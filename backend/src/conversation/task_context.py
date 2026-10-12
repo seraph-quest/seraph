@@ -309,7 +309,8 @@ class TaskContinuityService:
             from src.runtime_plugins.ownership import begin_native_writer, CompositionBindingError
             from src.workspace.production import ProductionWorkspaceReconciliationError
             try:
-                guard = await begin_native_writer(db, owner="finite_service")
+                guard = await begin_native_writer(db, owner="finite_service",
+                    header_budget=db.info["composition_read_guard"].header_budget)
             except (CompositionBindingError, ProductionWorkspaceReconciliationError) as exc:
                 code = getattr(exc, "reason_code", None) or str(exc)
                 raise BoardError(code, "Task continuity requires current healthy composition", status_code=503) from exc

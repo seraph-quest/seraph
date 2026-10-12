@@ -9,6 +9,7 @@ inside the same SQLite writer transaction as task creation.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -478,10 +479,92 @@ def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int, he
     return payload
 
 
-async def _begin_immediate(db: AsyncSession) -> None:
+def _artifact_writer_frame(db):
+    """Ordinary artifact epochs cannot replace an identity-bound writer."""
+    from src.workspace.accounting_witness import CompositionReadGuard, CompositionSessionGuard
+    from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+    if db.info.get("owned_discovery_connection") is not None or _MEMORY_LEDGER_PHASE.get() is not None:
+        raise BoardError("input_artifact_original_writer_required",
+            "A retained original owner cannot be replaced", status_code=409)
+    guard = db.info.get("composition_guard")
+    reader = db.info.get("composition_read_guard")
+    if guard is not None:
+        for name, value in vars(guard).items():
+            active = False
+            if name.startswith(("_native_memory_", "_native_programme_", "_discovery_", "_session_")):
+                active = value is not None
+            elif name in ("_programme_current_leaves", "_programme_base_leaves", "_legacy_continuity_metadata"):
+                active = type(value) is not dict or len(value) != 0
+            elif name.startswith("_programme_"):
+                active = value is not None
+            elif name == "_prospective_admission_finished":
+                active = value is not False
+            elif name.startswith(("_prospective_admission", "_writer_first_metadata_")) or name in (
+                    "_selection", "_publication_members", "_retention_read_budget"):
+                active = value is not None
+            if active:
+                raise BoardError("input_artifact_original_writer_required",
+                    "A retained original owner cannot be replaced", status_code=409)
+        if (type(guard) is not CompositionSessionGuard or guard.db is not db
+                or guard._retention_closed
+                or db.info.get("composition_writer_owner") not in {"native_ingress", "finite_service"}
+                or (type(guard.base) is dict and guard.base.get("schema_version") == 2)
+                or any(getattr(guard, name, None) is not None for name in (
+                    "_native_memory_source_retention", "_native_programme_start_numeric_owner",
+                    "_native_memory_source_projection", "_native_memory_source_capacity_owner",
+                    "_native_memory_retained_proofs", "_prospective_admission",
+                    "_discovery_writer_metadata_owner", "_discovery_reservation",
+                    "_retention_read_budget", "_session_reservation"))):
+            raise BoardError("input_artifact_original_writer_required",
+                "Input artifacts require their original ordinary writer", status_code=409)
+        return True, guard.header_budget
+    if reader is not None:
+        if type(reader) is not CompositionReadGuard or reader.db is not db or reader.closed:
+            raise BoardError("input_artifact_original_writer_required",
+                "The original artifact read session changed", status_code=409)
+        return True, reader.header_budget
+    return False, None
+
+
+async def _commit_artifact_writer(db):
+    """Publish the original epoch, then retire its transaction-bound guard."""
+    _artifact_writer_frame(db)
+    guard = db.info.get("composition_guard")
+    if guard is None:
+        await db.commit()
+        return
+    from src.db.engine import _commit_original_session_owner
+    await _commit_original_session_owner(db)
+    if db.info.get("composition_guard") is not guard:
+        raise BoardError("input_artifact_original_writer_required",
+            "The artifact writer changed during publication", status_code=409)
+    guard.close()
+    for name in ("composition_guard", "composition_base_witness",
+                 "native_writer_started", "composition_writer_owner"):
+        db.info.pop(name, None)
+    from src.workspace.accounting_witness import CompositionReadGuard
+    reader = CompositionReadGuard(db, header_budget=guard.header_budget)
+    reader.install()
+    db.info["composition_read_guard"] = reader
+
+
+async def _begin_immediate(db: AsyncSession, *, _native_frame=None) -> None:
     bind = db.get_bind()
     if getattr(getattr(bind, "dialect", None), "name", "") != "sqlite":
         return
+    if (db.info.get("composition_guard") is not None
+            and db.info.get("composition_writer_owner") != "native_ingress"):
+        raise BoardError("input_artifact_original_writer_required",
+            "The active original writer cannot become an artifact ingress", status_code=409)
+    current_writer = db.info.get("composition_guard")
+    if current_writer is not None and (current_writer.touched or current_writer._pending_events
+            or db.info.get("work_board_events_after_commit")):
+        raise BoardError("artifact_transaction_boundary",
+            "Input artifacts cannot commit pending caller mutations", status_code=409)
+    native, budget = _artifact_writer_frame(db)
+    if _native_frame is not None and (native is not _native_frame[0] or budget is not _native_frame[1]):
+        raise BoardError("input_artifact_original_writer_required",
+            "The original artifact frame changed", status_code=409)
     if db.in_transaction():
         if db.new or db.dirty or db.deleted:
             raise BoardError(
@@ -489,8 +572,27 @@ async def _begin_immediate(db: AsyncSession) -> None:
                 "Input artifact writes require a fresh transaction",
                 status_code=409,
             )
-        await db.commit()
-    await db.execute(text("BEGIN IMMEDIATE"))
+        await _commit_artifact_writer(db)
+    if native:
+        from src.runtime_plugins.ownership import begin_native_writer
+        await begin_native_writer(db, owner="native_ingress", header_budget=budget)
+    else:
+        await db.execute(text("BEGIN IMMEDIATE"))
+
+
+@asynccontextmanager
+async def _artifact_finalization_writer(db, frame):
+    if not frame[0]:
+        async with db.begin():
+            yield
+        return
+    await _begin_immediate(db, _native_frame=frame)
+    try:
+        yield
+        await _commit_artifact_writer(db)
+    except BaseException:
+        await db.rollback()
+        raise
 
 
 def _raise_input_error(exc: TypedInputError) -> BoardError:
@@ -602,6 +704,27 @@ async def _verify_general_proposal(db, row, parsed):
     from src.work_board.general_task_proposal import seal_proposal_publication
     await seal_proposal_publication(db, WorkBoardOwner(principal_id=row.owner_principal_id,
         session_id=row.owner_session_id), GeneralTaskEnvelope.model_validate(parsed), goal_revision=row.goal_revision)
+
+
+async def _recheck_artifact_request(db, owner, request, inputs, payload_digest, **kwargs):
+    """Recheck actual authority and the exact request after each ownership exit."""
+    from src.db.models import OperatorSession, OperatorIdentity
+    root = await db.get(OperatorSession, owner.session_id, populate_existing=True)
+    now = _utc(_now())
+    if (root is None or root.principal_id != owner.principal_id or root.revoked_at is not None
+            or root.replaced_by_id is not None or root.is_bearer_tombstone
+            or _utc(root.idle_expires_at) <= now or _utc(root.absolute_expires_at) <= now):
+        raise BoardError("input_artifact_original_authority_changed",
+            "The original artifact session is no longer current", status_code=409)
+    if root.operator_identity_id:
+        identity = await db.get(OperatorIdentity, root.operator_identity_id, populate_existing=True)
+        if identity is None or identity.revoked_at is not None:
+            raise BoardError("input_artifact_original_authority_changed",
+                "The original artifact identity is no longer current", status_code=409)
+    current, _, digest = await _validate_request(db, owner, request, **kwargs)
+    if current != inputs or digest != payload_digest:
+        raise BoardError("input_artifact_request_changed",
+            "The original artifact request changed", status_code=409)
 
 
 async def _finalize_pending(
@@ -926,6 +1049,7 @@ async def prepare_input_artifact(
     below prevents a public task artifact from selecting the longer retention.
     """
 
+    artifact_frame = _artifact_writer_frame(db)
     observed_at = _utc(now or _now())
     if request.capability_id == "work.document-compare.v1":
         raise BoardError("document_pair_reservation_required", "Select and stream a private document pair first", status_code=422)
@@ -990,7 +1114,11 @@ async def prepare_input_artifact(
             parsed=_decode_and_validate_payload(staged_row,verified,allow_scheduler=allow_scheduler)
             authored_replay=(tuple(str(getattr(staged_row,column.name)) for column in staged_row.__table__.columns),parsed)
 
-    await _begin_immediate(db)
+    await _begin_immediate(db, _native_frame=artifact_frame)
+    if artifact_frame[0]:
+        await _recheck_artifact_request(db, owner, request, inputs, payload_digest,
+            allow_scheduler=allow_scheduler, publication_population=publication_population,
+            general_task_publication=general_task_publication)
     if general_task_publication is not None:
         from src.work_board.general_task_proposal import recheck_proposal_publication
         await recheck_proposal_publication(db, owner, general_task_publication)
@@ -1018,14 +1146,24 @@ async def prepare_input_artifact(
         if existing.state in {"expired", "revoked", "deleted"}:
             return _metadata(existing)
         if existing.metadata_digest is None:
-            await db.commit()
+            pending_path = _payload_path(existing)
+            await _commit_artifact_writer(db)
+            if artifact_frame[0]:
+                await _recheck_artifact_request(db, owner, request, inputs, payload_digest,
+                    allow_scheduler=allow_scheduler, publication_population=publication_population,
+                    general_task_publication=general_task_publication)
+                await db.rollback()
             try:
-                _write_payload(_payload_path(existing), payload)
+                _write_payload(pending_path, payload)
             except OSError as exc:
                 raise BoardError("input_artifact_write_failed", "The input artifact could not be written", status_code=503) from exc
-            async with db.begin():
+            async with _artifact_finalization_writer(db, artifact_frame):
+                if artifact_frame[0]:
+                    await _recheck_artifact_request(db, owner, request, inputs, payload_digest,
+                        allow_scheduler=allow_scheduler, publication_population=publication_population,
+                        general_task_publication=general_task_publication)
                 refreshed = (
-                    await db.execute(select(WorkBoardInputArtifact).where(WorkBoardInputArtifact.artifact_id == existing.artifact_id))
+                    await db.execute(select(WorkBoardInputArtifact).where(WorkBoardInputArtifact.artifact_id == artifact_id))
                 ).scalar_one_or_none()
                 if refreshed is None:
                     raise BoardError("input_artifact_missing", "The input artifact reservation disappeared", status_code=409)
@@ -1083,12 +1221,22 @@ async def prepare_input_artifact(
     )
     db.add(row)
     await db.flush()
-    await db.commit()
+    pending_path = _payload_path(row)
+    await _commit_artifact_writer(db)
+    if artifact_frame[0]:
+        await _recheck_artifact_request(db, owner, request, inputs, payload_digest,
+            allow_scheduler=allow_scheduler, publication_population=publication_population,
+            general_task_publication=general_task_publication)
+        await db.rollback()
     try:
-        _write_payload(_payload_path(row), payload)
+        _write_payload(pending_path, payload)
     except OSError as exc:
         raise BoardError("input_artifact_write_failed", "The input artifact could not be written", status_code=503) from exc
-    async with db.begin():
+    async with _artifact_finalization_writer(db, artifact_frame):
+        if artifact_frame[0]:
+            await _recheck_artifact_request(db, owner, request, inputs, payload_digest,
+                allow_scheduler=allow_scheduler, publication_population=publication_population,
+                general_task_publication=general_task_publication)
         refreshed = (
             await db.execute(select(WorkBoardInputArtifact).where(WorkBoardInputArtifact.artifact_id == artifact_id))
         ).scalar_one_or_none()
@@ -1667,7 +1815,7 @@ async def bind_input_artifact(
     await db.flush()
     await db.refresh(row)
     if started_transaction:
-        await db.commit()
+        await _commit_artifact_writer(db)
 
 
 async def _begin_consume_writer(db, owner, *, task_id, task_revision, artifact_id,
@@ -1806,7 +1954,7 @@ async def _begin_consume_writer(db, owner, *, task_id, task_revision, artifact_i
     await db.rollback()
     from src.runtime_plugins.ownership import begin_native_writer
     try:
-        await begin_native_writer(db, owner="native_ingress")
+        await begin_native_writer(db, owner="native_ingress", header_budget=guard.header_budget)
         current_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id)
             .execution_options(populate_existing=True))
         current_attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
@@ -2039,7 +2187,7 @@ async def _set_terminal_state(
     # The terminal fence must be durable before filesystem mutation.  If the
     # process dies after this commit, the row remains non-executable and the
     # exact cleanup receipt can be reconciled without reopening the input.
-    await db.commit()
+    await _commit_artifact_writer(db)
     try:
         if path is None:
             raise _InputArtifactCleanupUnverified("cleanup_reference_invalid")
@@ -2179,7 +2327,7 @@ async def expire_input_artifacts(
     # Expiry uses one bounded writer transaction, so make every terminal
     # fence durable before touching any payload.  A failed cleanup below
     # leaves an expired, non-executable row and raises an explicit receipt.
-    await db.commit()
+    await _commit_artifact_writer(db)
     cleanup_failures: list[tuple[WorkBoardInputArtifact, str]] = []
     for row in expired_rows:
         try:

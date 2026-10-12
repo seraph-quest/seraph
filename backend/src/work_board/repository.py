@@ -269,6 +269,11 @@ async def _begin_sqlite_immediate(db: AsyncSession) -> None:
     transaction before opening the serialized dependency transaction.  Never
     commit a caller's pending task mutation implicitly.
     """
+    if (db.info.get("composition_guard") is not None
+            or db.info.get("composition_read_guard") is not None):
+        from src.work_board.input_artifacts import _begin_immediate
+        await _begin_immediate(db)
+        return
     bind = db.get_bind()
     dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
     if dialect_name != "sqlite":
@@ -1108,7 +1113,7 @@ class WorkBoardRepository:
                 handoffs = await _stage_dispatch_projection(db, owner, task, attempt, run, proof)
         await db.rollback()
         from src.runtime_plugins.ownership import begin_native_writer
-        await begin_native_writer(db, owner="native_ingress")
+        await begin_native_writer(db, owner="native_ingress", header_budget=guard.header_budget)
         current_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id)
             .execution_options(populate_existing=True))
         current_attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True) if attempt_id else None

@@ -45,6 +45,8 @@ async def _terminal_report(sessions, operator, monkeypatch, root):
     from src.workflows.job_runtime import DurableJobRepository
     from src.db.models import Session, WorkBoardAttempt, WorkBoardStatus, WorkflowRunState
     from src.memory.m5 import _require_original_m5_session
+    from src.runtime_plugins.ownership import begin_native_writer
+    from src.work_board.input_artifacts import _commit_artifact_writer
     from tests.test_browser_task_runtime import _input
     from tests.test_browser_task_lifecycle import _html_responses
 
@@ -60,36 +62,44 @@ async def _terminal_report(sessions, operator, monkeypatch, root):
     await continuity.start()
     try:
         async with sessions() as db:
+            await begin_native_writer(db, owner="native_ingress")
             task = (await board.create_task(db, owner, WorkBoardTaskCreate(
                 title="Original task conversation", goal_id=goal.id, goal_revision=goal.revision,
                 idempotency_key="numeric-prefix-original-conversation"), origin_session_id=owner.session_id)).task
-            await db.commit()
+            await _commit_artifact_writer(db)
+        async with sessions() as db:
             assert await db.get(Session, owner.session_id) is None
             await db.rollback()
             reply = await continuity.continue_task(db, operator, ContinueTaskRequest(
                 task_id=task.task_id, expected_revision=task.task_revision,
                 new_conversation_id=owner.session_id))
             assert reply["conversation_id"] == owner.session_id and reply["idempotent_replay"] is False
-            await db.commit()
+            await _commit_artifact_writer(db)
             await _require_original_m5_session(db, owner.principal_id, owner.session_id)
     finally:
         await continuity.stop()
     # Original physical input owner and pipeline accept; no terminal SQL seeds.
     async with sessions() as db:
+        await begin_native_writer(db, owner="native_ingress")
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(
             schema_version=1, capability_id="browser.public-task.v1", goal_id=goal.id,
             goal_revision=goal.revision, input=_input(), idempotency_key="numeric-prefix-source-input"))
+        await begin_native_writer(db, owner="native_ingress")
         producer = (await board.create_task(db, owner, WorkBoardTaskCreate(
             title="Finite public reference", goal_id=goal.id, goal_revision=goal.revision,
             capability_id="browser.public-task.v1", input_artifact_id=artifact.artifact_id,
             status=WorkBoardStatus.todo, priority=87, idempotency_key="numeric-prefix-source-task"))).task
-        preview = await pipelines.preview(db, owner, producer.task_id, PipelinePreviewRequest(
-            expected_revision=producer.task_revision, source_input_artifact_id=artifact.artifact_id,
+        producer_id, producer_revision = producer.task_id, producer.task_revision
+        await _commit_artifact_writer(db)
+        await begin_native_writer(db, owner="native_ingress")
+        preview = await pipelines.preview(db, owner, producer_id, PipelinePreviewRequest(
+            expected_revision=producer_revision, source_input_artifact_id=artifact.artifact_id,
             idempotency_key="numeric-prefix-operation"))
+        await _commit_artifact_writer(db)
         operation = await pipelines.accept(db, owner, preview["operation_id"], PipelineAcceptRequest(
             expected_revision=preview["revision"], expected_parent_revision=preview["parent_revision"],
             expected_digest=preview["digest"]))
-        await db.commit()
+        await _commit_artifact_writer(db)
     responses = _html_responses()
     fetches = []
     async def fetch(request):
@@ -102,6 +112,74 @@ async def _terminal_report(sessions, operator, monkeypatch, root):
     original_runner = task_runner.BrowserTaskRunner
     jobs = DurableJobRepository()
     dispatcher = WorkBoardDispatcher(repository=board, jobs=jobs, session_provider=sessions)
+    # Observe the original callback without substituting its authority or
+    # repeating its queries. It suppresses dependency errors as False, so keep
+    # only bounded scalar diagnostics from calls it actually makes.
+    original_current = dispatcher._browser_assert_current
+    async def observe_current(**binding):
+        from contextlib import asynccontextmanager
+        from sqlalchemy import event
+        from src.work_board import dispatcher as dispatcher_module
+        from src.work_board import input_artifacts as artifact_module
+        observations = {}
+        def error(exc):
+            code = getattr(exc, "code", None)
+            return {"class": type(exc).__name__, "code": code if type(code) is str
+                and len(code) <= 128 and all(c in "abcdefghijklmnopqrstuvwxyz_" for c in code) else None}
+        def observe_call(label, original):
+            async def forwarded(*args, **kwargs):
+                try:
+                    result = await original(*args, **kwargs)
+                except BaseException as exc:
+                    observations[label] = error(exc)
+                    raise
+                observations[label] = {"returned": True}
+                if label == "task":
+                    observations[label].update(status=result.status.value,
+                        revision=result.task_revision,
+                        expected_revision=binding["board_task_revision"],
+                        owner_matches=result.owner_principal_id == binding["owner_principal_id"],
+                        session_matches=result.owner_session_id == binding["owner_session_id"],
+                        artifact_matches=result.input_artifact_id == binding["input_artifact_id"])
+                return result
+            return forwarded
+        def loaded_attempt(attempt, context):
+            if attempt.attempt_id == binding["attempt_id"]:
+                observations["attempt"] = {"loaded": True,
+                    "task_matches": attempt.task_id == binding["task_id"],
+                    "fence": attempt.fencing_token, "expected_fence": binding["board_fencing_token"],
+                    "lease_owner_matches": attempt.lease_owner == dispatcher.runner_id,
+                    "ended": attempt.ended_at is not None,
+                    "cancel_requested": attempt.cancel_requested_at is not None,
+                    "lease_present": attempt.lease_expires_at is not None}
+        original_sessions = dispatcher.session_provider
+        @asynccontextmanager
+        async def observed_sessions():
+            try:
+                async with original_sessions() as db:
+                    yield db
+            except BaseException as exc:
+                observations["session_exit"] = error(exc)
+                raise
+            observations["session_exit"] = {"returned": True}
+        event.listen(WorkBoardAttempt, "load", loaded_attempt)
+        try:
+            with monkeypatch.context() as callback_patch:
+                callback_patch.setattr(dispatcher, "session_provider", observed_sessions)
+                callback_patch.setattr(board, "get_task", observe_call("task", board.get_task))
+                callback_patch.setattr(dispatcher_module, "authenticate_session",
+                    observe_call("auth", dispatcher_module.authenticate_session))
+                callback_patch.setattr(pipelines, "task_guard", observe_call("pipeline", pipelines.task_guard))
+                callback_patch.setattr(artifact_module, "resolve_input_artifact_for_task",
+                    observe_call("artifact", artifact_module.resolve_input_artifact_for_task))
+                result = await original_current(**binding)
+                observations["original_returned_true"] = result is True
+                return result
+        finally:
+            event.remove(WorkBoardAttempt, "load", loaded_attempt)
+            if observations.get("original_returned_true") is not True:
+                _save_private(root / "original-browser-admission-diagnostic.private.json", observations)
+    monkeypatch.setattr(dispatcher, "_browser_assert_current", observe_current)
     async with async_playwright() as playwright:
         async def launch():
             # Supported original Playwright API: actual sandbox, no fallback.
@@ -132,7 +210,7 @@ async def _terminal_report(sessions, operator, monkeypatch, root):
                     if index < 2:
                         operation = await pipelines.read(db, owner, operation["operation_id"])
                         operation = await pipelines.advance(db, owner, operation["operation_id"], operation["revision"])
-                        await db.commit()
+                        await _commit_artifact_writer(db)
     assert fetches
     async with sessions() as db:
         attempt = (await db.scalars(select(WorkBoardAttempt).where(

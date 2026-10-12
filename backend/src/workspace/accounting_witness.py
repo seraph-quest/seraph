@@ -8642,8 +8642,9 @@ def native_composition_files(table, row, *, root=None, header_budget=None):
 
 class CompositionReadGuard:
     """Generic inspection remains usable; no retained mutation permission."""
-    def __init__(self, db):
+    def __init__(self, db, *, header_budget=None):
         self.db = db
+        self.header_budget = header_budget
         self.listeners = []
         self.connection_listeners = []
         self.closed = False
@@ -8712,7 +8713,7 @@ async def prepare_composition_read_session(db, *, header_budget=None):
     await db.rollback()
     if not populated:
         return None
-    guard = CompositionReadGuard(db)
+    guard = CompositionReadGuard(db, header_budget=header_budget)
     guard.install()
     db.info["composition_read_guard"] = guard
     return guard

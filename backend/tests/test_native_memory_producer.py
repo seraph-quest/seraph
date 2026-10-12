@@ -26,13 +26,20 @@ from tests.test_work_board_adapters import _write_input
 
 @pytest_asyncio.fixture
 async def actual_memory(tmp_path, monkeypatch):
-    """Produce a real retained legacy source before first composition activation."""
+    """Initialize first, then produce a real REPORT with mocked browser edges."""
     from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory, maintenance_fence
     from src.auth.service import create_session
     from src.auth.middleware import OperatorAuthMiddleware
     from src.runtime_plugins.bridge import CordisHost
     from src.runtime_plugins.dispatch import NativeServiceDispatcher
+    from src.runtime_plugins.composition import PACKAGE_ROOT, reviewed_composition
     from src.workflows.job_runtime import DurableJobRepository
+    from src.db import engine as original
+    from tests.test_native_memory_genuine_numeric_prefix import _terminal_report
+    from tests.test_native_memory_report_source_vertical import ByteDerivedPage
+    from tests.test_browser_task_runtime import FakeBrowser, FakeLocator
+    from types import SimpleNamespace
+    import playwright.async_api
     root = tmp_path / "workspace"
     root.mkdir()
     monkeypatch.setattr(settings, "workspace_dir", str(root))
@@ -55,8 +62,8 @@ async def actual_memory(tmp_path, monkeypatch):
     # not inherit the task-scoped override. Bind that canonical factory too;
     # every actual owner still reads/writes the same isolated database.
     monkeypatch.setattr("src.db.engine.async_session_factory", factory)
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
+    monkeypatch.setattr(original, "engine", engine)
+    monkeypatch.setattr(original, "_db_path", str(root / "seraph.db"))
     @asynccontextmanager
     async def sessions():
         async with get_session() as db:
@@ -64,24 +71,23 @@ async def actual_memory(tmp_path, monkeypatch):
             yield db
     monkeypatch.setattr("src.workflows.job_runtime.get_session", sessions)
     with override_session_factory(factory):
-        token, operator = await create_session()
+        await original.init_db()
+        node = Path(os.environ["SERAPH_CORDIS_TEST_NODE"])
+        package = Path(os.environ.get("SERAPH_CORDIS_TEST_ROOT", str(PACKAGE_ROOT)))
+        def stock_reviewed(*, node_path=None):
+            return reviewed_composition(node_path=node_path, root=package)
+        monkeypatch.setattr("src.runtime_plugins.bridge.reviewed_composition", stock_reviewed)
+        reviewed = stock_reviewed(node_path=node)
         jobs = DurableJobRepository()
         monkeypatch.setattr("src.workflows.job_runtime.durable_job_repository", jobs)
-        # No Done/Attempt receipt is seeded. Existing source owners perform the
-        # actual canonical write/readback while this deployment is still legacy.
-        task, attempt, output = await executed_source(operator, jobs, monkeypatch)
         with maintenance_fence(workspace):
             async with get_session() as db:
                 await begin_native_writer(db, owner="composition_maintenance", fresh=True)
-                await initialize_fresh_deployment(db, composition_digests={domain: "a" * 64 for domain in DOMAINS})
+                await initialize_fresh_deployment(db, composition_digests={
+                    domain: reviewed.composition_digest for domain in DOMAINS})
         dispatcher = NativeServiceDispatcher(jobs=jobs)
         calls = []
-        actual = dispatcher.dispatch
-        async def observe(frame, **kwargs):
-            calls.append(json.loads(json.dumps(frame)))
-            return await actual(frame, **kwargs)
-        monkeypatch.setattr(dispatcher, "dispatch", observe)
-        host = CordisHost(node_path=Path(os.environ["SERAPH_CORDIS_TEST_NODE"]), service_dispatch=dispatcher)
+        host = CordisHost(node_path=node, service_dispatch=dispatcher)
         monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
         from src.api.memory import router
         app = FastAPI()
@@ -89,6 +95,40 @@ async def actual_memory(tmp_path, monkeypatch):
         app.include_router(router, prefix="/api")
         try:
             assert await host.start(), host.snapshot()
+            token, operator = await create_session()
+            class ComponentPage(ByteDerivedPage):
+                def locator(self, selector):
+                    assert selector in ("body", "main h1")
+                    return FakeLocator(self.body_text)
+            class ComponentChromium:
+                async def launch(self, *, headless, chromium_sandbox):
+                    assert headless is True and chromium_sandbox is True
+                    browser = FakeBrowser({})
+                    browser.context.page = ComponentPage({})
+                    return browser
+            @asynccontextmanager
+            async def component_playwright():
+                # Only the external browser edge is mocked. Original pipeline,
+                # Source execution, verification and saved output stay real.
+                yield SimpleNamespace(chromium=ComponentChromium())
+            with monkeypatch.context() as browser_edge:
+                browser_edge.setattr(playwright.async_api, "async_playwright", component_playwright)
+                task, attempt, jobs = await _terminal_report(get_session, operator, monkeypatch, root)
+            assert task.capability_id == "work.local-evidence-report.v1"
+            from src.work_board import pipelines
+            from src.work_board.contracts import WorkBoardOwner
+            async with get_session() as db:
+                verified = await pipelines.verified_output(db, WorkBoardOwner(
+                    principal_id=operator.principal.principal_id, session_id=operator.session_id), task)
+            output = Path(verified["file_path"])
+            dispatcher = NativeServiceDispatcher(jobs=jobs)
+            actual = dispatcher.dispatch
+            async def observe(frame, **kwargs):
+                calls.append(json.loads(json.dumps(frame)))
+                return await actual(frame, **kwargs)
+            monkeypatch.setattr(dispatcher, "dispatch", observe)
+            host.service_dispatch = dispatcher
+            monkeypatch.setattr("src.workflows.job_runtime.durable_job_repository", jobs)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost",
                 cookies={settings.operator_auth_cookie_name: token}, headers={"Origin": "http://localhost:3001"}) as client:
                 yield client, operator, jobs, host, calls, task, attempt, output

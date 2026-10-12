@@ -24,7 +24,7 @@ async def actual_report_memory(accounting_db, real_auth, monkeypatch):
     from src.auth.middleware import OperatorAuthMiddleware
     from src.runtime_plugins.bridge import CordisHost
     from src.runtime_plugins.dispatch import NativeServiceDispatcher
-    from src.runtime_plugins.composition import reviewed_composition
+    from src.runtime_plugins.composition import PACKAGE_ROOT, reviewed_composition
     from src.runtime_plugins.ownership import DOMAINS, begin_native_writer, initialize_fresh_deployment
     from src.workspace.production import ProductionWorkspace, maintenance_fence
     from src.api.memory import router
@@ -39,18 +39,21 @@ async def actual_report_memory(accounting_db, real_auth, monkeypatch):
         monkeypatch.setattr(target, get_session)
     with override_session_factory(factory):
         await original.init_db()
-        token, operator = await create_session()
-        task, attempt, jobs = await _terminal_report(get_session, operator, monkeypatch, root)
-        assert task.capability_id == memory_producer.REPORT_SOURCE_CAPABILITY
-        monkeypatch.setattr("src.workflows.job_runtime.durable_job_repository", jobs)
         node = Path(os.environ["SERAPH_CORDIS_TEST_NODE"])
-        reviewed = reviewed_composition(node_path=node)
+        package = Path(os.environ.get("SERAPH_CORDIS_TEST_ROOT", str(PACKAGE_ROOT)))
+        def stock_reviewed(*, node_path=None):
+            return reviewed_composition(node_path=node_path, root=package)
+        monkeypatch.setattr("src.runtime_plugins.bridge.reviewed_composition", stock_reviewed)
+        reviewed = stock_reviewed(node_path=node)
         workspace = ProductionWorkspace(host_root=root)
         with maintenance_fence(workspace):
             async with get_session() as db:
                 await begin_native_writer(db, owner="composition_maintenance", fresh=True)
                 await initialize_fresh_deployment(db, composition_digests={
                     domain: reviewed.composition_digest for domain in DOMAINS})
+        from src.workflows.job_runtime import DurableJobRepository
+        jobs = DurableJobRepository()
+        monkeypatch.setattr("src.workflows.job_runtime.durable_job_repository", jobs)
         host = CordisHost(node_path=node, service_dispatch=NativeServiceDispatcher(jobs=jobs))
         monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
         app = FastAPI()
@@ -58,6 +61,11 @@ async def actual_report_memory(accounting_db, real_auth, monkeypatch):
         app.include_router(router, prefix="/api")
         try:
             assert await host.start(), host.snapshot()
+            token, operator = await create_session()
+            task, attempt, jobs = await _terminal_report(get_session, operator, monkeypatch, root)
+            assert task.capability_id == memory_producer.REPORT_SOURCE_CAPABILITY
+            monkeypatch.setattr("src.workflows.job_runtime.durable_job_repository", jobs)
+            host.service_dispatch = NativeServiceDispatcher(jobs=jobs)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost",
                     cookies={settings.operator_auth_cookie_name: token},
                     headers={"Origin": "http://localhost:3001"}) as client:

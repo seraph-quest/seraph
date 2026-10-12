@@ -23,6 +23,19 @@ from src.work_board.repository import BoardError, WorkBoardRepository, _begin_sq
 from src.workspace import canonical_workspace_root, canonical_workspace_root_identity
 
 
+async def _begin_pipeline_writer(db):
+    from src.work_board.input_artifacts import _artifact_writer_frame, _begin_immediate
+    if _artifact_writer_frame(db)[0]:
+        await _begin_immediate(db)
+    else:
+        await _begin_sqlite_immediate(db)
+
+
+async def _commit_pipeline_writer(db):
+    from src.work_board.input_artifacts import _commit_artifact_writer
+    await _commit_artifact_writer(db)
+
+
 RECOVERY_REASONS = frozenset({"input_artifact_cleanup_required", "input_artifact_write_failed",
     "pipeline_recovery_required", "pipeline_materialization_conflict", "pipeline_output_unverified",
     "pipeline_output_too_large", "pipeline_handoff_changed", "pipeline_input_changed",
@@ -248,14 +261,14 @@ async def resume_retired_cleanup(db, owner, operation_id):
     witnesses = await stage_retired_input_cleanup(db, owner, operation_id)
     failure = False
     for witness in witnesses:
-        await _begin_sqlite_immediate(db)
+        await _begin_pipeline_writer(db)
         _row, _value, entry = await _cleanup_binding_locked(db, owner, witness)
-        await db.commit()
+        await _commit_pipeline_writer(db)
         if entry is None: continue
         readback = cleanup_retired_input(witness)
-        await _begin_sqlite_immediate(db)
+        await _begin_pipeline_writer(db)
         await _ack_retired_input_cleanup_locked(db, owner, witness=witness, readback=readback)
-        await db.commit()
+        await _commit_pipeline_writer(db)
         failure = failure or readback.outcome != "absent"
     if failure:
         raise BoardError("input_artifact_cleanup_required", "The accepted plan retains exact private cleanup recovery", status_code=503)
@@ -265,7 +278,7 @@ async def record_recovery(db, owner, operation_id, code):
     row, value = await owned(db, owner, operation_id)
     workspace = canonical_bytes(value["live_root"])
     revision = row.revision
-    await _begin_sqlite_immediate(db)
+    await _begin_pipeline_writer(db)
     row, value = await owned(db, owner, operation_id, revision=revision, workspace_identity=workspace)
     request = value.setdefault("advance_request", {})
     reason = safe_recovery_reason(code)
@@ -423,9 +436,9 @@ async def accept(db: Any, owner: WorkBoardOwner, operation_id: str, request: Any
         source_witness = await stage_plan_source(db, await db.get(GuardianOpportunity, initial.opportunity_id),
             allow_planned=initial.status == "accepted")
     context = await stage_accept(db, owner, operation_id, request, source_witness=source_witness)
-    await _begin_sqlite_immediate(db)
+    await _begin_pipeline_writer(db)
     result = await _accept_locked(db, owner, operation_id, request, staged_context=context)
-    await db.commit()
+    await _commit_pipeline_writer(db)
     await resume_retired_cleanup(db, owner, operation_id)
     return await read(db, owner, operation_id)
 
@@ -518,7 +531,7 @@ async def reuse_preview(db: Any, owner: WorkBoardOwner, operation_id: str, reque
     original = await db.get(WorkBoardProposal, operation_id)
     if original is not None and original.owner_principal_id == owner.principal_id and original.owner_session_id == owner.session_id and original.opportunity_id is not None:
         raise BoardError("pipeline_review_required", "Opportunity plans cannot substitute or reuse their fixed source", status_code=409)
-    await _begin_sqlite_immediate(db)
+    await _begin_pipeline_writer(db)
     old, prior = await owned(db, owner, operation_id, revision=request.expected_revision)
     if old.opportunity_id is not None:
         raise BoardError("pipeline_review_required", "Opportunity plans cannot substitute or reuse their fixed source", status_code=409)
@@ -585,7 +598,7 @@ async def stage_revision(db: Any, owner: WorkBoardOwner, operation_id: str, requ
         typed_input_digest=staged_artifact.typed_input_digest, capability_id=CAPABILITIES[0],
         goal_id=staged_artifact.goal_id, goal_revision=staged_artifact.goal_revision)
     artifact_token = _metadata_digest(resolved.row)
-    await _begin_sqlite_immediate(db)
+    await _begin_pipeline_writer(db)
     row, value = await owned(db, owner, operation_id, workspace_identity=workspace)
     if row.opportunity_id is not None:
         raise BoardError("pipeline_review_required", "Opportunity plans cannot substitute their fixed source", status_code=409)
@@ -657,7 +670,7 @@ async def quiesce_revision(owner: WorkBoardOwner, operation_id: str, expected_re
             await dispatcher.cancel_task(owner, task.task_id, expected_revision=task.task_revision,
                 reason="pipeline_revision_requested")
     async with session_provider() as db:
-        await _begin_sqlite_immediate(db)
+        await _begin_pipeline_writer(db)
         row, value = await owned(db, owner, operation_id, revision=expected_revision)
         snapshots = []
         for step in value["steps"]:
@@ -671,7 +684,7 @@ async def quiesce_revision(owner: WorkBoardOwner, operation_id: str, expected_re
         value["pending_revision"]["quiescence_verified"] = True
         value["pending_revision"]["quiescence_request_revision"] = expected_revision
         await store(db, row, value)
-        await db.commit()
+        await _commit_pipeline_writer(db)
         return await read(db, owner, operation_id)
 
 
@@ -1201,7 +1214,7 @@ async def _begin_pipeline_advance_writer(db, owner, operation_id, index, *, arti
     handoff_token = row_token(handoff) if handoff else None
     workspace = canonical_bytes(value["live_root"])
     await db.rollback()
-    await begin_native_writer(db, owner="native_ingress")
+    await begin_native_writer(db, owner="native_ingress", header_budget=guard.header_budget)
     row, value = await owned(db, owner, operation_id, workspace_identity=workspace)
     consumer = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == consumer_id)
         .execution_options(populate_existing=True))
@@ -1413,7 +1426,7 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
         producer_witness = await stage_pipeline_producer_readback(db, owner, producer)
         staged_revision, staged_digest = row.revision, row.proposal_digest
         consumer_token = row_token(consumer)
-        await _begin_sqlite_immediate(db)
+        await _begin_pipeline_writer(db)
         row, value = await owned(db, owner, operation_id, revision=staged_revision, workspace_identity=workspace)
         if row.proposal_digest != staged_digest:
             raise BoardError("pipeline_materialization_conflict", "The operation staging changed", status_code=409)
@@ -1441,7 +1454,7 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
         value["reservations"][SLOTS[index]] = reservation
         value["advance_request"] = {"expected_revision": expected_revision, "plan_version": value["plan_version"], "state": "reserved"}
         await store(db, row, value)
-        await db.commit()  # reservation precedes filesystem materialization
+        await _commit_pipeline_writer(db)  # reservation precedes filesystem materialization
         artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
             capability_id=consumer.capability_id, goal_id=consumer.goal_id, goal_revision=consumer.goal_revision,
             input=inputs.model_dump(mode="json"), idempotency_key=key))
@@ -1453,7 +1466,7 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
             raise BoardError("pipeline_producer_changed", "The exact materialized producer changed", status_code=409)
         producer_witness = fresh_producer_witness
         reserved_revision = row.revision
-        await _begin_sqlite_immediate(db)
+        await _begin_pipeline_writer(db)
         row, current = await owned(db, owner, operation_id, revision=reserved_revision, workspace_identity=workspace)
         consumer = await WorkBoardRepository().get_task(db, owner, consumer.task_id)
         await task_guard(db, consumer, workspace_identity=workspace, source_witness=source_witness)
@@ -1482,5 +1495,5 @@ async def advance(db: Any, owner: WorkBoardOwner, operation_id: str, expected_re
         await store(db, row, current)
         value = current
         changed_any = True
-        await db.commit()
+        await _commit_pipeline_writer(db)
     return await read(db, owner, operation_id, workspace_identity=workspace)

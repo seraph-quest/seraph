@@ -70,7 +70,7 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
     from src.db.models import WorkBoardTask, WorkBoardAttempt, WorkBoardStatus, WorkBoardProposal, WorkflowRunState
     from src.browser.task_runner import BrowserTaskRunner
     from src.runtime_plugins.bridge import CordisHost
-    from src.runtime_plugins.composition import reviewed_composition
+    from src.runtime_plugins.composition import PACKAGE_ROOT, reviewed_composition
     from src.runtime_plugins.dispatch import NativeServiceDispatcher
     from src.runtime_plugins.ownership import DOMAINS, begin_native_writer, initialize_fresh_deployment
     from src.workspace.production import ProductionWorkspace, maintenance_fence
@@ -148,7 +148,11 @@ async def test_actual_accepted_report_source_with_mocked_browser_edge(accounting
         constructor(self, **kwargs)
     monkeypatch.setattr(BrowserTaskRunner, '__init__', external_browser)
 
-    reviewed = reviewed_composition(node_path=NODE)
+    package = Path(os.environ.get("SERAPH_CORDIS_TEST_ROOT", str(PACKAGE_ROOT)))
+    def stock_reviewed(*, node_path=None):
+        return reviewed_composition(node_path=node_path, root=package)
+    monkeypatch.setattr("src.runtime_plugins.bridge.reviewed_composition", stock_reviewed)
+    reviewed = stock_reviewed(node_path=NODE)
     workspace = ProductionWorkspace(host_root=root)
     host = CordisHost(node_path=NODE, service_dispatch=NativeServiceDispatcher(jobs=durable_job_repository))
     monkeypatch.setattr('src.runtime_plugins.bridge.cordis_host', host)

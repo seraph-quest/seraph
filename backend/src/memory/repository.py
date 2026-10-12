@@ -2217,6 +2217,8 @@ def _canonical_memory_deletion_marker(
     memory: Memory,
     *,
     check_text: bool = True,
+    _memory_header_budget=None,
+    _memory_header_certificate=None,
 ) -> str | None:
     """Return a durable canonical delete marker, if one is present.
 
@@ -2228,35 +2230,69 @@ def _canonical_memory_deletion_marker(
     an active malformed row remains an ordinary writable record.
     """
 
+    if _memory_header_budget is not None:
+        from src.runtime_plugins.memory_producer import _native_memory_generic_owner_marker_payer
+        from src.memory.header_bounds import _native_memory_utf8_width, _native_memory_ascii_string_width
+        _native_memory_generic_owner_marker_payer(memory, _memory_header_budget, _memory_header_certificate)
     raw_metadata = getattr(memory, "metadata_json", None)
+    if _memory_header_budget is not None:
+        # Parsed closed JSON strings/containers are bounded by the original
+        # input UTF8 capacity. The certified full Memory row also includes the
+        # fixed-column capacity needed by the decoder's error representation.
+        parser_upper = max(6 * _native_memory_utf8_width(raw_metadata or "{}") + 2,
+            _memory_header_certificate.upper_bytes)
+        _memory_header_budget.debit(parser_upper,
+            appearance=("native-memory-forget-marker", "json-parser"))
     metadata_malformed = False
     try:
         parsed_metadata = json.loads(raw_metadata or "{}")
     except (TypeError, json.JSONDecodeError):
+        if _memory_header_budget is not None:
+            _memory_header_budget.debit(2, appearance=("native-memory-forget-marker", "malformed-empty-map"))
         parsed_metadata = {}
         metadata_malformed = bool(raw_metadata)
+    if _memory_header_budget is not None and not isinstance(parsed_metadata, dict):
+        _memory_header_budget.debit(2, appearance=("native-memory-forget-marker", "metadata-empty-map"))
     metadata = parsed_metadata if isinstance(parsed_metadata, dict) else {}
     if not isinstance(parsed_metadata, dict):
         metadata_malformed = True
 
     operator_control_value = metadata.get("operator_control")
     if operator_control_value is None:
+        if _memory_header_budget is not None:
+            _memory_header_budget.debit(2, appearance=("native-memory-forget-marker", "operator-empty-map"))
         operator_control: dict[str, Any] = {}
     elif isinstance(operator_control_value, dict):
         operator_control = operator_control_value
     else:
+        if _memory_header_budget is not None:
+            _memory_header_budget.debit(2, appearance=("native-memory-forget-marker", "operator-invalid-empty-map"))
         operator_control = {}
         metadata_malformed = True
 
+    if _memory_header_budget is not None:
+        from src.memory.m5 import _original_memory_vault_nfc_utf8_upper
+        _original_memory_vault_nfc_utf8_upper(0)  # original pinned CPython/UCD prerequisite
+        _memory_header_budget.debit(4, appearance=("native-memory-forget-marker", "marker-function"))
     def _marker_value(value: Any) -> str:
         if not isinstance(value, str):
             return ""
+        if _memory_header_budget is not None:
+            _memory_header_budget.debit(_native_memory_ascii_string_width(value),
+                appearance=("native-memory-forget-marker", "marker-strip"))
+            # Pinned full lowercase emits at most three scalar codepoints
+            # per input; each UTF8 scalar is at most four bytes.
+            _memory_header_budget.debit(6 * (3 * 4 * len(value)) + 2,
+                appearance=("native-memory-forget-marker", "marker-lower"))
         return value.strip().lower()
 
     archived_reason = _marker_value(metadata.get("archived_reason"))
     if "archived_reason" in metadata and not isinstance(metadata.get("archived_reason"), str):
         metadata_malformed = True
     if archived_reason == _CANONICAL_MEMORY_DELETE_EXPORT_REASON:
+        if _memory_header_budget is not None:
+            _memory_header_budget.debit(_native_memory_ascii_string_width("archived_reason=") + _native_memory_ascii_string_width(archived_reason) - 2,
+                appearance=("native-memory-forget-marker", "marker-return-format"))
         return f"archived_reason={archived_reason}"
 
     delete_export_state_value = operator_control.get("delete_export_state")
@@ -2265,11 +2301,18 @@ def _canonical_memory_deletion_marker(
         metadata_malformed = True
     if "delete_export_state" in metadata and not isinstance(top_level_delete_export_state, str):
         metadata_malformed = True
+    if _memory_header_budget is not None:
+        pair_upper = 3 + (72 * len(delete_export_state_value) + 2 if isinstance(delete_export_state_value, str) else 2)
+        pair_upper += 72 * len(top_level_delete_export_state) + 2 if isinstance(top_level_delete_export_state, str) else 2
+        _memory_header_budget.debit(pair_upper, appearance=("native-memory-forget-marker", "delete-state-tuple"))
     for delete_export_state in (
         _marker_value(delete_export_state_value),
         _marker_value(top_level_delete_export_state),
     ):
         if delete_export_state == _CANONICAL_MEMORY_REDACTED_STATE:
+            if _memory_header_budget is not None:
+                _memory_header_budget.debit(_native_memory_ascii_string_width("delete_export_state=") + _native_memory_ascii_string_width(delete_export_state) - 2,
+                    appearance=("native-memory-forget-marker", "marker-return-format"))
             return f"delete_export_state={delete_export_state}"
 
     last_action_value = operator_control.get("last_action")
@@ -2278,11 +2321,18 @@ def _canonical_memory_deletion_marker(
     top_level_last_action = metadata.get("last_action")
     if "last_action" in metadata and not isinstance(top_level_last_action, str):
         metadata_malformed = True
+    if _memory_header_budget is not None:
+        pair_upper = 3 + (72 * len(last_action_value) + 2 if isinstance(last_action_value, str) else 2)
+        pair_upper += 72 * len(top_level_last_action) + 2 if isinstance(top_level_last_action, str) else 2
+        _memory_header_budget.debit(pair_upper, appearance=("native-memory-forget-marker", "last-action-tuple"))
     for last_action in (
         _marker_value(last_action_value),
         _marker_value(top_level_last_action),
     ):
         if last_action in _CANONICAL_MEMORY_DELETE_ACTIONS:
+            if _memory_header_budget is not None:
+                _memory_header_budget.debit(_native_memory_ascii_string_width("last_action=") + _native_memory_ascii_string_width(last_action) - 2,
+                    appearance=("native-memory-forget-marker", "marker-return-format"))
             return f"last_action={last_action}"
 
     # The propagated replacement is itself a canonical redaction marker. Keep
@@ -2290,6 +2340,11 @@ def _canonical_memory_deletion_marker(
     # metadata-only browser read can skip these deferred text columns because
     # the SQL scope already contains the same bounded marker predicates.
     if check_text:
+        if _memory_header_budget is not None:
+            _memory_header_budget.debit(_native_memory_ascii_string_width(getattr(memory, "content", "") or ""),
+                appearance=("native-memory-forget-marker", "content-strip"))
+            _memory_header_budget.debit(_native_memory_ascii_string_width(getattr(memory, "summary", "") or ""),
+                appearance=("native-memory-forget-marker", "summary-strip"))
         content = str(getattr(memory, "content", "") or "").strip()
         summary = str(getattr(memory, "summary", "") or "").strip()
         if content == _CANONICAL_MEMORY_DELETE_CONTENT:
@@ -2299,10 +2354,20 @@ def _canonical_memory_deletion_marker(
 
     if metadata_malformed:
         status = getattr(memory, "status", None)
+        if _memory_header_budget is not None and type(status) is not MemoryStatus:
+            # The genuine ORM column delivers the existing enum. An arbitrary
+            # replacement cannot supply a bounded error/str constructor.
+            from src.memory.header_bounds import HeaderBoundsError
+            raise HeaderBoundsError("memory_forget_marker_status_dimensions_unavailable")
         try:
             normalized_status = _coerce_enum(status, MemoryStatus).value
         except (TypeError, ValueError):
             normalized_status = str(status or "").strip().lower()
+        if _memory_header_budget is not None:
+            _memory_header_budget.debit(3
+                + _native_memory_ascii_string_width(MemoryStatus.archived.value)
+                + _native_memory_ascii_string_width(MemoryStatus.superseded.value),
+                appearance=("native-memory-forget-marker", "suppressed-status-set"))
         if normalized_status in {MemoryStatus.archived.value, MemoryStatus.superseded.value}:
             return "metadata=malformed_suppressed_memory"
 

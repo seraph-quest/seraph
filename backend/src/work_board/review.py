@@ -910,6 +910,23 @@ async def _memory_report_dependency_headers(db, task, header_budget, *, _origina
                 "workflow_run_states", "work_board_input_artifacts", "work_board_proposals", "work_board_events"):
             certificates.append(await header_budget.certify_all(
                 db, COMPOSITION_DESCRIPTORS[name], _header_budget=header_budget))
+        # Original pre-inventory Root/operation deliveries use the genuine
+        # certificates just issued, before either original model query runs.
+        header_budget.debit(99, appearance=("native-memory-report-dependencies", "dependency-delivery-roster"))
+        for certificate_index, identity, dates in ((0, task.owner_session_id, 5),
+                (6, task.pipeline_operation_id, 2)):
+            selected = certificates[certificate_index]
+            found = False
+            for index in range(len(selected.row_ids)):
+                if selected.row_ids[index] == identity:
+                    header_budget.debit(selected.row_upper_bytes[index],
+                        appearance=("native-memory-report-dependencies", "dependency-model-delivery", selected.descriptor.table))
+                    header_budget.debit(dates * 44,
+                        appearance=("native-memory-report-dependencies", "dependency-date-delivery", selected.descriptor.table))
+                    found = True
+                    break
+            if not found:
+                raise HeaderBoundsError("memory_report_dependency_numeric_owner_changed")
     finally:
         _end_memory_report_numeric_trace(collector, active_token, trace_token)
     from src.memory.composition_headers import _common_trace_label_width
@@ -1599,6 +1616,18 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
             or artifact.bound_task_revision != reservation.get("consumer_revision", -2) + 1):
             raise ValueError("native_memory_report_source_changed")
         terminal = validated_terminal_report_source(run, _memory_header_budget=header_budget)
+        if header_budget is not None and type(terminal) is dict:
+            from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+            from src.memory.header_bounds import _native_memory_ascii_string_width
+            key_upper = 2 + max(0, len(terminal) - 1)
+            for key in terminal:
+                key_upper += _native_memory_ascii_string_width(key)
+            _report_memory_allocation_pay(header_budget, "terminal-key-set", key_upper)
+            expected_upper = (2 + 3 + _native_memory_ascii_string_width("candidate")
+                + _native_memory_ascii_string_width("output_reference")
+                + _native_memory_ascii_string_width("output_sha256")
+                + _native_memory_ascii_string_width("size_bytes"))
+            _report_memory_allocation_pay(header_budget, "terminal-expected-key-set", expected_upper)
         if (type(terminal) is not dict or set(terminal) != {"candidate", "output_reference", "output_sha256", "size_bytes"}
             or terminal["candidate"] != value or type(terminal["size_bytes"]) is not int
             or not 0 < terminal["size_bytes"] <= 65536 or type(terminal["output_reference"]) is not str
@@ -1609,9 +1638,13 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
             or not _safe_verification_receipt(proof, require_complete=True, _memory_header_budget=header_budget)):
             raise ValueError("native_memory_report_source_changed")
         artifacts, effects = _memory_report_receipt_list(run.artifact_receipts_json, header_budget), _memory_report_receipt_list(run.effect_receipts_json, header_budget)
-        if (len(_memory_report_matching_artifacts(artifacts, terminal, header_budget)) != 1
-            or not any(isinstance(item, dict) and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"
-                and item.get("target_path") == terminal["output_reference"] and item.get("content_sha256") == terminal["output_sha256"] for item in effects)):
+        if len(_memory_report_matching_artifacts(artifacts, terminal, header_budget)) != 1:
+            raise ValueError("native_memory_report_source_changed")
+        if header_budget is not None:
+            from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+            _report_memory_allocation_pay(header_budget, "effect-readback-generator", 32)
+        if not any(isinstance(item, dict) and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"
+                and item.get("target_path") == terminal["output_reference"] and item.get("content_sha256") == terminal["output_sha256"] for item in effects):
             raise ValueError("native_memory_report_source_changed")
         if header_budget is not None:
             from src.runtime_plugins.task_capability import _report_memory_allocation_pay

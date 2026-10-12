@@ -484,7 +484,7 @@ async def validate_native_memory_mutation_plan(plan, *, db, candidate_digest, co
     return plan
 
 
-async def prepare_native_memory_mutation(db, *, admission, native_memory_report_source=None, native_memory_source=None):
+async def prepare_native_memory_mutation(db, *, admission, native_memory_report_source=None, native_memory_source=None, native_memory_owner_numeric_source=None):
     from src.runtime_plugins.memory_producer import (
         NativeMemoryMutationAdmission, validate_original_memory_owner, _consume_original_memory_text)
     from src.memory.header_bounds import HeaderReadBudget
@@ -496,7 +496,8 @@ async def prepare_native_memory_mutation(db, *, admission, native_memory_report_
         raise ValueError("prepared_memory_admission_unavailable")
     initial_state = await _native_memory_writer_state(db)
     transaction = db.sync_session.get_transaction()
-    value = await validate_original_memory_owner(db, admission, _numeric_source=native_memory_source)
+    value = await validate_original_memory_owner(db, admission, _numeric_source=native_memory_source,
+        _resource_source=native_memory_owner_numeric_source)
     principal, session = value["operator_principal_id"], value["operator_session_id"]
     rows, updates = [], []
     audit = None

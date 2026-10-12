@@ -98,7 +98,9 @@ async def test_genuine_candidate_text_schedule_covers_original_formatter(actual_
         assert capability > 2 and goal > 2
         ref_utf8 = proof[3][0] - 2 if proof[3] else 64
         literal = len("Verified  completed successfully for goal  at revision ; independent readback  is bound to the source attempt.")
-        wrong_format = 6 * (literal + (capability - 2) // 6 + (goal - 2) // 6 + 20 + ref_utf8) + 2
+        revision = proof[2]["goal_revision"][0]
+        assert revision == len(str(task.goal_revision))
+        wrong_format = 6 * (literal + (capability - 2) // 6 + (goal - 2) // 6 + revision + ref_utf8) + 2
         assert actual[-1][3][1] > wrong_format
         label_values = sum(composition_headers._common_trace_label_width(label) for label, _ in vector)
         pair_values = 9 * 23 + label_values

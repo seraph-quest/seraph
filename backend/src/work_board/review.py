@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import asyncio
+from contextvars import ContextVar
 from weakref import WeakKeyDictionary
 from typing import Any, Mapping
 
@@ -344,21 +345,100 @@ def _bounded_utf8(value: str, max_bytes: int) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
-def _verified_readback(attempt: WorkBoardAttempt) -> dict[str, Any] | None:
-    for item in _decode_list(attempt.receipt_refs_json):
+def _memory_report_receipt_string(value, budget, stage, strip=False, lower=False, empty_falsy=True):
+    if budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+        scalar = (value or "") if empty_falsy else value
+        if type(scalar) is not str:
+            raise HeaderBoundsError("memory_report_receipt_numeric_shape_unsupported")
+        upper = _native_memory_ascii_string_width(scalar)
+        _report_memory_allocation_pay(budget, stage, upper)
+        if strip:
+            _report_memory_allocation_pay(budget, "receipt-string-strip", upper)
+        if lower:
+            # Original accepted digests are ASCII. An unsupported Unicode
+            # lowercase expansion has no authenticated Source width here.
+            for character in scalar:
+                if ord(character) > 127:
+                    raise HeaderBoundsError("memory_report_receipt_numeric_shape_unsupported")
+            _report_memory_allocation_pay(budget, "receipt-string-lower", upper)
+    result = str((value or "") if empty_falsy else value)
+    if strip:
+        result = result.strip()
+    if lower:
+        result = result.lower()
+    return result
+
+
+def _memory_report_receipt_map_pay(budget, stage, run_id, content_digest, verified=False):
+    if budget is None:
+        return
+    from src.memory.header_bounds import _native_memory_ascii_string_width as width
+    from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+    upper = (2 + 3 + 4 + width("receipt_kind") + width("readback")
+        + width("status") + width("succeeded" if verified else "verified")
+        + width("workflow_run_id") + width(run_id)
+        + width("content_sha256") + width(content_digest))
+    if verified:
+        upper += 1 + width("verified") + 1 + 4
+    _report_memory_allocation_pay(budget, stage, upper)
+
+
+def _memory_report_receipt_insert_pay(budget, stage, key, value):
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width as width
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        _report_memory_allocation_pay(budget, stage, 2 + width(key) + width(value))
+
+
+def _memory_report_empty_receipt(budget):
+    if budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        _report_memory_allocation_pay(budget, "verification-empty-map", 2)
+    return {}
+
+
+def _memory_report_receipt_list(raw, budget):
+    if budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_journal_numeric_pay
+        _report_memory_journal_numeric_pay(raw, budget)
+    return _decode_list(raw)
+
+
+def _memory_report_matching_artifacts(artifacts, terminal, budget):
+    if budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        upper = 2
+        count = 0
+        for item in artifacts:
+            if (isinstance(item, dict) and item.get("exists") is True
+                    and item.get("file_path") == terminal["output_reference"]
+                    and item.get("content_sha256") == terminal["output_sha256"]):
+                upper += _native_memory_source_value_upper(item)
+                count += 1
+        upper += max(0, count - 1)
+        _report_memory_allocation_pay(budget, "readback-matching-artifact-list", upper)
+    return [item for item in artifacts if isinstance(item, dict) and item.get("exists") is True
+        and item.get("file_path") == terminal["output_reference"] and item.get("content_sha256") == terminal["output_sha256"]]
+
+
+def _verified_readback(attempt: WorkBoardAttempt, *, _memory_header_budget=None) -> dict[str, Any] | None:
+    for item in _memory_report_receipt_list(attempt.receipt_refs_json, _memory_header_budget):
         if not isinstance(item, Mapping):
             continue
         # Receipt refs are persisted evidence, so the independent proof type
         # must survive the attempt projection.  A generic effect marked
         # verified is not sufficient to establish readback.
-        if str(item.get("receipt_kind") or "").strip() != "readback":
+        if _memory_report_receipt_string(item.get("receipt_kind"), _memory_header_budget, "readback-kind", True) != "readback":
             continue
-        if str(item.get("status") or "") not in _VERIFIED_RECEIPT_STATUSES:
+        if _memory_report_receipt_string(item.get("status"), _memory_header_budget, "readback-status") not in _VERIFIED_RECEIPT_STATUSES:
             continue
         if not bool(item.get("verified")):
             continue
-        receipt_run_id = str(item.get("workflow_run_id") or "").strip()
-        expected_run_id = str(attempt.workflow_run_id or "").strip()
+        receipt_run_id = _memory_report_receipt_string(item.get("workflow_run_id"), _memory_header_budget, "readback-receipt-run", True)
+        expected_run_id = _memory_report_receipt_string(attempt.workflow_run_id, _memory_header_budget, "readback-attempt-run", True)
         # A board attempt is bound to one durable root.  Do not accept a
         # syntactically valid receipt from another run merely because the
         # authoritative root itself succeeded; child evidence must be
@@ -367,9 +447,10 @@ def _verified_readback(attempt: WorkBoardAttempt) -> dict[str, Any] | None:
         if not receipt_run_id or receipt_run_id != expected_run_id:
             continue
         run_id = expected_run_id
-        digest = str(item.get("content_sha256") or "").lower()
+        digest = _memory_report_receipt_string(item.get("content_sha256"), _memory_header_budget, "readback-digest", False, True)
         if not run_id or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
             continue
+        _memory_report_receipt_map_pay(_memory_header_budget, "readback-proof-map", run_id, digest, True)
         proof: dict[str, Any] = {
             "receipt_kind": "readback",
             "workflow_run_id": run_id,
@@ -384,12 +465,14 @@ def _verified_readback(attempt: WorkBoardAttempt) -> dict[str, Any] | None:
             "verification_id",
             "effect_id_digest",
         ):
-            value = str(item.get(key) or "").strip()
+            value = _memory_report_receipt_string(item.get(key), _memory_header_budget, "readback-optional", True)
             pattern = _SAFE_EFFECT_DIGEST if key == "effect_id_digest" else _SAFE_RECEIPT_ID
             if value and pattern.fullmatch(value):
+                _memory_report_receipt_insert_pay(_memory_header_budget, "readback-proof-field", key, value)
                 proof[key] = value
-        verified_at = str(item.get("verified_at") or "").strip()
+        verified_at = _memory_report_receipt_string(item.get("verified_at"), _memory_header_budget, "readback-time", True)
         if verified_at and len(verified_at) <= 64 and "\n" not in verified_at and "\r" not in verified_at:
+            _memory_report_receipt_insert_pay(_memory_header_budget, "readback-proof-field", "verified_at", verified_at)
             proof["verified_at"] = verified_at
         return proof
     return None
@@ -399,18 +482,20 @@ def _safe_verification_receipt(
     proof: Mapping[str, Any] | None,
     *,
     require_complete: bool = False,
+    _memory_header_budget=None,
 ) -> dict[str, Any]:
     """Return the bounded typed proof persisted in a handoff/review receipt."""
     if not isinstance(proof, Mapping):
-        return {}
-    if str(proof.get("receipt_kind") or "").strip() != "readback":
-        return {}
-    run_id = str(proof.get("workflow_run_id") or "").strip()
-    digest = str(proof.get("content_sha256") or "").strip().lower()
+        return _memory_report_empty_receipt(_memory_header_budget)
+    if _memory_report_receipt_string(proof.get("receipt_kind"), _memory_header_budget, "verification-kind", True) != "readback":
+        return _memory_report_empty_receipt(_memory_header_budget)
+    run_id = _memory_report_receipt_string(proof.get("workflow_run_id"), _memory_header_budget, "verification-run", True)
+    digest = _memory_report_receipt_string(proof.get("content_sha256"), _memory_header_budget, "verification-digest", True, True)
     if not run_id or not _SAFE_WORKFLOW_ID.fullmatch(run_id):
-        return {}
+        return _memory_report_empty_receipt(_memory_header_budget)
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
-        return {}
+        return _memory_report_empty_receipt(_memory_header_budget)
+    _memory_report_receipt_map_pay(_memory_header_budget, "verification-receipt-map", run_id, digest)
     receipt: dict[str, Any] = {
         "receipt_kind": "readback",
         "status": "verified",
@@ -419,9 +504,10 @@ def _safe_verification_receipt(
     }
     raw_verified_at = proof.get("verified_at")
     if raw_verified_at is not None:
-        verified_at = str(raw_verified_at).strip()
+        verified_at = _memory_report_receipt_string(raw_verified_at, _memory_header_budget, "verification-time", True, False, False)
         if not verified_at or len(verified_at) > 64 or "\n" in verified_at or "\r" in verified_at:
-            return {}
+            return _memory_report_empty_receipt(_memory_header_budget)
+        _memory_report_receipt_insert_pay(_memory_header_budget, "verification-receipt-field", "verified_at", verified_at)
         receipt["verified_at"] = verified_at
     for key in (
         "readback_id",
@@ -430,15 +516,16 @@ def _safe_verification_receipt(
         "verification_id",
         "effect_id_digest",
     ):
-        value = str(proof.get(key) or "").strip()
+        value = _memory_report_receipt_string(proof.get(key), _memory_header_budget, "verification-optional", True)
         pattern = _SAFE_EFFECT_DIGEST if key == "effect_id_digest" else _SAFE_RECEIPT_ID
         if value and pattern.fullmatch(value):
+            _memory_report_receipt_insert_pay(_memory_header_budget, "verification-receipt-field", key, value)
             receipt[key] = value
     if require_complete and (
         not receipt.get("readback_id")
         or not receipt.get("verified_at")
     ):
-        return {}
+        return _memory_report_empty_receipt(_memory_header_budget)
     return receipt
 
 
@@ -632,6 +719,7 @@ class _MemoryReportDependencyNumericInventory:
 
 _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL = object()
 _MEMORY_REPORT_DEPENDENCY_NUMERIC = WeakKeyDictionary()
+_MEMORY_REPORT_PRINCIPAL_SCOPE = ContextVar("native_memory_report_principal_numeric", default=None)
 
 
 async def _memory_report_dependency_headers(db, task, header_budget, *, _original_source_certificates=None):
@@ -723,7 +811,7 @@ async def _stage_terminal_report_input(db, task, *, header_budget=None, _origina
     await _memory_report_dependency_headers(db, task, header_budget,
         _original_source_certificates=_original_source_certificates)
     _typed_input_model(task.capability_id)
-    await _report_current_authority(db, task)
+    await _report_current_authority(db, task, header_budget=header_budget)
     attempt = await db.scalar(select(WorkBoardAttempt).where(WorkBoardAttempt.task_id == task.task_id)
         .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
     run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == attempt.workflow_run_id)) if attempt else None
@@ -731,7 +819,7 @@ async def _stage_terminal_report_input(db, task, *, header_budget=None, _origina
         or attempt.outcome != "verified" or attempt.lease_owner is not None or attempt.lease_expires_at is not None
         or run is None or run.status != "succeeded" or run.finished_at is None):
         raise BoardError("pipeline_output_unverified", "The actual terminal report attempt is required")
-    await validate_run(db, run)
+    await _memory_report_validate_run(db, task, run, header_budget)
     owner = WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id)
     source = await stage_accepted_plan_task(db, task, attempt=attempt)
     from src.work_board.pipelines import owned, row_token, canonical_bytes
@@ -747,54 +835,513 @@ async def _stage_terminal_report_input(db, task, *, header_budget=None, _origina
     return resolved.payload, source, canonical_bytes(value["live_root"]), row_token(operation)
 
 
-async def _report_current_authority(db, task):
+def _memory_report_row_certificate(db, task, budget, table):
+    """Original REPORT row-width evidence only; never a body permission."""
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError, HeaderCertificate, COMPOSITION_DESCRIPTORS, _SEAL
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    record = getattr(budget, "_native_memory_report_dependency_numeric", None)
+    if (type(budget) is not HeaderReadBudget
+            or type(record) is not _MemoryReportDependencyNumericInventory
+            or _MEMORY_REPORT_DEPENDENCY_NUMERIC.get(record) is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._seal is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._issued_id != id(record) or record.db is not db or record.budget is not budget
+            or record.issuer_task is not asyncio.current_task()
+            or record.task_id != task.task_id or record.owner_principal_id != task.owner_principal_id
+            or record.owner_session_id != task.owner_session_id
+            or record.transaction is not db.sync_session.get_transaction()
+            or not record.driver.in_transaction):
+        raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+    frame = _configured_mac_numeric_frame()
+    if frame is not None and frame is not budget:
+        raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+    matched_connection = False
+    for connection, state in record.transaction._connections.items():
+        from sqlalchemy.engine import Connection
+        if (type(connection) is Connection and state[0] is connection
+                and state[1] is connection.get_transaction() and not connection.closed
+                and connection.in_transaction()
+                and connection.connection.driver_connection is record.driver):
+            matched_connection = True
+            break
+    if not matched_connection:
+        raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+    for certificate in record.certificates:
+        if certificate.descriptor is COMPOSITION_DESCRIPTORS[table]:
+            if (type(certificate) is not HeaderCertificate or certificate._seal is not _SEAL
+                    or certificate._issued_id != id(certificate) or certificate._db is not db
+                    or certificate._transaction is not record.transaction
+                    or certificate._driver is not record.driver
+                    or certificate._changes != record.driver.total_changes):
+                raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+            return certificate
+    raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+
+
+def _memory_report_principal_numeric_owner(db, principal_id):
+    """Existing REPORT8 payer for the original direct principal recheck."""
+    from src.memory.header_bounds import HeaderBoundsError
+    record = _MEMORY_REPORT_PRINCIPAL_SCOPE.get()
+    if record is None:
+        return None
+    if (type(record) is not _MemoryReportDependencyNumericInventory
+            or _MEMORY_REPORT_DEPENDENCY_NUMERIC.get(record) is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._seal is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._issued_id != id(record) or record.owner_principal_id != principal_id):
+        raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    # Enrollment already checked the actual Task. Its original inventory now
+    # rechecks only existing payer/certificate/Task/transaction lineage.
+    if db is None:
+        db = record.db
+    _memory_report_row_certificate(db, record, record.budget, "operator_sessions")
+    return record
+
+
+async def _memory_report_authenticate_principal(db, task, budget):
+    from src.auth.service import authenticate_principal
+    if budget is None:
+        return await authenticate_principal(task.owner_principal_id, db=db)
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+    _memory_report_row_certificate(db, task, budget, "operator_sessions")
+    if _MEMORY_REPORT_PRINCIPAL_SCOPE.get() is not None:
+        raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    record = budget._native_memory_report_dependency_numeric
+    # The original test bypass allocates before its normal principal payer.
+    # It has no supported REPORT numerical branch; ordinary authentication
+    # (budget=None) keeps its original behavior above.
+    if task.owner_principal_id == "operator:test-bypass":
+        raise HeaderBoundsError("memory_report_auth_branch_numeric_unavailable")
+    _report_memory_allocation_pay(budget, "principal-scope-token", 4)
+    token = _MEMORY_REPORT_PRINCIPAL_SCOPE.set(record)
+    try:
+        _memory_report_principal_numeric_owner(db, task.owner_principal_id)
+        current = await authenticate_principal(task.owner_principal_id, db=db)
+        from src.auth.service import auth_enabled, _OWNERSHIP_LEGACY
+        _report_memory_allocation_pay(budget, "principal-numeric-branch-tuple", 19)
+        branches = (auth_enabled(), False, current.ownership_continuity == _OWNERSHIP_LEGACY)
+        _report_memory_allocation_pay(budget, "principal-numeric-branch-slot", 3 + 4 + 164)
+        object.__setattr__(record, "_principal_numeric_branches", branches)
+        return current
+    finally:
+        _MEMORY_REPORT_PRINCIPAL_SCOPE.reset(token)
+
+
+def _retain_memory_report_authority_numeric_facts(record, task, attempt, run):
+    """Widths observed by the original successful REPORT identity owner."""
+    from types import MappingProxyType
+    from enum import Enum
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width as key_width, _native_memory_utf8_width
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+    from src.workflows.inference_accounting import _accounting_scalar_upper
+    budget = record.budget
+    _memory_report_principal_numeric_owner(record.db, task.owner_principal_id)
+    def membership(table, identity):
+        certificate = _memory_report_row_certificate(record.db, task, budget, table)
+        for candidate in certificate.row_ids:
+            if candidate == identity:
+                return
+        raise HeaderBoundsError("memory_report_authority_numeric_owner_changed")
+    membership("work_board_tasks", task.task_id)
+    membership("work_board_attempts", attempt.attempt_id)
+    membership("workflow_run_states", run.run_identity)
+    if (attempt.task_id != task.task_id or attempt.workflow_run_id != run.run_identity
+            or record.task_id != task.task_id or task.typed_input_digest is None
+            or task.capability_id != "work.local-evidence-report.v1"):
+        raise HeaderBoundsError("memory_report_authority_numeric_owner_changed")
+    def scalar(value):
+        if isinstance(value, datetime):
+            return _accounting_scalar_upper(value)
+        if isinstance(value, Enum):
+            value = value.value
+        return _native_memory_source_value_upper(value)
+    def widths(model, names):
+        upper = 2 + max(0, len(names) - 1) + len(names)
+        for name in names:
+            upper += key_width(name) + 20
+        _report_memory_allocation_pay(budget, "authority-numeric-field-map", upper)
+        values = {}
+        for name in names:
+            values[name] = scalar(getattr(model, name))
+        _report_memory_allocation_pay(budget, "authority-numeric-field-proxy", 4)
+        _report_memory_allocation_pay(budget, "authority-numeric-field-return", 27)
+        return MappingProxyType(values), upper
+    task_widths, task_upper = widths(task, ("task_id", "capability_id", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision"))
+    attempt_widths, attempt_upper = widths(attempt, ("attempt_id", "task_id", "workflow_run_id", "parent_handoff_context_json", "parent_handoff_digest"))
+    run_widths, run_upper = widths(run, ("run_identity", "input_digest", "job_kind", "capability_version", "owner_kind",
+        "owner_principal_id", "service_id", "authority_digest", "dependencies_json", "resource_claims_json", "deadline_at",
+        "priority", "max_attempts", "session_id", "parent_job_id", "parent_fencing_token", "goal_id", "goal_revision",
+        "plan_revision", "candidate_id", "source_task_id", "composition_binding_json", "run_fingerprint", "budget_digest"))
+    text_upper = 2 + 3 + 4
+    for name in ("dependencies_json", "resource_claims_json", "composition_binding_json", "declared_authority_json"):
+        text_upper += key_width(name) + 20
+    _report_memory_allocation_pay(budget, "authority-numeric-text-map", text_upper)
+    text_bytes = {}
+    for name in ("dependencies_json", "resource_claims_json", "composition_binding_json", "declared_authority_json"):
+        value = getattr(run, name)
+        if value is not None and type(value) is not str:
+            raise HeaderBoundsError("memory_report_authority_numeric_shape_unavailable")
+        text_bytes[name] = _native_memory_utf8_width(value) if value is not None else 0
+    _report_memory_allocation_pay(budget, "authority-numeric-text-proxy", 4)
+    text_bytes = MappingProxyType(text_bytes)
+    retained_upper = (2 + 7 + key_width(task.task_id) + key_width(attempt.attempt_id) + key_width(run.run_identity)
+        + task_upper + attempt_upper + run_upper + text_upper + key_width(task.typed_input_digest))
+    _report_memory_allocation_pay(budget, "authority-numeric-retained-tuple", retained_upper)
+    retained = (task.task_id, attempt.attempt_id, run.run_identity, task_widths, attempt_widths,
+        run_widths, text_bytes, task.typed_input_digest)
+    _report_memory_allocation_pay(budget, "authority-numeric-record-slot", 3 + key_width("_authority_numeric_facts") + 4)
+    object.__setattr__(record, "_authority_numeric_facts", retained)
+
+
+def _memory_report_identity_matches(db, task, attempt, inputs, run, *, principal, budget):
+    from src.runtime_plugins.task_capability import report_identity_matches_current, _report_memory_allocation_pay
+    if budget is None:
+        return report_identity_matches_current(task, attempt, inputs, run, principal=principal)
+    from src.memory.header_bounds import HeaderBoundsError
+    _memory_report_row_certificate(db, task, budget, "operator_sessions")
+    if _MEMORY_REPORT_PRINCIPAL_SCOPE.get() is not None:
+        raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    record = budget._native_memory_report_dependency_numeric
+    _report_memory_allocation_pay(budget, "identity-scope-token", 4)
+    token = _MEMORY_REPORT_PRINCIPAL_SCOPE.set(record)
+    try:
+        _memory_report_principal_numeric_owner(db, task.owner_principal_id)
+        matched = report_identity_matches_current(task, attempt, inputs, run, principal=principal,
+            _memory_header_budget=budget)
+        if matched:
+            _retain_memory_report_authority_numeric_facts(record, task, attempt, run)
+        return matched
+    finally:
+        _MEMORY_REPORT_PRINCIPAL_SCOPE.reset(token)
+
+
+async def _memory_report_task_guard(db, task, attempt, workspace_identity, source_witness, budget):
+    from src.work_board.pipelines import task_guard
+    if budget is None:
+        return await task_guard(db, task, attempt=attempt, workspace_identity=workspace_identity,
+            source_witness=source_witness)
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+    _memory_report_row_certificate(db, task, budget, "operator_sessions")
+    if _MEMORY_REPORT_PRINCIPAL_SCOPE.get() is not None:
+        raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    record = budget._native_memory_report_dependency_numeric
+    _report_memory_allocation_pay(budget, "pipeline-scope-token", 4)
+    token = _MEMORY_REPORT_PRINCIPAL_SCOPE.set(record)
+    try:
+        _memory_report_principal_numeric_owner(db, task.owner_principal_id)
+        return await task_guard(db, task, attempt=attempt, workspace_identity=workspace_identity,
+            source_witness=source_witness, _memory_header_budget=budget)
+    finally:
+        _MEMORY_REPORT_PRINCIPAL_SCOPE.reset(token)
+
+
+async def _memory_report_validate_run(db, task, run, budget):
+    from src.runtime_plugins.ownership import validate_run
+    if budget is None:
+        return await validate_run(db, run)
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.task_capability import _report_memory_allocation_pay, _report_memory_binding_pay
+    _memory_report_row_certificate(db, task, budget, "operator_sessions")
+    if _MEMORY_REPORT_PRINCIPAL_SCOPE.get() is not None:
+        raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    record = budget._native_memory_report_dependency_numeric
+    _report_memory_allocation_pay(budget, "run-scope-token", 4)
+    token = _MEMORY_REPORT_PRINCIPAL_SCOPE.set(record)
+    try:
+        _memory_report_principal_numeric_owner(db, task.owner_principal_id)
+        if run.composition_binding_json is not None:
+            _report_memory_binding_pay(run.composition_binding_json, budget)
+        return await validate_run(db, run)
+    finally:
+        _MEMORY_REPORT_PRINCIPAL_SCOPE.reset(token)
+
+
+def _memory_report_row_token(db, task, row, budget):
+    from src.work_board.pipelines import row_token
+    if budget is not None:
+        from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.db.models import OperatorSession, Goal
+        if type(row) is WorkBoardEvent:
+            table = "work_board_events"
+            identity = row.event_id
+        elif type(row) is OperatorSession:
+            table = "operator_sessions"
+            identity = row.id
+        elif type(row) is Goal:
+            table = "goals"
+            identity = row.id
+        else:
+            raise HeaderBoundsError("memory_report_row_numeric_shape_unavailable")
+        certificate = _memory_report_row_certificate(db, task, budget, table)
+        upper = None
+        for index in range(len(certificate.row_ids)):
+            if certificate.row_ids[index] == identity:
+                upper = certificate.row_upper_bytes[index]
+                break
+        if upper is None:
+            raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+        # Closed SQLModel fields are exactly the certified descriptor columns;
+        # all persisted nullable defaults are already present. ISO scalars use
+        # the existing typed datetime44 ceiling, independently of borrowed refs.
+        actual_upper = 2 + max(0, len(certificate.descriptor.columns) - 1)
+        for name in certificate.descriptor.columns:
+            value = getattr(row, name)
+            actual_upper += _native_memory_ascii_string_width(name) + 1
+            if isinstance(value, datetime):
+                actual_upper += 44
+            else:
+                actual_upper += _native_memory_source_value_upper(value)
+        if actual_upper > upper:
+            raise HeaderBoundsError("memory_report_row_numeric_shape_unavailable")
+        _report_memory_allocation_pay(budget, "row-token-model-dump-" + table, upper)
+        for name in certificate.descriptor.columns:
+            value = getattr(row, name)
+            if isinstance(value, datetime):
+                _report_memory_allocation_pay(budget, "row-token-utc-" + table, 44)
+                _report_memory_allocation_pay(budget, "row-token-iso-" + table, 44)
+        _report_memory_allocation_pay(budget, "row-token-map-" + table, upper)
+        _report_memory_allocation_pay(budget, "row-token-json-" + table, upper)
+        _report_memory_allocation_pay(budget, "row-token-utf8-" + table, upper)
+        _report_memory_allocation_pay(budget, "row-token-hexdigest-" + table, 66)
+    return row_token(row)
+
+
+def _memory_report_owner_pair(first, second, budget):
+    if budget is not None:
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        _report_memory_allocation_pay(budget, "owner-pair",
+            3 + _native_memory_source_value_upper(first) + _native_memory_source_value_upper(second))
+    return first, second
+
+
+def _memory_report_expiry_utc(value, budget):
+    from src.work_board.pipelines import utc
+    if budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        _report_memory_allocation_pay(budget, "authority-expiry-utc", 44)
+    return utc(value)
+
+
+def _memory_report_lookup_pay(db, task, budget, table, identity, datetime_fields):
+    if budget is None:
+        return
+    from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+    from src.memory.header_bounds import HeaderBoundsError
+    certificate = _memory_report_row_certificate(db, task, budget, table)
+    for index in range(len(certificate.row_ids)):
+        if certificate.row_ids[index] == identity:
+            _report_memory_allocation_pay(budget, "authority-model-delivery-" + table,
+                certificate.row_upper_bytes[index])
+            _report_memory_allocation_pay(budget, "authority-date-delivery-capacity-" + table,
+                datetime_fields * 44)
+            return
+    raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+
+
+async def _report_current_authority(db, task, *, header_budget=None):
     from src.db.models import OperatorSession, OperatorIdentity, Goal
     from src.auth.service import authenticate_principal
     from src.work_board.pipelines import row_token, utc
+    _memory_report_lookup_pay(db, task, header_budget, "operator_sessions", task.owner_session_id, 5)
     root = await db.get(OperatorSession, task.owner_session_id, populate_existing=True)
+    _memory_report_lookup_pay(db, task, header_budget, "goals", task.goal_id, 4)
     goal = await db.get(Goal, task.goal_id, populate_existing=True)
     identity = await db.get(OperatorIdentity, root.operator_identity_id, populate_existing=True) if root and root.operator_identity_id else None
+    if header_budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        _report_memory_allocation_pay(header_budget, "authority-observed-datetime", 44)
     observed = _now()
     if (root is None or root.principal_id != task.owner_principal_id or root.revoked_at is not None
         or root.replaced_by_id is not None or root.is_bearer_tombstone
-        or utc(root.idle_expires_at) <= observed or utc(root.absolute_expires_at) <= observed
+        or _memory_report_expiry_utc(root.idle_expires_at, header_budget) <= observed
+        or _memory_report_expiry_utc(root.absolute_expires_at, header_budget) <= observed
         or (root.operator_identity_id and (identity is None or identity.revoked_at is not None))
         or goal is None or goal.status != "active" or goal.revision != task.goal_revision
-        or (goal.owner_principal_id, goal.owner_session_id) != (task.owner_principal_id, task.owner_session_id)):
+        or _memory_report_owner_pair(goal.owner_principal_id, goal.owner_session_id, header_budget) !=
+            _memory_report_owner_pair(task.owner_principal_id, task.owner_session_id, header_budget)):
         raise BoardError("pipeline_root_changed", "The current report authority changed")
-    principal = (await authenticate_principal(task.owner_principal_id, db=db)).principal
-    return principal, (row_token(root), row_token(goal), row_token(identity) if identity else "")
+    principal = (await _memory_report_authenticate_principal(db, task, header_budget)).principal
+    if header_budget is not None:
+        # Original three hash/empty-string tokens, then the borrowed principal
+        # plus that token tuple. This is storage only, never principal issuance.
+        _report_memory_allocation_pay(header_budget, "authority-token-tuple", 138)
+        _report_memory_allocation_pay(header_budget, "authority-return-tuple", 145)
+    return principal, (_memory_report_row_token(db, task, root, header_budget),
+        _memory_report_row_token(db, task, goal, header_budget), row_token(identity) if identity else "")
+
+
+def _memory_report_decode_event(value, budget):
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_utf8_width, HeaderBoundsError
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        if type(value) is not str:
+            raise HeaderBoundsError("memory_report_row_numeric_shape_unavailable")
+        upper = 6 * _native_memory_utf8_width(value or "{}") + 2
+        _report_memory_allocation_pay(budget, "event-metadata-parser", upper)
+        _report_memory_allocation_pay(budget, "event-metadata-pairs", upper)
+        _report_memory_allocation_pay(budget, "event-metadata-dicts", upper)
+    return _decode_object(value)
+
+
+def _memory_report_expected_event(kind, attempt, run, value, budget):
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        if kind == "attempt.linked":
+            upper = (2 + 2 + 3 + _native_memory_ascii_string_width("attempt_id")
+                + _native_memory_ascii_string_width(attempt.attempt_id)
+                + _native_memory_ascii_string_width("workflow_run_id") + _native_memory_ascii_string_width(run.run_identity)
+                + _native_memory_ascii_string_width("task_revision")
+                + _native_memory_source_value_upper(value["task_revision"] + 1))
+        else:
+            upper = (2 + 4 + 5 + _native_memory_ascii_string_width("attempt_id")
+                + _native_memory_ascii_string_width(attempt.attempt_id)
+                + _native_memory_ascii_string_width("outcome") + _native_memory_ascii_string_width("verified")
+                + _native_memory_ascii_string_width("status") + _native_memory_ascii_string_width("done")
+                + _native_memory_ascii_string_width("task_revision")
+                + _native_memory_source_value_upper(value["task_revision"] + 2)
+                + _native_memory_ascii_string_width("verified_readback") + 4)
+        _report_memory_allocation_pay(budget, "event-expected-map", upper)
+    if kind == "attempt.linked":
+        return {"attempt_id": attempt.attempt_id, "workflow_run_id": run.run_identity,
+            "task_revision": value["task_revision"] + 1}
+    return {"attempt_id": attempt.attempt_id, "outcome": "verified",
+        "status": "done", "task_revision": value["task_revision"] + 2, "verified_readback": True}
 
 
 async def _report_done_events(db, task, attempt, run, *, header_budget=None):
     from src.runtime_plugins.task_capability import read_report_candidate
     from src.work_board.pipelines import row_token
     value = read_report_candidate(run, _memory_header_budget=header_budget)
+    if header_budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        event_certificate = _memory_report_row_certificate(db, task, header_budget, "work_board_events")
+        # This original predicate selects a subset of the already certified
+        # census. Its model delivery and result lists therefore fit this sum;
+        # body permission remains the original REPORT owner and caller guards.
+        events_upper = 2 + max(0, len(event_certificate.row_ids) - 1)
+        delivery_upper = 0
+        for index in range(len(event_certificate.row_ids)):
+            upper = event_certificate.row_upper_bytes[index]
+            events_upper += upper
+            delivery_upper += upper
+        _report_memory_allocation_pay(header_budget, "events-model-delivery-capacity", delivery_upper)
+        _report_memory_allocation_pay(header_budget, "events-date-delivery-capacity", 44 * len(event_certificate.row_ids))
+        _report_memory_allocation_pay(header_budget, "events-scalars-all", events_upper)
+        _report_memory_allocation_pay(header_budget, "events-list-copy", events_upper)
+        _report_memory_allocation_pay(header_budget, "events-kinds-list", 3
+            + _native_memory_ascii_string_width("attempt.linked") + _native_memory_ascii_string_width("attempt.done"))
     events = list((await db.scalars(select(WorkBoardEvent).where(WorkBoardEvent.task_id == task.task_id,
         WorkBoardEvent.kind.in_(["attempt.linked", "attempt.done"])))).all())
     def chosen(kind):
+        if header_budget is not None:
+            selected_upper, selected_count = 2, 0
+            for event in events:
+                if event.kind == kind:
+                    for index in range(len(event_certificate.row_ids)):
+                        if event_certificate.row_ids[index] == event.event_id:
+                            selected_upper += event_certificate.row_upper_bytes[index]
+                            selected_count += 1
+                            break
+                    else:
+                        from src.memory.header_bounds import HeaderBoundsError
+                        raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
+            _report_memory_allocation_pay(header_budget, "events-selected-list",
+                selected_upper + max(0, selected_count - 1))
         return [event for event in events if event.kind == kind
-            and _decode_object(event.metadata_json).get("attempt_id") == attempt.attempt_id]
+            and _memory_report_decode_event(event.metadata_json, header_budget).get("attempt_id") == attempt.attempt_id]
     links, dones = chosen("attempt.linked"), chosen("attempt.done")
     if (len(links) != 1 or len(dones) != 1 or dones[0].event_id <= links[0].event_id
         or task.task_revision != value["task_revision"] + 2 or task.status != WorkBoardStatus.done
         or task.idempotency_binding != run.idempotency_binding or attempt.workflow_run_id != run.run_identity):
         raise ValueError("native_memory_report_source_changed")
     link, done = links[0], dones[0]
-    link_metadata, done_metadata = _decode_object(link.metadata_json), _decode_object(done.metadata_json)
+    link_metadata, done_metadata = _memory_report_decode_event(link.metadata_json, header_budget), _memory_report_decode_event(done.metadata_json, header_budget)
     if (type(link_metadata.get("task_revision")) is not int
         or type(done_metadata.get("task_revision")) is not int
         or type(done_metadata.get("verified_readback")) is not bool
         or done_metadata.get("verified_readback") is not True
-        or any((event.owner_principal_id, event.owner_session_id) != (task.owner_principal_id, task.owner_session_id)
+        or any(_memory_report_owner_pair(event.owner_principal_id, event.owner_session_id, header_budget) !=
+            _memory_report_owner_pair(task.owner_principal_id, task.owner_session_id, header_budget)
             or event.actor_principal_id != value["board_lease_owner"] or not event.actor_session_id for event in (link, done))
         or done.actor_session_id != link.actor_session_id
-        or _decode_object(link.metadata_json) != {"attempt_id": attempt.attempt_id, "workflow_run_id": run.run_identity,
-            "task_revision": value["task_revision"] + 1}
-        or _decode_object(done.metadata_json) != {"attempt_id": attempt.attempt_id, "outcome": "verified",
-            "status": "done", "task_revision": value["task_revision"] + 2, "verified_readback": True}):
+        or _memory_report_decode_event(link.metadata_json, header_budget) !=
+            _memory_report_expected_event("attempt.linked", attempt, run, value, header_budget)
+        or _memory_report_decode_event(done.metadata_json, header_budget) !=
+            _memory_report_expected_event("attempt.done", attempt, run, value, header_budget)):
         raise ValueError("native_memory_report_source_changed")
-    return (row_token(link), row_token(done))
+    if header_budget is not None:
+        _report_memory_allocation_pay(header_budget, "events-token-tuple", 135)
+    return (_memory_report_row_token(db, task, link, header_budget),
+        _memory_report_row_token(db, task, done, header_budget))
+
+
+def _memory_report_artifact_binding_matches(artifact, task, budget):
+    if budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper as width
+        artifact_upper = task_upper = 2 + 6
+        for name in ("owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id"):
+            artifact_upper += width(getattr(artifact, name))
+            task_upper += width(getattr(task, name))
+        artifact_upper += width(artifact.capability_version) + width(artifact.bound_task_id)
+        task_upper += width("1") + width(task.task_id)
+        _report_memory_allocation_pay(budget, "artifact-owner-tuple", artifact_upper)
+        _report_memory_allocation_pay(budget, "artifact-task-tuple", task_upper)
+    return ((artifact.owner_principal_id, artifact.owner_session_id, artifact.goal_id, artifact.goal_revision,
+        artifact.capability_id, artifact.capability_version, artifact.bound_task_id) ==
+        (task.owner_principal_id, task.owner_session_id, task.goal_id, task.goal_revision, task.capability_id, "1", task.task_id))
+
+
+def _memory_report_artifact_digest(row, budget):
+    from src.work_board.input_artifacts import _metadata_digest
+    if budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width as width
+        if row.capability_id != "work.local-evidence-report.v1":
+            raise HeaderBoundsError("memory_report_artifact_numeric_shape_unsupported")
+        upper = 2 + 17 + 18
+        for name in ("artifact_id", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision",
+                "capability_id", "capability_version", "idempotency_key", "payload_sha256", "typed_input_ref",
+                "size_bytes", "state", "bound_task_id", "bound_task_revision", "created_at", "expires_at",
+                "consumed_at", "revision"):
+            upper += width(name)
+            if name in ("created_at", "expires_at", "consumed_at"):
+                if name == "consumed_at" and row.consumed_at is None:
+                    upper += 4
+                else:
+                    upper += 44
+                    _report_memory_allocation_pay(budget, "artifact-metadata-date-utc", 44)
+                    _report_memory_allocation_pay(budget, "artifact-metadata-date-iso", 44)
+            else:
+                upper += _native_memory_source_value_upper(getattr(row, name))
+        _report_memory_allocation_pay(budget, "artifact-document-empty-map", 2)
+        _report_memory_allocation_pay(budget, "artifact-metadata-map", upper)
+        _report_memory_allocation_pay(budget, "artifact-metadata-json", upper)
+        _report_memory_allocation_pay(budget, "artifact-metadata-utf8", upper)
+        _report_memory_allocation_pay(budget, "artifact-metadata-hexdigest", 66)
+    return _metadata_digest(row)
+
+
+def _memory_report_artifact_delivery_pay(db, task, artifact_id, budget):
+    if budget is None:
+        return
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+    certificate = _memory_report_row_certificate(db, task, budget, "work_board_input_artifacts")
+    for index in range(len(certificate.row_ids)):
+        if certificate.row_ids[index] == artifact_id:
+            _report_memory_allocation_pay(budget, "artifact-model-delivery", certificate.row_upper_bytes[index])
+            _report_memory_allocation_pay(budget, "artifact-date-delivery-capacity", 3 * 44)
+            return
+    raise HeaderBoundsError("memory_report_row_numeric_owner_changed")
 
 
 async def native_report_memory_metadata(db, task, attempt, run, *, _report_input_bytes=None,
@@ -818,35 +1365,33 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
         or run.status != "succeeded" or run.finished_at is None or attempt.workflow_run_id != run.run_identity):
         raise ValueError("native_memory_report_source_changed")
     value = read_report_candidate(run, _memory_header_budget=header_budget)
-    await validate_run(db, run)
+    await _memory_report_validate_run(db, task, run, header_budget)
+    _memory_report_artifact_delivery_pay(db, task, value["input_id"], header_budget)
     artifact = await db.get(WorkBoardInputArtifact, value["input_id"], populate_existing=True)
     latest = await db.scalar(select(WorkBoardAttempt.attempt_id).where(WorkBoardAttempt.task_id == task.task_id)
         .order_by(WorkBoardAttempt.created_at.desc(), WorkBoardAttempt.attempt_id.desc()).limit(1))
     if (value["task_id"] != task.task_id or value["attempt_id"] != attempt.attempt_id
         or value["board_fencing_token"] != attempt.fencing_token or latest != attempt.attempt_id
         or artifact is None or task.input_artifact_id != artifact.artifact_id
-        or (artifact.owner_principal_id, artifact.owner_session_id, artifact.goal_id, artifact.goal_revision,
-            artifact.capability_id, artifact.capability_version, artifact.bound_task_id) !=
-            (task.owner_principal_id, task.owner_session_id, task.goal_id, task.goal_revision, task.capability_id, "1", task.task_id)
+        or not _memory_report_artifact_binding_matches(artifact, task, header_budget)
         or artifact.state != "consumed" or artifact.consumed_at is None or not artifact.metadata_digest
         or type(artifact.bound_task_revision) is not int or artifact.bound_task_revision < 1
         or artifact.payload_sha256 != value["payload_sha256"] or artifact.payload_sha256 != task.typed_input_digest
         or artifact.typed_input_ref != value["typed_input_ref"] or artifact.typed_input_ref != task.typed_input_ref
         or artifact.size_bytes != value["payload_bytes"] or len(_report_input_bytes) != artifact.size_bytes
         or hashlib.sha256(_report_input_bytes).hexdigest() != artifact.payload_sha256
-        or _metadata_digest(artifact) != artifact.metadata_digest):
+        or _memory_report_artifact_digest(artifact, header_budget) != artifact.metadata_digest):
         raise ValueError("native_memory_report_source_changed")
     await _report_done_events(db, task, attempt, run, header_budget=header_budget)
-    principal, _ = await _report_current_authority(db, task)
+    principal, _ = await _report_current_authority(db, task, header_budget=header_budget)
     inputs = _decode_typed_input_payload(task, _report_input_bytes, _memory_header_budget=header_budget,
         _memory_report_input_stage=_memory_report_input_stage, _memory_db=db)
-    if not report_identity_matches_current(task, attempt, inputs, run, principal=principal,
-            _memory_header_budget=header_budget):
+    if not _memory_report_identity_matches(db, task, attempt, inputs, run, principal=principal,
+            budget=header_budget):
         raise ValueError("native_memory_report_source_changed")
     await recheck_accepted_plan_task(db, task, attempt=attempt, source_witness=_report_source_witness)
-    operation, operation_value = await task_guard(db, task, attempt=attempt,
-        workspace_identity=_report_workspace_identity, source_witness=_report_source_witness,
-        _memory_header_budget=header_budget)
+    operation, operation_value = await _memory_report_task_guard(db, task, attempt,
+        _report_workspace_identity, _report_source_witness, header_budget)
     if _report_operation_token is not None and row_token(operation) != _report_operation_token:
         raise ValueError("native_memory_report_source_changed")
     reservation = operation_value["reservations"].get(task.pipeline_slot)
@@ -860,16 +1405,19 @@ async def native_report_memory_metadata(db, task, attempt, run, *, _report_input
         or not 0 < terminal["size_bytes"] <= 65536 or type(terminal["output_reference"]) is not str
         or not terminal["output_reference"].startswith("artifacts/work-board/evidence/")):
         raise ValueError("native_memory_report_source_changed")
-    proof = _verified_readback(attempt)
+    proof = _verified_readback(attempt, _memory_header_budget=header_budget)
     if (proof is None or proof["content_sha256"] != terminal["output_sha256"]
-        or not _safe_verification_receipt(proof, require_complete=True)):
+        or not _safe_verification_receipt(proof, require_complete=True, _memory_header_budget=header_budget)):
         raise ValueError("native_memory_report_source_changed")
-    artifacts, effects = _decode_list(run.artifact_receipts_json), _decode_list(run.effect_receipts_json)
-    if (len([item for item in artifacts if isinstance(item, dict) and item.get("exists") is True
-        and item.get("file_path") == terminal["output_reference"] and item.get("content_sha256") == terminal["output_sha256"]]) != 1
+    artifacts, effects = _memory_report_receipt_list(run.artifact_receipts_json, header_budget), _memory_report_receipt_list(run.effect_receipts_json, header_budget)
+    if (len(_memory_report_matching_artifacts(artifacts, terminal, header_budget)) != 1
         or not any(isinstance(item, dict) and item.get("receipt_kind") == "readback" and item.get("status") == "succeeded"
             and item.get("target_path") == terminal["output_reference"] and item.get("content_sha256") == terminal["output_sha256"] for item in effects)):
         raise ValueError("native_memory_report_source_changed")
+    if header_budget is not None:
+        from src.runtime_plugins.task_capability import _report_memory_allocation_pay
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        _report_memory_allocation_pay(header_budget, "readback-return-proof-copy", _native_memory_source_value_upper(proof))
     return dict(proof)
 
 

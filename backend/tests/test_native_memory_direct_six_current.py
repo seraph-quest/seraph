@@ -48,6 +48,12 @@ async def test_real_source_prices_before_direct_six_and_preserves_all_phase_buil
         try:
             with pytest.raises(HeaderBoundsError):
                 direct(operation, prepared, **arguments)
+            with pytest.raises(HeaderBoundsError):
+                direct(operation, prepared, certificate=certificate, retention_widths=widths)
+            with pytest.raises(HeaderBoundsError):
+                accounting_witness._native_memory_successful_current_lifecycle_numeric_entries(
+                    operation, prepared, certificate=certificate, retention_widths=widths)
+            assert preflights == [] and certificate.budget.remaining == before
         finally:
             composition_headers._CURRENT.reset(token)
         original_budget = guard.header_budget

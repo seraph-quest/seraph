@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import weakref
+from contextvars import ContextVar
 
 from sqlmodel import select
 from sqlalchemy import update
@@ -17,6 +19,183 @@ DOMAINS = tuple(f"seraph.{name}.v1" for name in (
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
 _REF = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 _RESTORE = re.compile(r"restore:([0-9a-f]{64})(?::([0-9a-f]{32}))?\Z")
+_REPORT_RUNTIME_TRACE_ACTIVE = ContextVar("native_memory_report_runtime_trace", default=None)
+_REPORT_RUNTIME_TRACE_COLLECTORS = weakref.WeakValueDictionary()
+_REPORT_RUNTIME_NUMERIC = weakref.WeakKeyDictionary()
+
+
+def _native_memory_report_runtime_owner(db):
+    from src.work_board.review import (_MEMORY_REPORT_PRINCIPAL_SCOPE,
+        _MemoryReportDependencyNumericInventory, _MEMORY_REPORT_DEPENDENCY_NUMERIC,
+        _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL, _memory_report_principal_numeric_owner)
+    from src.memory.header_bounds import HeaderBoundsError
+    record = _MEMORY_REPORT_PRINCIPAL_SCOPE.get()
+    if record is None:
+        return None
+    if (type(record) is not _MemoryReportDependencyNumericInventory
+            or _MEMORY_REPORT_DEPENDENCY_NUMERIC.get(record) is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._seal is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._issued_id != id(record)):
+        raise HeaderBoundsError("memory_report_runtime_numeric_owner_changed")
+    return _memory_report_principal_numeric_owner(db, record.owner_principal_id)
+
+
+class _NativeMemoryReportRuntimeTraceCollector:
+    """Only the original REPORT Runtime14 certification's numerical trace."""
+    def __init__(self, owner, prior):
+        self.owner = owner
+        self.prior = prior
+        self.entries = []
+
+    def _checked(self):
+        from src.memory.header_bounds import HeaderBoundsError
+        if (_REPORT_RUNTIME_TRACE_COLLECTORS.get(id(self)) is not self
+                or _REPORT_RUNTIME_TRACE_ACTIVE.get() is not self):
+            raise HeaderBoundsError("memory_report_runtime_numeric_trace_changed")
+        if _native_memory_report_runtime_owner(self.owner.db) is not self.owner:
+            raise HeaderBoundsError("memory_report_runtime_numeric_trace_changed")
+
+    def _storage_debit(self, upper, stage):
+        from src.memory.header_bounds import _MEMORY_CHARGE_TRACE
+        token = _MEMORY_CHARGE_TRACE.set(self.prior)
+        try:
+            self.owner.budget.debit(upper, appearance=("native-memory-report-runtime-trace", stage, len(self.entries)))
+        finally:
+            _MEMORY_CHARGE_TRACE.reset(token)
+
+    def append_charge(self, appearance, amount):
+        from src.memory.header_bounds import HeaderBoundsError
+        from src.memory.composition_headers import _common_trace_label_width
+        self._checked()
+        if type(amount) is not int or not 0 <= amount < 2**63:
+            raise HeaderBoundsError("memory_report_runtime_numeric_trace_changed")
+        pair = 3 + _common_trace_label_width(appearance) + 20
+        self._storage_debit(pair, "entry-pair")
+        self._storage_debit(pair + 1, "entry-list-slot")
+        entry = (appearance, amount)
+        self.entries.append(entry)
+        if self.prior is not None and self.prior[0] is self.owner.budget:
+            from src.memory.composition_headers import _CommonCertificationTraceCollector
+            from src.runtime_plugins.memory_producer import _MemoryAuthorityTraceCollector, _NativeMemoryReportTraceCollector
+            from src.workflows.job_runtime import _NativeMemoryClaimTraceCollector
+            from src.workspace.accounting_witness import _NativeMemoryAccountingTraceCollector
+            outer = self.prior[1]
+            if type(outer) in (_CommonCertificationTraceCollector, _MemoryAuthorityTraceCollector,
+                    _NativeMemoryReportTraceCollector, _NativeMemoryClaimTraceCollector,
+                    _NativeMemoryAccountingTraceCollector, _NativeMemoryReportRuntimeTraceCollector):
+                outer.append_charge(appearance, amount)
+            elif type(outer) is list:
+                outer.append(entry)
+            else:
+                raise HeaderBoundsError("memory_report_runtime_numeric_trace_changed")
+
+
+async def _native_memory_report_runtime_certificate(db, owner):
+    from src.memory.header_bounds import (_MEMORY_CHARGE_TRACE, HeaderBoundsError,
+        HeaderCertificate, RUNTIME_COMPOSITION, _SEAL)
+    from src.memory.composition_headers import _common_trace_label_width
+    if (_native_memory_report_runtime_owner(db) is not owner
+            or _REPORT_RUNTIME_TRACE_ACTIVE.get() is not None):
+        raise HeaderBoundsError("memory_report_runtime_numeric_trace_changed")
+    budget = owner.budget
+    constructor = 2 + 2 + 3 * 4
+    for name in ("owner", "prior", "entries"):
+        constructor += _common_trace_label_width(name) + 1
+    budget.debit(constructor, appearance=("native-memory-report-runtime-trace", "collector-construction"))
+    budget.debit(2, appearance=("native-memory-report-runtime-trace", "collector-list"))
+    budget.debit(4, appearance=("native-memory-report-runtime-trace", "collector-weak-reference"))
+    budget.debit(27, appearance=("native-memory-report-runtime-trace", "collector-registry-entry"))
+    collector = _NativeMemoryReportRuntimeTraceCollector(owner, _MEMORY_CHARGE_TRACE.get())
+    _REPORT_RUNTIME_TRACE_COLLECTORS[id(collector)] = collector
+    budget.debit(4, appearance=("native-memory-report-runtime-trace", "active-context-token"))
+    active_token = _REPORT_RUNTIME_TRACE_ACTIVE.set(collector)
+    trace_token = None
+    try:
+        collector._checked()
+        budget.debit(4, appearance=("native-memory-report-runtime-trace", "trace-context-token"))
+        budget.debit(11, appearance=("native-memory-report-runtime-trace", "trace-binding-tuple"))
+        trace_token = _MEMORY_CHARGE_TRACE.set((budget, collector))
+        certificate = await budget.certify(db, RUNTIME_COMPOSITION, tuple(DOMAINS), _header_budget=budget)
+        collector._checked()
+        if (type(certificate) is not HeaderCertificate or certificate._seal is not _SEAL
+                or certificate._issued_id != id(certificate) or certificate.descriptor is not RUNTIME_COMPOSITION
+                or certificate._db is not db or certificate._transaction is not owner.transaction
+                or certificate._driver is not owner.driver or certificate._changes != owner.driver.total_changes
+                or certificate.row_ids != tuple(DOMAINS)):
+            raise HeaderBoundsError("memory_report_runtime_numeric_certificate_changed")
+        retained = 2 + max(0, len(collector.entries) - 1)
+        for appearance, amount in collector.entries:
+            retained += 3 + _common_trace_label_width(appearance) + 20
+        collector._storage_debit(retained, "retained-copy")
+        collector._storage_debit(2 + 3 + 4 * 4 + retained, "retained-record")
+        collector._storage_debit(27, "retained-registry-entry")
+        _REPORT_RUNTIME_NUMERIC[owner] = (certificate, tuple(collector.entries), owner.budget, owner.issuer_task)
+        return certificate
+    finally:
+        if trace_token is not None:
+            _MEMORY_CHARGE_TRACE.reset(trace_token)
+        _REPORT_RUNTIME_TRACE_ACTIVE.reset(active_token)
+        _REPORT_RUNTIME_TRACE_COLLECTORS.pop(id(collector), None)
+
+
+def original_native_memory_report_runtime_numeric_schedule(operation, prepared, *, certificate, facts, retention_widths):
+    """ONE original Runtime14 issuer/read vector; capacity, never permission."""
+    from src.runtime_plugins.memory_producer import _native_memory_report_dependency_numeric_inventory
+    from src.memory.header_bounds import HeaderBoundsError
+    owner = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    retained = _REPORT_RUNTIME_NUMERIC.get(owner)
+    if (retained is None or retained[2] is not owner.budget or retained[3] is not owner.issuer_task
+            or retained[0]._db is not owner.db or retained[0]._transaction is not owner.transaction
+            or retained[0]._driver is not owner.driver or retained[0]._changes != owner.driver.total_changes):
+        raise HeaderBoundsError("memory_report_runtime_numeric_contribution_unavailable")
+    return retained[1]
+
+
+def _native_memory_report_runtime_allocation_upper(stage, *, binding=None):
+    from src.memory.composition_headers import _common_trace_label_width
+    from src.memory.header_bounds import HeaderBoundsError
+    if stage == "inventory":
+        names = ("inventory-query", "inventory-list", "inventory-domain-set",
+            "inventory-required-set", "inventory-dictionary")
+        repeated_name, repetitions = "inventory-dependency", 14
+    elif stage == "dependencies" and type(binding) is RuntimeCompositionBinding:
+        names = ()
+        repeated_name, repetitions = "binding-dependency", len(binding.dependency_vector)
+    else:
+        raise HeaderBoundsError("memory_report_runtime_numeric_shape_changed")
+    # The original grammar's intermediate tuples and each new debit label
+    # are constructed only after this precharge.
+    planned = 0
+    for tag in ("native-memory-authority", "native-memory-report-runtime"):
+        original = tag == "native-memory-authority"
+        width = 2 + max(0, len(names) + repetitions - 1) if original else 0
+        for name in names:
+            label = 3 + _common_trace_label_width(tag) + _common_trace_label_width(name)
+            width += 3 + label + 20 if original else label
+        label = 3 + _common_trace_label_width(tag) + _common_trace_label_width(repeated_name)
+        width += repetitions * (3 + label + 20 if original else label)
+        planned += width
+    return planned
+
+
+def _native_memory_report_runtime_pay(db, owner, certificate, stage, *, binding=None):
+    from src.memory.header_bounds import HeaderBoundsError, HeaderCertificate, RUNTIME_COMPOSITION, _SEAL
+    from src.runtime_plugins.memory_producer import _native_memory_authority_entries
+    if (_native_memory_report_runtime_owner(db) is not owner
+            or type(certificate) is not HeaderCertificate or certificate._seal is not _SEAL
+            or certificate._issued_id != id(certificate) or certificate.descriptor is not RUNTIME_COMPOSITION
+            or certificate._db is not db or certificate._transaction is not owner.transaction
+            or certificate._driver is not owner.driver or certificate._changes != owner.driver.total_changes
+            or certificate.row_ids != tuple(DOMAINS)):
+        raise HeaderBoundsError("memory_report_runtime_numeric_certificate_changed")
+    planned = _native_memory_report_runtime_allocation_upper(stage, binding=binding)
+    owner.budget.debit(planned, appearance=("native-memory-report-runtime", "allocation-plan", stage))
+    entries = _native_memory_authority_entries(stage, certificate.upper_bytes,
+        dependencies=len(binding.dependency_vector) if binding is not None else 0,
+        row_uppers=certificate.row_upper_bytes)
+    for (_, name), upper in entries:
+        owner.budget.debit(upper, appearance=("native-memory-report-runtime", name))
 
 
 def restore_audit_reference(reference):
@@ -258,13 +437,24 @@ def method_dependencies(method, *, native_branch="base", goal_bound=False, progr
 
 async def inventory(db, *, header_budget=None):
     certificate = None
+    report_owner = _native_memory_report_runtime_owner(db)
+    if report_owner is not None:
+        from src.memory.header_bounds import HeaderBoundsError
+        if header_budget is not None and header_budget is not report_owner.budget:
+            raise HeaderBoundsError("memory_report_runtime_numeric_frame_changed")
+        header_budget = report_owner.budget
     if header_budget is not None:
         from src.memory.header_bounds import HeaderReadBudget, RUNTIME_COMPOSITION
         if type(header_budget) is not HeaderReadBudget:
             raise CompositionBindingError("composition_header_budget_required")
-        certificate = await header_budget.certify(db, RUNTIME_COMPOSITION, tuple(DOMAINS), _header_budget=header_budget)
+        if report_owner is not None:
+            certificate = await _native_memory_report_runtime_certificate(db, report_owner)
+        else:
+            certificate = await header_budget.certify(db, RUNTIME_COMPOSITION, tuple(DOMAINS), _header_budget=header_budget)
     from .memory_producer import _native_memory_authority_owner_pay
     _native_memory_authority_owner_pay(db, "inventory", certificate=certificate)
+    if report_owner is not None:
+        _native_memory_report_runtime_pay(db, report_owner, certificate, "inventory")
     rows = list((await db.execute(select(RuntimeCompositionState))).scalars())
     if len(rows) != 14 or {row.runtime_domain for row in rows} != set(DOMAINS):
         raise CompositionBindingError("composition_inventory_incomplete")
@@ -372,6 +562,13 @@ async def validate_invocation(db, binding, *, header_budget=None):
     rows = await inventory(db, header_budget=header_budget)
     from .memory_producer import _native_memory_authority_owner_pay
     _native_memory_authority_owner_pay(db, "dependencies", binding=binding)
+    report_owner = _native_memory_report_runtime_owner(db)
+    if report_owner is not None:
+        from src.memory.header_bounds import HeaderBoundsError
+        retained = _REPORT_RUNTIME_NUMERIC.get(report_owner)
+        if retained is None:
+            raise HeaderBoundsError("memory_report_runtime_numeric_contribution_unavailable")
+        _native_memory_report_runtime_pay(db, report_owner, retained[0], "dependencies", binding=binding)
     for dependency in binding.dependency_vector:
         row = rows[dependency.runtime_domain]
         if row.state != "ready" or dependency != CompositionDependency(row.runtime_domain,

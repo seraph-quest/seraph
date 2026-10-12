@@ -326,6 +326,64 @@ def _touch_is_due(record: OperatorSession, now: datetime) -> bool:
     return now - last_seen_at >= interval
 
 
+def _native_memory_report_principal_pay(db, stage, *, principal_id=None, record=None):
+    """Capacity for the original REPORT principal call, never authentication."""
+    from src.work_board.review import _memory_report_principal_numeric_owner
+    if record is not None:
+        principal_id = record.principal_id
+    owner = _memory_report_principal_numeric_owner(db, principal_id)
+    if owner is None:
+        return
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.memory_producer import _native_memory_authority_entries
+    certificate = owner.certificates[0]
+    if record is not None and (record.id not in certificate.row_ids
+            or record.principal_id != owner.owner_principal_id):
+        raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    if stage == "reverse-legacy-tuple":
+        owner.budget.debit(_native_memory_report_legacy_tuple_upper(),
+            appearance=("native-memory-report-auth", "reverse-legacy-tuple"))
+        return
+    for appearance, upper in _native_memory_authority_entries(stage, certificate.upper_bytes):
+        owner.budget.debit(upper,
+            appearance=("native-memory-report-auth", appearance[1]))
+
+
+def _native_memory_report_legacy_tuple_upper():
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    return (3 + _native_memory_source_value_upper(_OWNERSHIP_LEGACY)
+        + _native_memory_source_value_upper(_OWNERSHIP_RECOVERY_ACTION))
+
+
+def _native_memory_report_principal_numeric_entries(root_upper, *, legacy_reverse=False):
+    """Pure encoded allocation widths; these numbers confer no authority."""
+    from src.runtime_plugins.memory_producer import _native_memory_authority_entries
+    from src.memory.header_bounds import HeaderBoundsError
+    if type(legacy_reverse) is not bool:
+        raise HeaderBoundsError("memory_report_principal_numeric_shape_changed")
+    if legacy_reverse:
+        return (tuple((("native-memory-report-auth", appearance[1]), amount)
+            for appearance, amount in _native_memory_authority_entries("principal-query", root_upper))
+            + ((("native-memory-report-auth", "reverse-legacy-tuple"),
+                _native_memory_report_legacy_tuple_upper()),)
+            + tuple((("native-memory-report-auth", appearance[1]), amount)
+                for appearance, amount in _native_memory_authority_entries("operator-constructor", root_upper)))
+    return tuple((("native-memory-report-auth", appearance[1]), amount)
+        for stage in ("principal-query", "reverse-results", "operator-constructor")
+        for appearance, amount in _native_memory_authority_entries(stage, root_upper))
+
+
+def original_native_memory_report_principal_numeric_schedule(db, principal_id):
+    """ONE genuine REPORT8 principal call's existing child allocations."""
+    from src.work_board.review import _memory_report_principal_numeric_owner
+    from src.memory.header_bounds import HeaderBoundsError
+    owner = _memory_report_principal_numeric_owner(db, principal_id)
+    if owner is None:
+        raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    upper = owner.certificates[0].upper_bytes
+    return _native_memory_report_principal_numeric_entries(upper)
+
+
 def _operator_for_record(
     record: OperatorSession,
     *,
@@ -335,6 +393,7 @@ def _operator_for_record(
 ) -> AuthenticatedOperator:
     from src.runtime_plugins.memory_producer import _native_memory_authority_owner_pay
     _native_memory_authority_owner_pay(None, "operator-constructor", record=record)
+    _native_memory_report_principal_pay(None, "operator-constructor", record=record)
     return AuthenticatedOperator(
         record.id,
         _principal(record.id, record.principal_id),
@@ -365,6 +424,7 @@ async def _ownership_metadata(
     # incomplete/legacy migration state, and even an empty replacement string
     # is malformed metadata rather than an active root.
     if record.is_bearer_tombstone is not False or record.replaced_by_id is not None:
+        _native_memory_report_principal_pay(db, "reverse-legacy-tuple", record=record)
         return _OWNERSHIP_LEGACY, _OWNERSHIP_RECOVERY_ACTION
     budget = db.info.get("auth_session_budget")
     if budget is not None:
@@ -373,6 +433,7 @@ async def _ownership_metadata(
         budget.debit(3 * (6 * 512 + 2) + 2, appearance=("auth-reverse-projection", record.id))
     from src.runtime_plugins.memory_producer import _native_memory_authority_owner_pay
     _native_memory_authority_owner_pay(db, "reverse-results", record=record)
+    _native_memory_report_principal_pay(db, "reverse-results", record=record)
     try:
         non_tombstone_predecessors = (
             await db.execute(
@@ -683,6 +744,7 @@ async def authenticate_principal(principal_id: str, *, db=None) -> Authenticated
             return await authenticate_principal(principal_id, db=session)
     from src.runtime_plugins.memory_producer import _native_memory_authority_owner_pay
     _native_memory_authority_owner_pay(db, "principal-query")
+    _native_memory_report_principal_pay(db, "principal-query", principal_id=principal_id)
     record = (await db.execute(select(OperatorSession).where(
         OperatorSession.principal_id == principal_id,
         OperatorSession.is_bearer_tombstone.is_(False),

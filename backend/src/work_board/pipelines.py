@@ -844,12 +844,16 @@ async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt 
     if row.status != "accepted" or value.get("pending_revision") or value.get("authority_frozen"):
         raise BoardError("pipeline_review_required", "Changed unfinished work needs exact plan review", status_code=409)
     try:
-        require_source_permission(value["source_scope"])
+        require_source_permission(value["source_scope"], _memory_header_budget=_memory_header_budget)
     except BoardError:
         await freeze_unfinished(db, row, value, "source_permission_changed")
         raise
     if not any(step["task_ref"] == task.task_id and step["slot"] == task.pipeline_slot for step in value["steps"]):
         raise BoardError("pipeline_task_stale", "This task is no longer a current operation step", status_code=409)
+    if _memory_header_budget is not None:
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-deadline-parser", 44)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-deadline-utc", 44)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-deadline-current-time", 44)
     deadline = utc(datetime.fromisoformat(value["deadline_at"]))
     if deadline <= now():
         raise BoardError("pipeline_expired", "The original absolute operation deadline expired", status_code=409)
@@ -865,9 +869,23 @@ async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt 
         _report_memory_allocation_pay(_memory_header_budget, "pipeline-goal-budget-parser", upper)
         _report_memory_allocation_pay(_memory_header_budget, "pipeline-goal-budget-pairs", upper)
         _report_memory_allocation_pay(_memory_header_budget, "pipeline-goal-budget-dicts", upper)
+        # Original GoalAdmissionBudget has eleven closed fields. Its two
+        # strings already have max_length 160/64; six bounded integer fields
+        # use the original signed-i64 unit20, two datetimes use unit44.
+        # Four UTF8 bytes per Unicode scalar and the original ASCII-JSON
+        # unit6 bound string delivery, including omitted/default fields.
+        model_upper = 2 + 10 + 11 + 5 + (6 * 4 * 160 + 2) + (6 * 4 * 64 + 2) + 6 * 20 + 2 * 44
+        for name in ("reviewed_grant", "grant_id", "max_outstanding_jobs", "max_attempts",
+                "max_runtime_seconds", "notifications_per_day", "period_started_at", "period_expires_at",
+                "quiet_hours_start", "quiet_hours_end", "timezone"):
+            model_upper += _native_memory_ascii_string_width(name)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-goal-budget-model", model_upper)
     budget = deserialize_admission_budget(goal)
     if budget is None or not budget.reviewed_grant:
         raise BoardError("pipeline_goal_budget_required", "The current Goal no longer grants finite work", status_code=409)
+    if _memory_header_budget is not None and budget.period_expires_at:
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-budget-expiry-utc", 44)
+        _report_memory_allocation_pay(_memory_header_budget, "pipeline-budget-current-time", 44)
     if budget.period_expires_at and utc(budget.period_expires_at) <= now():
         raise BoardError("pipeline_goal_budget_expired", "The current Goal grant expired", status_code=409)
     if task.pipeline_slot == SLOTS[0] and task.typed_input_digest != value["source"]["input_sha256"]:
@@ -887,12 +905,70 @@ async def task_guard(db: Any, task: WorkBoardTask, *, attempt: WorkBoardAttempt 
     return row, value
 
 
-def require_source_permission(scope: Mapping[str, Any]) -> None:
+def _memory_report_policy_numeric_inputs(hosts, budget):
+    """Observe numeric policy inputs at the original paid REPORT caller."""
+    if budget is None:
+        return
+    from src.runtime_plugins.task_capability import _report_memory_admission_payer, _report_memory_allocation_pay
+    from src.work_board.review import _MEMORY_REPORT_PRINCIPAL_SCOPE, _memory_report_principal_numeric_owner
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_utf8_width
+    _report_memory_admission_payer(budget)
+    record = _MEMORY_REPORT_PRINCIPAL_SCOPE.get()
+    _memory_report_principal_numeric_owner(record.db, record.owner_principal_id)
+    def dimensions(value):
+        if type(value) is not str:
+            raise HeaderBoundsError("memory_report_site_policy_numeric_shape_unavailable")
+        commas = colons = slashes = dots = hyphens = 0
+        ascii_only = plain_dns = True
+        for character in value:
+            code = ord(character)
+            if code > 127:
+                ascii_only = False
+            if not (48 <= code <= 57 or 65 <= code <= 90 or 97 <= code <= 122 or character in ".-"):
+                plain_dns = False
+            commas += character == ","
+            colons += character == ":"
+            slashes += character == "/"
+            dots += character == "."
+            hyphens += character == "-"
+        utf8 = _native_memory_utf8_width(value)
+        _report_memory_allocation_pay(budget, "policy-input-dimension-tuple", 160)
+        return (utf8, 6 * utf8 + 2, ascii_only, commas, colons, slashes, dots, hyphens, plain_dns)
+    host_upper = 2 + max(0, len(hosts) - 1) + 160 * len(hosts)
+    _report_memory_allocation_pay(budget, "policy-input-host-list", host_upper)
+    observed_hosts = []
+    for host in hosts:
+        observed_hosts.append(dimensions(host))
+    _report_memory_allocation_pay(budget, "policy-input-host-tuple", host_upper)
+    observed_hosts = tuple(observed_hosts)
+    allowlist = dimensions(settings.browser_site_allowlist)
+    blocklist = dimensions(settings.browser_site_blocklist)
+    _report_memory_allocation_pay(budget, "policy-input-retained-tuple", host_upper + 324)
+    retained = (observed_hosts, allowlist, blocklist)
+    _report_memory_allocation_pay(budget, "policy-input-record-slot", 171)
+    object.__setattr__(record, "_site_policy_numeric_inputs", retained)
+
+
+def _memory_report_site_access(host, budget):
+    from src.security.site_policy import evaluate_site_access
+    if budget is None:
+        return evaluate_site_access(host, resolve_dns=False)
+    from src.runtime_plugins.task_capability import _report_memory_admission_payer
+    from src.memory.header_bounds import HeaderBoundsError
+    _report_memory_admission_payer(budget)
+    # The genuine policy owner has not yet supplied its parser/constructor
+    # numerical grammar. Do not invoke an unsupported private keyword or
+    # execute an unpriced policy allocation under this resource scope.
+    raise HeaderBoundsError("memory_report_site_policy_numeric_unavailable")
+
+
+def require_source_permission(scope: Mapping[str, Any], *, _memory_header_budget=None) -> None:
     from src.security.site_policy import evaluate_site_access
     hosts = scope.get("allowed_hosts")
     if not isinstance(hosts, list) or not 1 <= len(hosts) <= 8:
         raise BoardError("pipeline_source_permission", "The reviewed source scope is invalid", status_code=409)
-    if any(not isinstance(host, str) or not evaluate_site_access(host, resolve_dns=False).allowed for host in hosts):
+    _memory_report_policy_numeric_inputs(hosts, _memory_header_budget)
+    if any(not isinstance(host, str) or not _memory_report_site_access(host, _memory_header_budget).allowed for host in hosts):
         raise BoardError("pipeline_source_permission", "Current source policy no longer permits this output", status_code=409)
 
 

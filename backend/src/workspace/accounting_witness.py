@@ -954,6 +954,68 @@ def _native_memory_reference_preflight_numeric_entries(operation, prepared, *, c
     return result
 
 
+def _native_memory_original_preflight_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Constructor capacity for ONE original capture payload preflight vector.
+
+    Excludes body/parser costs in that returned vector, Current normalization,
+    common/Universe and caller-retained lineage. No vector/body/query is made.
+    """
+    from src.runtime_plugins import memory_producer as source_owner
+    from src.memory.header_bounds import HeaderBoundsError, MAX_ROWS, MEMORY_DESCRIPTORS
+    from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+    source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info.get("composition_guard")
+    source = operation.source
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    if (source_owner._MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set()
+            or type(certificate) is not CompositionHeaderCertificate
+            or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)
+            or certificate.driver is not operation.driver
+            or certificate.metadata_budget is not certificate.budget
+            or guard.header_budget is not certificate.budget
+            or source_owner._native_memory_source_numeric_frame() is not certificate.budget
+            or type(projection) is not tuple or len(projection) != 3
+            or projection[0] is not operation):
+        raise HeaderBoundsError("memory_original_preflight_construction_owner_changed")
+    row_count = len(facts["row_uppers"])
+    if not 1 <= row_count <= MAX_ROWS or retention_widths["row_count"] != row_count:
+        raise HeaderBoundsError("memory_original_preflight_construction_shape_unavailable")
+    event_count = 0
+    for descriptor, identity, row in projection[1]:
+        if descriptor.table in ("audit_events", "work_board_events"):
+            event_count += 1
+    # The actual Source candidate has already been parsed and authenticated.
+    # The existing builder scans this exact borrowed JSON for its deadline;
+    # require its marker here without constructing any substring/parsed body.
+    candidate = source.admission.candidate_json
+    if type(candidate) is not str or candidate.find('"original_deadline":') < 0:
+        raise HeaderBoundsError("memory_original_preflight_deadline_unavailable")
+    # Output O: field-set1 + ref-list/set/sort3 + reference4R + four owner-key
+    # UTF8 appearances + audit field-set1/reference4 + deadline3 + canonical2.
+    output_count = 18 + 4 * row_count
+    # Original generic owner creates its one selected/projection row map plus
+    # sets/new-addresses/return closure. Immutable references use capacity4 and
+    # each numeric scalar has original signed-int64 width20.
+    owner_storage = 1024 + 128 * row_count
+    prefix_storage = 2 + 2 * 4 + 1
+    reference_arrays = (2 + 5 * row_count) + (2 + 5 * event_count)
+    # pay(): new three-ref label14 + pair37 + list slot5. Maxima dict entry27;
+    # final normalized pair27 + tuple slot5. Include each distinct structure.
+    vector_storage = 6 + output_count * (14 + 37 + 5 + 27 + 27 + 5)
+    # Fixed four-scalar source-identity argument tuple, payload prefix and
+    # reference/audit field name containers are separate from the vector.
+    temporary_storage = (2 + 4 * 4) + (2 + 2 * 4) + (2 + 2 * 4)
+    # Original field_set traverses each literal field; reference() runs R+1
+    # times and constructs numerical width generators over the exact table
+    # roster, never over guessed row-byte capacities. Eight local functions
+    # plus fixed iterators/deadline scans/maxima traversal fit32 control slots.
+    reference_controls = (row_count + 1) * (8 + len(RETAINED_FIELDS) + len(MEMORY_DESCRIPTORS))
+    controls = 32 * (32 + 4 * row_count + len(_MEMORY_ORIGINAL_FIELDS) + reference_controls)
+    return owner_storage + prefix_storage + reference_arrays + vector_storage + temporary_storage + controls
+
+
 def _native_memory_original_preflight_numeric_entries(operation, prepared, *, certificate, retention_widths):
     """ONE original capture payload preflight, separately composed by its owner."""
     return _native_memory_reference_preflight_numeric_entries(operation, prepared,
@@ -1131,6 +1193,11 @@ def _native_memory_six_current_construction_numeric_entries(operation, prepared,
         raise HeaderBoundsError("memory_current_numeric_owner_unavailable")
     guard = operation.db.info.get("composition_guard")
     facts = guard._native_memory_source_capacity_facts[3]
+    source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if (guard.header_budget is not certificate.budget
+            or source_owner._native_memory_source_numeric_frame() is not certificate.budget):
+        raise HeaderBoundsError("memory_current_convergence_owner_unavailable")
     if type(_construction_only) is not bool:
         raise HeaderBoundsError("memory_current_construction_mode_unavailable")
     w = retention_widths
@@ -1393,6 +1460,11 @@ def _native_memory_successful_current_lifecycle_numeric_entries(operation, prepa
     if retained is None or retained[0] is not operation or retained[1] is not prepared:
         raise HeaderBoundsError("memory_current_convergence_owner_unavailable")
     facts = retained[3]
+    source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if (guard.header_budget is not certificate.budget
+            or source_owner._native_memory_source_numeric_frame() is not certificate.budget):
+        raise HeaderBoundsError("memory_current_convergence_owner_unavailable")
     _guard, rows, own, _audit, _new, _value = _native_memory_generic_future_bound_inputs(
         operation, prepared, certificate, facts, retention_widths)
     w = retention_widths
@@ -1733,6 +1805,327 @@ def _native_memory_postoriginal_cold_numeric_entries(operation, prepared, *, cer
             for _ in range(2):
                 entries.extend(original_native_memory_configured_mac_numeric_schedule(kind="effect"))
     return tuple(entries)
+
+
+def _native_memory_standalone_cold_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Preconstruction capacity for ONE standalone original cold forecast.
+
+    Generic BODY/common/Universe/SourceRows/witness builders and the caller's
+    retained five-field tuple are separate. No forecast array/body/certificate
+    is constructed here. Nonempty affected cohorts fail before allocation.
+    """
+    from src.runtime_plugins import memory_producer as source_owner
+    from src.memory.header_bounds import HeaderBoundsError, MAX_ROWS, MEMORY_DESCRIPTORS
+    from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+    source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info.get("composition_guard")
+    source = operation.source
+    proofs = getattr(guard, "_native_memory_retained_proofs", None)
+    selected = getattr(guard, "_native_memory_existing_source_rows", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    if (source_owner._MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set()
+            or type(certificate) is not CompositionHeaderCertificate
+            or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)
+            or certificate.driver is not operation.driver
+            or certificate.metadata_budget is not certificate.budget
+            or guard.header_budget is not certificate.budget
+            or source_owner._native_memory_source_numeric_frame() is not certificate.budget
+            or type(proofs) is not tuple or len(proofs) != 3 or proofs[0] is not operation
+            or type(selected) is not tuple or len(selected) != 3 or selected[0] is not operation
+            or selected[1] is not certificate or type(projection) is not tuple or len(projection) != 3
+            or projection[0] is not operation):
+        raise HeaderBoundsError("memory_cold_construction_numeric_owner_changed")
+    if proofs[2]:
+        raise HeaderBoundsError("memory_cold_construction_affected_unavailable")
+    row_count = len(facts["row_uppers"])
+    if not 1 <= row_count <= MAX_ROWS or retention_widths["row_count"] != row_count:
+        raise HeaderBoundsError("memory_cold_construction_numeric_shape_unavailable")
+    # Borrow only original already-paid selected/projection maps. Override
+    # lookup uses scalar loops rather than the generic owner's new row map.
+    raw = None
+    event_count = receipt_count = accepted_count = 0
+    for descriptor, key, row, encoded in selected[2]:
+        if descriptor.table == "workflow_run_states" and key == operation.run.run_identity:
+            raw = row["checkpoint_receipts_json"]
+    for descriptor, key, changes in projection[2]:
+        if (descriptor.table == "workflow_run_states" and key == operation.run.run_identity
+                and "checkpoint_receipts_json" in changes):
+            raw = changes["checkpoint_receipts_json"]
+    for address in facts["row_uppers"]:
+        table, key = address
+        if table == "work_board_decision_receipts":
+            receipt_count += 1
+        if table == "memory_proposals":
+            status = None
+            for descriptor, row_key, row, encoded in selected[2]:
+                if descriptor.table == table and row_key == key:
+                    status = row["status"]
+            for descriptor, row_key, row in projection[1]:
+                if descriptor.table == table and row_key == key:
+                    status = row["status"]
+            for descriptor, row_key, changes in projection[2]:
+                if descriptor.table == table and row_key == key and "status" in changes:
+                    status = changes["status"]
+            if status == "accepted":
+                accepted_count += 1
+    for descriptor, key, row in projection[1]:
+        if descriptor.table in ("audit_events", "work_board_events"):
+            event_count += 1
+    if type(raw) is not str:
+        raise HeaderBoundsError("memory_cold_construction_prior_journal_unavailable")
+    # Original lexical parser appends one fee pair per strict JSON token. Count
+    # the genuine borrowed column without substring/token/list construction.
+    position = lexical_count = 0
+    while position < len(raw):
+        char = raw[position]
+        if char in " \t\r\n{}[],:":
+            position += 1
+            continue
+        lexical_count += 1
+        if char == '"':
+            position += 1
+            while position < len(raw):
+                if raw[position] == "\\":
+                    position += 2
+                elif raw[position] == '"':
+                    position += 1
+                    break
+                else:
+                    position += 1
+        else:
+            while position < len(raw) and raw[position] not in " \t\r\n,]}":
+                position += 1
+    # Cold fixed constructors: candidate33/context120/binding120/digest105/
+    # claim17/original21/reference21/audit6/raw1/output2=446. Two journal
+    # traversals add94+26R+8E; journal/lexical tail89+17R+4E+L.
+    # Receipt21 + one configured MAC<=12; accepted selection51 + two MACs<=24.
+    cold_count = (629 + 43 * row_count + 12 * event_count + lexical_count
+        + 33 * receipt_count + 75 * accepted_count)
+    # Same immutable-reference4/int64 scalar20 planning convention as the
+    # Current constructor. Label <=7 references =>30; pair <=53. Count label,
+    # pair, list slot and tuple slot separately; no generic maximum map.
+    # The original standalone builder calls the generic lineage/row-map
+    # owner ONCE; it does not build the generic BODY maps/normalization result.
+    owner_maps = 1024 + 128 * row_count
+    cold_outputs = 4 + cold_count * 96
+    # Nested cold helpers materialize their original stage vectors before the
+    # final cold list/tuple. Binding originals7*60 and five remaps21, candidate
+    #33/claim17/original21/reference21/audit6/output2; local payload arrays four
+    #times (Original18+4R,Current18+9R+4E). MAC provider source maximum12.
+    helper_vectors = (105 + 33 + 17 + 21 + 21 + 6 + 2
+        + 72 + 26 * row_count + 8 * event_count
+        + 33 * receipt_count + 75 * accepted_count)
+    nested_arrays = 4 + helper_vectors * 96
+    # Seven original binding60 constructors also allocate23 initial input
+    # pairs, two seven-field manifests and six constructor-sizing inputs;
+    # price those separately, matching the original Source scalar grammar.
+    nested_name = 3 + len("constructor-dependencies") + 2 + len("domain-values") + 2
+    name_width = max(nested_name, len("required-plus-goals-inference-set") + 2)
+    binding_label = 5 + len("composition-binding-parser") + 2 + 4 + name_width
+    binding_pair = 3 + binding_label + 20
+    input_pair = 3 + name_width + 20
+    binding_storage = (60 * (binding_label + binding_pair) + 35 * nested_name
+        + 2 + 2 * (2 + 60 * binding_pair + 59)
+        + 23 * input_pair + (2 + 23 * input_pair + 22)
+        + 2 * (7 * input_pair + (2 + 7 * input_pair + 6))
+        + 6 * input_pair + (2 + 6 * input_pair + 5)
+        + (2 + 14 * 20 + 13) + (2 + 34 * 20 + 33)
+        + (2 + 6 * 20 + 5))
+    nested_arrays += 7 * binding_storage
+    # Original Source context planning scalar includes its full120 subtree
+    # (and conservatively an extra candidate9), including intermediate parser,
+    # admission, candidate and current-digest remap arrays, without building it.
+    context_storage = source_owner._original_native_memory_source_schedule_planning_upper(result_present=True)
+    scalar_maps = (2 * (2 + 4 * 27) + 4 * (2 + 4 * 27) * (row_count + event_count)
+        + receipt_count * (3 * 2 + (25 + 2 + 6) * 27)
+        + accepted_count * (2 + 11 * 27))
+    # Borrowed-reference tuple, event tuple, literal-key starred tuple and
+    # the DISTINCT starred scalar-max generator tuple in the cold constructor.
+    incidental_arrays = (2 + 5 * row_count) + (2 + 5 * event_count) + (2 + 21 * row_count)
+    incidental_arrays += 2 + 5 * (len(_MEMORY_ORIGINAL_FIELDS) + len(_MEMORY_CURRENT_FIELDS) + 9)
+    # Four cold payload traversals call reference() 6R+2E+2 times. Each
+    # reference's table-set width traverses the exact retained/Memory roster;
+    # include those width generators and original lexical token scans.
+    reference_calls = 6 * row_count + 2 * event_count + 2
+    reference_controls = reference_calls * (8 + len(RETAINED_FIELDS) + len(MEMORY_DESCRIPTORS))
+    controls = 32 * (96 + 8 * row_count + 4 * event_count
+        + reference_controls + 2 * lexical_count
+        + 16 * (receipt_count + accepted_count))
+    upper = (owner_maps + cold_outputs + nested_arrays + context_storage
+        + scalar_maps + incidental_arrays + controls)
+    if type(upper) is not int or upper < 0:
+        raise HeaderBoundsError("memory_cold_construction_numeric_shape_unavailable")
+    return upper
+
+
+def _native_memory_generic_body_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Preconstruction capacity for ONE generic BODY forecast constructor tree.
+
+    Common metadata, Universe, stand-alone cold readers, SourceRows and row
+    witnesses are separate. No forecast vector/body/certificate is constructed.
+    Nonempty affected cohorts remain unsupported before any allocation.
+    """
+    from src.runtime_plugins import memory_producer as source_owner
+    from src.memory.header_bounds import HeaderBoundsError, MAX_ROWS, MEMORY_DESCRIPTORS
+    from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+    source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info.get("composition_guard")
+    source = operation.source
+    proofs = getattr(guard, "_native_memory_retained_proofs", None)
+    selected = getattr(guard, "_native_memory_existing_source_rows", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    if (source_owner._MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set()
+            or type(certificate) is not CompositionHeaderCertificate
+            or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)
+            or certificate.driver is not operation.driver
+            or certificate.metadata_budget is not certificate.budget
+            or guard.header_budget is not certificate.budget
+            or source_owner._native_memory_source_numeric_frame() is not certificate.budget
+            or type(proofs) is not tuple or len(proofs) != 3 or proofs[0] is not operation
+            or type(selected) is not tuple or len(selected) != 3 or selected[0] is not operation
+            or selected[1] is not certificate or type(projection) is not tuple or len(projection) != 3
+            or projection[0] is not operation):
+        raise HeaderBoundsError("memory_body_construction_numeric_owner_changed")
+    if proofs[2]:
+        raise HeaderBoundsError("memory_body_construction_affected_unavailable")
+    row_count = len(facts["row_uppers"])
+    if (not 1 <= row_count <= MAX_ROWS or retention_widths["row_count"] != row_count
+            or type(facts["baseline_trace"]) is not tuple or not facts["baseline_trace"]):
+        raise HeaderBoundsError("memory_body_construction_numeric_shape_unavailable")
+    # Borrow only original already-paid selected/projection maps. Override
+    # lookup uses scalar loops rather than the generic owner's new row map.
+    raw = None
+    event_count = receipt_count = accepted_count = codec_count = codec_fields = 0
+    for descriptor, key, row, encoded in selected[2]:
+        if descriptor.table == "workflow_run_states" and key == operation.run.run_identity:
+            raw = row["checkpoint_receipts_json"]
+    for descriptor, key, changes in projection[2]:
+        if (descriptor.table == "workflow_run_states" and key == operation.run.run_identity
+                and "checkpoint_receipts_json" in changes):
+            raw = changes["checkpoint_receipts_json"]
+    for address in facts["row_uppers"]:
+        table, key = address
+        if table == "work_board_decision_receipts":
+            receipt_count += 1
+        if type(key) is str:
+            fields = NATIVE_EXTENSION_FIELDS.get(table, COMPOSITION_FIELDS.get(table))
+            if fields is not None:
+                codec_count += 13 if table == "memory_episodes" else 9
+                codec_fields += len(fields)
+        if table == "memory_proposals":
+            status = None
+            for descriptor, row_key, row, encoded in selected[2]:
+                if descriptor.table == table and row_key == key:
+                    status = row["status"]
+            for descriptor, row_key, row in projection[1]:
+                if descriptor.table == table and row_key == key:
+                    status = row["status"]
+            for descriptor, row_key, changes in projection[2]:
+                if descriptor.table == table and row_key == key and "status" in changes:
+                    status = changes["status"]
+            if status == "accepted":
+                accepted_count += 1
+    for descriptor, key, row in projection[1]:
+        if descriptor.table in ("audit_events", "work_board_events"):
+            event_count += 1
+    if type(raw) is not str:
+        raise HeaderBoundsError("memory_body_construction_prior_journal_unavailable")
+    # Original lexical parser appends one fee pair per strict JSON token. Count
+    # the genuine borrowed column without substring/token/list construction.
+    position = lexical_count = 0
+    while position < len(raw):
+        char = raw[position]
+        if char in " \t\r\n{}[],:":
+            position += 1
+            continue
+        lexical_count += 1
+        if char == '"':
+            position += 1
+            while position < len(raw):
+                if raw[position] == "\\":
+                    position += 2
+                elif raw[position] == '"':
+                    position += 1
+                    break
+                else:
+                    position += 1
+        else:
+            while position < len(raw) and raw[position] not in " \t\r\n,]}":
+                position += 1
+    baseline_count = len(facts["baseline_trace"])
+    validation_count = 9 if certificate.schema_cookies is not None else 3
+    # Cold fixed constructors: candidate33/context120/binding120/digest105/
+    # claim17/original21/reference21/audit6/raw1/output2=446. Two journal
+    # traversals add94+26R+8E; journal/lexical tail89+17R+4E+L.
+    # Receipt21 + one configured MAC<=12; accepted selection51 + two MACs<=24.
+    cold_count = (629 + 43 * row_count + 12 * event_count + lexical_count
+        + 33 * receipt_count + 75 * accepted_count)
+    body_count = (baseline_count + (row_count - 1) * (validation_count + 4)
+        + 4 * validation_count + 32 + cold_count)
+    # Same immutable-reference4/int64 scalar20 planning convention as the
+    # Current constructor. Label <=7 references =>30; pair <=53. Count label,
+    # pair, list slot, tuple slot and normalization/maxima dictionary separately.
+    owner_maps = 2 * (1024 + 128 * row_count)
+    generic_maps = 6 * (2 + 65 * row_count) + 4 * (2 + 27 * body_count)
+    body_outputs = 4 + body_count * 150
+    cold_outputs = 4 + cold_count * 96
+    # Codec input9-pair tuple, generated9/13 labels+output, per-field generator
+    # storage and each inner dictionary. Audit gets an additional nine-vector.
+    codecs = (codec_count + 9) * 96 + row_count * (2 + 9 * 32) + 21 * codec_fields
+    # Nested cold helpers materialize their original stage vectors before the
+    # final cold list/tuple. Binding originals7*60 and five remaps21, candidate
+    #33/claim17/original21/reference21/audit6/output2; local payload arrays four
+    #times (Original18+4R,Current18+9R+4E). MAC provider source maximum12.
+    helper_vectors = (105 + 33 + 17 + 21 + 21 + 6 + 2
+        + 72 + 26 * row_count + 8 * event_count
+        + 33 * receipt_count + 75 * accepted_count)
+    nested_arrays = 4 + helper_vectors * 96
+    # Seven original binding60 constructors also allocate23 initial input
+    # pairs, two seven-field manifests and six constructor-sizing inputs;
+    # price those separately, matching the original Source scalar grammar.
+    nested_name = 3 + len("constructor-dependencies") + 2 + len("domain-values") + 2
+    name_width = max(nested_name, len("required-plus-goals-inference-set") + 2)
+    binding_label = 5 + len("composition-binding-parser") + 2 + 4 + name_width
+    binding_pair = 3 + binding_label + 20
+    input_pair = 3 + name_width + 20
+    binding_storage = (60 * (binding_label + binding_pair) + 35 * nested_name
+        + 2 + 2 * (2 + 60 * binding_pair + 59)
+        + 23 * input_pair + (2 + 23 * input_pair + 22)
+        + 2 * (7 * input_pair + (2 + 7 * input_pair + 6))
+        + 6 * input_pair + (2 + 6 * input_pair + 5)
+        + (2 + 14 * 20 + 13) + (2 + 34 * 20 + 33)
+        + (2 + 6 * 20 + 5))
+    nested_arrays += 7 * binding_storage
+    # Original Source context planning scalar includes its full120 subtree
+    # (and conservatively an extra candidate9), including intermediate parser,
+    # admission, candidate and current-digest remap arrays, without building it.
+    context_storage = source_owner._original_native_memory_source_schedule_planning_upper(result_present=True)
+    scalar_maps = (2 * (2 + 4 * 27) + 4 * (2 + 4 * 27) * (row_count + event_count)
+        + receipt_count * (3 * 2 + (25 + 2 + 6) * 27)
+        + accepted_count * (2 + 11 * 27))
+    # Borrowed-reference tuple, event tuple, literal-key starred tuple and
+    # the DISTINCT starred scalar-max generator tuple in the cold constructor.
+    incidental_arrays = (2 + 5 * row_count) + (2 + 5 * event_count) + (2 + 21 * row_count)
+    incidental_arrays += 2 + 5 * (len(_MEMORY_ORIGINAL_FIELDS) + len(_MEMORY_CURRENT_FIELDS) + 9)
+    # Four cold payload traversals call reference() 6R+2E+2 times. Each
+    # reference's table-set width traverses the exact retained/Memory roster;
+    # include those width generators, field-pair codec widths, and token scans.
+    reference_calls = 6 * row_count + 2 * event_count + 2
+    reference_controls = reference_calls * (8 + len(RETAINED_FIELDS) + len(MEMORY_DESCRIPTORS))
+    controls = 32 * (96 + 8 * row_count + 4 * event_count + codec_fields
+        + reference_controls + 2 * baseline_count + 2 * lexical_count
+        + 16 * (receipt_count + accepted_count))
+    # Parent retains its distinct five-field lineage AFTER the BODY vector.
+    retained_tuple = 2 + 5 * 4
+    upper = (owner_maps + generic_maps + body_outputs + cold_outputs + codecs
+        + nested_arrays + context_storage + scalar_maps + incidental_arrays + controls + retained_tuple)
+    if type(upper) is not int or upper < 0:
+        raise HeaderBoundsError("memory_body_construction_numeric_shape_unavailable")
+    return upper
 
 
 def _native_memory_generic_future_numeric_schedule(operation, prepared, *, certificate, facts, retention_widths):
@@ -2599,6 +2992,13 @@ def _native_memory_future_common_numeric_components(operation, prepared, *, cert
     source_owner._native_memory_dispatch_validation_numeric_owner(operation, prepared,
         certificate=certificate, facts=facts, retention_widths=retention_widths)
     guard = operation.db.info.get("composition_guard")
+    from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+    source = operation.source
+    if (source_owner._MEMORY_SOURCES.get(id(source)) is not source or not source._live.is_set()
+            or type(certificate) is not CompositionHeaderCertificate
+            or certificate.seal is not _SEAL or certificate.issued_id != id(certificate)
+            or certificate.driver is not operation.driver):
+        raise HeaderBoundsError("memory_common_components_numeric_unavailable")
     original = getattr(guard, "_native_memory_source_common_numeric", None)
     snapshot = getattr(guard, "_native_memory_source_snapshot_numeric", None)
     projection = getattr(guard, "_native_memory_source_projection", None)
@@ -2618,13 +3018,16 @@ def _native_memory_future_common_numeric_components(operation, prepared, *, cert
     # Original _metadata_scalar(width=20) has the SAME three scalar fees for
     # state-changes and each schema cookie. Authenticate every value against
     # the genuine observed Source snapshot before constructing any vector.
-    from src.memory.composition_headers import _metadata_upper
-    scalar_upper = _metadata_upper(2, (20,))
+    # _metadata_upper(2, (20,)): outer2 + two one-field rows22 + comma1.
+    # Scalar arithmetic avoids constructing the helper generator before payment.
+    scalar_upper = 2 + 2 * (2 + 20) + 1
     for name in ("state-changes", "schema-main", "schema-temp"):
         for stage in ("delivery", "row-copy", "encoded-copy"):
             seen = False
             for appearance, amount in snapshot[2]:
-                if appearance == ("metadata-prequery", name, stage):
+                if (type(appearance) is tuple and len(appearance) == 3
+                        and appearance[0] == "metadata-prequery"
+                        and appearance[1] == name and appearance[2] == stage):
                     if amount != scalar_upper:
                         raise HeaderBoundsError("memory_common_components_numeric_unavailable")
                     seen = True
@@ -2658,9 +3061,12 @@ def _native_memory_future_common_numeric_components(operation, prepared, *, cert
             row_helpers += (2 + 5 * (3 * columns)) + (2 + 21 * (1 + 3 * columns)) + 10 * 32 + 3 * 2
         wrappers = 8 + 43 * (3 * validation_count + 18) + 5 * (5 * validation_count + 36)
         outer = 2 + 3 * 11
-        # Four original local functions and their generator objects use the
-        # same 32-slot control bound; no planner builds a vector to price itself.
-        return owner_storage + header_storage + descriptor_maps + projected_result + row_helpers + wrappers + outer + 32 * 20
+        # Source control: 33 per-descriptor old-id generators plus fixed local
+        # functions/wrapper generators fit64; two per-issuer generators cover
+        # locator/header sums, four per-row cover generic affected/override
+        # traversal, and16 per-created-row cover header helper width traversals.
+        controls = 32 * (64 + 2 * issuer_count + 4 * row_count + 16 * creating)
+        return owner_storage + header_storage + descriptor_maps + projected_result + row_helpers + wrappers + outer + controls
     from src.memory.header_bounds import _native_memory_projected_superset_charges
     core, _headers = _native_memory_projected_superset_charges(certificate, original[2],
         projection[1], projection[2], source_operation=operation)
@@ -2682,20 +3088,23 @@ def _native_memory_future_common_numeric_components(operation, prepared, *, cert
 
 
 def _native_memory_source_snapshot_numeric_entries(operation, prepared, *, certificate,
-        facts, retention_widths):
+        facts, retention_widths, _construction_only=False):
     """ONE future original Source snapshot metadata without unused planning storage.
 
     Body callbacks remain separate. This projects the original full-common
     issuer and retains the actual universe/cache-wrapper appearances. It
     constructs no future certificate, database row or reference permission.
     """
-    from src.memory.header_bounds import HeaderBoundsError, _native_memory_projected_superset_charges
-    guard, _rows, _own, _audit, _new, _value = _native_memory_generic_future_bound_inputs(
-        operation, prepared, certificate, facts, retention_widths)
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info["composition_guard"]
     original = getattr(guard, "_native_memory_source_common_numeric", None)
     snapshot = getattr(guard, "_native_memory_source_snapshot_numeric", None)
     projection = getattr(guard, "_native_memory_source_projection", None)
     slots = getattr(guard, "_native_memory_integer_slots", None)
+    components = getattr(guard, "_native_memory_future_common_components", None)
     if (type(original) is not tuple or len(original) != 3
             or original[0] is not operation or original[1] is not certificate
             or type(original[2]) is not tuple
@@ -2704,10 +3113,38 @@ def _native_memory_source_snapshot_numeric_entries(operation, prepared, *, certi
             or type(snapshot[2]) is not tuple
             or type(projection) is not tuple or len(projection) != 3
             or projection[0] is not operation
-            or type(slots) is not tuple or len(slots) != 2 or slots[0] is not operation):
+            or type(slots) is not tuple or len(slots) != 2 or slots[0] is not operation
+            or type(_construction_only) is not bool
+            or type(components) is not tuple or len(components) != 6
+            or components[0] is not operation or components[1] is not prepared
+            or components[2] is not certificate or components[3] is not facts
+            or components[4] is not retention_widths or type(components[5]) is not tuple):
         raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
-    core, _headers = _native_memory_projected_superset_charges(certificate, original[2],
-        projection[1], projection[2], source_operation=operation)
+    core = None
+    for name, entries in components[5]:
+        if name == "core":
+            if core is not None or type(entries) is not tuple:
+                raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+            core = entries
+    if core is None:
+        raise HeaderBoundsError("memory_source_snapshot_numeric_unavailable")
+    if _construction_only:
+        # The wrapper's two index tuples, delivered slices, validation
+        # projections, wrapper/cookie slices and final concatenation are
+        # numerical containers. Reuse the already constructed common core;
+        # no second projector or generic row-map constructor is needed.
+        storage, core_storage = 2, 2
+        for label, _amount in snapshot[2]:
+            storage += 4 + _native_memory_capacity_label_width(label,
+                operation=operation, prepared=prepared, certificate=certificate) + 20
+        for label, _amount in core:
+            core_storage += 4 + _native_memory_capacity_label_width(label,
+                operation=operation, prepared=prepared, certificate=certificate) + 20
+        # Six generator expressions and three enumerate objects occur in the
+        # original wrapper constructor. Preserve their separate conservative
+        # 32-slot, int64-width control storage in addition to copied entries.
+        return (4 * storage + 2 * core_storage
+            + 2 * (2 + 21 * len(snapshot[2])) + 9 * 32 * 20)
     start_label = ("metadata-prequery", "common-certification-trace", "collector-list")
     end_label = ("metadata-prequery", "common-certification-trace", "retained-copy")
     baseline = snapshot[2]
@@ -2765,25 +3202,52 @@ def _native_memory_source_snapshot_numeric_entries(operation, prepared, *, certi
 
 
 def _native_memory_source_rows_numeric_entries(operation, prepared, *, certificate,
-        facts, retention_widths):
-    """Source-owned all-ref and own-only collection allocations; no bodies."""
+        facts, retention_widths, _construction_only=False):
+    """Source-owned collections, with a scalar constructor cost before building.
+
+    The retained dimension map contains exactly the paid selected addresses
+    and sealed new-row capacity addresses. Iterating it needs no prospective
+    row map, copied body, certificate or reference permission.
+    """
     from types import MappingProxyType
-    from src.memory.header_bounds import _native_memory_ascii_string_width as width
-    _guard, rows, own, _audit, _new, _value = _native_memory_generic_future_bound_inputs(
-        operation, prepared, certificate, facts, retention_widths)
-    def entries(addresses):
-        refs_upper = 2 + max(0, len(addresses) - 1) + sum(
-            3 + width(table) + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))
-            for table, key in addresses)
-        result_upper = 2 + max(0, len(addresses) - 1) + sum(
-            5 + 4 + (22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))
-            + 2 * (retention_widths["own_upper"] if (table, key) == own
-                else facts["row_uppers"][(table, key)]) for table, key in addresses)
-        return tuple((("memory-source-rows", stage), upper) for stage, upper in (
-            ("reference-set", refs_upper), ("reference-sort", refs_upper),
-            ("reference-tuple", refs_upper), ("result-tuples", result_upper),
-            ("result-return", result_upper)))
-    return MappingProxyType({"all": entries(tuple(rows)), "own": entries((own,))})
+    from src.memory.header_bounds import HeaderBoundsError, MAX_ROWS, _native_memory_ascii_string_width as width
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if (type(_construction_only) is not bool or type(facts) is not MappingProxyType
+            or type(facts.get("row_uppers")) is not MappingProxyType
+            or not 1 <= len(facts["row_uppers"]) <= MAX_ROWS):
+        raise HeaderBoundsError("memory_source_rows_numeric_shape_unavailable")
+    if _construction_only:
+        # Ten new two-field labels and amount pairs; two five-pair lists
+        # and immutable returns; the two-entry map and its proxy. Stage/upper
+        # dispatch reuses literal stage strings and references, not row bodies.
+        label = 3 + width("memory-source-rows") + width("reference-tuple")
+        pair = 3 + label + 20
+        return (10 * label + 10 * pair + 2 * (2 + 5 * pair + 4)
+            + 2 * (2 + 5 * pair + 4) + 2 + 1 + 2 + width("all") + width("own")
+            + 2 * (2 + 5 * pair + 4) + 4 + 2 * 4)
+    all_refs = all_results = 2 + max(0, len(facts["row_uppers"]) - 1)
+    own_refs = own_results = None
+    for address in facts["row_uppers"]:
+        row_upper = facts["row_uppers"][address]
+        table, key = address
+        key_upper = 22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)
+        reference_upper = 3 + width(table) + key_upper
+        own = table == "workflow_run_states" and key == operation.run.run_identity
+        result_upper = 5 + 4 + key_upper + 2 * (retention_widths["own_upper"] if own else row_upper)
+        all_refs += reference_upper
+        all_results += result_upper
+        if own:
+            own_refs, own_results = 2 + reference_upper, 2 + result_upper
+    if own_refs is None:
+        raise HeaderBoundsError("memory_source_rows_numeric_shape_unavailable")
+    all_entries, own_entries = [], []
+    for stage in ("reference-set", "reference-sort", "reference-tuple", "result-tuples", "result-return"):
+        reference_stage = stage != "result-tuples" and stage != "result-return"
+        all_entries.append((("memory-source-rows", stage), all_refs if reference_stage else all_results))
+        own_entries.append((("memory-source-rows", stage), own_refs if reference_stage else own_results))
+    return MappingProxyType({"all": tuple(all_entries), "own": tuple(own_entries)})
 
 
 async def _native_memory_source_rows(db, certificate, references):
@@ -3573,6 +4037,257 @@ def _native_memory_capture_planning_upper(operation, prepared, *, certificate,
     return vector + source_upper + binding_upper
 
 
+def _native_memory_capacity_label_width(value, *, operation, prepared, certificate):
+    """Numerical storage width for an authentic Source capacity label.
+
+    A private integer slot occupies capacity only. It never becomes a
+    reference, certificate key, permission, SQL value or fabricated identity.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+    if type(value) is _NativeMemoryFutureIntegerSlot:
+        value._checked()
+        if (value.operation is not operation or value.prepared is not prepared
+                or value.budget is not certificate.budget or value.bound_key is not None):
+            raise HeaderBoundsError("memory_future_integer_slot_changed")
+        # Covers the original int64 address and its quoted canonical key.
+        return 22
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is int:
+        if not -(2**63) <= value < 2**63:
+            raise HeaderBoundsError("header_metadata_bound")
+        return 20
+    if type(value) is str:
+        return _native_memory_ascii_string_width(value)
+    if type(value) is tuple:
+        upper = 2 + max(0, len(value) - 1)
+        for item in value:
+            upper += _native_memory_capacity_label_width(item, operation=operation,
+                prepared=prepared, certificate=certificate)
+        return upper
+    raise HeaderBoundsError("memory_numeric_capacity_label_unavailable")
+
+
+def _native_memory_issue_body_numeric_contributions(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Issue approved constructor contributions once on the original writer.
+
+    The retained immutable vectors carry capacity dimensions only. They do
+    not certify future bodies or authorize the effect or its publication.
+    """
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    from src.memory.header_bounds import HeaderBoundsError
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info["composition_guard"]
+    if (getattr(guard, "_native_memory_generic_body_allocation_numeric", None) is not None
+            or getattr(guard, "_native_memory_row_witness_allocation_numeric", None) is not None):
+        raise HeaderBoundsError("memory_numeric_constructor_already_issued")
+    # This scalar includes the complete generic/cold constructor subtree and
+    # this exact five-pointer lineage tuple. It excludes common certification.
+    body_planning = _native_memory_generic_body_construction_numeric_upper(
+        operation, prepared, certificate=certificate, facts=facts,
+        retention_widths=retention_widths)
+    guard.header_budget.debit(body_planning,
+        appearance=("native-memory-composer", "generic-body-constructor"))
+    body = _native_memory_generic_future_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard._native_memory_generic_body_allocation_numeric = (
+        operation, prepared, certificate, retention_widths, body)
+    # The witness scalar covers its nested four-stage vectors and its output
+    # list/tuple. The retained pointer tuple is a separate actual allocation.
+    witness_planning = _native_memory_row_witness_collection_numeric_entries(
+        operation, prepared, certificate=certificate, facts=facts,
+        retention_widths=retention_widths, _construction_only=True)
+    guard.header_budget.debit(witness_planning,
+        appearance=("native-memory-composer", "row-witness-constructor"))
+    witnesses = _native_memory_row_witness_collection_numeric_entries(
+        operation, prepared, certificate=certificate, facts=facts,
+        retention_widths=retention_widths)
+    guard.header_budget.debit(22,
+        appearance=("native-memory-composer", "row-witness-lineage"))
+    guard._native_memory_row_witness_allocation_numeric = (
+        operation, prepared, certificate, retention_widths, witnesses)
+
+
+def _native_memory_retained_phase_numeric_entries(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """Rephase already issued contributions, preserving every appearance.
+
+    This contribution is not the complete reservation. Standalone cold,
+    Current, authority and lifecycle owners remain required contributions.
+    Scalar mode prices the new containers without constructing their entries.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_numeric_planning_mode_changed")
+    guard = operation.db.info["composition_guard"]
+    roster = getattr(guard, "_native_memory_effect_numeric_call_vector", None)
+    dispatch = getattr(guard, "_native_memory_dispatch_allocation_numeric", None)
+    reads = getattr(guard, "_native_memory_dispatch_read_numeric", None)
+    capture = getattr(guard, "_native_memory_capture_allocation_numeric", None)
+    rows = getattr(guard, "_native_memory_source_rows_allocation_numeric", None)
+    common = getattr(guard, "_native_memory_future_common_components", None)
+    snapshot = getattr(guard, "_native_memory_source_snapshot_allocation_numeric", None)
+    publication = getattr(guard, "_native_memory_publication_allocation_numeric", None)
+    journals = getattr(guard, "_native_memory_private_journal_numeric", None)
+    body = getattr(guard, "_native_memory_generic_body_allocation_numeric", None)
+    witnesses = getattr(guard, "_native_memory_row_witness_allocation_numeric", None)
+    # Check identities individually: no validation tuple/map is allocated
+    # before the caller has paid this builder's scalar construction bound.
+    if (type(roster) is not tuple or len(roster) != 5
+            or roster[0] is not operation or roster[1] is not prepared
+            or roster[2] is not certificate or roster[3] is not retention_widths
+            or type(dispatch) is not tuple or len(dispatch) != 6
+            or dispatch[0] is not operation or dispatch[1] is not prepared
+            or dispatch[2] is not certificate or dispatch[3] is not facts
+            or dispatch[4] is not retention_widths
+            or type(reads) is not tuple or len(reads) != 9
+            or reads[0] is not operation or reads[1] is not prepared
+            or reads[2] is not certificate or reads[3] is not facts
+            or reads[4] is not certificate.budget
+            or reads[5] is not guard._native_memory_source_capacity_owner[3]
+            or reads[6] is not operation.transaction or reads[7] is not operation.driver
+            or type(capture) is not tuple or len(capture) != 5
+            or capture[0] is not operation or capture[1] is not prepared
+            or capture[2] is not certificate or capture[3] is not retention_widths
+            or type(rows) is not tuple or len(rows) != 6
+            or rows[0] is not operation or rows[1] is not prepared
+            or rows[2] is not certificate or rows[3] is not facts
+            or rows[4] is not retention_widths
+            or type(common) is not tuple or len(common) != 6
+            or common[0] is not operation or common[1] is not prepared
+            or common[2] is not certificate or common[3] is not facts
+            or common[4] is not retention_widths
+            or type(snapshot) is not tuple or len(snapshot) != 6
+            or snapshot[0] is not operation or snapshot[1] is not prepared
+            or snapshot[2] is not certificate or snapshot[3] is not facts
+            or snapshot[4] is not retention_widths
+            or type(publication) is not tuple or len(publication) != 6
+            or publication[0] is not operation or publication[1] is not prepared
+            or publication[2] is not certificate or publication[3] is not retention_widths
+            or type(journals) is not tuple or len(journals) != 7
+            or journals[0] is not operation or journals[1] is not prepared
+            or journals[2] is not certificate or journals[3] is not retention_widths
+            or type(body) is not tuple or len(body) != 5
+            or body[0] is not operation or body[1] is not prepared
+            or body[2] is not certificate or body[3] is not retention_widths
+            or type(witnesses) is not tuple or len(witnesses) != 5
+            or witnesses[0] is not operation or witnesses[1] is not prepared
+            or witnesses[2] is not certificate or witnesses[3] is not retention_widths):
+        raise HeaderBoundsError("memory_retained_phase_contribution_unavailable")
+    current = getattr(guard, "_native_memory_current_allocation_numeric", None)
+    cold = getattr(guard, "_native_memory_standalone_cold_allocation_numeric", None)
+    original = getattr(guard, "_native_memory_original_preflight_allocation_numeric", None)
+    if (type(current) is not tuple or len(current) != 5
+            or current[0] is not operation or current[1] is not prepared
+            or current[2] is not certificate or current[3] is not retention_widths
+            or type(cold) is not tuple or len(cold) != 5
+            or cold[0] is not operation or cold[1] is not prepared
+            or cold[2] is not certificate or cold[3] is not retention_widths
+            or type(original) is not tuple or len(original) != 5
+            or original[0] is not operation or original[1] is not prepared
+            or original[2] is not certificate or original[3] is not retention_widths):
+        raise HeaderBoundsError("memory_reference_phase_contribution_unavailable")
+    count = storage = 0
+    if not _construction_only:
+        result = []
+    # Two passes through each validator source preserve allocations and reads
+    # as distinct vectors; common core and MISS wrapper are likewise distinct.
+    for phase, owner, occurrences in roster[4]:
+        for component in range(2):
+            triples = False
+            entries = None
+            if owner == "dispatch-validator":
+                entries = dispatch[5] if component == 0 else reads[8]
+                triples = component == 0
+            elif owner == "source-snapshot" and component == 0:
+                entries = snapshot[5]
+            elif owner == "all-source-rows" and component == 0:
+                entries = rows[5]["all"]
+            elif owner == "own-source-rows" and component == 0:
+                entries = rows[5]["own"]
+            elif owner == "generic-body" and component == 0:
+                entries = body[4]
+            elif owner == "row-witnesses" and component == 0:
+                entries = witnesses[4]
+            elif owner in {"first-write-common", "engine-common", "reader-common", "writer-superset"}:
+                entries = common[5][component][1]
+            if entries is None:
+                continue
+            for _occurrence in range(occurrences):
+                for entry in entries:
+                    if triples:
+                        label = entry[1]
+                        amount = entry[2]
+                    else:
+                        label = entry[0]
+                        amount = entry[1]
+                    if type(amount) is not int or amount < 0:
+                        raise HeaderBoundsError("canonical_bound_not_certified")
+                    width = 4 + _native_memory_ascii_string_width(phase) + 20
+                    width += _native_memory_capacity_label_width(label, operation=operation,
+                        prepared=prepared, certificate=certificate)
+                    count += 1
+                    storage += width + 1
+                    if not _construction_only:
+                        result.append((phase, label, amount))
+    # Capture and the two publication/journal phases are direct original calls.
+    for component in range(9):
+        if component == 0:
+            entries = capture[4]
+            phase = "capture"
+            triples = False
+        elif component == 1:
+            entries = publication[5]
+            phase = None
+            triples = True
+        elif component == 2:
+            entries = journals[4]
+            phase = "capture"
+            triples = False
+        elif component == 3:
+            entries = journals[5]
+            phase = "completion"
+            triples = False
+        elif component == 4:
+            entries = current[4]
+            phase = None
+            triples = True
+        elif component in {5, 6, 7}:
+            entries = cold[4]
+            phase = "capture" if component == 5 else "completion"
+            triples = False
+        else:
+            entries = original[4]
+            phase = "capture"
+            triples = False
+        for entry in entries:
+            if triples:
+                phase, label, amount = entry
+            else:
+                label, amount = entry
+            if phase not in {"effect", "capture", "completion"} or type(amount) is not int or amount < 0:
+                raise HeaderBoundsError("canonical_bound_not_certified")
+            width = 4 + _native_memory_ascii_string_width(phase) + 20
+            width += _native_memory_capacity_label_width(label, operation=operation,
+                prepared=prepared, certificate=certificate)
+            count += 1
+            storage += width + 1
+            if not _construction_only:
+                result.append((phase, label, amount))
+    if _construction_only:
+        # Triple objects, list slots and final tuple slots; iteration controls
+        # are bounded by the literal roster and preserve all multiplicities.
+        return 4 + 3 * storage + (count + 8 * len(roster[4]) + 20) * 20
+    return tuple(result)
+
+
 async def _native_memory_effect_numeric_schedule(db, run, operation, prepared, *,
         existing_references, before_row, certificate):
     """Compose only the original Source's closed, paid numeric contributions.
@@ -3593,13 +4308,15 @@ async def _native_memory_effect_numeric_schedule(db, run, operation, prepared, *
             or dimensions[1] is not prepared or dimensions[2] is not certificate):
         raise HeaderBoundsError("memory_numeric_forecast_owner_changed")
     facts, widths = retained[3], dimensions[3]
-    checked_guard, _rows, _own, _audit, _new, _candidate = (
-        _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, widths))
+    # Authenticate before constructing any generic row map or numeric vector.
+    # Each later projection has its own prepaid constructor contribution.
+    memory_producer._native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
     selected_before = None
     for descriptor, key, row, _encoded in guard._native_memory_existing_source_rows[2]:
         if descriptor.table == "workflow_run_states" and key == run.run_identity:
             selected_before = row
-    if (checked_guard is not guard or guard.db is not db or operation.run is not run
+    if (guard.db is not db or operation.run is not run
             or selected_before != before_row
             or existing_references != guard._native_memory_existing_source_rows[1]):
         raise HeaderBoundsError("memory_numeric_forecast_owner_changed")
@@ -3698,6 +4415,119 @@ async def _native_memory_effect_numeric_schedule(db, run, operation, prepared, *
     guard._native_memory_capture_stage_map_numeric = (
         operation, prepared, certificate, widths, capture_map_upper,
         capture_map_count)
+    source_rows_planning = _native_memory_source_rows_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths,
+        _construction_only=True)
+    guard.header_budget.debit(source_rows_planning,
+        appearance=("native-memory-composer", "source-rows-constructor"))
+    source_rows = _native_memory_source_rows_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    source_rows_width = 2 + 1
+    for name in source_rows:
+        entries = source_rows[name]
+        source_rows_width += _common_trace_label_width(name) + 1 + 2 + max(0, len(entries) - 1)
+        for label, _amount in entries:
+            source_rows_width += 3 + _common_trace_label_width(label) + 20
+    guard.header_budget.debit(2 + 5 + 5 * 20 + source_rows_width,
+        appearance=("native-memory-composer", "source-rows-lineage"))
+    guard._native_memory_source_rows_allocation_numeric = (
+        operation, prepared, certificate, facts, widths, source_rows)
+    common_planning = _native_memory_future_common_numeric_components(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths,
+        _construction_only=True)
+    guard.header_budget.debit(common_planning,
+        appearance=("native-memory-composer", "common-constructor"))
+    common_components = _native_memory_future_common_numeric_components(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    common_vector_width = 2 + max(0, len(common_components) - 1)
+    for name, entries in common_components:
+        common_vector_width += 3 + _common_trace_label_width(name) + 2 + max(0, len(entries) - 1)
+        for label, _amount in entries:
+            common_vector_width += 3 + _native_memory_capacity_label_width(label,
+                operation=operation, prepared=prepared, certificate=certificate) + 20
+    guard.header_budget.debit(2 + 5 + 5 * 20 + common_vector_width,
+        appearance=("native-memory-composer", "common-lineage"))
+    guard._native_memory_future_common_components = (
+        operation, prepared, certificate, facts, widths, common_components)
+    snapshot_planning = _native_memory_source_snapshot_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths,
+        _construction_only=True)
+    guard.header_budget.debit(snapshot_planning,
+        appearance=("native-memory-composer", "source-snapshot-constructor"))
+    snapshot_entries = _native_memory_source_snapshot_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    snapshot_vector_width = 2 + max(0, len(snapshot_entries) - 1)
+    for label, _amount in snapshot_entries:
+        snapshot_vector_width += 3 + _native_memory_capacity_label_width(label,
+            operation=operation, prepared=prepared, certificate=certificate) + 20
+    guard.header_budget.debit(2 + 5 + 5 * 20 + snapshot_vector_width,
+        appearance=("native-memory-composer", "source-snapshot-lineage"))
+    guard._native_memory_source_snapshot_allocation_numeric = (
+        operation, prepared, certificate, facts, widths, snapshot_entries)
+    # Approved constructor bounds are paid before the original builders.
+    # Their immutable results are then reused across the literal phase roster.
+    _native_memory_issue_body_numeric_contributions(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    # One issued reference vector per original builder. The future phase
+    # roster reuses these objects and preserves each actual callback repeat.
+    current_planning = _native_memory_six_current_construction_numeric_entries(
+        operation, prepared, certificate=certificate, retention_widths=widths,
+        _construction_only=True)
+    guard.header_budget.debit(current_planning,
+        appearance=("native-memory-composer", "current-constructor"))
+    current_entries = _native_memory_successful_current_lifecycle_numeric_entries(
+        operation, prepared, certificate=certificate, retention_widths=widths)
+    guard.header_budget.debit(22,
+        appearance=("native-memory-composer", "current-lineage"))
+    guard._native_memory_current_allocation_numeric = (
+        operation, prepared, certificate, widths, current_entries)
+    cold_planning = _native_memory_standalone_cold_construction_numeric_upper(
+        operation, prepared, certificate=certificate, facts=facts, retention_widths=widths)
+    guard.header_budget.debit(cold_planning,
+        appearance=("native-memory-composer", "standalone-cold-constructor"))
+    cold_entries = _native_memory_postoriginal_cold_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    guard.header_budget.debit(22,
+        appearance=("native-memory-composer", "standalone-cold-lineage"))
+    guard._native_memory_standalone_cold_allocation_numeric = (
+        operation, prepared, certificate, widths, cold_entries)
+    original_planning = _native_memory_original_preflight_construction_numeric_upper(
+        operation, prepared, certificate=certificate, facts=facts, retention_widths=widths)
+    guard.header_budget.debit(original_planning,
+        appearance=("native-memory-composer", "original-preflight-constructor"))
+    original_entries = _native_memory_original_preflight_numeric_entries(operation, prepared,
+        certificate=certificate, retention_widths=widths)
+    guard.header_budget.debit(22,
+        appearance=("native-memory-composer", "original-preflight-lineage"))
+    guard._native_memory_original_preflight_allocation_numeric = (
+        operation, prepared, certificate, widths, original_entries)
+    phase_planning = _native_memory_retained_phase_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths,
+        _construction_only=True)
+    guard.header_budget.debit(phase_planning,
+        appearance=("native-memory-composer", "retained-phase-constructor"))
+    phase_entries = _native_memory_retained_phase_numeric_entries(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    guard.header_budget.debit(22,
+        appearance=("native-memory-composer", "retained-phase-lineage"))
+    guard._native_memory_retained_phase_allocation_numeric = (
+        operation, prepared, certificate, widths, phase_entries)
+    effect_available = capture_available = completion_available = 0
+    for phase, _label, amount in phase_entries:
+        if phase == "effect":
+            effect_available += amount
+        elif phase == "capture":
+            capture_available += amount
+        else:
+            completion_available += amount
+    # Observed Source spending and closed-contribution totals only. The
+    # remaining named owner denials below prohibit treating these as whole-U.
+    guard.header_budget.debit(2 + 7 + 3 * 4 + 5 * 20,
+        appearance=("native-memory-composer", "available-totals-lineage"))
+    from src.memory.header_bounds import MAX_BYTES
+    guard._native_memory_available_numeric_totals = (
+        operation, prepared, certificate, MAX_BYTES - guard.header_budget.remaining,
+        effect_available, capture_available, completion_available, len(phase_entries))
     authority_owner = getattr(memory_producer,
         "original_native_memory_source_authority_numeric_schedule", None)
     if authority_owner is None:
@@ -4141,34 +4971,98 @@ async def apply_native_memory_unknown(db, run, plan):
         _MEMORY_PUBLICATIONS.pop(id(plan), None)
 
 
-def _native_memory_row_witness_numeric_entries(table, key, *, encoded_upper, reference_upper):
-    from src.memory.header_bounds import _native_memory_object_width
-    witness_upper = _native_memory_object_width({
-        "ref": reference_upper, "tuple_digest": 66, "encoded_bytes": 7})
-    return tuple((("memory-row-witness", table, key, stage), upper)
-        for stage, upper in (("hash-input", encoded_upper), ("digest", 66),
-            ("reference", reference_upper), ("record", witness_upper)))
+def _native_memory_row_witness_numeric_entries(table, key, *, encoded_upper,
+        reference_upper, _construction_only=False):
+    from src.memory.header_bounds import _native_memory_ascii_string_width as width
+    # Exact original three-field object grammar. Numerical sizing requires
+    # neither a temporary field dict nor an additional serialized witness.
+    witness_upper = 4 + 6 + reference_upper + 15 + 66 + 16 + 7
+    if _construction_only:
+        label = 5 + width("memory-row-witness") + width(table) + (
+            22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)) + width("hash-input")
+        pair = 3 + label + 20
+        return 4 * label + 4 * pair + 2 + 4 * pair + 3
+    return (
+        (("memory-row-witness", table, key, "hash-input"), encoded_upper),
+        (("memory-row-witness", table, key, "digest"), 66),
+        (("memory-row-witness", table, key, "reference"), reference_upper),
+        (("memory-row-witness", table, key, "record"), witness_upper))
+
+
+def _native_memory_row_witness_collection_numeric_entries(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE all-selected-row witness collection, including its own construction.
+
+    Address keys come from the original retained numerical dimensions. An
+    unbound integer slot contributes numerical width only; it is not a ref.
+    """
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, MAX_ROWS, _native_memory_ascii_string_width as width
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if (type(_construction_only) is not bool or type(facts.get("row_uppers")) is not MappingProxyType
+            or type(facts.get("raw_tuple_uppers")) is not MappingProxyType
+            or not 1 <= len(facts["row_uppers"]) <= MAX_ROWS):
+        raise HeaderBoundsError("memory_row_witness_numeric_shape_unavailable")
+    rows_count = len(facts["row_uppers"])
+    list_upper = 2 + max(0, rows_count - 1)
+    constructor_upper = 0
+    result_pairs_upper = 0
+    for address in facts["row_uppers"]:
+        table, key = address
+        key_upper = 22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key)
+        reference_upper = 17 + width(table) + key_upper
+        list_upper += 114 + reference_upper
+        if _construction_only:
+            constructor_upper += _native_memory_row_witness_numeric_entries(table, key,
+                encoded_upper=0, reference_upper=reference_upper, _construction_only=True)
+            label = 5 + width("memory-row-witness") + width(table) + key_upper + width("hash-input")
+            result_pairs_upper += 4 * (3 + label + 20)
+    if _construction_only:
+        collection_label = 3 + width("memory-row-witness-list") + width("construction")
+        collection_pair = 3 + collection_label + 20
+        result_pairs_upper += 2 * collection_pair
+        # The caller's result list and immutable return copy the same pairs.
+        # Two additional collection labels/pairs and two map iterators are
+        # distinct from each row helper's constructor and returned tuple.
+        return (constructor_upper + 2 * collection_label + 2 * collection_pair
+            + 2 * (2 + result_pairs_upper + 4 * rows_count + 1) + 2 * 4)
+    result = [(("memory-row-witness-list", "construction"), list_upper)]
+    for address in facts["row_uppers"]:
+        table, key = address
+        reference_upper = 17 + width(table) + (
+            22 if type(key) is _NativeMemoryFutureIntegerSlot else width(key))
+        own = table == "workflow_run_states" and key == operation.run.run_identity
+        encoded_upper = retention_widths["own_raw_upper"] if own else facts["raw_tuple_uppers"][address]
+        result.extend(_native_memory_row_witness_numeric_entries(table, key,
+            encoded_upper=encoded_upper, reference_upper=reference_upper))
+    result.append((("memory-row-witness-list", "return"), list_upper))
+    return tuple(result)
 
 
 def _native_memory_row_witnesses(rows, *, header_budget=None):
     from src.memory.composition_headers import current_budget
-    from src.memory.header_bounds import _native_memory_object_width, _native_memory_ascii_string_width
+    from src.memory.header_bounds import _native_memory_ascii_string_width
     payer = header_budget if header_budget is not None else current_budget()
     if payer is not None:
-        list_upper = 2 + max(0, len(rows) - 1) + sum(_native_memory_object_width({
-            "ref": _native_memory_object_width({"table": _native_memory_ascii_string_width(descriptor.table),
-                "key": _native_memory_ascii_string_width(key)}), "tuple_digest": 66, "encoded_bytes": 7})
-            for descriptor, key, row, encoded in rows)
+        list_upper = 2 + max(0, len(rows) - 1)
+        for descriptor, key, row, encoded in rows:
+            reference_upper = 17 + _native_memory_ascii_string_width(descriptor.table) + _native_memory_ascii_string_width(key)
+            list_upper += 4 + 6 + reference_upper + 15 + 66 + 16 + 7
         payer.debit(list_upper, appearance=("memory-row-witness-list", "construction"))
     result = []
     for descriptor, key, row, encoded in rows:
         if payer is not None:
-            reference_upper = _native_memory_object_width({
-                "table": _native_memory_ascii_string_width(descriptor.table),
-                "key": _native_memory_ascii_string_width(key)})
-            for appearance, upper in _native_memory_row_witness_numeric_entries(
-                    descriptor.table, key, encoded_upper=len(encoded), reference_upper=reference_upper):
-                payer.debit(upper, appearance=appearance)
+            reference_upper = 17 + _native_memory_ascii_string_width(descriptor.table) + _native_memory_ascii_string_width(key)
+            witness_upper = 4 + 6 + reference_upper + 15 + 66 + 16 + 7
+            # Debit the four original appearances directly. Constructing a
+            # forecast vector here would allocate an unused intermediate after
+            # effects; the real witness below is the only output being built.
+            payer.debit(len(encoded), appearance=("memory-row-witness", descriptor.table, key, "hash-input"))
+            payer.debit(66, appearance=("memory-row-witness", descriptor.table, key, "digest"))
+            payer.debit(reference_upper, appearance=("memory-row-witness", descriptor.table, key, "reference"))
+            payer.debit(witness_upper, appearance=("memory-row-witness", descriptor.table, key, "record"))
         result.append({"ref": {"table": descriptor.table, "key": key},
             "tuple_digest": hashlib.sha256(encoded).hexdigest(), "encoded_bytes": len(encoded)})
     if payer is not None:
@@ -5447,7 +6341,18 @@ def _checked_preoriginal_memory_row(row):
         if (original is not None or current is not None or context["result"] is not None
                 or row["status"] not in {"accepted", "queued", "running", "awaiting_approval", "paused", "blocked",
                                         "cancelled", "failed", "unknown_external_effect", "cost_liability"}
-                or strict_json_loads(row["effect_receipts_json"]) != []):
+                ):
+            raise ValueError("memory_preoriginal_state_changed")
+        # This original parser executes only after the preceding shape checks.
+        # Charge its actual input before decoding; the genuine baseline trace
+        # then carries this appearance into the original BODY forecast.
+        from src.memory.composition_headers import current_budget
+        payer = current_budget()
+        if payer is not None:
+            payer.debit(_native_memory_cold_text_upper(row["effect_receipts_json"]),
+                appearance=("native-memory-cold", "preoriginal", row["run_identity"],
+                    "effect-receipts-json"))
+        if strict_json_loads(row["effect_receipts_json"]) != []:
             raise ValueError("memory_preoriginal_state_changed")
         _checked_memory_claim_row(row, run, context, binding)
         return context["candidate"]
@@ -5460,8 +6365,15 @@ def _checked_memory_unknown_unverified_row(row, run, context, binding, current):
     from src.memory.header_bounds import strict_json_loads
     payload = current["payload"]
     if (payload["state"] != "unknown" or payload["reason_code"] != "original_projection_unavailable"
-            or payload["original_checkpoint_digest"] is not None or context["result"] is not None
-            or strict_json_loads(row["effect_receipts_json"]) != []
+            or payload["original_checkpoint_digest"] is not None or context["result"] is not None):
+        raise ValueError("memory_unknown_unverified_shape_changed")
+    from src.memory.composition_headers import current_budget
+    payer = current_budget()
+    if payer is not None:
+        payer.debit(_native_memory_cold_text_upper(row["effect_receipts_json"]),
+            appearance=("native-memory-cold", "unknown-unverified", row["run_identity"],
+                "effect-receipts-json"))
+    if (strict_json_loads(row["effect_receipts_json"]) != []
             or row["status"] not in {"cancelled", "failed", "blocked", "unknown_external_effect", "cost_liability"}
             or payload["owner_events"] != [] or payload["absences"] != []):
         raise ValueError("memory_unknown_unverified_shape_changed")

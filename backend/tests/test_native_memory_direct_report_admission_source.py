@@ -25,6 +25,170 @@ async def authenticated_direct_report_operation(async_db, real_auth, monkeypatch
     return await setup_operation(async_db, monkeypatch, tmp_path, owner=owner)
 
 
+@pytest.fixture
+async def authenticated_direct_report_with_original_memory_session(async_db, real_auth, monkeypatch, tmp_path):
+    """Use the existing continuity service before any pipeline/job admission."""
+    from config.settings import settings
+    from src.auth import service
+    from src.goals import repository as goals
+    from src.work_board.contracts import WorkBoardOwner, WorkBoardTaskCreate
+    from src.work_board.repository import WorkBoardRepository
+    from src.conversation.task_context import TaskContinuityService, ContinueTaskRequest
+    from src.db.models import Session, WorkflowRunState
+    from sqlalchemy import select
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(service, "get_session", async_db)
+    monkeypatch.setattr(goals, "get_session", async_db)
+    _bearer, operator = await service.create_session()
+    assert operator.operator_identity_id is None
+    owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+    # Original service creation, with the authenticated owner: no seeded Goal,
+    # Session, Source, bytes, certificate or ownerless-row ownership update.
+    goal = await goals.GoalRepository().create(title="Original conversation prerequisite",
+        owner_principal_id=owner.principal_id, owner_session_id=owner.session_id)
+    repository = WorkBoardRepository()
+    continuity = TaskContinuityService(repository)
+    await continuity.start()
+    try:
+        async with async_db() as db:
+            mutation = await repository.create_task(db, owner, WorkBoardTaskCreate(
+                title="Choose an original task conversation", goal_id=goal.id, goal_revision=goal.revision,
+                idempotency_key="native-memory-original-session-prerequisite"), origin_session_id=owner.session_id)
+            task_id, task_revision = mutation.task.task_id, mutation.task.task_revision
+            await db.commit()
+            assert await db.get(Session, owner.session_id) is None
+            assert not (await db.scalars(select(WorkflowRunState))).all()
+            await db.rollback()
+            reply = await continuity.continue_task(db, operator, ContinueTaskRequest(
+                task_id=task_id, expected_revision=task_revision,
+                new_conversation_id=operator.session_id))
+            assert reply["conversation_id"] == operator.session_id and reply["idempotent_replay"] is False
+            await db.commit()
+            original = await db.get(Session, operator.session_id)
+            assert original.owner_principal_id == operator.principal.principal_id
+            assert original.continuity_task_id == task_id
+    finally:
+        await continuity.stop()
+    return await setup_operation(async_db, monkeypatch, tmp_path, owner=owner)
+
+
+@pytest.mark.asyncio
+async def test_original_continuity_session_satisfies_original_m5_owner_before_report(
+        async_db, authenticated_direct_report_with_original_memory_session):
+    from src.memory.m5 import _require_original_m5_session
+    from src.db.models import Session
+    owner, _repository, accepted = authenticated_direct_report_with_original_memory_session
+    assert len(accepted["steps"]) == 3
+    async with async_db() as db:
+        await _require_original_m5_session(db, owner.principal_id, owner.session_id)
+        retained = await db.get(Session, owner.session_id)
+        assert retained.owner_principal_id == owner.principal_id
+
+
+@pytest.mark.asyncio
+async def test_unissued_report_input_stage_cannot_issue_numeric_facts():
+    from src.runtime_plugins.memory_producer import (_OriginalMemoryReportInputStage,
+        _memory_report_decoder_numeric_owner)
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    budget = HeaderReadBudget()
+    before = budget.remaining
+    # Uninitialized negative witness: the registry must deny before reading
+    # any owner field, allocating dimensions or debiting the real payer.
+    unissued = object.__new__(_OriginalMemoryReportInputStage)
+    with pytest.raises(HeaderBoundsError, match="memory_report_input_numeric_owner_changed"):
+        _memory_report_decoder_numeric_owner(unissued, None, b"", None, budget)
+    assert budget.remaining == before
+
+
+def test_legacy_verification_receipt_preserves_falsy_verified_at_conversion():
+    from src.work_board.review import _safe_verification_receipt
+    # Legacy proof conversion uses str(raw_verified_at), even for numeric0.
+    # This ordinary-path regression needs no Source/certificate fabrication.
+    proof = {"receipt_kind": "readback", "workflow_run_id": "original-report-root",
+        "content_sha256": "a" * 64, "verified_at": 0}
+    result = _safe_verification_receipt(proof)
+    assert result["verified_at"] == "0"
+
+
+def test_unissued_report_admission_scope_denies_before_owner_fields_or_debit():
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    from src.runtime_plugins.task_capability import _report_memory_admission_payer
+    from src.work_board.review import (
+        _MEMORY_REPORT_PRINCIPAL_SCOPE, _MemoryReportDependencyNumericInventory,
+    )
+    budget = HeaderReadBudget()
+    before = budget.remaining
+    with pytest.raises(HeaderBoundsError, match="memory_report_admission_numeric_owner_changed"):
+        _report_memory_admission_payer(budget)
+    token = _MEMORY_REPORT_PRINCIPAL_SCOPE.set(object.__new__(_MemoryReportDependencyNumericInventory))
+    try:
+        with pytest.raises(HeaderBoundsError, match="memory_report_admission_numeric_owner_changed"):
+            _report_memory_admission_payer(budget)
+    finally:
+        _MEMORY_REPORT_PRINCIPAL_SCOPE.reset(token)
+    assert budget.remaining == before
+
+
+def test_unissued_report_row_inventory_cannot_pay_or_grant_rows():
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    from src.work_board.review import (_MemoryReportDependencyNumericInventory,
+        _memory_report_row_certificate)
+    budget = HeaderReadBudget()
+    before = budget.remaining
+    # Exact-class construction alone is not the original eight-cert issuance.
+    # Registry denial precedes reads of uninitialized owner/certificate fields.
+    budget._native_memory_report_dependency_numeric = object.__new__(_MemoryReportDependencyNumericInventory)
+    with pytest.raises(HeaderBoundsError, match="memory_report_row_numeric_owner_changed"):
+        _memory_report_row_certificate(None, None, budget, "work_board_events")
+    assert budget.remaining == before
+
+
+@pytest.mark.asyncio
+async def test_original_continuity_cannot_claim_an_existing_audit_placeholder(
+        async_db, real_auth, monkeypatch, tmp_path):
+    from config.settings import settings
+    from src.auth import service
+    from src.audit import repository as audit
+    from src.goals import repository as goals
+    from src.work_board.contracts import WorkBoardOwner, WorkBoardTaskCreate
+    from src.work_board.repository import WorkBoardRepository, BoardError
+    from src.conversation.task_context import TaskContinuityService, ContinueTaskRequest
+    from src.db.models import Session
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(service, "get_session", async_db)
+    monkeypatch.setattr(goals, "get_session", async_db)
+    monkeypatch.setattr(audit, "get_session", async_db)
+    _bearer, operator = await service.create_session()
+    owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+    goal = await goals.GoalRepository().create(title="Existing placeholder denial",
+        owner_principal_id=owner.principal_id, owner_session_id=owner.session_id)
+    repository = WorkBoardRepository()
+    async with async_db() as db:
+        mutation = await repository.create_task(db, owner, WorkBoardTaskCreate(title="Original task",
+            goal_id=goal.id, goal_revision=goal.revision, idempotency_key="native-memory-placeholder-denial"))
+        task_id, revision = mutation.task.task_id, mutation.task.task_revision
+    # The original Audit owner creates its own FK placeholder through
+    # ensure_sessions_exist; no test-seeded Session or ownership assignment.
+    await audit.AuditRepository().log_event(session_id=operator.session_id,
+        actor="operator", event_type="task.continuity.requested", summary="Original placeholder denial")
+    continuity = TaskContinuityService(repository)
+    await continuity.start()
+    try:
+        async with async_db() as db:
+            existing = await db.get(Session, operator.session_id)
+            assert existing is not None and existing.owner_principal_id is None
+            await db.rollback()
+            with pytest.raises(BoardError) as denied:
+                await continuity.continue_task(db, operator, ContinueTaskRequest(task_id=task_id,
+                    expected_revision=revision, new_conversation_id=operator.session_id))
+            assert denied.value.code == "task_conversation_conflict"
+        async with async_db() as db:
+            existing = await db.get(Session, operator.session_id)
+            assert existing.owner_principal_id is None
+    finally:
+        await continuity.stop()
+
+
 @pytest.mark.asyncio
 async def test_authenticated_direct_finite_report_is_conditional_identity_absent(
         async_db, authenticated_direct_report_operation):

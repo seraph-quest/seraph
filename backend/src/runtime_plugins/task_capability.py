@@ -273,6 +273,172 @@ def _report_memory_fieldset_pay(value, budget, *, stage):
     _report_memory_allocation_pay(budget, stage, upper)
 
 
+def _report_memory_identity_binding(*, owner_principal_id, goal_id, goal_revision,
+        idempotency_scope, dedupe_key, budget):
+    """Meter this actual original five-field binding call without eager work."""
+    from src.workflows.job_runtime import _binding
+    if budget is not None:
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        upper = (2 + 4 + 5 + _native_memory_source_value_upper(owner_principal_id)
+            + _native_memory_source_value_upper(goal_id or "")
+            + _native_memory_source_value_upper(goal_revision)
+            + _native_memory_source_value_upper(idempotency_scope)
+            + _native_memory_source_value_upper(dedupe_key))
+        for name in ("owner_principal_id", "goal_id", "goal_revision", "idempotency_scope", "candidate_dedupe_key"):
+            upper += _native_memory_ascii_string_width(name)
+        _report_memory_allocation_pay(budget, "identity-binding-map", upper)
+        _report_memory_allocation_pay(budget, "identity-binding-json", upper)
+        _report_memory_allocation_pay(budget, "identity-binding-utf8", upper)
+        _report_memory_allocation_pay(budget, "identity-binding-hexdigest", 66)
+    return _binding(owner_principal_id=owner_principal_id, goal_id=goal_id,
+        goal_revision=goal_revision, idempotency_scope=idempotency_scope, dedupe_key=dedupe_key)
+
+
+def _report_memory_binding_planning_upper():
+    """Storage of the existing closed60 parser schedule; no body sizing."""
+    # Exact original grammar retained by the Source context owner's planning
+    # formula:25 plain stages,7 constructor names,28 manifest names; the
+    # original helper's metadata contains35 nested names and these containers.
+    nested = 3 + len("constructor-dependencies") + 2 + len("domain-values") + 2
+    name = max(nested, len("required-plus-goals-inference-set") + 2)
+    label = 5 + len("composition-binding-parser") + 2 + 4 + name
+    pair = 3 + label + 20
+    input_pair = 3 + name + 20
+    return (60 * (label + pair) + 35 * nested
+        + 2 + 2 * (2 + 60 * pair + 59)
+        + 23 * input_pair + (2 + 23 * input_pair + 22)
+        + 2 * (7 * input_pair + (2 + 7 * input_pair + 6))
+        + 6 * input_pair + (2 + 6 * input_pair + 5)
+        + (2 + 14 * 20 + 13) + (2 + 34 * 20 + 33)
+        + (2 + 6 * 20 + 5))
+
+
+def _report_memory_binding_pay(text, budget):
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_utf8_width
+        from src.workflows.inference_accounting import _original_native_binding_numeric_entries
+        _report_memory_allocation_pay(budget, "binding-parser-schedule-storage",
+            _report_memory_binding_planning_upper())
+        nested = 3 + len("constructor-dependencies") + 2 + len("domain-values") + 2
+        name = max(nested, len("required-plus-goals-inference-set") + 2)
+        _report_memory_allocation_pay(budget, "binding-parser-label-storage",
+            60 * (3 + len("native-memory-report-binding") + 2 + name))
+        # Reuse the original14-domain/34-method parser grammar unchanged.
+        # Repeated calls are charged independently, never memoized.
+        entries = _original_native_binding_numeric_entries(None, _native_memory_utf8_width(text))
+        for appearance, upper in entries:
+            budget.debit(upper, appearance=("native-memory-report-binding", appearance[2]))
+
+
+def _report_memory_binding_from_json(text, budget):
+    from src.runtime_plugins.ownership import RuntimeCompositionBinding
+    _report_memory_binding_pay(text, budget)
+    return RuntimeCompositionBinding.from_json(text)
+
+
+def _report_memory_datetime(text, budget):
+    _report_memory_allocation_pay(budget, "datetime-parser", 44)
+    return datetime.fromisoformat(text)
+
+
+def _report_memory_digest(value, budget):
+    from src.workflows.job_runtime import _digest
+    _report_memory_canonical_pay(value, budget, stage="identity-authority-digest", digest_output=True)
+    return _digest(value)
+
+
+def _report_memory_json_loads(value, budget):
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_utf8_width
+        upper = 6 * _native_memory_utf8_width(value) + 2
+        _report_memory_allocation_pay(budget, "identity-readback-parser", upper)
+        _report_memory_allocation_pay(budget, "identity-readback-pairs", upper)
+        _report_memory_allocation_pay(budget, "identity-readback-dicts", upper)
+    return json.loads(value)
+
+
+def _report_memory_canonical_bytes(value, budget):
+    _report_memory_canonical_pay(value, budget, stage="identity-readback-canonical")
+    return canonical_bytes(value)
+
+
+def _report_memory_datetime_iso(value, budget):
+    from src.work_board.pipelines import utc
+    _report_memory_allocation_pay(budget, "datetime-utc", 44)
+    _report_memory_allocation_pay(budget, "datetime-iso", 44)
+    return utc(value).isoformat()
+
+
+def _report_memory_deadline_replace(value, budget):
+    _report_memory_allocation_pay(budget, "datetime-replace", 44)
+    return value.replace(tzinfo=value.tzinfo or timezone.utc)
+
+
+def _report_memory_identity_model_upper(identity):
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    upper = 2 + 6 + 7
+    for name in ("job_id", "owner_kind", "owner_principal_id", "job_kind", "capability_version",
+            "idempotency_scope", "idempotency_key"):
+        upper += _native_memory_ascii_string_width(name) + _native_memory_source_value_upper(getattr(identity, name))
+    return upper
+
+
+def _report_memory_binding_model_upper(binding):
+    from src.memory.header_bounds import _native_memory_ascii_string_width
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    dependencies = 2 + max(0, len(binding.dependency_vector) - 1)
+    for dependency in binding.dependency_vector:
+        dependency_upper = 2 + 3 + 4
+        for name in ("runtime_domain", "owner_kind", "epoch", "composition_digest"):
+            dependency_upper += (_native_memory_ascii_string_width(name)
+                + _native_memory_source_value_upper(getattr(dependency, name)))
+        dependencies += dependency_upper
+    upper = 2 + 7 + 8
+    for name in ("runtime_domain", "origin_method", "native_branch", "allowed_child_methods",
+            "dependency_vector", "host_package_digest", "host_composition_digest", "schema_version"):
+        upper += _native_memory_ascii_string_width(name)
+        upper += dependencies if name == "dependency_vector" else _native_memory_source_value_upper(getattr(binding, name))
+    return upper
+
+
+def _report_memory_replace_spec(original, authority, binding, fingerprint, budget):
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.workflows.inference_accounting import _accounting_scalar_upper
+        authority_upper = _native_memory_source_value_upper(authority)
+        binding_upper = _report_memory_binding_model_upper(binding)
+        changes_upper = (2 + 2 + 3 + _native_memory_ascii_string_width("declared_authority") + authority_upper
+            + _native_memory_ascii_string_width("composition_binding") + binding_upper
+            + _native_memory_ascii_string_width("run_fingerprint") + _native_memory_source_value_upper(fingerprint))
+        _report_memory_allocation_pay(budget, "identity-replace-changes", changes_upper)
+        _report_memory_allocation_pay(budget, "identity-replace-fields-tuple", 2 + 24 + 25 * 4)
+        upper = 2 + 24 + 25
+        for name in ("identity", "inputs", "session_id", "conversation_id", "operator_session_id", "parent_job_id",
+                "parent_fencing_token", "goal_id", "goal_revision", "plan_revision", "candidate_id", "source_task_id",
+                "composition_binding", "priority", "dependencies", "resource_claims", "declared_authority",
+                "deadline_at", "max_attempts", "max_outstanding_jobs", "service_id", "run_fingerprint",
+                "budget_microusd", "budget_digest", "routine_publication_admission_guard"):
+            upper += _native_memory_ascii_string_width(name)
+            if name == "identity":
+                upper += _report_memory_identity_model_upper(original.identity)
+            elif name == "composition_binding":
+                upper += binding_upper
+            elif name == "declared_authority":
+                upper += authority_upper
+            elif name == "run_fingerprint":
+                upper += _native_memory_source_value_upper(fingerprint)
+            elif name == "deadline_at":
+                upper += _accounting_scalar_upper(original.deadline_at)
+            else:
+                upper += _native_memory_source_value_upper(getattr(original, name))
+        _report_memory_allocation_pay(budget, "identity-replace-expanded-fields", upper)
+        _report_memory_allocation_pay(budget, "identity-replace-constructor", upper)
+    return replace(original, declared_authority=authority, composition_binding=binding, run_fingerprint=fingerprint)
+
+
 def _report_memory_journal_numeric_pay(raw, budget):
     """Original JSON parser resource payment; never a report-read grant."""
     if budget is None:
@@ -465,11 +631,11 @@ def read_report_candidate(run, kind="admission", *, _memory_header_budget=None):
     for key in ("task_revision", "board_fencing_token", "goal_revision", "operation_revision", "plan_version", "payload_bytes"):
         if type(value[key]) is not int or value[key] < 1:
             raise ValueError("original report candidate integer changed")
-    binding = RuntimeCompositionBinding.from_json(run.composition_binding_json)
-    cutoff = datetime.fromisoformat(value["cutoff"])
-    started = datetime.fromisoformat(value["attempt_started_at"])
-    operation_deadline = datetime.fromisoformat(value["operation_deadline"])
-    run_deadline = datetime.fromisoformat(run.deadline_at) if type(run.deadline_at) is str else run.deadline_at
+    binding = _report_memory_binding_from_json(run.composition_binding_json, _memory_header_budget)
+    cutoff = _report_memory_datetime(value["cutoff"], _memory_header_budget)
+    started = _report_memory_datetime(value["attempt_started_at"], _memory_header_budget)
+    operation_deadline = _report_memory_datetime(value["operation_deadline"], _memory_header_budget)
+    run_deadline = _report_memory_datetime(run.deadline_at, _memory_header_budget) if type(run.deadline_at) is str else run.deadline_at
     if (cutoff.tzinfo is None or started.tzinfo is None or operation_deadline.tzinfo is None
         or cutoff > min(operation_deadline, started + timedelta(seconds=30))
         or value["job_id"] != f"evidence-cpu:{value['task_id']}:{value['attempt_id']}"
@@ -485,7 +651,7 @@ def read_report_candidate(run, kind="admission", *, _memory_header_budget=None):
         or run.run_fingerprint != value["run_fingerprint"] or run.owner_principal_id != value["owner_principal_id"]
         or run.operator_session_id != value["original_root_id"] or run.session_id != value["original_root_id"]
         or run.goal_id != value["goal_id"] or run.goal_revision != value["goal_revision"]
-        or run_deadline.replace(tzinfo=run_deadline.tzinfo or timezone.utc) != cutoff):
+        or _report_memory_deadline_replace(run_deadline, _memory_header_budget) != cutoff):
         raise ValueError("original report candidate binding changed")
     preflight_report_journal(history)
     return value
@@ -496,6 +662,27 @@ def checked_report_records(run):
     value = read_report_candidate(run)
     return {key: value[key] for key in ("task_id", "attempt_id", "input_id", "operation_id",
         "link_id", "handoff_id", "producer_task_id", "producer_attempt_id", "goal_id")}
+
+
+def _report_memory_admission_payer(budget):
+    """Validate the original caller-enrolled REPORT resource payer only."""
+    if budget is None:
+        return None
+    from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget
+    from src.work_board.review import (
+        _MEMORY_REPORT_PRINCIPAL_SCOPE, _MemoryReportDependencyNumericInventory,
+        _MEMORY_REPORT_DEPENDENCY_NUMERIC, _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL,
+        _memory_report_principal_numeric_owner,
+    )
+    record = _MEMORY_REPORT_PRINCIPAL_SCOPE.get()
+    if (type(budget) is not HeaderReadBudget
+            or type(record) is not _MemoryReportDependencyNumericInventory
+            or _MEMORY_REPORT_DEPENDENCY_NUMERIC.get(record) is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._seal is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or record._issued_id != id(record) or record.budget is not budget):
+        raise HeaderBoundsError("memory_report_admission_numeric_owner_changed")
+    _memory_report_principal_numeric_owner(record.db, record.owner_principal_id)
+    return None
 
 
 def report_identity_matches_current(task, attempt, inputs, run, *, principal, _memory_header_budget=None) -> bool:
@@ -518,7 +705,7 @@ def report_identity_matches_current(task, attempt, inputs, run, *, principal, _m
             or principal.principal_id != task.owner_principal_id
             or task.task_id != metadata["task_id"] or attempt.attempt_id != metadata["attempt_id"]
             or attempt.fencing_token != metadata["board_fencing_token"]
-            or attempt.started_at is None or utc(attempt.started_at).isoformat() != metadata["attempt_started_at"]
+            or attempt.started_at is None or _report_memory_datetime_iso(attempt.started_at, _memory_header_budget) != metadata["attempt_started_at"]
             or task.owner_principal_id != metadata["owner_principal_id"]
             or task.owner_session_id != metadata["original_root_id"]
             or task.goal_id != metadata["goal_id"] or task.goal_revision != metadata["goal_revision"]
@@ -533,31 +720,62 @@ def report_identity_matches_current(task, attempt, inputs, run, *, principal, _m
             or model.producer_sha256 != metadata["producer_sha256"]
             or model.handoff_ref != metadata["handoff_id"]):
             return False
-        original = spec_for(task, attempt, inputs, deadline=datetime.fromisoformat(metadata["cutoff"]),
+        original = spec_for(task, attempt, inputs, deadline=_report_memory_datetime(metadata["cutoff"], _memory_header_budget),
             _memory_header_budget=_memory_header_budget)
+        if _memory_header_budget is not None:
+            from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+            from src.memory.header_bounds import _native_memory_ascii_string_width
+            # Inspect the original authenticated grant scalars without
+            # constructing the str results, sorted list, or authority copy.
+            grants_upper = 2 + max(0, len(principal.grants) - 1)
+            for grant in principal.grants:
+                scalar = getattr(grant, "value", grant)
+                if type(scalar) is not str:
+                    raise ValueError("original report grant scalar changed")
+                grant_upper = _native_memory_ascii_string_width(scalar)
+                grants_upper += grant_upper
+                _report_memory_allocation_pay(_memory_header_budget, "identity-grant-str", grant_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "identity-grants-sorted", grants_upper)
+            if "grants" in original.declared_authority:
+                raise ValueError("original report authority shape changed")
+            authority_upper = (_native_memory_source_value_upper(original.declared_authority)
+                + 2 + _native_memory_ascii_string_width("grants") + grants_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "identity-authority-merge", authority_upper)
+            fingerprint_upper = (2 + 3 + 4 + _native_memory_ascii_string_width("task_ref")
+                + _native_memory_ascii_string_width(task.task_id) + _native_memory_ascii_string_width("attempt_ref")
+                + _native_memory_ascii_string_width(attempt.attempt_id) + _native_memory_ascii_string_width("inputs")
+                + _native_memory_source_value_upper(original.inputs) + _native_memory_ascii_string_width("authority")
+                + authority_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "identity-fingerprint-map", fingerprint_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "identity-fingerprint-json", fingerprint_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "identity-fingerprint-utf8", fingerprint_upper)
+            _report_memory_allocation_pay(_memory_header_budget, "identity-fingerprint-hexdigest", 66)
         authority = {**original.declared_authority,
             "grants": sorted(str(getattr(grant, "value", grant)) for grant in principal.grants)}
-        original = replace(original, declared_authority=authority,
-            composition_binding=RuntimeCompositionBinding.from_json(run.composition_binding_json),
-            run_fingerprint=digest({"task_ref": task.task_id, "attempt_ref": attempt.attempt_id,
-                "inputs": original.inputs, "authority": authority}))
+        original = _report_memory_replace_spec(original, authority,
+            _report_memory_binding_from_json(run.composition_binding_json, _memory_header_budget),
+            digest({"task_ref": task.task_id, "attempt_ref": attempt.attempt_id,
+                "inputs": original.inputs, "authority": authority}), _memory_header_budget)
         _report_memory_safe_inputs_pay(original.inputs, _memory_header_budget)
         input_digest, safe_inputs = _safe_durable_inputs(original.inputs)
         return (not _admission_conflicts(run, spec=original, input_digest=input_digest,
-                    authority_digest=_digest(authority), deadline=original.deadline_at)
-            and canonical_bytes(json.loads(run.arguments_json)) == canonical_bytes(safe_inputs)
-            and canonical_bytes(json.loads(run.declared_authority_json)) == canonical_bytes(authority)
+                    authority_digest=_report_memory_digest(authority, _memory_header_budget), deadline=original.deadline_at,
+                    _memory_header_budget=_memory_header_budget)
+            and _report_memory_canonical_bytes(_report_memory_json_loads(run.arguments_json, _memory_header_budget), _memory_header_budget) == _report_memory_canonical_bytes(safe_inputs, _memory_header_budget)
+            and _report_memory_canonical_bytes(_report_memory_json_loads(run.declared_authority_json, _memory_header_budget), _memory_header_budget) == _report_memory_canonical_bytes(authority, _memory_header_budget)
             and run.operator_session_id == task.owner_session_id
             and run.idempotency_scope == original.identity.idempotency_scope
             and run.idempotency_key == original.identity.idempotency_key
-            and run.idempotency_binding == _binding(owner_principal_id=original.identity.owner_principal_id,
+            and run.idempotency_binding == _report_memory_identity_binding(owner_principal_id=original.identity.owner_principal_id,
                 goal_id=original.goal_id, goal_revision=original.goal_revision,
-                idempotency_scope=original.identity.idempotency_scope, dedupe_key=original.identity.idempotency_key)
+                idempotency_scope=original.identity.idempotency_scope, dedupe_key=original.identity.idempotency_key,
+                budget=_memory_header_budget)
             and not run.parent_run_identity
             and (run.root_run_identity or run.run_identity) == run.run_identity
             and input_digest == metadata["input_digest"]
-            and _digest(authority) == metadata["authority_digest"]
-            and _composition_fingerprint(original, input_digest) == metadata["run_fingerprint"])
+            and _report_memory_digest(authority, _memory_header_budget) == metadata["authority_digest"]
+            and _composition_fingerprint(original, input_digest,
+                _memory_header_budget=_memory_header_budget) == metadata["run_fingerprint"])
     except (AttributeError, ValueError, TypeError, KeyError, BoardError):
         return False
 
@@ -597,7 +815,7 @@ def validated_terminal_report_source(run, *, _memory_header_budget=None):
         or claim["composition_binding_digest"] != candidate["composition_binding_digest"]
         or claim["input_digest"] != candidate["input_digest"] or claim["authority_digest"] != candidate["authority_digest"]
         or claim["run_fingerprint"] != candidate["run_fingerprint"]
-        or claim["original_deadline_at"] != int(datetime.fromisoformat(candidate["cutoff"]).timestamp() * 1000)):
+        or claim["original_deadline_at"] != int(_report_memory_datetime(candidate["cutoff"], _memory_header_budget).timestamp() * 1000)):
         raise ValueError("original terminal report claim changed")
     if _memory_header_budget is not None:
         from src.memory.header_bounds import _native_memory_ascii_string_width

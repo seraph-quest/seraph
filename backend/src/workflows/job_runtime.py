@@ -390,12 +390,70 @@ async def _native_memory_original_claim_read_capture(db, run, request):
         _NATIVE_MEMORY_CLAIM_TRACES.pop(id(collector), None)
 
 
-def original_native_memory_completion_claim_read_numeric_schedule(operation, prepared, *,
+def _native_memory_completion_bound_input_construction_upper(operation, prepared, *,
         certificate, facts, retention_widths):
+    """Only the existing generic numerical-input constructor subtree."""
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    from src.memory.header_bounds import HeaderBoundsError, MAX_ROWS, _native_memory_utf8_width
+    from src.workspace.accounting_witness import COMPOSITION_FIELDS, NATIVE_EXTENSION_FIELDS
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    guard = operation.db.info["composition_guard"]
+    proofs = getattr(guard, "_native_memory_retained_proofs", None)
+    selected = getattr(guard, "_native_memory_existing_source_rows", None)
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    if (type(proofs) is not tuple or len(proofs) != 3 or proofs[0] is not operation
+            or proofs[2] or type(selected) is not tuple or len(selected) != 3
+            or selected[0] is not operation or selected[1] is not certificate
+            or type(projection) is not tuple or len(projection) != 3
+            or projection[0] is not operation):
+        raise HeaderBoundsError("memory_completion_constructor_lineage_changed")
+    count = len(facts["row_uppers"])
+    if not 1 <= count <= MAX_ROWS or retention_widths["row_count"] != count:
+        raise HeaderBoundsError("memory_completion_constructor_lineage_changed")
+    addresses = rows = 0
+    for address in facts["row_uppers"]:
+        table, key = address
+        key_width = 6 * _native_memory_utf8_width(key) + 2 if type(key) is str else 20
+        address_width = 3 + len(table) + 2 + key_width
+        addresses += address_width
+        fields = NATIVE_EXTENSION_FIELDS.get(table, COMPOSITION_FIELDS.get(table))
+        if fields is None:
+            raise HeaderBoundsError("memory_completion_constructor_lineage_changed")
+        # Original raw row map plus optional scalar override map. Both are
+        # bounded by the certified raw tuple and original literal field keys.
+        row_width = facts["raw_tuple_uppers"][address] + 2
+        for name in fields:
+            row_width += 6 * len(name) + 4
+        rows += address_width + 1 + 3 + 2 * row_width
+    fixed_sets = (2 + 25 * (6 * len("completion_future_text_bytes") + 3)) * 3
+    fixed_sets += 2 * (2 + 3 * (6 * len("checkpoint_receipts_json") + 3))
+    fixed_sets += 2 * (2 + 7 * (6 * len("checkpoint_receipts_json") + 3))
+    allowed_sets = len(projection[1]) * (2 + 5 * (6 * len("work_board_decision_receipts") + 3))
+    # rows mapping; SIX equality sets; projected-address frozenset; each
+    # selected/new address, row/changes tuple and update-search generator.
+    result = (2 + max(0, count - 1) + rows + 7 * (2 + addresses + count)
+        + 2 * addresses + count * (2 + 7 + 8 * 4)
+        + fixed_sets + allowed_sets + 3 * (3 + len("workflow_run_states") + 2 + addresses)
+        + 6 * (2 + 7 + 8 * 4) + 2 + 5 + 6 * 20)
+    return result
+
+
+def original_native_memory_completion_claim_read_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
     """Reuse ONE original claim's ordered paid numerical observations only."""
-    from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
     from src.memory.header_bounds import HeaderBoundsError
-    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if type(_construction_only) is not bool:
+        from src.memory.header_bounds import HeaderBoundsError
+        raise HeaderBoundsError("memory_completion_constructor_mode_changed")
+    construction = _native_memory_completion_bound_input_construction_upper(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if not _construction_only:
+        from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+        _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
     source = operation.source
     claim = source.claim
     lineage = getattr(claim, "_memory_claim_read_numeric", None)
@@ -412,7 +470,7 @@ def original_native_memory_completion_claim_read_numeric_schedule(operation, pre
         raise HeaderBoundsError("memory_original_claim_numeric_lineage_changed")
     # No old driver/transaction is revived. Current Source/guard/facts checks
     # above authorize only numerical forecast reuse, never old body reads.
-    return lineage[7]
+    return construction if _construction_only else lineage[7]
 
 
 def _native_memory_claim_binding_parser_upper(text_bytes):
@@ -480,12 +538,21 @@ def _native_memory_claim_verifier_budget(db, run, request):
 
 
 def original_native_memory_claim_verifier_allocation_numeric_schedule(operation, prepared, *,
-        certificate, facts, retention_widths):
+        certificate, facts, retention_widths, _construction_only=False):
     """ONE completion verifier's allocations, separate from observed reads."""
-    from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
     from src.memory.header_bounds import WRS_BY_RUN
     from src.security.trust_contract import AuthorityGrant
-    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if type(_construction_only) is not bool:
+        from src.memory.header_bounds import HeaderBoundsError
+        raise HeaderBoundsError("memory_completion_constructor_mode_changed")
+    construction = _native_memory_completion_bound_input_construction_upper(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if not _construction_only:
+        from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+        _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
     text = facts["text_bytes"][(WRS_BY_RUN.table, operation.run.run_identity)]
     grants = 2
     count = 0
@@ -497,6 +564,12 @@ def original_native_memory_claim_verifier_allocation_numeric_schedule(operation,
     if count != 4:
         from src.memory.header_bounds import HeaderBoundsError
         raise HeaderBoundsError("memory_claim_verifier_numeric_grants_changed")
+    if _construction_only:
+        # FIVE actual triples, five two-field appearance tuples, outer tuple.
+        # Grant iteration constructs no container; four values are constants.
+        appearance = 3 + len("native-memory-claim-verifier") + 2 + len("authority-json-parser") + 2
+        triple = 4 + len("completion") + 2 + appearance + 20
+        return construction + 2 + 4 + 5 * (triple + appearance)
     return (("completion", ("native-memory-claim-verifier", "binding-parser"),
             _native_memory_claim_binding_parser_upper(retention_widths["binding_text_bytes"])),
         ("completion", ("native-memory-claim-verifier", "producer-roster"), _native_memory_claim_producer_roster_upper()),
@@ -1835,18 +1908,35 @@ def _native_memory_completion_goal_fence_payer(db, source):
 
 
 def original_native_memory_completion_goal_fence_numeric_schedule(operation, prepared, *,
-        certificate, facts, retention_widths):
+        certificate, facts, retention_widths, _construction_only=False):
     """ONE original user Goal fence's scalar copies and final JSON parser."""
-    from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
     from src.memory.header_bounds import GOAL, WRS_BY_RUN, HeaderBoundsError
-    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if type(_construction_only) is not bool:
+        from src.memory.header_bounds import HeaderBoundsError
+        raise HeaderBoundsError("memory_completion_constructor_mode_changed")
+    construction = _native_memory_completion_bound_input_construction_upper(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if not _construction_only:
+        from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+        _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
     run = operation.run
     if run.owner_kind != "user":
         raise HeaderBoundsError("memory_completion_goal_fence_numeric_shape_unavailable")
     if run.goal_id is None:
-        return ()
+        return construction if _construction_only else ()
     own = facts["text_bytes"][(WRS_BY_RUN.table, run.run_identity)]
     goal = facts["text_bytes"][(GOAL.table, run.goal_id)]
+    if _construction_only:
+        # Original nine-pair intermediate and final nine triples are distinct.
+        stage = len("authority-parser-fallback") + 2
+        appearance = 3 + len("native-memory-completion-goal-fence") + 2 + stage
+        pair = 3 + stage + 20
+        triple = 4 + len("completion") + 2 + appearance + 20
+        return (construction + 2 + 8 + 9 * pair + 2 + 8 + 9 * (triple + appearance)
+            + 2 * (2 + 7 + 8 * 4))  # string closure and tuple generator frame
     def string(size):
         if type(size) is not int or size < 0:
             raise HeaderBoundsError("memory_completion_goal_fence_numeric_shape_unavailable")
@@ -2246,13 +2336,395 @@ def _dependency_ids(run: WorkflowRunState) -> list[str]:
     return _string_list(parsed)
 
 
-def _composition_fingerprint(spec, input_digest):
-    value = _text(spec.run_fingerprint, input_digest)
+def _memory_admission_owner(budget):
+    """Original REPORT caller's allocation payer; never body permission."""
+    if budget is None:
+        return
+    from src.runtime_plugins.task_capability import _report_memory_admission_payer
+    _report_memory_admission_payer(budget)
+
+
+def _memory_admission_pay(budget, stage, upper):
+    if budget is None:
+        return
+    _memory_admission_owner(budget)
+    budget.debit(upper, appearance=("native-memory-admission-conflict", stage))
+
+
+def _memory_admission_text(value, default, budget, stage):
+    _memory_admission_owner(budget)
+    if budget is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        if value is not None and type(value) is not str:
+            raise DurableJobTransitionError("native admission scalar shape unavailable")
+        upper = 2 if not value else _native_memory_ascii_string_width(value)
+        _memory_admission_pay(budget, stage + "-string", upper)
+        _memory_admission_pay(budget, stage + "-strip", upper)
+    return _text(value, default)
+
+
+def _memory_admission_digest(value, budget, stage):
+    _memory_admission_owner(budget)
+    if budget is not None:
+        from src.workspace.accounting_witness import _native_memory_closed_value_width
+        upper = _native_memory_closed_value_width(value)
+        _memory_admission_pay(budget, stage + "-canonical", upper)
+        _memory_admission_pay(budget, stage + "-utf8", upper)
+        _memory_admission_pay(budget, stage + "-digest", 66)
+    return _digest(value)
+
+
+def _memory_admission_list(value, budget, stage, *, parsed=False):
+    _memory_admission_owner(budget)
+    if budget is not None:
+        from src.workspace.accounting_witness import _native_memory_closed_value_width
+        from src.memory.header_bounds import _native_memory_utf8_width
+        if parsed:
+            upper = 2 if not value else 6 * _native_memory_utf8_width(value) + 2
+            if value:
+                _memory_admission_pay(budget, stage + "-parser", upper)
+                _memory_admission_pay(budget, stage + "-parsed-list", upper)
+        else:
+            upper = _native_memory_closed_value_width(value) if value is not None else 2
+        # Each string is normalized twice by the original comprehension;
+        # encoded source width bounds each retained/temporary normalization.
+        _memory_admission_pay(budget, stage + "-condition-string", upper)
+        _memory_admission_pay(budget, stage + "-condition-strip", upper)
+        _memory_admission_pay(budget, stage + "-value-string", upper)
+        _memory_admission_pay(budget, stage + "-value-strip", upper)
+        _memory_admission_pay(budget, stage + "-set", upper)
+        _memory_admission_pay(budget, stage + "-sorted-list", upper)
+        _memory_admission_pay(budget, stage + "-canonical", upper)
+    return _normalized_json_list(value) if parsed else _canonical(_string_list(value))
+
+
+def _memory_admission_deadline(value, budget, stage):
+    _memory_admission_owner(budget)
+    # Original datetime/UTC/ISO constructors have the same fixed source bound
+    # used by the REPORT owner; no new date or permission is constructed here.
+    if value is not None:
+        _memory_admission_pay(budget, stage + "-utc", 194)
+        _memory_admission_pay(budget, stage + "-iso", 194)
+    return _deadline_identity(value)
+
+
+def _memory_admission_binding_json(binding, budget, *, _construction_only=False):
+    _memory_admission_owner(budget)
+    if budget is not None:
+        _memory_admission_pay(budget, "binding-control-roster",
+            2 + 7 + 8 * (6 * len("host_composition_digest") + 2)
+            + 2 * len(binding.dependency_vector) * (2 + 3 + 4 * (6 * len("composition_digest") + 2)))
+        from src.runtime_plugins.task_capability import _report_memory_binding_model_upper
+        from src.workspace.accounting_witness import _native_memory_closed_value_width
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        upper = _report_memory_binding_model_upper(binding)
+        payload = upper + len("method_manifest_version") + 3 + 28 + 1 \
+            + len("method_manifest_digest") + 3 + 66 + 1
+        wire = payload + len("binding_digest") + 3 + 66 + 1
+        methods = _native_memory_closed_value_width(binding.allowed_child_methods)
+        dependencies = 2 + max(0, len(binding.dependency_vector) - 1)
+        dependency_maps = 0
+        for item in binding.dependency_vector:
+            item_upper = 2 + 3 + 4
+            for name in ("runtime_domain", "owner_kind", "epoch", "composition_digest"):
+                item_upper += _native_memory_ascii_string_width(name) + _native_memory_closed_value_width(getattr(item, name))
+            dependencies += item_upper
+            dependency_maps += item_upper
+        from src.workflows.inference_accounting import _original_native_binding_numeric_entries
+        from src.runtime_plugins.task_capability import _report_memory_binding_planning_upper
+        # ONE genuinely prepaid original60 constructor supplies its two
+        # manifest occurrences. Only the closed manifest roster is consumed;
+        # no from_json parser or binding constructor is called by to_json.
+        _memory_admission_pay(budget, "binding-schedule-storage", _report_memory_binding_planning_upper())
+        entries = _original_native_binding_numeric_entries(None, wire)
+        copies = 1 if _construction_only else 2
+        _memory_admission_pay(budget, "binding-manifest-roster", 2 + 13 + 14 * (
+            6 * len("child-dependencies") + 2))
+        manifest_names = ("method-set", "method-sort", "method-tuple", "domain-names", "domain-values",
+            "domain-sort", "domain-tuple", "method-closure", "origin-dependencies", "child-dependencies",
+            "manifest-source", "manifest-canonical", "manifest-encoded", "manifest-digest")
+        _memory_admission_pay(budget, "binding-label-storage", 14 * copies * 4 * (
+            2 + len("binding-manifest-") + 20 + len("child-dependencies") + 12))
+        seen = 0
+        for appearance, amount in entries:
+            name = appearance[2]
+            if type(name) is tuple and len(name) == 3 and name[0] == "manifest":
+                if type(name[1]) is not int or name[1] not in (0, 1) or name[2] not in manifest_names:
+                    raise DurableJobTransitionError("native binding manifest schedule changed")
+                if name[1] < copies:
+                    bit = 1 << (14 * name[1] + manifest_names.index(name[2]))
+                    if seen & bit:
+                        raise DurableJobTransitionError("native binding manifest schedule changed")
+                    _memory_admission_pay(budget, "binding-manifest-" + str(name[1]) + "-" + name[2], amount)
+                    seen |= bit
+        if seen != (1 << (14 * copies)) - 1:
+            raise DurableJobTransitionError("native binding manifest schedule changed")
+        for occurrence in range(copies):
+            _memory_admission_pay(budget, "binding-payload-methods-list", methods)
+            _memory_admission_pay(budget, "binding-payload-dependencies-list", dependencies)
+            _memory_admission_pay(budget, "binding-dependency-maps", dependency_maps)
+            _memory_admission_pay(budget, "binding-payload-map", payload)
+        _memory_admission_pay(budget, "binding-canonical", payload)
+        _memory_admission_pay(budget, "binding-utf8", payload)
+        _memory_admission_pay(budget, "binding-digest", 66)
+        if not _construction_only:
+            _memory_admission_pay(budget, "binding-wire-map", wire)
+            _memory_admission_pay(budget, "binding-wire-canonical", wire)
+    return None if _construction_only else binding.to_json()
+
+
+def original_native_memory_admission_conflict_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE genuine REPORT conflict call; no model, read or authority is issued."""
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width, _native_memory_utf8_width
+    from src.runtime_plugins.memory_producer import (
+        _native_memory_dispatch_validation_numeric_owner, _native_memory_report_input_numeric_facts,
+        _native_memory_report_authority_numeric_facts,
+        REPORT_SOURCE_CAPABILITY)
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_admission_numeric_shape_unavailable")
+    proofs = getattr(operation.db.info["composition_guard"], "_native_memory_retained_proofs", None)
+    if (type(proofs) is not tuple or len(proofs) != 3 or proofs[0] is not operation
+            or type(proofs[2]) is not tuple or proofs[2]):
+        raise HeaderBoundsError("memory_admission_numeric_affected_schedule_unavailable")
+    record = _native_memory_report_input_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    authority = _native_memory_report_authority_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    task_id, attempt_id, report_id, task, attempt, run, text, input_digest = authority
+    if (task_id != record.stage.task_id or attempt_id != record.stage.attempt_id
+            or report_id == operation.run.run_identity or input_digest != record.input_digest):
+        raise HeaderBoundsError("memory_admission_numeric_selected_row_unavailable")
+    if len(task) != 6 or len(run) != 24 or len(text) != 4:
+        raise HeaderBoundsError("memory_admission_numeric_selected_row_unavailable")
+    for name in ("task_id", "capability_id", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision"):
+        if name not in task or type(task[name]) is not int or task[name] < 0:
+            raise HeaderBoundsError("memory_admission_numeric_selected_row_unavailable")
+    for name in ("run_identity", "input_digest", "job_kind", "capability_version", "owner_kind",
+            "owner_principal_id", "service_id", "authority_digest", "dependencies_json", "resource_claims_json",
+            "deadline_at", "priority", "max_attempts", "session_id", "parent_job_id", "parent_fencing_token",
+            "goal_id", "goal_revision", "plan_revision", "candidate_id", "source_task_id", "composition_binding_json",
+            "run_fingerprint", "budget_digest"):
+        if name not in run or type(run[name]) is not int or run[name] < 0:
+            raise HeaderBoundsError("memory_admission_numeric_selected_row_unavailable")
+    for name in ("dependencies_json", "resource_claims_json", "composition_binding_json", "declared_authority_json"):
+        if name not in text or type(text[name]) is not int or text[name] < 0:
+            raise HeaderBoundsError("memory_admission_numeric_selected_row_unavailable")
+    if not text["composition_binding_json"]:
+        raise HeaderBoundsError("memory_admission_numeric_binding_unavailable")
+    from src.workspace.accounting_witness import _native_memory_closed_value_width
+    from src.runtime_plugins.task_capability import _report_memory_binding_planning_upper
+    # Existing from_json fixes14 dependencies/34 methods/8192 UTF8 bytes.
+    binding_bytes = text["composition_binding_json"]
+    if binding_bytes > 8192:
+        raise HeaderBoundsError("memory_admission_numeric_binding_unavailable")
+    model = 6 * binding_bytes + 2
+    payload = model + len("method_manifest_version") + 3 + 28 + 1 + len("method_manifest_digest") + 3 + 66 + 1
+    wire = payload + len("binding_digest") + 3 + 66 + 1
+    sizing_roster = 2 + 23 + 24 * (6 * len("composition_binding_json") + 2)
+    binding_roster = 2 + 7 + 8 * (6 * len("host_composition_digest") + 2) \
+        + 2 * 14 * (2 + 3 + 4 * (6 * len("composition_digest") + 2))
+    expected = actual = 2 + 23 + 24
+    for name in ("job_id", "input_digest", "job_kind", "capability_version", "owner_kind",
+            "owner_principal_id", "service_id", "authority_digest", "dependencies", "resource_claims",
+            "deadline_at", "priority", "max_attempts", "session_id", "parent_job_id",
+            "parent_fencing_token", "goal_id", "goal_revision", "plan_revision", "candidate_id",
+            "source_task_id", "composition_binding_json", "run_fingerprint", "budget_digest"):
+        key_width = _native_memory_ascii_string_width(name)
+        expected += key_width
+        actual += key_width
+        if name in ("input_digest", "authority_digest", "run_fingerprint", "budget_digest"):
+            expected += 66
+            actual += max(66, run[name])
+        elif name == "deadline_at":
+            expected += 194
+            actual += 194
+        elif name in ("priority", "max_attempts"):
+            expected += 20
+            actual += 20
+        elif name in ("dependencies", "resource_claims"):
+            expected += 6 * 2 + 2  # spec_for leaves both original tuples empty
+            raw_bytes = text[name + "_json"]
+            actual += 6 * (6 * raw_bytes + 2 if raw_bytes else 2) + 2
+        elif name == "composition_binding_json":
+            expected += 6 * (model + 256) + 2
+            actual += run[name]
+        else:
+            actual += run["run_identity" if name == "job_id" else name]
+            if name == "job_id":
+                expected += (_native_memory_ascii_string_width("evidence-cpu:")
+                    + _native_memory_ascii_string_width(record.stage.task_id)
+                    + _native_memory_ascii_string_width(":")
+                    + _native_memory_ascii_string_width(record.stage.attempt_id) - 6)
+            elif name == "job_kind":
+                expected += task["capability_id"]
+            elif name == "capability_version":
+                expected += 3
+            elif name == "owner_kind":
+                expected += 6  # user
+            elif name == "owner_principal_id":
+                expected += task[name]
+            elif name == "session_id":
+                expected += task["owner_session_id"]
+            elif name in ("goal_id", "goal_revision"):
+                expected += task[name]
+            elif name == "plan_revision":
+                expected += record.dimensions[2][1]
+            else:
+                expected += 4  # spec_for's original NULL defaults
+    #135 pairs is the closed worst branch including two parsed lists and
+    # actual budget fallback; no unused reservation is refunded. One original
+    #60-vector constructor is additionally required by this forecast itself.
+    count = 135
+    stage_upper = len("expected-dependencies-condition-string") + 2
+    label_upper = 3 + len("native-memory-admission-conflict") + 2 + stage_upper
+    pair_upper = 3 + label_upper + 20
+    planning = (_report_memory_binding_planning_upper() + sizing_roster
+        + 2 + 13 + 14 * (len("child-dependencies") + 2)
+        + count * (4 * stage_upper + label_upper + pair_upper + 1)
+        + 2 * (2 + count * pair_upper + count - 1) + 4 * (2 + 7 + 8 * 4))
+    if _construction_only:
+        return planning
+    from src.workflows.inference_accounting import _original_native_binding_numeric_entries
+    original = _original_native_binding_numeric_entries(None, wire)
+    entries = []
+    def add(stage, upper):
+        entries.append((("native-memory-admission-conflict", stage), upper))
+    def digest(stage, upper):
+        add(stage + "-canonical", upper); add(stage + "-utf8", upper); add(stage + "-digest", 66)
+    def normalized(stage, upper, *, parsed=False):
+        if parsed:
+            add(stage + "-parser", upper); add(stage + "-parsed-list", upper)
+        for tail in ("condition-string", "condition-strip", "value-string", "value-strip", "set", "sorted-list", "canonical"):
+            add(stage + "-" + tail, upper)
+    def binding(copies):
+        add("binding-control-roster", binding_roster)
+        add("binding-schedule-storage", _report_memory_binding_planning_upper())
+        add("binding-manifest-roster", 2 + 13 + 14 * (6 * len("child-dependencies") + 2))
+        add("binding-label-storage", 14 * copies * 4 * (2 + len("binding-manifest-") + 20 + len("child-dependencies") + 12))
+        manifest_names = ("method-set", "method-sort", "method-tuple", "domain-names", "domain-values",
+            "domain-sort", "domain-tuple", "method-closure", "origin-dependencies", "child-dependencies",
+            "manifest-source", "manifest-canonical", "manifest-encoded", "manifest-digest")
+        seen = 0
+        for appearance, amount in original:
+            name = appearance[2]
+            if type(name) is tuple and len(name) == 3 and name[0] == "manifest":
+                if type(name[1]) is not int or name[1] not in (0, 1) or name[2] not in manifest_names:
+                    raise HeaderBoundsError("memory_admission_numeric_constructor_roster_changed")
+                if name[1] < copies:
+                    bit = 1 << (14 * name[1] + manifest_names.index(name[2]))
+                    if seen & bit:
+                        raise HeaderBoundsError("memory_admission_numeric_constructor_roster_changed")
+                    seen |= bit
+                    add("binding-manifest-" + str(name[1]) + "-" + name[2], amount)
+        if seen != (1 << (14 * copies)) - 1:
+            raise HeaderBoundsError("memory_admission_numeric_constructor_roster_changed")
+        for index in range(copies):
+            add("binding-payload-methods-list", model); add("binding-payload-dependencies-list", model)
+            add("binding-dependency-maps", model); add("binding-payload-map", payload)
+        add("binding-canonical", payload); add("binding-utf8", payload); add("binding-digest", 66)
+        if copies == 2:
+            add("binding-wire-map", wire); add("binding-wire-canonical", wire)
+    add("map-sizing-roster", sizing_roster); add("expected-map", expected)
+    normalized("expected-dependencies", 2); normalized("expected-resources", 2)
+    add("expected-deadline-utc", 194); add("expected-deadline-iso", 194)
+    binding(2)
+    add("expected-fingerprint-update", 2 + 2 + 25 + 66)
+    add("fingerprint-string", 66); add("fingerprint-strip", 66)
+    binding(1)
+    fingerprint_map = 2 + 1 + len("native_fingerprint") + 3 + 66 + len("composition_binding_digest") + 3 + 66
+    add("fingerprint-map", fingerprint_map); digest("fingerprint", fingerprint_map)
+    add("expected-budget-map", 2 + len("budget_microusd") + 3 + 20)
+    add("expected-budget-update", 2 + len("budget_digest") + 3 + 66)
+    digest("expected-budget", 2 + len("budget_microusd") + 3 + 20)
+    add("expected-budget-string", 2); add("expected-budget-strip", 2)
+    add("map-sizing-roster", sizing_roster); add("actual-map", actual)
+    normalized("actual-dependencies", 6 * text["dependencies_json"] + 2 if text["dependencies_json"] else 2, parsed=True)
+    normalized("actual-resources", 6 * text["resource_claims_json"] + 2 if text["resource_claims_json"] else 2, parsed=True)
+    add("actual-deadline-utc", 194); add("actual-deadline-iso", 194)
+    add("actual-fingerprint-update", 2 + 2 + 25 + 66)
+    add("actual-authority-fallback", 2)
+    authority = 6 * text["declared_authority_json"] + 2 if text["declared_authority_json"] else 2
+    add("actual-authority-parser", authority); add("actual-authority-materialization", authority)
+    add("actual-budget-map", 2 + len("budget_microusd") + 3 + 20)
+    add("actual-budget-update", 2 + len("budget_digest") + 3 + 66)
+    digest("actual-budget", 2 + len("budget_microusd") + 3 + 20)
+    add("comparison-items", expected + 24 * 3 + 4); add("conflict-list", 2 + 23 + 24 * 27)
+    if len(entries) != count:
+        raise HeaderBoundsError("memory_admission_numeric_constructor_roster_changed")
+    return tuple(entries)
+
+
+def _memory_admission_map_capacity(existing, spec, budget, *, actual):
+    _memory_admission_owner(budget)
+    if budget is None:
+        return
+    # Pay this closed numeric field roster before constructing it. Widths
+    # describe the actual22-field admission maps, with two optional fields.
+    _memory_admission_pay(budget, "map-sizing-roster",
+        2 + 23 + 24 * (6 * len("composition_binding_json") + 2))
+    from src.workspace.accounting_witness import _native_memory_closed_value_width
+    from src.memory.header_bounds import _native_memory_ascii_string_width, _native_memory_utf8_width
+    upper = 2 + 23 + 24
+    for name in ("job_id", "input_digest", "job_kind", "capability_version", "owner_kind",
+            "owner_principal_id", "service_id", "authority_digest", "dependencies", "resource_claims",
+            "deadline_at", "priority", "max_attempts", "session_id", "parent_job_id",
+            "parent_fencing_token", "goal_id", "goal_revision", "plan_revision", "candidate_id",
+            "source_task_id", "composition_binding_json", "run_fingerprint", "budget_digest"):
+        upper += _native_memory_ascii_string_width(name)
+        if name in ("input_digest", "authority_digest", "run_fingerprint", "budget_digest"):
+            width = 66
+            value = getattr(existing, name, None) if actual else getattr(spec, name, None)
+            if value is not None:
+                width = max(width, _native_memory_closed_value_width(value))
+        elif name == "deadline_at":
+            width = 194
+        elif name in ("priority", "max_attempts"):
+            width = 20
+        elif name in ("dependencies", "resource_claims"):
+            value = getattr(existing, name + "_json", None) if actual else getattr(spec, name)
+            raw = (6 * _native_memory_utf8_width(value) + 2 if value else 2) if actual \
+                else _native_memory_closed_value_width(value)
+            width = 6 * raw + 2  # canonical list retained as a JSON string
+        elif name == "composition_binding_json":
+            if actual:
+                width = _native_memory_closed_value_width(getattr(existing, name, None))
+            elif spec.composition_binding is None:
+                width = 4
+            else:
+                from src.runtime_plugins.task_capability import _report_memory_binding_model_upper
+                width = 6 * (_report_memory_binding_model_upper(spec.composition_binding) + 256) + 2
+        elif actual:
+            value = getattr(existing, "run_identity" if name == "job_id" else name, None)
+            width = _native_memory_closed_value_width(value)
+        elif name in ("job_id", "job_kind", "capability_version", "owner_kind", "owner_principal_id"):
+            width = _native_memory_closed_value_width(getattr(spec.identity, name))
+        else:
+            width = _native_memory_closed_value_width(getattr(spec, name, None))
+        upper += width
+    _memory_admission_pay(budget, "actual-map" if actual else "expected-map", upper)
+    return upper
+
+
+def _composition_fingerprint(spec, input_digest, *, _memory_header_budget=None):
+    _memory_admission_owner(_memory_header_budget)
+    value = _memory_admission_text(spec.run_fingerprint, input_digest, _memory_header_budget, "fingerprint")
     if spec.composition_binding is not None:
         if not isinstance(spec.composition_binding, RuntimeCompositionBinding):
             raise DurableJobTransitionError("typed composition binding required")
-        return _digest({"native_fingerprint": value,
-                        "composition_binding_digest": spec.composition_binding.binding_digest})
+        if _memory_header_budget is not None:
+            # binding_digest has one payload/manifest path; the serialization
+            # wrapper's two-path conservative reservation bounds this subset.
+            _memory_admission_binding_json(spec.composition_binding, _memory_header_budget, _construction_only=True)
+            from src.workspace.accounting_witness import _native_memory_closed_value_width
+            _memory_admission_pay(_memory_header_budget, "fingerprint-map",
+                2 + 1 + len("native_fingerprint") + 3 + _native_memory_closed_value_width(value)
+                + len("composition_binding_digest") + 3 + 66)
+        return _memory_admission_digest({"native_fingerprint": value,
+                        "composition_binding_digest": spec.composition_binding.binding_digest},
+                        _memory_header_budget, "fingerprint")
     return value
 
 
@@ -2263,9 +2735,12 @@ def _admission_conflicts(
     input_digest: str,
     authority_digest: str,
     deadline: datetime | None,
+    _memory_header_budget=None,
 ) -> list[str]:
     """Return immutable admission fields that differ without exposing values."""
+    _memory_admission_owner(_memory_header_budget)
     identity = spec.identity
+    expected_upper = _memory_admission_map_capacity(existing, spec, _memory_header_budget, actual=False)
     expected = {
         "job_id": identity.job_id,
         "input_digest": input_digest,
@@ -2275,9 +2750,9 @@ def _admission_conflicts(
         "owner_principal_id": identity.owner_principal_id,
         "service_id": spec.service_id,
         "authority_digest": authority_digest,
-        "dependencies": _canonical(_string_list(spec.dependencies)),
-        "resource_claims": _canonical(_string_list(spec.resource_claims)),
-        "deadline_at": _deadline_identity(deadline),
+        "dependencies": _memory_admission_list(spec.dependencies, _memory_header_budget, "expected-dependencies"),
+        "resource_claims": _memory_admission_list(spec.resource_claims, _memory_header_budget, "expected-resources"),
+        "deadline_at": _memory_admission_deadline(deadline, _memory_header_budget, "expected-deadline"),
         "priority": int(spec.priority),
         "max_attempts": int(spec.max_attempts),
         "session_id": spec.session_id,
@@ -2288,18 +2763,23 @@ def _admission_conflicts(
         "plan_revision": spec.plan_revision,
         "candidate_id": spec.candidate_id,
         "source_task_id": spec.source_task_id,
-        "composition_binding_json": spec.composition_binding.to_json() if spec.composition_binding is not None else None,
+        "composition_binding_json": _memory_admission_binding_json(spec.composition_binding, _memory_header_budget) if spec.composition_binding is not None else None,
     }
     if spec.run_fingerprint is not None or hasattr(existing, "run_fingerprint"):
-        expected["run_fingerprint"] = _composition_fingerprint(spec, input_digest)
+        _memory_admission_pay(_memory_header_budget, "expected-fingerprint-update", 2 + 2 + 25 + 66)
+        expected["run_fingerprint"] = _composition_fingerprint(spec, input_digest, _memory_header_budget=_memory_header_budget)
     if hasattr(existing, "budget_digest"):
         expected_budget = spec.budget_microusd
         if expected_budget is None:
             expected_budget = _authority_budget_microusd(spec.declared_authority)
-        expected["budget_digest"] = _text(
+        _memory_admission_pay(_memory_header_budget, "expected-budget-map", 2 + len("budget_microusd") + 3 + 20)
+        _memory_admission_pay(_memory_header_budget, "expected-budget-update", 2 + len("budget_digest") + 3 + 66)
+        expected["budget_digest"] = _memory_admission_text(
             spec.budget_digest,
-            _digest({"budget_microusd": expected_budget}),
+            _memory_admission_digest({"budget_microusd": expected_budget}, _memory_header_budget, "expected-budget"),
+            _memory_header_budget, "expected-budget",
         )
+    _memory_admission_map_capacity(existing, spec, _memory_header_budget, actual=True)
     actual = {
         "job_id": getattr(existing, "run_identity", None),
         "input_digest": getattr(existing, "input_digest", None),
@@ -2309,9 +2789,9 @@ def _admission_conflicts(
         "owner_principal_id": getattr(existing, "owner_principal_id", None),
         "service_id": getattr(existing, "service_id", None),
         "authority_digest": getattr(existing, "authority_digest", None),
-        "dependencies": _normalized_json_list(getattr(existing, "dependencies_json", None)),
-        "resource_claims": _normalized_json_list(getattr(existing, "resource_claims_json", None)),
-        "deadline_at": _deadline_identity(getattr(existing, "deadline_at", None)),
+        "dependencies": _memory_admission_list(getattr(existing, "dependencies_json", None), _memory_header_budget, "actual-dependencies", parsed=True),
+        "resource_claims": _memory_admission_list(getattr(existing, "resource_claims_json", None), _memory_header_budget, "actual-resources", parsed=True),
+        "deadline_at": _memory_admission_deadline(getattr(existing, "deadline_at", None), _memory_header_budget, "actual-deadline"),
         "priority": int(getattr(existing, "priority", 0) or 0),
         "max_attempts": int(getattr(existing, "max_attempts", 0) or 0),
         "session_id": getattr(existing, "session_id", None),
@@ -2325,20 +2805,36 @@ def _admission_conflicts(
         "composition_binding_json": getattr(existing, "composition_binding_json", None),
     }
     if "run_fingerprint" in expected:
+        _memory_admission_pay(_memory_header_budget, "actual-fingerprint-update", 2 + 2 + 25 + 66)
         actual["run_fingerprint"] = getattr(existing, "run_fingerprint", None) or input_digest
     if "budget_digest" in expected:
+        if _memory_header_budget is not None:
+            from src.memory.header_bounds import _native_memory_utf8_width
+            raw_authority = getattr(existing, "declared_authority_json", None)
+            upper = 2 if not raw_authority else 6 * _native_memory_utf8_width(raw_authority) + 2
+            _memory_admission_pay(_memory_header_budget, "actual-authority-fallback", 2)
+            if raw_authority:
+                _memory_admission_pay(_memory_header_budget, "actual-authority-parser", upper)
+                _memory_admission_pay(_memory_header_budget, "actual-authority-materialization", upper)
+            if not getattr(existing, "budget_digest", None):
+                _memory_admission_pay(_memory_header_budget, "actual-budget-map", 2 + len("budget_microusd") + 3 + 20)
+            _memory_admission_pay(_memory_header_budget, "actual-budget-update", 2 + len("budget_digest") + 3 + 66)
         authority = _json_load(getattr(existing, "declared_authority_json", None), {})
-        actual["budget_digest"] = getattr(existing, "budget_digest", None) or _digest(
-            {"budget_microusd": _authority_budget_microusd(authority)}
+        actual["budget_digest"] = getattr(existing, "budget_digest", None) or _memory_admission_digest(
+            {"budget_microusd": _authority_budget_microusd(authority)}, _memory_header_budget, "actual-budget"
         )
     # Scheduled child work is deliberately deduped across strategist parent
     # occurrences.  The first admitted child retains its original lineage;
     # a later parent may replay that same child only after its own fence has
     # been checked.  Other callers keep parent identity immutable.
     if identity.idempotency_scope == "goal-snapshot-to-file-scheduler":
+        _memory_admission_pay(_memory_header_budget, "scheduled-pop-roster", 2 + 2 + 25 + 22 + 13)
         for field_name in ("parent_job_id", "parent_fencing_token", "deadline_at"):
             expected.pop(field_name, None)
             actual.pop(field_name, None)
+    _memory_admission_pay(_memory_header_budget, "comparison-items",
+        (expected_upper + 24 * 3 + 4) if expected_upper is not None else 0)
+    _memory_admission_pay(_memory_header_budget, "conflict-list", 2 + 23 + 24 * 27)
     return [field_name for field_name, value in expected.items() if actual[field_name] != value]
 
 
@@ -3268,13 +3764,19 @@ def _native_memory_plain_copy_upper(value):
 
 
 def original_native_memory_completion_output_numeric_schedule(operation, prepared, *,
-        certificate, facts, retention_widths):
+        certificate, facts, retention_widths, _construction_only=False):
     """One genuine successful completion's local/output allocations only.
 
     DB reader/writer certification and body/authority calls remain separately
     enumerated by the original startup call vector; no body or future receipt
     is constructed here. Unsupported sealed outcomes retain original STOP.
     """
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if type(_construction_only) is not bool:
+        from src.memory.header_bounds import HeaderBoundsError
+        raise HeaderBoundsError("memory_completion_constructor_mode_changed")
     from src.runtime_plugins.memory_producer import _MemoryOwnerSourceOperation, _MEMORY_OPERATIONS
     import asyncio
     from src.memory.header_bounds import HeaderBoundsError
@@ -3316,6 +3818,46 @@ def original_native_memory_completion_output_numeric_schedule(operation, prepare
             or (method == "memory.forget" and type(result.get("memory")) is dict
                 and type(result["memory"].get("id")) is str)):
         raise HeaderBoundsError("memory_source_retention_outcome_unavailable")
+    if _construction_only:
+        from src.runtime_plugins.task_capability import _report_memory_binding_planning_upper
+        from src.memory.header_bounds import _native_memory_utf8_width
+        # This scalar prices the numeric helpers themselves, never their
+        # future allocation amounts. Amounts are signed-i64 numeric slots.
+        run_width = 6 * _native_memory_utf8_width(operation.run.run_identity) + 2
+        field_width = 6 * len("checkpoint_receipts_json") + 2
+        manifest_width = 4 + len("manifest") + 2 + 20 + 6 * len("child-dependencies") + 2
+        stage_width = 6 * len("payload-dependencies-list") + 2
+        binding_name = max(manifest_width, 4 + len("payload") + 2 + 20 + stage_width)
+        binding_pair = 3 + binding_name + 20
+        # Original60; four-name set; filtered28, two4 intermediates,
+        # growing32/36, tail5 and distinct returned41 pair tuples.
+        binding = (_report_memory_binding_planning_upper()
+            + 2 + 3 + 4 * (stage_width + 1)
+            + 7 * 2 + (28 + 4 + 4 + 32 + 36 + 5 + 41) * (binding_pair + 1)
+            + 4 * (2 + 7 + 8 * 4))
+        label = 5 + len("native-memory-completion-serialize") + 2 + run_width + field_width + stage_width
+        pair = 3 + label + 20
+        triple = 4 + len("completion") + 2 + label + 20
+        # Original serializer: six-key map, twenty-name tuple, initial20
+        # output map, twenty-two keyword update map, six-pair update iterator;
+        # lease seed2 and four nested numeric containers3/3/5/3.
+        numeric_item = field_width + 1 + 20
+        serializer_maps = (2 + 5 + 6 * (2 * field_width + 1)
+            + 2 + 19 + 20 * field_width
+            + 2 + 19 + 20 * numeric_item + 2 + 21 + 22 * numeric_item
+            + 2 + 5 + 6 * (3 + field_width + 20)
+            + 5 * 2 + 16 * (numeric_item + 1))
+        serializer = (serializer_maps + 2 * (2 + 19 + 20 * (pair + 1))
+            + 2 + 6 + 7 * (stage_width + 20 + 3)
+            + 2 + 1 + 2 * (stage_width + 20 + 3)
+            + 12 * (2 + 7 + 8 * 4))
+        # Main79 pair-list, distinct final79 triples, seven date labels,
+        # five ISO labels, generator wrappers and ten/two key capacity sums.
+        return (binding + serializer + 2 + 78 + 79 * (pair + 1)
+            + 2 + 78 + 79 * (triple + 1)
+            + 2 + 9 + 10 * (field_width + 1)
+            + 2 + 1 + 2 * (field_width + 1)
+            + 8 * (2 + 7 + 8 * 4))
     address = (WRS_BY_RUN.table, operation.run.run_identity)
     numeric_map_upper = 2 + max(0, len(WorkflowRunState.model_fields) - 1) + sum(
         6 * len(name) + 3 + 20 for name in WorkflowRunState.model_fields)

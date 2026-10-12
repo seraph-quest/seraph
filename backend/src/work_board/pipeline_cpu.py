@@ -130,6 +130,7 @@ def spec_for(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str
             + _native_memory_ascii_string_width("idempotency_scope") + _native_memory_ascii_string_width("work-board-attempt")
             + _native_memory_ascii_string_width("idempotency_key") + key_upper)
         _report_memory_allocation_pay(_memory_header_budget, "spec-identity-constructor", identity_upper)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-identity-keyword-fields", identity_upper)
         # Preserve the original seven __post_init__ str/strip invocations.
         for name in ("job_id", "owner_kind", "owner_principal_id", "job_kind",
                 "capability_version", "idempotency_scope", "idempotency_key"):
@@ -151,6 +152,29 @@ def spec_for(task: WorkBoardTask, attempt: WorkBoardAttempt, inputs: Mapping[str
             _report_memory_allocation_pay(_memory_header_budget, "spec-identity-strip-" + name, field_upper)
         _report_memory_allocation_pay(_memory_header_budget, "spec-identity-owner-kinds", 3
             + _native_memory_ascii_string_width("user") + _native_memory_ascii_string_width("service"))
+        # Reuse the original typed scalar datetime ceiling; no isoformat or
+        # serialization is performed to size the borrowed original deadline.
+        from src.workflows.inference_accounting import _accounting_scalar_upper
+        values_upper = (identity_upper + safe_upper + 2 * _native_memory_source_value_upper(task.owner_session_id)
+            + _native_memory_source_value_upper(task.goal_id) + _native_memory_source_value_upper(task.goal_revision)
+            + _native_memory_source_value_upper(model.plan_version) + _native_memory_source_value_upper(task.priority)
+            + authority_upper + _accounting_scalar_upper(deadline) + 1 + 1 + 66)
+        keyword_upper = 2 + 12 + 13 + values_upper
+        for name in ("identity", "inputs", "session_id", "operator_session_id", "goal_id", "goal_revision",
+                "plan_revision", "priority", "declared_authority", "deadline_at", "max_attempts",
+                "max_outstanding_jobs", "run_fingerprint"):
+            keyword_upper += _native_memory_ascii_string_width(name)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-keyword-fields", keyword_upper)
+        # The original dataclass has 25 slots: these 13 supplied fields, two
+        # retained empty tuples and ten original None defaults.
+        constructor_upper = 2 + 24 + 25 + values_upper + 2 * 2 + 10 * 4
+        for name in ("identity", "inputs", "session_id", "conversation_id", "operator_session_id", "parent_job_id",
+                "parent_fencing_token", "goal_id", "goal_revision", "plan_revision", "candidate_id", "source_task_id",
+                "composition_binding", "priority", "dependencies", "resource_claims", "declared_authority",
+                "deadline_at", "max_attempts", "max_outstanding_jobs", "service_id", "run_fingerprint",
+                "budget_microusd", "budget_digest", "routine_publication_admission_guard"):
+            constructor_upper += _native_memory_ascii_string_width(name)
+        _report_memory_allocation_pay(_memory_header_budget, "spec-constructor", constructor_upper)
     return DurableJobSpec(
         identity=DurableJobIdentity(job_id=job_id(task, attempt), owner_kind="user",
             owner_principal_id=task.owner_principal_id, job_kind=task.capability_id,

@@ -1914,6 +1914,66 @@ def _memory_report_stage_pay(budget, stage, upper):
     budget.debit(upper, appearance=("native-memory-report-stage", stage))
 
 
+def _native_memory_report_authority_numeric_facts(operation, prepared, *, certificate, facts, retention_widths):
+    """Borrow the successful original REPORT owner's numerical field maps."""
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    inventory = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    stage = operation.source.admission.report_source._input_stage
+    observed = getattr(inventory, "_authority_numeric_facts", None)
+    if (type(observed) is not tuple or len(observed) != 8
+            or observed[0] != stage.task_id or observed[1] != stage.attempt_id
+            or type(observed[2]) is not str or not observed[2]
+            or observed[2] == operation.run.run_identity
+            or type(observed[7]) is not str or len(observed[7]) != 64):
+        raise HeaderBoundsError("memory_report_authority_numeric_owner_changed")
+    for index in (3, 4, 5, 6):
+        mapping = observed[index]
+        if type(mapping) is not MappingProxyType:
+            raise HeaderBoundsError("memory_report_authority_numeric_shape_unavailable")
+        for name, amount in mapping.items():
+            if (type(name) is not str or type(amount) is not int
+                    or not 0 <= amount <= MAX_BYTES):
+                raise HeaderBoundsError("memory_report_authority_numeric_shape_unavailable")
+    if (observed[0] not in inventory.certificates[2].row_ids
+            or observed[1] not in inventory.certificates[3].row_ids
+            or observed[2] not in inventory.certificates[4].row_ids):
+        raise HeaderBoundsError("memory_report_authority_numeric_owner_changed")
+    return observed
+
+
+def _native_memory_report_input_numeric_facts(operation, prepared, *, certificate, facts, retention_widths):
+    """Borrow only the original decoder's authenticated numerical record."""
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    inventory = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    stage = operation.source.admission.report_source._input_stage
+    record = getattr(stage, "_numeric_inputs", None)
+    if (type(record) is not _OriginalMemoryReportInputNumericFacts
+            or _MEMORY_REPORT_INPUT_NUMERIC.get(id(record)) is not record
+            or record._seal is not _MEMORY_REPORT_INPUT_NUMERIC_SEAL or record._issued_id != id(record)
+            or record.stage is not stage or record.inventory is not inventory
+            or record.task_id != stage.task_id
+            or type(record.input_upper) is not int or not 0 <= record.input_upper <= MAX_BYTES
+            or type(record.dimensions) is not tuple or len(record.dimensions) != 10):
+        raise HeaderBoundsError("memory_report_input_numeric_owner_changed")
+    observed = _native_memory_report_authority_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if observed[7] != record.input_digest:
+        raise HeaderBoundsError("memory_report_input_numeric_owner_changed")
+    index = 0
+    for name in ("schema_version", "operation_ref", "plan_version", "producer_task_ref", "producer_attempt_ref",
+            "handoff_ref", "producer_sha256", "producer_schema", "quoted_source_data", "no_learning"):
+        dimension = record.dimensions[index]
+        if (type(dimension) is not tuple or len(dimension) != 3 or dimension[0] != name
+                or type(dimension[1]) is not int or not 0 <= dimension[1] <= MAX_BYTES
+                or type(dimension[2]) is not int or not 0 <= dimension[2] <= MAX_BYTES):
+            raise HeaderBoundsError("memory_report_input_numeric_shape_unavailable")
+        index += 1
+    return record
+
+
 def _memory_report_input_stage_digest(stage):
     from src.memory.header_bounds import _native_memory_utf8_width
     budget = stage.budget

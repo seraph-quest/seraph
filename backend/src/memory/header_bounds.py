@@ -190,7 +190,11 @@ class HeaderReadBudget:
                             if type(trace[1]) is _NativeMemoryReportTraceCollector:
                                 trace[1].append_charge(appearance, amount)
                             else:
-                                trace[1].append((appearance, amount))
+                                from src.runtime_plugins.ownership import _NativeMemoryReportRuntimeTraceCollector
+                                if type(trace[1]) is _NativeMemoryReportRuntimeTraceCollector:
+                                    trace[1].append_charge(appearance, amount)
+                                else:
+                                    trace[1].append((appearance, amount))
         discovery = _DISCOVERY_NUMERIC_READS.get()
         if discovery is not None and discovery.budget is self:
             discovery.consume(appearance, amount)

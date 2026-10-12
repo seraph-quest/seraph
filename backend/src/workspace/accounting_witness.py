@@ -959,6 +959,9 @@ def validate_retained_table_schema(connection, table, *, error="composition_proj
     """Only the reviewed NULL-only Session addition is DDL-compatible with v3."""
     from src.memory.composition_headers import current_budget
     if current_budget() is not None and table != "sessions":
+        from src.memory.composition_headers import _original_retained_schema_proved
+        if _original_retained_schema_proved(connection, table, RETAINED_FIELDS[table]):
+            return
         names = _original_composition_metadata_rows(connection,
             'SELECT name FROM pragma_table_info(?) LIMIT ?', (table, len(RETAINED_FIELDS[table]) + 1),
             ("name",), appearance=(table, "columns"))

@@ -989,6 +989,45 @@ def _validate(connection,certificate):
         certificate.original_selection.owner._validate_programme_selection(certificate.original_selection)
 
 
+def _original_retained_schema_proved(connection, table, fields):
+    """Consume this original operation's live whole mapped-schema proof."""
+    certificate = _CURRENT.get()
+    if certificate is None:
+        return False
+    if (type(certificate) is not CompositionHeaderCertificate
+            or _SNAPSHOT_CERTIFICATES.get(id(certificate)) is not certificate):
+        raise HeaderBoundsError("header_certificate_unavailable")
+    scope = _checked_current_snapshot_scope(certificate.budget)
+    if scope is None or scope.session is None:
+        return False
+    _check_snapshot_scope_connection(scope, connection)
+    current = scope.certificates.get(connection)
+    if (type(certificate) is not CompositionHeaderCertificate
+            or _SNAPSHOT_CERTIFICATES.get(id(certificate)) is not certificate
+            or certificate.connection is not connection or certificate.budget is not scope.budget
+            or certificate.common_certificate is not None or certificate.raw_owner is not None
+            or certificate.metadata_budget is not certificate.budget
+            or current is None or current[0] is not certificate):
+        raise HeaderBoundsError("header_certificate_unavailable")
+    _validate(connection, certificate)
+    if _snapshot_schema_cookies(connection, certificate.budget,
+            _header_budget=certificate.metadata_budget) != current[1]:
+        raise HeaderBoundsError("header_certificate_stale")
+    descriptor = COMPOSITION_DESCRIPTORS.get(table)
+    if (descriptor is None or table == "sessions" or type(fields) is not tuple
+            or len(descriptor.columns) != len(fields)):
+        return False
+    for name in fields:
+        if name not in descriptor.columns:
+            return False
+    for name in descriptor.columns:
+        if name not in fields:
+            return False
+    # A successfully issued common certificate validated all mapped columns,
+    # including empty tables. This consumes no row/body or writer permission.
+    return True
+
+
 def preflight_programme_identity_component(common33, *, original_selection):
     """Only an original rollback/native guard selects this named exception."""
     from src.db.models import OperatorIdentity

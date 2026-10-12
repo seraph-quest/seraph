@@ -821,7 +821,9 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
             else:
                 # Original SQLite integer locators fit signed int64 JSON.
                 key_copy_upper = 20
-        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(2, (20, *([44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
+        row_bound = (1 if _header_budget is not None
+            and _original_common_header_single_row(connection, descriptor, identities, _header_budget) else 2)
+        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(row_bound, (20, *([44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
         if len(rows)!=1: raise HeaderBoundsError("header_row_unavailable")
         row=rows[0]
         if _header_budget is not None:
@@ -962,6 +964,99 @@ def _discover(connection, descriptor, budget, key=None, tombstone=False, remaini
     if _header_budget is None:
         budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("locator-metadata", descriptor.table, key, tombstone, tuple(ids)))
     return tuple(ids)
+
+
+_COMMON_HEADER_DISCOVER = _discover
+_COMMON_HEADER_SCHEMA = validate_descriptor_schema
+_COMMON_HEADER_LOCATOR = _validate_locator
+_COMMON_HEADER_RESOLVE = HeaderReadBudget.resolve_future
+_COMMON_HEADER_ENROLL = HeaderReadBudget.enroll
+
+
+def _original_common_header_single_row(connection, descriptor, identities, budget):
+    """Only the immediate protected common issuer consumes its paid key proof."""
+    scope = _checked_current_snapshot_scope(budget)
+    if scope is None or scope.session is None:
+        return False
+    headers = sys._getframe(1)
+    issuer = headers.f_back
+    wrapper = issuer.f_back if issuer is not None else None
+    if (headers.f_code is not _headers.__code__ or issuer is None
+            or issuer.f_code is not preflight_composition_superset.__code__
+            or wrapper is None
+            or wrapper.f_code is not _certify_current_memory_snapshot_on_connection.__code__):
+        return False
+    _check_snapshot_scope_connection(scope, connection)
+    state = issuer.f_locals.get("state")
+    if (type(budget) is not HeaderReadBudget or _discover is not _COMMON_HEADER_DISCOVER
+            or validate_descriptor_schema is not _COMMON_HEADER_SCHEMA
+            or _validate_locator is not _COMMON_HEADER_LOCATOR
+            or HeaderReadBudget.resolve_future is not _COMMON_HEADER_RESOLVE
+            or HeaderReadBudget.enroll is not _COMMON_HEADER_ENROLL
+            or "resolve_future" in budget.__dict__ or "enroll" in budget.__dict__
+            or type(budget.future_references) is not set
+            or type(budget.physical_references) is not set
+            or descriptor is not COMPOSITION_DESCRIPTORS.get(descriptor.table)
+            or issuer.f_locals.get("descriptor") is not descriptor
+            or issuer.f_locals.get("ids") is not identities or type(identities) is not tuple
+            or issuer.f_locals.get("connection") is not connection
+            or issuer.f_locals.get("budget") is not budget
+            or issuer.f_locals.get("_header_budget") is not budget
+            or issuer.f_locals.get("raw_owner") is not None
+            or "present" not in issuer.f_locals
+            or wrapper.f_locals.get("scope") is not scope
+            or wrapper.f_locals.get("connection") is not connection
+            or wrapper.f_locals.get("budget") is not budget
+            or type(wrapper.f_locals.get("cookies")) is not tuple
+            or type(state) is not tuple or len(state) != 3
+            or connection.get_transaction() is not state[0]
+            or not state[0].is_active
+            or connection.connection.driver_connection is not state[1]
+            or state[1].total_changes != state[2]):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    from src.workspace.accounting_witness import CompositionReadGuard, RETAINED_FIELDS
+    guard = scope.session.info.get("composition_read_guard")
+    if descriptor.table not in RETAINED_FIELDS:
+        return False
+    # A selected single-column PK cannot lose its implicit uniqueness index.
+    # For the alternate named unique locator, the existing reader guard must
+    # recognize its DDL by the protected table spelling in the original name.
+    model = _COMPOSITION_MODELS[descriptor.table]
+    primary = model.__table__.primary_key.columns
+    if len(primary) != 1 or next(iter(primary)).name != descriptor.key:
+        protected_index = False
+        for index in model.__table__.indexes:
+            if (index.unique and len(index.columns) == 1
+                    and next(iter(index.columns)).name == descriptor.key
+                    and type(index.name) is str and descriptor.table in index.name.lower()):
+                protected_index = True
+        if not protected_index:
+            return False
+    if (type(guard) is not CompositionReadGuard or guard.db is not scope.session or guard.closed):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    # The original reader guard remains installed through the first census.
+    # Its connection listener rejects retained-table DDL/DML, including writes
+    # attempted by synchronous SQLAlchemy instrumentation callbacks.
+    from sqlalchemy import event
+    from types import CodeType, FunctionType
+    install = CompositionReadGuard.install.__code__
+    denied_code = next(code for code in install.co_consts
+        if type(code) is CodeType and code.co_name == "denied")
+    begin_code = next(code for code in install.co_consts
+        if type(code) is CodeType and code.co_name == "after_begin")
+    listener_code = next(code for code in begin_code.co_consts
+        if type(code) is CodeType and code.co_name == "before_cursor_execute")
+    for bound, listener in guard.connection_listeners:
+        if (bound is connection and type(listener) is FunctionType
+                and listener.__code__ is listener_code
+                and any(type(cell.cell_contents) is FunctionType
+                    and cell.cell_contents.__code__ is denied_code
+                    and any(owner.cell_contents is guard
+                        for owner in cell.cell_contents.__closure__ or ())
+                    for cell in listener.__closure__ or ())
+                and event.contains(connection, "before_cursor_execute", listener)):
+            return True
+    raise HeaderBoundsError("header_metadata_owner_unavailable")
 
 
 async def discover_rows(db, descriptor, budget, *, _header_budget=None):

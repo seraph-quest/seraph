@@ -2680,7 +2680,17 @@ class CompositionReadGuard:
                     source = statement.lower().lstrip()
                     protected = not source.startswith(("select", "begin", "pragma", "savepoint", "release", "rollback")) and any(name in source for name in RETAINED_FIELDS)
                 else:
-                    protected = table in RETAINED_FIELDS and any(getattr(operation, flag, False) for flag in ("is_insert", "is_update", "is_delete"))
+                    from sqlalchemy.schema import DDLElement, CreateTable, DropTable, CreateIndex, DropIndex
+                    if isinstance(operation, (CreateTable, DropTable)):
+                        protected = operation.element.name in RETAINED_FIELDS
+                    elif isinstance(operation, (CreateIndex, DropIndex)):
+                        protected = operation.element.table.name in RETAINED_FIELDS
+                    elif isinstance(operation, DDLElement):
+                        # Generic/unknown compiled DDL has no proven safe target
+                        # under this original inspection-only guard.
+                        protected = True
+                    else:
+                        protected = table in RETAINED_FIELDS and any(getattr(operation, flag, False) for flag in ("is_insert", "is_update", "is_delete"))
                 if protected:
                     denied()
             event.listen(connection, "before_cursor_execute", before_cursor_execute)

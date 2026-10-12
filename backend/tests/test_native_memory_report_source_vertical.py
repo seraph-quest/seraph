@@ -22,7 +22,17 @@ from tests.test_research_native_vertical import real_auth
 
 
 _configured_node = os.environ.get("SERAPH_TEST_NODE_RUNTIME")
-NODE = Path(_configured_node) if _configured_node else None
+_managed_node = os.environ.get("SERAPH_CORDIS_TEST_NODE")
+if _managed_node:
+    NODE = Path(_managed_node)
+    if _configured_node and Path(_configured_node) != NODE:
+        raise RuntimeError("conflicting explicit test Node paths")
+    _managed_node_digest = os.environ.get("SERAPH_CORDIS_TEST_NODE_SHA256")
+    if (_managed_node_digest != "d95de52ccb76fb2c5775bf176f29f3025e4b19352c092aad51ce5d930717359f"
+            or hashlib.sha256(NODE.read_bytes()).hexdigest() != _managed_node_digest):
+        raise RuntimeError("original managed test Node identity unavailable")
+else:
+    NODE = Path(_configured_node) if _configured_node else None
 
 
 class FulfilledText(HTMLParser):

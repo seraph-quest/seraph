@@ -476,6 +476,92 @@ def _journal(raw, *, _memory_header_budget=None):
     return value
 
 
+
+def _report_memory_preflight_journal(journal, budget):
+    """Original preflight allocations paid once at the original reader site."""
+    if budget is not None:
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        from src.memory.header_bounds import HeaderBoundsError
+        if type(journal) is not list:
+            raise HeaderBoundsError("memory_report_journal_numeric_bound")
+        selected_upper, count = 2, 0
+        for item in journal:
+            if type(item) is not dict:
+                raise HeaderBoundsError("memory_report_journal_numeric_bound")
+            if item.get("checkpoint_id") in REPORT_CHECKPOINT_IDS:
+                selected_upper += _native_memory_source_value_upper(item.get("checkpoint_id"))
+                count += 1
+        selected_upper += max(0, count - 1)
+        _report_memory_allocation_pay(budget, "journal-preflight-selected-list", selected_upper)
+        _report_memory_allocation_pay(budget, "journal-preflight-selected-set", selected_upper)
+        # The original duplicate check raises before its claim scan/canonical
+        # calls; do not manufacture their payment on that failed branch.
+        duplicate = False
+        for index in range(len(journal)):
+            checkpoint = journal[index].get("checkpoint_id")
+            if checkpoint in REPORT_CHECKPOINT_IDS:
+                for earlier in range(index):
+                    if journal[earlier].get("checkpoint_id") == checkpoint:
+                        duplicate = True
+                        break
+            if duplicate:
+                break
+        if not duplicate:
+            reserve_claim = True
+            for item in journal:
+                checkpoint = item.get("checkpoint_id", "")
+                if type(checkpoint) is not str:
+                    raise HeaderBoundsError("memory_report_journal_numeric_bound")
+                _report_memory_allocation_pay(budget, "journal-preflight-checkpoint-str",
+                    _native_memory_source_value_upper(checkpoint))
+                if (checkpoint.startswith("runtime-service-invocation:")
+                        and checkpoint not in REPORT_CHECKPOINT_IDS):
+                    reserve_claim = False
+                    break
+            missing = len(REPORT_CHECKPOINT_IDS) - count
+            if len(journal) + missing + int(reserve_claim) <= 50:
+                _report_memory_canonical_pay(journal, budget, stage="journal-preflight-canonical")
+                # Every original protected payload may be reached after the
+                # journal-capacity predicate. Reserve its actual appearance
+                # before the original predicate/canonical call; an invalid
+                # input may stop earlier, but no valid call is underfunded.
+                for item in journal:
+                    if item.get("checkpoint_id") in REPORT_CHECKPOINT_IDS:
+                        _report_memory_canonical_pay(item.get("payload"), budget,
+                            stage="journal-preflight-payload-canonical")
+    return preflight_report_journal(journal)
+
+
+
+def _report_memory_claim_witness(receipt, budget):
+    from .dispatch import _receipt_witness, WITNESS_PREFIX
+    if budget is not None:
+        from collections.abc import Mapping
+        from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+        raw = receipt.get("payload")
+        if isinstance(raw, Mapping):
+            upper = _native_memory_source_value_upper(raw)
+            _report_memory_allocation_pay(budget, "terminal-claim-payload-copy", upper)
+            methods = raw.get("allowed_child_methods")
+            if type(methods) is tuple:
+                _report_memory_allocation_pay(budget, "terminal-claim-method-list",
+                    _native_memory_source_value_upper(methods))
+            _report_memory_allocation_pay(budget, "terminal-claim-keys-view", 4)
+            _report_memory_canonical_pay(raw, budget, stage="terminal-claim-seal", digest_output=True)
+            if type(methods) in (list, tuple):
+                method_upper = _native_memory_source_value_upper(methods)
+                _report_memory_allocation_pay(budget, "terminal-claim-method-set", method_upper)
+                _report_memory_allocation_pay(budget, "terminal-claim-method-sort", method_upper)
+                _report_memory_allocation_pay(budget, "terminal-claim-return-copy", upper)
+                _report_memory_allocation_pay(budget, "terminal-claim-method-tuple", method_upper)
+            if type(raw.get("claim_ref")) is str:
+                from src.memory.header_bounds import _native_memory_ascii_string_width
+                _report_memory_allocation_pay(budget, "terminal-claim-checkpoint-string",
+                    _native_memory_ascii_string_width(WITNESS_PREFIX)
+                    + _native_memory_ascii_string_width(raw["claim_ref"]) - 2)
+    return _receipt_witness(receipt)
+
+
 def preflight_report_journal(journal):
     """Reserve all missing finite phase slots; never truncate existing history."""
     if type(journal) is not list or any(type(item) is not dict for item in journal):
@@ -636,6 +722,17 @@ def read_report_candidate(run, kind="admission", *, _memory_header_budget=None):
     started = _report_memory_datetime(value["attempt_started_at"], _memory_header_budget)
     operation_deadline = _report_memory_datetime(value["operation_deadline"], _memory_header_budget)
     run_deadline = _report_memory_datetime(run.deadline_at, _memory_header_budget) if type(run.deadline_at) is str else run.deadline_at
+    if _memory_header_budget is not None:
+        from src.memory.header_bounds import _native_memory_utf8_width
+        task_bytes = _native_memory_utf8_width(value["task_id"])
+        attempt_bytes = _native_memory_utf8_width(value["attempt_id"])
+        _report_memory_allocation_pay(_memory_header_budget, "candidate-expected-job-string",
+            6 * (len("evidence-cpu:") + task_bytes + 1 + attempt_bytes) + 2)
+        _report_memory_allocation_pay(_memory_header_budget, "candidate-idempotency-key-string",
+            6 * (task_bytes + 1 + attempt_bytes) + 2)
+        _report_memory_allocation_pay(_memory_header_budget, "candidate-typed-input-ref-string",
+            6 * (len("workspace-json:artifacts/work-board/inputs/")
+                + _native_memory_utf8_width(value["input_id"]) + 1 + 64 + len(".json")) + 2)
     if (cutoff.tzinfo is None or started.tzinfo is None or operation_deadline.tzinfo is None
         or cutoff > min(operation_deadline, started + timedelta(seconds=30))
         or value["job_id"] != f"evidence-cpu:{value['task_id']}:{value['attempt_id']}"
@@ -653,8 +750,95 @@ def read_report_candidate(run, kind="admission", *, _memory_header_budget=None):
         or run.goal_id != value["goal_id"] or run.goal_revision != value["goal_revision"]
         or _report_memory_deadline_replace(run_deadline, _memory_header_budget) != cutoff):
         raise ValueError("original report candidate binding changed")
-    preflight_report_journal(history)
+    _report_memory_preflight_journal(history, _memory_header_budget)
+    _report_memory_candidate_numeric_observe(run, history, value, _memory_header_budget)
     return value
+
+
+
+def _report_memory_candidate_numeric_observe(run, history, candidate, budget):
+    """Numerical dimensions from this original successful journal reader."""
+    if budget is None:
+        return
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_utf8_width, _native_memory_ascii_string_width
+    from src.runtime_plugins.memory_producer import _native_memory_source_value_upper
+    from src.work_board.review import (_MemoryReportDependencyNumericInventory,
+        _MEMORY_REPORT_DEPENDENCY_NUMERIC, _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL,
+        _memory_report_row_certificate)
+    record = getattr(budget, "_native_memory_report_dependency_numeric", None)
+    if (type(record) is not _MemoryReportDependencyNumericInventory
+            or _MEMORY_REPORT_DEPENDENCY_NUMERIC.get(record) is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL):
+        raise HeaderBoundsError("memory_report_candidate_numeric_owner_changed")
+    certificate = _memory_report_row_certificate(record.db, record, budget, "workflow_run_states")
+    if (run.run_identity not in certificate.row_ids or type(history) is not list or len(history) > 50
+            or type(candidate) is not dict or candidate.get("task_id") != record.task_id
+            or candidate.get("job_id") != run.run_identity):
+        raise HeaderBoundsError("memory_report_candidate_numeric_owner_changed")
+    fields_upper = 2 + max(0, len(candidate) - 1)
+    for name in candidate:
+        fields_upper += _native_memory_ascii_string_width(name) + 1 + 43
+    _report_memory_allocation_pay(budget, "candidate-numeric-field-map", fields_upper)
+    fields = {}
+    for name in candidate:
+        value = candidate[name]
+        _report_memory_allocation_pay(budget, "candidate-numeric-field-pair", 43)
+        fields[name] = (_native_memory_source_value_upper(value),
+            _native_memory_utf8_width(value) if type(value) is str else 0)
+    _report_memory_allocation_pay(budget, "candidate-numeric-field-proxy", 4)
+    fields = MappingProxyType(fields)
+    rows_upper = 2 + max(0, len(history) - 1) + 190 * len(history)
+    _report_memory_allocation_pay(budget, "candidate-numeric-history-list", rows_upper)
+    rows = []
+    for item in history:
+        payload = item.get("payload")
+        receipt_fields = 2 + max(0, len(item) - 1)
+        for name in item:
+            receipt_fields += _native_memory_ascii_string_width(name)
+        payload_fields = 0
+        if type(payload) is dict:
+            payload_fields = 2 + max(0, len(payload) - 1)
+            for name in payload:
+                payload_fields += _native_memory_ascii_string_width(name)
+        checkpoint = item.get("checkpoint_id", "")
+        if type(checkpoint) is not str:
+            raise HeaderBoundsError("memory_report_candidate_numeric_shape_unavailable")
+        phase = len(REPORT_CHECKPOINT_IDS)
+        for index in range(len(REPORT_CHECKPOINT_IDS)):
+            if checkpoint == REPORT_CHECKPOINT_IDS[index]:
+                phase = index
+                break
+        methods = payload.get("allowed_child_methods") if type(payload) is dict else None
+        methods_count = len(methods) if type(methods) in (list, tuple) else 0
+        methods_upper = _native_memory_source_value_upper(methods) if methods_count else 2
+        claim_ref = payload.get("claim_ref") if type(payload) is dict else None
+        claim_ref_upper = _native_memory_ascii_string_width(claim_ref) if type(claim_ref) is str else 0
+        _report_memory_allocation_pay(budget, "candidate-numeric-history-row", 190)
+        rows.append((_native_memory_source_value_upper(item), receipt_fields,
+            _native_memory_source_value_upper(payload), payload_fields,
+            _native_memory_ascii_string_width(checkpoint), phase,
+            methods_upper, methods_count, claim_ref_upper))
+    _report_memory_allocation_pay(budget, "candidate-numeric-history-tuple", rows_upper)
+    rows = tuple(rows)
+    # Original subsequent readers use these exact existing scalar fields.
+    # Count widths now from this already-paid REPORT row, never retain values
+    # or decode another JSON document for forecasting.
+    for name in ("artifact_receipts_json", "effect_receipts_json", "arguments_json", "declared_authority_json"):
+        raw = getattr(run, name)
+        if raw is not None and type(raw) is not str:
+            raise HeaderBoundsError("memory_report_candidate_numeric_shape_unavailable")
+    _report_memory_allocation_pay(budget, "candidate-numeric-retained-tuple",
+        2 + 8 + _native_memory_ascii_string_width(run.run_identity)
+        + fields_upper + rows_upper + 6 * 20)
+    observed = (run.run_identity, fields, rows, _native_memory_source_value_upper(history),
+        _native_memory_utf8_width(run.checkpoint_receipts_json or "[]"),
+        _native_memory_utf8_width(run.artifact_receipts_json or "[]"),
+        _native_memory_utf8_width(run.effect_receipts_json or "[]"),
+        _native_memory_utf8_width(run.arguments_json or ""),
+        _native_memory_utf8_width(run.declared_authority_json or ""))
+    _report_memory_allocation_pay(budget, "candidate-numeric-record-slot",
+        3 + _native_memory_ascii_string_width("_report_journal_numeric") + 4)
+    object.__setattr__(record, "_report_journal_numeric", observed)
 
 
 def checked_report_records(run):
@@ -807,7 +991,7 @@ def validated_terminal_report_source(run, *, _memory_header_budget=None):
         and item.get("checkpoint_id") not in REPORT_CHECKPOINT_IDS]
     if len(claims) != 1:
         raise ValueError("original report claim required")
-    claim = _receipt_witness(claims[0])
+    claim = _report_memory_claim_witness(claims[0], _memory_header_budget)
     birth = next(item for item in history if item["checkpoint_id"] == REPORT_CHECKPOINT_IDS[0])
     if (claim["invocation_ref"] != run.run_identity or claim["attempt_count"] != 1
         or claim["fencing_token"] != run.fencing_token or claim["origin_method"] != "tasks.admit"
@@ -899,6 +1083,12 @@ def validated_terminal_report_source(run, *, _memory_header_budget=None):
         raise ValueError("verified report source changed")
     sha = invoked["output_sha256"]
     validate_sha(sha)
+    if _memory_header_budget is not None:
+        from src.memory.header_bounds import _native_memory_utf8_width
+        expected_upper = 6 * (len("artifacts/work-board/evidence/") + 6 + 64
+            + _native_memory_utf8_width(candidate["task_id"])
+            + _native_memory_utf8_width(candidate["attempt_id"])) + 2
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-output-path", expected_upper)
     expected = f"artifacts/work-board/evidence/{candidate['task_id']}-{candidate['attempt_id']}-{sha}.txt"
     if (invoked["output_reference"] != expected or outcome["output_reference"] != expected
         or outcome["output_sha256"] != sha or invoked["file_closed"] is not True
@@ -916,6 +1106,13 @@ def validated_terminal_report_source(run, *, _memory_header_budget=None):
         or effects[0].get("effect_type") != "evidence_cpu_output" or effects[0].get("receipt_kind") != "readback"
         or effects[0].get("status") != "succeeded" or effects[0].get("fencing_token") != run.fencing_token):
         raise ValueError("verified report artifact/readback unavailable")
+    if _memory_header_budget is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        result_upper = (2 + 3 + 4 + _native_memory_source_value_upper(candidate) + expected_upper
+            + 66 + _native_memory_source_value_upper(invoked["size_bytes"]))
+        for name in ("candidate", "output_reference", "output_sha256", "size_bytes"):
+            result_upper += _native_memory_ascii_string_width(name)
+        _report_memory_allocation_pay(_memory_header_budget, "terminal-source-return-map", result_upper)
     return {"candidate": candidate, "output_reference": expected, "output_sha256": sha,
         "size_bytes": invoked["size_bytes"]}
 

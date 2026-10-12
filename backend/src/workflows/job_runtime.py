@@ -3753,12 +3753,81 @@ def _native_memory_completion_claim_request_upper():
         "native_memory_admission", "native_programme_source")) + 66 + 6 * 4
 
 
+def _native_memory_claim_checkpoint_scratch_upper(source, db):
+    """Original4/20 checkpoint tree traversal scratch, not copy permission."""
+    import asyncio
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.runtime_plugins import memory_producer as owner
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if (type(source) is not owner._NativeMemoryDispatchSource
+            or owner._MEMORY_SOURCES.get(id(source)) is not source
+            or not source._live.is_set() or source._issued_id != id(source)
+            or source._seal is not owner._MEMORY_SOURCE_SEAL):
+        raise HeaderBoundsError("memory_completion_checkpoint_scratch_owner_changed")
+    guard = db.info.get("composition_guard")
+    if (type(guard) is not CompositionSessionGuard or guard.db is not db
+            or guard.header_budget is not source.admission.header_budget
+            or owner._native_memory_source_numeric_frame() is not guard.header_budget):
+        raise HeaderBoundsError("memory_completion_checkpoint_scratch_owner_changed")
+    retention = getattr(source, "_retention", None)
+    if retention is not None:
+        _native_memory_completion_goal_fence_payer(db, source)
+    else:
+        capacity = getattr(guard, "_native_memory_source_capacity_facts", None)
+        widths = getattr(guard, "_native_memory_retention_numeric_facts", None)
+        if (type(capacity) is not tuple or len(capacity) != 4
+                or type(widths) is not tuple or len(widths) != 4
+                or type(capacity[0]) is not owner._MemoryOwnerSourceOperation
+                or owner._MEMORY_OPERATIONS.get(id(capacity[0])) is not capacity[0]
+                or capacity[0].source is not source or capacity[0].db is not db):
+            raise HeaderBoundsError("memory_completion_checkpoint_scratch_owner_changed")
+        owner._native_memory_dispatch_validation_numeric_owner(capacity[0], capacity[1],
+            certificate=capacity[2], facts=capacity[3], retention_widths=widths[3])
+    claim = source.claim
+    if type(claim) is not NativeServiceClaim:
+        raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    checkpoint = claim.checkpoint
+    if not isinstance(checkpoint, Mapping) or len(checkpoint) != 4:
+        raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    for name in ("checkpoint_id", "state_digest", "safe", "payload"):
+        if name not in checkpoint:
+            raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    payload = checkpoint["payload"]
+    if not isinstance(payload, Mapping) or len(payload) != 20:
+        raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    for name in ("schema_version", "invocation_ref", "claim_ref", "checkpoint_id", "origin_method",
+            "native_branch", "allowed_child_methods", "method_manifest_version", "method_manifest_digest",
+            "attempt_count", "lease_owner", "fencing_token", "input_digest", "authority_digest",
+            "run_fingerprint", "original_deadline_at", "package_digest", "host_composition_digest",
+            "composition_binding_digest", "host_boot_nonce"):
+        if name not in payload:
+            raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+        value = payload[name]
+        if (name != "allowed_child_methods" and value is not None
+                and type(value) is not str and type(value) is not int and type(value) is not bool):
+            raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    methods = payload["allowed_child_methods"]
+    if (type(methods) is not tuple or methods != claim.binding.allowed_child_methods
+            or not 1 <= len(methods) <= 34):
+        raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    for method in methods:
+        if type(method) is not str:
+            raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    if (type(checkpoint["checkpoint_id"]) is not str or type(checkpoint["state_digest"]) is not str
+            or checkpoint["safe"] is not True):
+        raise HeaderBoundsError("memory_completion_checkpoint_scratch_shape_changed")
+    # Root encoded traversal44+N, nested payload37+N, methods1+N;
+    # three recursive plain-copy generator frames. Nullable scalars can
+    # remove string traversals; all fifteen payload strings are prepaid.
+    return (85 + 3 * len(methods)) * (2 + 7 + 8 * 4)
+
+
 def _native_memory_plain_copy_upper(value):
     """Every container copied by original _native_plain, no copy to size it."""
     if isinstance(value, Mapping):
         return _discovery_encoded_upper(value) + sum(_native_memory_plain_copy_upper(item)
             for item in value.values())
-    if type(value) in {tuple, list}:
+    if type(value) is tuple or type(value) is list:
         return _discovery_encoded_upper(value) + sum(_native_memory_plain_copy_upper(item) for item in value)
     return 0
 
@@ -3853,11 +3922,12 @@ def original_native_memory_completion_output_numeric_schedule(operation, prepare
             + 12 * (2 + 7 + 8 * 4))
         # Main79 pair-list, distinct final79 triples, seven date labels,
         # five ISO labels, generator wrappers and ten/two key capacity sums.
-        return (binding + serializer + 2 + 78 + 79 * (pair + 1)
-            + 2 + 78 + 79 * (triple + 1)
+        checkpoint_scratch = _native_memory_claim_checkpoint_scratch_upper(operation.source, operation.db)
+        return (checkpoint_scratch + binding + serializer + 2 + 79 + 80 * (pair + 1)
+            + 2 + 79 + 80 * (triple + 1)
             + 2 + 9 + 10 * (field_width + 1)
             + 2 + 1 + 2 * (field_width + 1)
-            + 8 * (2 + 7 + 8 * 4))
+            + 11 * (2 + 7 + 8 * 4))
     address = (WRS_BY_RUN.table, operation.run.run_identity)
     numeric_map_upper = 2 + max(0, len(WorkflowRunState.model_fields) - 1) + sum(
         6 * len(name) + 3 + 20 for name in WorkflowRunState.model_fields)
@@ -3880,7 +3950,9 @@ def original_native_memory_completion_output_numeric_schedule(operation, prepare
     receipt_upper = (2 + 1 + len("kind") + 3 + len("memory_status") + 3
         + _discovery_encoded_upper("native_memory_completed")
         + _discovery_encoded_upper(MEMORY_STATUS[method]))
-    entries = [(("native-memory-completion", "claim-checkpoint-copy"),
+    entries = [(("native-memory-completion", "claim-checkpoint-planning"),
+        _native_memory_claim_checkpoint_scratch_upper(operation.source, operation.db)),
+        (("native-memory-completion", "claim-checkpoint-copy"),
         _native_memory_plain_copy_upper(operation.source.claim.checkpoint)),
         (("native-memory-completion", "claim-journal-parser"), 6 * journal + 2)]
     entries.extend((("native-memory-completion-binding-json", appearance), upper)
@@ -3921,6 +3993,18 @@ def _native_memory_completion_certificate_labels(job_id, goal_id):
         yield ("exact-metadata", "final-state")
         yield ("exact-header", descriptor.table, descriptor.key, (identity,))
         yield ("exact-metadata", "validation-state")
+
+
+def original_native_memory_completion_certificate_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Original async certification observation wrapper, before invocation."""
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    # Coroutine + contextmanager wrapper + its generator frame, trace binding,
+    # token and empty list. Existing certification helper separately prepays
+    # all label rosters/counters/pairs/lists/returned lineage before construction.
+    return 2 * (2 + 5 + 6 * 4) + 41 + 11 + 8 + 2
 
 
 async def original_native_memory_completion_certificate_numeric_schedule(operation, prepared, *,
@@ -7579,6 +7663,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         run = await self._fetch(db, original_claim.job["job_id"])
                         context = memory_context(run)
                         sealed = context["result"]
+                        header_budget.debit(_native_memory_claim_checkpoint_scratch_upper(source, db),
+                            appearance=("native-memory-completion", "claim-checkpoint-planning"))
                         header_budget.debit(_native_memory_plain_copy_upper(original_claim.checkpoint),
                             appearance=("native-memory-completion", "claim-checkpoint-copy"))
                         receipt = _native_plain(original_claim.checkpoint)

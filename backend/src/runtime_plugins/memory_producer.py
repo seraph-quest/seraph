@@ -230,6 +230,162 @@ def _native_memory_authority_entries(stage, upper, *, dependencies=0, row_uppers
     raise HeaderBoundsError("memory_authority_numeric_stage_changed")
 
 
+def _native_memory_authority_entry_construction_upper(stage, *, dependencies=0):
+    """Closed original child-vector constructors, excluding original body fees."""
+    from src.memory.header_bounds import HeaderBoundsError
+    if type(dependencies) is not int or not 0 <= dependencies <= 34:
+        raise HeaderBoundsError("memory_authority_construction_shape_unavailable")
+    if stage == "inventory":
+        count = 19
+        # Five-prefix and fourteen-dependency tuples, followed by joined19.
+        intermediates = 5 + 5 + 14  # literal input5, prefix output5, dependency output14
+        frames = 2
+    elif stage == "dependencies":
+        count = dependencies
+        intermediates = 0
+        frames = 1
+    elif stage == "principal-query":
+        count = 5
+        intermediates = 0
+        frames = 0
+    elif stage == "reverse-results":
+        count = 5
+        intermediates = 0
+        frames = 1
+    elif stage == "operator-constructor":
+        count = 5
+        intermediates = 5  # original literal input pairs before tuple generator
+        frames = 25  # four grant strings/sum + two map sums/seventeen key strings + return generator
+    else:
+        raise HeaderBoundsError("memory_authority_construction_shape_unavailable")
+    label = 3 + len("native-memory-authority") + 2 + 40 + 2
+    pair = 3 + label + 20
+    vector = 2 + max(0, count - 1) + count * pair
+    upper = vector + count * (pair + label) + frames * 41
+    if intermediates:
+        upper += 4 + intermediates - 1 + intermediates * pair
+    if stage == "operator-constructor":
+        # Actual eight-field principal and nine-field operator numerical maps.
+        upper += 2 + 7 + 8 * (6 * 40 + 3 + 20)
+        upper += 2 + 8 + 9 * (6 * 40 + 3 + 20)
+    return upper
+
+
+def _native_memory_authority_trace_label_upper(value):
+    """Nonallocating capacity width of an already-issued numerical label."""
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_utf8_width
+    if type(value) is str:
+        return 6 * _native_memory_utf8_width(value) + 2
+    if type(value) is int:
+        return 20
+    if type(value) is bool:
+        return 5
+    if value is None:
+        return 4
+    if type(value) is tuple:
+        upper = 2 + max(0, len(value) - 1)
+        for child in value:
+            upper += _native_memory_authority_trace_label_upper(child)
+        return upper
+    raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+
+
+def _native_memory_authority_retained_trace_owner(operation, certificate):
+    import asyncio
+    from src.memory.header_bounds import HeaderBoundsError
+    from .ownership import DOMAINS
+    retained = getattr(operation.db.info["composition_guard"], "_native_memory_authority_read_numeric", None)
+    if (type(retained) is not tuple or len(retained) != 10
+            or retained[0] is not operation.source or retained[1] is not operation.scope
+            or retained[2] is not operation.db or retained[3] is not operation.transaction
+            or retained[4] is not operation.driver or retained[5] is not asyncio.current_task()
+            or retained[6] is not certificate.budget or type(retained[7]) is not tuple
+            or type(retained[8]) is not tuple or len(retained[8]) != len(DOMAINS)
+            or type(retained[9]) is not tuple):
+        raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+    for index in range(len(DOMAINS)):
+        if retained[8][index] != DOMAINS[index]:
+            raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+    roots = 0
+    for table, key in certificate.rows:
+        if table == "operator_sessions":
+            roots += 1
+            if retained[9].count(key) != 1:
+                raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+    if len(retained[9]) != roots:
+        raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+    return retained
+
+
+def original_native_memory_authority_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths, kind="dispatch"):
+    """ONE pure authority schedule constructor; parent retention is separate."""
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    from src.workflows.job_runtime import _native_memory_completion_bound_input_construction_upper
+    from src.memory.header_bounds import HeaderBoundsError
+    if kind != "dispatch" and kind != "completion-child":
+        raise HeaderBoundsError("memory_authority_construction_kind_unavailable")
+    if operation.run.owner_kind != "user":
+        raise HeaderBoundsError("memory_authority_numeric_shape_unavailable")
+    dependencies = len(operation.scope.binding.dependency_vector)
+    if not 0 <= dependencies <= 34:
+        raise HeaderBoundsError("memory_authority_construction_shape_unavailable")
+    core = _native_memory_completion_bound_input_construction_upper(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    runtime_count = root_count = 0
+    for table, key in certificate.rows:
+        if table == "runtime_composition_states":
+            runtime_count += 1
+        if table == "operator_sessions":
+            root_count += 1
+    if runtime_count != 14 or root_count == 0:
+        raise HeaderBoundsError("memory_authority_construction_shape_unavailable")
+    # Every entry is a pair of an ASCII appearance tuple (<=three40-char
+    # components) and an i64 upper, never a body/model byte substitute.
+    label = 4 + 3 * 42
+    pair = 3 + label + 20
+    child_count = 35 + dependencies
+    count = child_count + 5  # five source-owned runtime constructor fees
+    if kind == "dispatch":
+        count += 21 + (4 if operation.run.goal_id is not None else 0)
+    # Exact default result concatenations: child inventories19, dependencies,
+    # three five-vectors, owner; dispatch witness11/scalars7/grants3/Goal4.
+    # Eleven result tuples include the initial witness output and all ten
+    # dispatch concatenations; completion has fewer closed result tuples.
+    container = 2 + count - 1 + count * pair
+    result = core + 11 * container + 2 * count * (pair + label)
+    result += 2 + 13 + 14 * 20 + 2 + root_count - 1 + root_count * 20
+    projection = operation.db.info["composition_guard"]._native_memory_source_projection
+    projection_count = len(projection[1]) + len(projection[2])
+    result += 2 + max(0, projection_count - 1) + projection_count * 15
+    result += projection_count * (2 + 3 * 4)  # original per-row closed-table set
+    result += 10 * 41  # runtime/root/projection and original result generators
+    for stage in ("inventory", "dependencies", "principal-query", "reverse-results", "operator-constructor"):
+        result += _native_memory_authority_entry_construction_upper(stage, dependencies=dependencies)
+    # Source capacity-owner numeric map: ten literal fields, per-key generator.
+    result += 2 + 9 + 10 * (6 * 40 + 3 + 4) + 11 * 41
+    if kind == "dispatch":
+        from src.memory.m5 import _native_prepared_width_planning_scratch
+        for name, value in operation.scope.witness.items():
+            result += _native_prepared_width_planning_scratch(name)
+            result += _native_prepared_width_planning_scratch(value)
+        result += 41 + 2 * (2 + 10 + 11 * pair)  # witness sum/input/returned11
+        result += 5 * 41  # grant sum and four original closed string widths
+        # Combined read trace: label set, two equality sets, roster/map,
+        # read tuple and final concatenated tuple, all retained actual rows.
+        retained = _native_memory_authority_retained_trace_owner(operation, certificate)
+        reads = len(retained[7])
+        read_labels = 0
+        for appearance, amount in retained[7]:
+            read_labels += _native_memory_authority_trace_label_upper(appearance)
+        result += 2 * (2 + reads - 1 + read_labels + reads * 23)
+        result += 2 + reads + count - 1 + read_labels + reads * 23 + count * pair
+        result += 6 * 41
+        result += 3 * (2 + count - 1 + count * (label + 1 + 3 + 20))
+    return result
+
+
 def _native_memory_authority_owner_pay(db, stage, *, certificate=None, binding=None, record=None):
     owner = _native_memory_authority_capacity_checked(db)
     if owner is None:
@@ -261,9 +417,11 @@ def _native_memory_authority_owner_pay(db, stage, *, certificate=None, binding=N
     if record is not None and (record.id not in certificate.row_ids
             or record.principal_id != owner.source.operator.principal.principal_id):
         raise HeaderBoundsError("memory_authority_numeric_principal_changed")
+    dependencies = len(binding.dependency_vector) if binding is not None else 0
+    owner.budget.debit(_native_memory_authority_entry_construction_upper(stage, dependencies=dependencies),
+        appearance=("native-memory-authority", "child-construction", stage))
     for appearance, upper in _native_memory_authority_entries(stage, certificate.upper_bytes,
-            dependencies=len(binding.dependency_vector) if binding is not None else 0,
-            row_uppers=certificate.row_upper_bytes):
+            dependencies=dependencies, row_uppers=certificate.row_upper_bytes):
         owner.budget.debit(upper, appearance=appearance)
 
 
@@ -321,6 +479,10 @@ def original_native_memory_dispatch_authority_allocation_numeric_schedule(operat
     result += ((("native-memory-authority", "capacity-owner"), _native_memory_object_width(
         {name: 4 for name in ("source", "scope", "db", "transaction", "driver", "task", "budget",
             "runtime_certificate", "principal_certificate")})),)
+    result += tuple((("native-memory-authority", "child-construction", stage),
+        _native_memory_authority_entry_construction_upper(stage,
+            dependencies=len(operation.scope.binding.dependency_vector)))
+        for stage in ("inventory", "dependencies", "principal-query", "reverse-results", "operator-constructor"))
     return result
 
 
@@ -353,9 +515,42 @@ def original_native_memory_completion_authority_allocation_numeric_schedule(oper
         dependencies=len(operation.scope.binding.dependency_vector))
     for stage in ("principal-query", "reverse-results", "operator-constructor"):
         result += _native_memory_authority_entries(stage, sum(roots))
+    result += tuple((("native-memory-authority", "child-construction", stage),
+        _native_memory_authority_entry_construction_upper(stage,
+            dependencies=len(operation.scope.binding.dependency_vector)))
+        for stage in ("inventory", "dependencies", "principal-query", "reverse-results", "operator-constructor"))
     return ((("native-memory-completion-authority", "capacity-owner"),
         _native_memory_object_width({name: 4 for name in ("source", "scope", "db", "transaction",
             "driver", "task", "budget", "runtime_certificate", "principal_certificate", "ledger")})),) + result
+
+
+def _native_memory_authority_filter_prepaid_trace(trace, allocations):
+    """FIFO occurrence/amount match; caller prepays this closed construction."""
+    from src.memory.header_bounds import HeaderBoundsError
+    amounts = {}
+    indices = {}
+    for appearance, upper in allocations:
+        if type(upper) is not int or not 0 <= upper < 2**63:
+            raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+        if appearance not in amounts:
+            amounts[appearance] = []
+            indices[appearance] = 0
+        amounts[appearance].append(upper)
+    reads = []
+    for appearance, upper in trace:
+        if type(upper) is not int or not 0 <= upper < 2**63:
+            raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+        if appearance in amounts:
+            index = indices[appearance]
+            slots = amounts[appearance]
+            if index >= len(slots) or upper > slots[index]:
+                raise HeaderBoundsError("memory_authority_numeric_paid_amount_exceeded")
+            indices[appearance] = index + 1
+        else:
+            reads.append((appearance, upper))
+    if not reads:
+        raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+    return tuple(reads)
 
 
 def original_native_memory_dispatch_authority_numeric_schedule(operation, prepared, *,
@@ -369,22 +564,12 @@ def original_native_memory_dispatch_authority_numeric_schedule(operation, prepar
     import asyncio
     from src.memory.header_bounds import HeaderBoundsError
     from .ownership import DOMAINS
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    retained = _native_memory_authority_retained_trace_owner(operation, certificate)
     allocations = original_native_memory_dispatch_authority_allocation_numeric_schedule(
         operation, prepared, certificate=certificate, facts=facts, retention_widths=retention_widths)
-    retained = getattr(operation.db.info["composition_guard"], "_native_memory_authority_read_numeric", None)
-    if (type(retained) is not tuple or len(retained) != 10
-            or retained[0] is not operation.source or retained[1] is not operation.scope
-            or retained[2] is not operation.db or retained[3] is not operation.transaction
-            or retained[4] is not operation.driver or retained[5] is not asyncio.current_task()
-            or retained[6] is not certificate.budget or type(retained[7]) is not tuple
-            or retained[8] != tuple(DOMAINS)
-            or set(retained[9]) != {key for table, key in certificate.rows if table == "operator_sessions"}):
-        raise HeaderBoundsError("memory_authority_numeric_trace_changed")
-    allocation_labels = {appearance for appearance, upper in allocations}
-    original_reads = tuple((appearance, upper) for appearance, upper in retained[7]
-        if appearance not in allocation_labels)
-    if not original_reads or any(type(upper) is not int or upper < 0 for appearance, upper in original_reads):
-        raise HeaderBoundsError("memory_authority_numeric_trace_changed")
+    original_reads = _native_memory_authority_filter_prepaid_trace(retained[7], allocations)
     return original_reads + allocations
 
 
@@ -940,7 +1125,7 @@ async def _begin_memory_owner_source(db, run, scope, *, prepared=None):
     if prepared is not None:
         from src.memory.m5 import validate_native_memory_mutation_plan
         await validate_native_memory_mutation_plan(prepared, db=db,
-            candidate_digest=source.admission.candidate_digest)
+            candidate_digest=source.admission.candidate_digest, native_memory_source=source)
         object.__setattr__(operation, "_prepared", prepared)
     object.__setattr__(operation, "_seal", _MEMORY_SOURCE_SEAL)
     object.__setattr__(operation, "_issued_id", id(operation))
@@ -1132,6 +1317,226 @@ _MEMORY_REPORT_TRACE_ACTIVE = ContextVar("native_memory_report_dependency_trace"
 _MEMORY_REPORT_TRACE_COLLECTORS = weakref.WeakValueDictionary()
 
 
+def _native_memory_report_source_capacity_checked(source, db, budget):
+    """Actual original writer Source supplies resource custody, never a grant."""
+    import asyncio
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    from src.workspace.accounting_witness import CompositionSessionGuard, _COMPOSITION_METADATA_GUARDS
+    from src.workflows.job_runtime import NativeServiceClaim
+    from .dispatch import OriginalServiceInvocation
+    if (type(source) is not _NativeMemoryDispatchSource
+            or _MEMORY_SOURCES.get(id(source)) is not source
+            or source._seal is not _MEMORY_SOURCE_SEAL or source._issued_id != id(source)
+            or not source._live.is_set() or type(db) is not AsyncSession
+            or type(budget) is not HeaderReadBudget
+            or type(source.admission) is not NativeMemoryMutationAdmission
+            or source.admission.header_budget is not budget
+            or type(source._scope) is not OriginalServiceInvocation
+            or type(source.claim) is not NativeServiceClaim
+            or source._scope.binding is not source.claim.binding
+            or source._scope.witness["invocation_ref"] != source.claim.job["job_id"]
+            or source._scope.witness["input_digest"] != source.admission.candidate_digest
+            or source._scope.native_memory_source is not source
+            or source.report_source is not source.admission.report_source
+            or source._scope.native_memory_report_source is not source.report_source):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    witness = source.report_source
+    if (type(witness) is not NativeMemoryReportSourceWitness
+            or type(witness._identity) is not _MemoryReportSourceIssuance
+            or witness._identity.source_identity != id(witness)
+            or type(witness._input_stage) is not _OriginalMemoryReportInputStage
+            or _MEMORY_REPORT_INPUT_STAGES.get(id(witness._input_stage)) is not witness._input_stage
+            or witness._input_stage.budget is not budget):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    host, claim, scope = source.host, source.claim, source._scope
+    if (not host.admitting or host.reviewed is None or claim._host is not host
+            or host.boot_nonce != scope.host_boot_nonce
+            or claim.host_boot_nonce != host.boot_nonce
+            or host.reviewed.package_digest != scope.witness["package_digest"]
+            or host.reviewed.composition_digest != scope.witness["host_composition_digest"]):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    guard = db.info.get("composition_guard")
+    retained = getattr(guard, "_native_memory_authority_read_numeric", None)
+    if (type(guard) is not CompositionSessionGuard or guard not in _COMPOSITION_METADATA_GUARDS
+            or guard.db is not db or guard.header_budget is not budget
+            or guard._retention_closed or not db.info.get("native_writer_started")
+            or type(retained) is not tuple or len(retained) != 10
+            or retained[0] is not source or retained[1] is not scope or retained[2] is not db
+            or retained[3] is not db.sync_session.get_transaction()
+            or retained[5] is not asyncio.current_task() or retained[6] is not budget
+            or not retained[4].in_transaction):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    frame = _configured_mac_numeric_frame()
+    if frame is not None and frame is not budget:
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    # Compare the original captured writer fields directly. Calling the
+    # original snapshot builder here would construct a fresh nine-field tuple
+    # for every trace debit; this new resource gate needs no such copy.
+    import threading
+    captured = guard._retention_writer_snapshot
+    if (type(captured) is not tuple or len(captured) != 9
+            or captured[0] is not db or captured[1] is not retained[5]
+            or captured[2] != threading.get_ident()
+            or captured[3] not in ("native_ingress", "composition_maintenance", "durable_jobs", "finite_service")
+            or db.info.get("composition_writer_owner") != captured[3]
+            or captured[4] is not budget or captured[6] is not retained[3]
+            or captured[8] is not retained[4] or not retained[3].is_active
+            or db.in_nested_transaction()):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    connection = captured[5]
+    connection_record = retained[3]._connections.get(connection)
+    if (connection_record is None or connection_record[0] is not connection
+            or retained[3]._connections.get(db.sync_session.get_bind()) is not connection_record
+            or connection_record[1] is not captured[7]
+            or connection.closed or connection.invalidated
+            or connection.get_transaction() is not captured[7] or not captured[7].is_active
+            or connection.in_nested_transaction()
+            or connection.connection.driver_connection is not retained[4]):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    return retained
+
+
+def _native_memory_report_source_resource_owner(db_or_connection, budget):
+    """Header owner accessor for only these authentic lexical Source modes."""
+    collector = _MEMORY_REPORT_TRACE_ACTIVE.get()
+    if collector is None or (type(collector) is _NativeMemoryReportTraceCollector
+            and getattr(collector, "_source_mode", None) is None):
+        return None
+    from src.memory.header_bounds import HeaderBoundsError
+    if (type(collector) is not _NativeMemoryReportTraceCollector
+            or _MEMORY_REPORT_TRACE_COLLECTORS.get(id(collector)) is not collector):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    collector._checked()
+    if collector.budget is not budget:
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    if db_or_connection is collector.db:
+        return collector
+    from sqlalchemy.engine import Connection
+    transaction = collector.transaction
+    if type(db_or_connection) is not Connection:
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    connection_record = transaction._connections.get(db_or_connection)
+    if (connection_record is None or connection_record[0] is not db_or_connection
+            or connection_record[1] is not db_or_connection.get_transaction()
+            or not db_or_connection.in_transaction()
+            or db_or_connection.connection.driver_connection is not collector.driver):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    return collector
+
+
+def _begin_memory_report_source_numeric_trace(db, source, budget, mode):
+    from src.memory.header_bounds import HeaderBoundsError, _MEMORY_CHARGE_TRACE
+    from src.memory.composition_headers import _common_trace_label_width
+    retained = _native_memory_report_source_capacity_checked(source, db, budget)
+    if mode not in ("owner-session", "source-binding", "vault-consume") or _MEMORY_REPORT_TRACE_ACTIVE.get() is not None:
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    constructor_upper = 2 + 10 + 9 * 4 + 2 + _common_trace_label_width(mode)
+    for name in ("db", "budget", "issuer_task", "transaction", "driver", "guard", "prior", "entries", "source", "_source_mode", "stage"):
+        constructor_upper += _common_trace_label_width(name) + 1
+    budget.debit(constructor_upper, appearance=("native-memory-source-trace", "collector-construction"))
+    budget.debit(4, appearance=("native-memory-source-trace", "collector-weak-reference"))
+    budget.debit(27, appearance=("native-memory-source-trace", "collector-registry-entry"))
+    collector = object.__new__(_NativeMemoryReportTraceCollector)
+    collector.db, collector.budget = db, budget
+    collector.issuer_task, collector.transaction, collector.driver = retained[5], retained[3], retained[4]
+    collector.guard, collector.prior = db.info["composition_guard"], _MEMORY_CHARGE_TRACE.get()
+    collector.entries = []
+    collector.source, collector._source_mode = source, mode
+    collector.stage = source.report_source._input_stage
+    _MEMORY_REPORT_TRACE_COLLECTORS[id(collector)] = collector
+    budget.debit(4, appearance=("native-memory-source-trace", "active-context-token"))
+    active_token = _MEMORY_REPORT_TRACE_ACTIVE.set(collector)
+    trace_token = None
+    try:
+        collector._checked()
+        budget.debit(4, appearance=("native-memory-source-trace", "trace-context-token"))
+        budget.debit(11, appearance=("native-memory-source-trace", "trace-binding-tuple"))
+        budget.debit(16, appearance=("native-memory-source-trace", "collector-return-tuple"))
+        trace_token = _MEMORY_CHARGE_TRACE.set((budget, collector))
+        return collector, active_token, trace_token
+    except BaseException:
+        if trace_token is not None:
+            _MEMORY_CHARGE_TRACE.reset(trace_token)
+        _MEMORY_REPORT_TRACE_ACTIVE.reset(active_token)
+        _MEMORY_REPORT_TRACE_COLLECTORS.pop(id(collector), None)
+        raise
+
+
+def _finish_memory_report_source_numeric_trace(collector):
+    from src.memory.composition_headers import _common_trace_label_width
+    collector._checked()
+    upper = 2 + max(0, len(collector.entries) - 1)
+    for appearance, amount in collector.entries:
+        upper += 3 + _common_trace_label_width(appearance) + 20
+    collector._storage_debit(upper, "source-retained-core-tuple")
+    entries = tuple(collector.entries)
+    # Existing objects are borrowed; the actual immutable trace remains nested.
+    collector._storage_debit(2 + 8 + 7 * 4 + _common_trace_label_width(collector._source_mode) + upper,
+        "source-retained-lineage")
+    return (collector.source, collector.stage, collector.db, collector.transaction,
+        collector.driver, collector.issuer_task, collector.budget, collector._source_mode, entries)
+
+
+def _checked_memory_report_source_trace_certificate(collector, certificate, descriptor, identity):
+    from src.memory.header_bounds import HeaderBoundsError, HeaderCertificate, _SEAL
+    collector._checked()
+    if (type(certificate) is not HeaderCertificate or getattr(certificate, "_seal", None) is not _SEAL
+            or getattr(certificate, "_issued_id", None) != id(certificate)
+            or certificate.descriptor is not descriptor or certificate._db is not collector.db
+            or certificate._transaction is not collector.transaction or certificate._driver is not collector.driver
+            or certificate._changes != collector.driver.total_changes
+            or len(certificate.row_ids) != 1 or certificate.row_ids[0] != identity):
+        raise HeaderBoundsError("memory_report_source_resource_certificate_changed")
+
+
+def _memory_report_source_for_revalidation(db, admission):
+    from src.memory.header_bounds import HeaderBoundsError
+    guard = db.info.get("composition_guard")
+    retained = getattr(guard, "_native_memory_authority_read_numeric", None)
+    if retained is None:
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE
+        if db.info.get("native_writer_started") or _MEMORY_LEDGER_PHASE.get() is not None:
+            raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+        return None
+    if type(retained) is not tuple or len(retained) != 10:
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    source = retained[0]
+    _native_memory_report_source_capacity_checked(source, db, admission.header_budget)
+    if source.admission is not admission:
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    return source
+
+
+def _commit_memory_report_source_numeric_trace(source, proof, session_trace=None, *, recheck=False, read_current=False):
+    if source is None:
+        return
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
+    pending = getattr(proof, "_source_binding_numeric_pending", None)
+    if type(pending) is not tuple or len(pending) != 9 or pending[0] is not source:
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    retained = _native_memory_report_source_capacity_checked(source, pending[2], pending[6])
+    stage, budget = source.report_source._input_stage, pending[6]
+    if (pending[1] is not stage or pending[3] is not retained[3]
+            or pending[4] is not retained[4] or pending[5] is not retained[5]
+            or pending[7] != "source-binding"):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    if session_trace is not None and (type(session_trace) is not tuple or len(session_trace) != 9
+            or session_trace[0] is not source or session_trace[1] is not stage
+            or session_trace[2] is not pending[2] or session_trace[3] is not pending[3]
+            or session_trace[4] is not pending[4] or session_trace[5] is not pending[5]
+            or session_trace[6] is not budget or session_trace[7] != "owner-session"):
+        raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+    # Borrowed immutable trace objects; no copy of body or metadata values.
+    _memory_report_stage_pay(budget, "source-binding-success-lineage", 2 + 3 + 4 + 4 + 5 + 5)
+    confirmed = (pending, session_trace, recheck, read_current)
+    name = "_source_binding_recheck_numeric_confirmed" if recheck else "_source_binding_owner_numeric_confirmed"
+    _memory_report_stage_pay(budget, "source-binding-success-slot", 3 + _native_memory_ascii_string_width(name) + 4)
+    object.__setattr__(stage, name, confirmed)
+    object.__delattr__(proof, "_source_binding_numeric_pending")
+
+
 class _NativeMemoryReportTraceCollector:
     """Original REPORT8 issuer's resource observations, never read permission."""
     def __init__(self, db, budget, task, certificates, prior):
@@ -1150,6 +1555,14 @@ class _NativeMemoryReportTraceCollector:
         if (_MEMORY_REPORT_TRACE_COLLECTORS.get(id(self)) is not self
                 or _MEMORY_REPORT_TRACE_ACTIVE.get() is not self):
             raise HeaderBoundsError("memory_report_numeric_trace_changed")
+        if getattr(self, "_source_mode", None) is not None:
+            retained = _native_memory_report_source_capacity_checked(self.source, self.db, self.budget)
+            if (self._source_mode not in ("owner-session", "source-binding", "vault-consume")
+                    or self.issuer_task is not retained[5] or self.transaction is not retained[3]
+                    or self.driver is not retained[4] or self.guard is not self.db.info.get("composition_guard")
+                    or self.stage is not self.source.report_source._input_stage):
+                raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+            return
         import asyncio
         from sqlalchemy.ext.asyncio import AsyncSession
         from src.extensions.capability_execution import _configured_mac_numeric_frame
@@ -1186,6 +1599,12 @@ class _NativeMemoryReportTraceCollector:
             if guard is None:
                 raise HeaderBoundsError("memory_report_numeric_trace_changed")
             guard._validate_native_writer_snapshot(self.budget)
+        if getattr(self, "_metadata_record", None) is not None:
+            _checked_memory_report_metadata_numeric_owner(self.db, self.task_row, self.budget,
+                self._metadata_record, self._metadata_input_stage)
+            if (len(self.certificates[1].row_ids) != 1
+                    or self.certificates[1].row_ids[0] != self._metadata_input_stage.attempt_id):
+                raise HeaderBoundsError("memory_report_metadata_trace_changed")
 
     def _storage_debit(self, upper, stage):
         from src.memory.header_bounds import _MEMORY_CHARGE_TRACE
@@ -1221,7 +1640,8 @@ class _NativeMemoryReportTraceCollector:
                 raise HeaderBoundsError("memory_report_numeric_trace_changed")
 
 
-def _begin_memory_report_numeric_trace(db, task, budget, certificates):
+def _begin_memory_report_numeric_trace(db, task, budget, certificates, *,
+        _metadata_record=None, _metadata_input_stage=None):
     from src.memory.header_bounds import HeaderBoundsError, _MEMORY_CHARGE_TRACE
     from src.memory.composition_headers import _common_trace_label_width
     # Borrow only the original SourceBinding's four already-issued certs.
@@ -1233,10 +1653,23 @@ def _begin_memory_report_numeric_trace(db, task, budget, certificates):
     budget.debit(constructor_upper, appearance=("native-memory-report-trace", "collector-construction"))
     budget.debit(4, appearance=("native-memory-report-trace", "collector-weak-reference"))
     budget.debit(27, appearance=("native-memory-report-trace", "collector-registry-entry"))
+    if _metadata_record is not None:
+        _checked_memory_report_metadata_numeric_owner(db, task, budget, _metadata_record, _metadata_input_stage)
+        for name, stage in (("_metadata_record", "metadata-record-slot"),
+                ("_metadata_input_stage", "metadata-input-stage-slot")):
+            budget.debit(3 + _common_trace_label_width(name) + 4,
+                appearance=("native-memory-report-trace", stage))
+        budget.debit(21, appearance=("native-memory-report-trace", "metadata-certificates-tuple"))
+    elif _metadata_input_stage is not None:
+        raise HeaderBoundsError("memory_report_metadata_trace_changed")
     collector = _NativeMemoryReportTraceCollector(db, budget, task, certificates, _MEMORY_CHARGE_TRACE.get())
+    if _metadata_record is not None:
+        collector._metadata_record = _metadata_record
+        collector._metadata_input_stage = _metadata_input_stage
     _MEMORY_REPORT_TRACE_COLLECTORS[id(collector)] = collector
     budget.debit(4, appearance=("native-memory-report-trace", "active-context-token"))
     active_token = _MEMORY_REPORT_TRACE_ACTIVE.set(collector)
+    trace_token = None
     try:
         collector._checked()
         budget.debit(4, appearance=("native-memory-report-trace", "trace-context-token"))
@@ -1245,9 +1678,78 @@ def _begin_memory_report_numeric_trace(db, task, budget, certificates):
         trace_token = _MEMORY_CHARGE_TRACE.set((budget, collector))
         return collector, active_token, trace_token
     except BaseException:
+        if trace_token is not None:
+            _MEMORY_CHARGE_TRACE.reset(trace_token)
         _MEMORY_REPORT_TRACE_ACTIVE.reset(active_token)
         _MEMORY_REPORT_TRACE_COLLECTORS.pop(id(collector), None)
         raise
+
+
+def _checked_memory_report_metadata_numeric_owner(db, task, budget, record, stage):
+    """Existing issued REPORT8 custody; numeric observation grants no read."""
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.work_board.review import (_memory_report_row_certificate,
+        _MemoryReportDependencyNumericInventory, _MEMORY_REPORT_DEPENDENCY_NUMERIC,
+        _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL)
+    if (type(record) is not _MemoryReportDependencyNumericInventory
+            or _MEMORY_REPORT_DEPENDENCY_NUMERIC.get(record) is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL
+            or getattr(budget, "_native_memory_report_dependency_numeric", None) is not record
+            or record.db is not db or record.budget is not budget
+            or type(stage) is not _OriginalMemoryReportInputStage
+            or _MEMORY_REPORT_INPUT_STAGES.get(id(stage)) is not stage
+            or stage.budget is not budget or stage.task_id != task.task_id
+            or type(stage.input_bytes) is not bytes or type(stage.workspace_bytes) is not bytes
+            or type(stage._identity) is not _MemoryReportSourceIssuance
+            or stage._identity.source_identity != id(stage)):
+        raise HeaderBoundsError("memory_report_metadata_trace_changed")
+    for name in ("operator_sessions", "goals", "work_board_tasks", "work_board_attempts",
+            "workflow_run_states", "work_board_input_artifacts", "work_board_proposals", "work_board_events"):
+        _memory_report_row_certificate(db, task, budget, name)
+
+
+def _finish_memory_report_metadata_numeric_trace(collector, certificates):
+    collector._checked()
+    from src.memory.composition_headers import _common_trace_label_width
+    core_upper = 2 + max(0, len(collector.entries) - 1)
+    for appearance, amount in collector.entries:
+        core_upper += 3 + _common_trace_label_width(appearance) + 20
+    collector._storage_debit(core_upper, "metadata-retained-core-tuple")
+    entries = tuple(collector.entries)
+    lineage_upper = 2 + 8 + 7 * 4 + 21 + core_upper
+    collector._storage_debit(lineage_upper, "metadata-retained-lineage")
+    collector._storage_debit(3 + _common_trace_label_width("_report_metadata_numeric_trace") + 4,
+        "metadata-record-slot")
+    lineage = (collector._metadata_record, collector._metadata_input_stage, collector.db,
+        collector.transaction, collector.driver, collector.issuer_task, collector.budget,
+        certificates, entries)
+    object.__setattr__(collector._metadata_record, "_report_metadata_numeric_trace", lineage)
+
+
+def _native_memory_report_metadata_numeric_lineage(operation, prepared, *,
+        certificate, facts, retention_widths):
+    from src.memory.header_bounds import HeaderBoundsError
+    record = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    stage = operation.source.report_source._input_stage
+    _checked_memory_report_metadata_numeric_owner(operation.db, record, record.budget, record, stage)
+    retained = getattr(record, "_report_metadata_numeric_trace", None)
+    if (type(retained) is not tuple or len(retained) != 9 or retained[0] is not record
+            or retained[1] is not stage or retained[2] is not operation.db
+            or retained[3] is not operation.transaction or retained[4] is not operation.driver
+            or retained[5] is not record.issuer_task or retained[6] is not record.budget
+            or type(retained[7]) is not tuple or len(retained[7]) != 4
+            or type(retained[8]) is not tuple):
+        raise HeaderBoundsError("memory_report_metadata_trace_unavailable")
+    from src.memory.header_bounds import HeaderCertificate, WORK_BOARD_TASK, WORK_BOARD_ATTEMPT, GOAL, WRS_BY_RUN, _SEAL
+    for index in range(4):
+        cert = retained[7][index]
+        expected = WORK_BOARD_TASK if index == 0 else WORK_BOARD_ATTEMPT if index == 1 else GOAL if index == 2 else WRS_BY_RUN
+        if (type(cert) is not HeaderCertificate or cert._seal is not _SEAL or cert._issued_id != id(cert)
+                or cert.descriptor is not expected or cert._db is not operation.db
+                or cert._transaction is not operation.transaction or cert._driver is not operation.driver
+                or cert._changes != operation.driver.total_changes):
+            raise HeaderBoundsError("memory_report_metadata_trace_unavailable")
+    return retained
 
 
 def _end_memory_report_numeric_trace(collector, active_token, trace_token):
@@ -1320,6 +1822,417 @@ def _native_memory_report_dependency_numeric_inventory(operation, prepared, *, c
                 or exact._driver is not operation.driver or exact._changes != prepared._total_changes):
             raise HeaderBoundsError("memory_report_dependency_numeric_certificate_changed")
     return record
+
+
+def _native_memory_source_binding_numeric_lineage(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Borrow success-only original SESSION/Source observations, never a grant."""
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    record = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    source = operation.source
+    stage = source.admission.report_source._input_stage
+    confirmed = getattr(stage, "_source_binding_owner_numeric_confirmed", None)
+    if (type(confirmed) is not tuple or len(confirmed) != 4
+            or confirmed[2] is not False or confirmed[3] is not False):
+        raise HeaderBoundsError("memory_source_authority_source_binding_certificate_trace_unavailable")
+    for index in range(2):
+        lineage = confirmed[index]
+        mode = "source-binding" if index == 0 else "owner-session"
+        if (type(lineage) is not tuple or len(lineage) != 9
+                or lineage[0] is not source or lineage[1] is not stage
+                or lineage[2] is not operation.db or lineage[3] is not operation.transaction
+                or lineage[4] is not operation.driver or lineage[5] is not record.issuer_task
+                or lineage[6] is not record.budget or lineage[7] != mode
+                or type(lineage[8]) is not tuple or not lineage[8]):
+            raise HeaderBoundsError("memory_source_authority_source_binding_certificate_trace_changed")
+        for entry in lineage[8]:
+            if (type(entry) is not tuple or len(entry) != 2
+                    or type(entry[0]) is not tuple or type(entry[1]) is not int
+                    or not 0 <= entry[1] <= MAX_BYTES):
+                raise HeaderBoundsError("memory_source_authority_source_binding_certificate_trace_changed")
+    return confirmed
+
+
+def original_native_memory_source_binding_trace_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """Original SESSION then Source-binding observations and their storage.
+
+    These are actual original lexical regions, not a complete owner graph.
+    Original Source rows stay unchanged; no future certificate is fabricated.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width as width
+    from src.workspace.accounting_witness import _native_memory_capacity_label_width
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_source_binding_trace_constructor_mode_changed")
+    confirmed = _native_memory_source_binding_numeric_lineage(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    entries = None if _construction_only else []
+    constructor = pair_values = events = 0
+    for mode_index in range(2):
+        lineage = confirmed[1] if mode_index == 0 else confirmed[0]
+        mode = lineage[7]
+        core = lineage[8]
+        collector_upper = 2 + 10 + 9 * 4 + 2 + width(mode)
+        for name in ("db", "budget", "issuer_task", "transaction", "driver", "guard", "prior", "entries", "source", "_source_mode", "stage"):
+            collector_upper += width(name) + 1
+        for stage in ("collector-construction", "collector-weak-reference", "collector-registry-entry",
+                "active-context-token", "trace-context-token", "trace-binding-tuple", "collector-return-tuple"):
+            upper = collector_upper if stage == "collector-construction" else (27 if stage == "collector-registry-entry"
+                else 11 if stage == "trace-binding-tuple" else 16 if stage == "collector-return-tuple" else 4)
+            label_upper = 3 + width("native-memory-source-trace") + width(stage)
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-source-trace", stage), upper))
+        retained_upper = 2 + max(0, len(core) - 1)
+        for index in range(len(core)):
+            entry = core[index]
+            label_upper = _native_memory_capacity_label_width(entry[0], operation=operation,
+                prepared=prepared, certificate=certificate)
+            original_pair_upper = 3 + label_upper + 20
+            retained_upper += original_pair_upper
+            # append_charge prepays these two original appearances before it
+            # appends the original debit's pair to the observation list.
+            for stage in ("entry-pair", "entry-list-slot"):
+                upper = original_pair_upper + (1 if stage == "entry-list-slot" else 0)
+                storage_label_upper = 4 + width("native-memory-report-trace") + width(stage) + 20
+                pair_upper = 3 + storage_label_upper + 20
+                constructor += storage_label_upper + pair_upper
+                pair_values += pair_upper
+                events += 1
+                if not _construction_only:
+                    entries.append((("native-memory-report-trace", stage, index), upper))
+            # Borrow this exact immutable observed pair: it is not relabeled,
+            # reconstructed or confused with another certificate issuer.
+            pair_values += original_pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append(entry)
+        for stage in ("source-retained-core-tuple", "source-retained-lineage"):
+            upper = retained_upper if stage == "source-retained-core-tuple" else 2 + 8 + 7 * 4 + width(mode) + retained_upper
+            if not 0 <= upper <= MAX_BYTES:
+                raise HeaderBoundsError("memory_source_binding_trace_numeric_upper_unavailable")
+            label_upper = 4 + width("native-memory-report-trace") + width(stage) + 20
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-report-trace", stage, len(core)), upper))
+    constructor += 2 * (2 + max(0, events - 1) + pair_values)
+    if _construction_only:
+        return constructor
+    return tuple(entries)
+
+
+def _native_memory_source_vault_numeric_lineage(operation, prepared, *,
+        certificate, facts, retention_widths):
+    from src.memory.header_bounds import HeaderBoundsError
+    record = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    source = operation.source
+    stage = source.report_source._input_stage
+    current = _native_memory_report_source_capacity_checked(source, operation.db, record.budget)
+    retained = getattr(stage, "_source_vault_numeric_confirmed", None)
+    if (type(retained) is not tuple or len(retained) != 9 or retained[0] is not source
+            or retained[1] is not stage or retained[2] is not operation.db
+            or retained[3] is not current[3] or retained[4] is not current[4]
+            or retained[5] is not current[5] or retained[6] is not record.budget
+            or retained[7] != "vault-consume" or type(retained[8]) is not tuple):
+        raise HeaderBoundsError("memory_source_vault_numeric_trace_unavailable")
+    for entry in retained[8]:
+        if (type(entry) is not tuple or len(entry) != 2 or type(entry[1]) is not int
+                or not 0 <= entry[1] <= 2**63 - 1):
+            raise HeaderBoundsError("memory_source_vault_numeric_trace_unavailable")
+    return retained
+
+
+def original_native_memory_source_vault_consume_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE original successful text/Vault consume with its trace storage."""
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width as width
+    from src.workspace.accounting_witness import _native_memory_capacity_label_width
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_source_binding_trace_constructor_mode_changed")
+    confirmed = _native_memory_source_vault_numeric_lineage(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    entries = None if _construction_only else []
+    constructor = pair_values = events = 0
+    for mode_index in range(1):
+        lineage = confirmed
+        mode = lineage[7]
+        core = lineage[8]
+        collector_upper = 2 + 10 + 9 * 4 + 2 + width(mode)
+        for name in ("db", "budget", "issuer_task", "transaction", "driver", "guard", "prior", "entries", "source", "_source_mode", "stage"):
+            collector_upper += width(name) + 1
+        for stage in ("collector-construction", "collector-weak-reference", "collector-registry-entry",
+                "active-context-token", "trace-context-token", "trace-binding-tuple", "collector-return-tuple"):
+            upper = collector_upper if stage == "collector-construction" else (27 if stage == "collector-registry-entry"
+                else 11 if stage == "trace-binding-tuple" else 16 if stage == "collector-return-tuple" else 4)
+            label_upper = 3 + width("native-memory-source-trace") + width(stage)
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-source-trace", stage), upper))
+        retained_upper = 2 + max(0, len(core) - 1)
+        for index in range(len(core)):
+            entry = core[index]
+            label_upper = _native_memory_capacity_label_width(entry[0], operation=operation,
+                prepared=prepared, certificate=certificate)
+            original_pair_upper = 3 + label_upper + 20
+            retained_upper += original_pair_upper
+            # append_charge prepays these two original appearances before it
+            # appends the original debit's pair to the observation list.
+            for stage in ("entry-pair", "entry-list-slot"):
+                upper = original_pair_upper + (1 if stage == "entry-list-slot" else 0)
+                storage_label_upper = 4 + width("native-memory-report-trace") + width(stage) + 20
+                pair_upper = 3 + storage_label_upper + 20
+                constructor += storage_label_upper + pair_upper
+                pair_values += pair_upper
+                events += 1
+                if not _construction_only:
+                    entries.append((("native-memory-report-trace", stage, index), upper))
+            # Borrow this exact immutable observed pair: it is not relabeled,
+            # reconstructed or confused with another certificate issuer.
+            pair_values += original_pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append(entry)
+        for stage in ("source-retained-core-tuple", "source-retained-lineage", "source-vault-success-slot"):
+            upper = (retained_upper if stage == "source-retained-core-tuple" else
+                3 + width("_source_vault_numeric_confirmed") + 4 if stage == "source-vault-success-slot" else
+                2 + 8 + 7 * 4 + width(mode) + retained_upper)
+            if not 0 <= upper <= MAX_BYTES:
+                raise HeaderBoundsError("memory_source_binding_trace_numeric_upper_unavailable")
+            label_upper = 4 + width("native-memory-report-trace") + width(stage) + 20
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-report-trace", stage, len(core)), upper))
+    constructor += 2 * (2 + max(0, events - 1) + pair_values)
+    if _construction_only:
+        return constructor
+    return tuple(entries)
+
+
+def original_native_memory_source_readback_digest_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE original proof digest from its own paid scalar observations.
+
+    Scalar mode sizes this helper's new labels, pairs, list and returned tuple.
+    The caller pays that constructor before default mode; neither mode grants
+    a read or returns a complete Source authority reservation.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width as width
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_source_readback_constructor_mode_changed")
+    record = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    fields = getattr(record, "_source_readback_digest_numeric_fields", None)
+    names = ("receipt_kind", "workflow_run_id", "status", "content_sha256", "readback_id",
+        "artifact_id", "verification_id", "verifier_id", "effect_id_digest", "digest", "verified_at")
+    if type(fields) is not tuple or len(fields) != len(names):
+        raise HeaderBoundsError("memory_source_readback_numeric_fields_unavailable")
+    for field in fields:
+        if (type(field) is not tuple or len(field) != 4
+                or type(field[0]) is not bool or type(field[1]) is not bool
+                or type(field[2]) is not int or not 0 <= field[2] <= MAX_BYTES
+                or type(field[3]) is not int or not 0 <= field[3] <= MAX_BYTES
+                or (not field[0] and (field[1] or field[2] or field[3]))
+                or (not field[1] and field[2] != field[3])):
+            raise HeaderBoundsError("memory_source_readback_numeric_fields_changed")
+    # Only default mode constructs output. The same literal stage roster is
+    # counted in scalar mode without pairs, labels, a list or field copies.
+    entries = None if _construction_only else []
+    constructor = pair_values = events = raw_values = normalized_values = keys_upper = count = sorted_pairs = 0
+    prefix_upper = width("native-memory-report-stage")
+    for index in range(len(names)):
+        field = fields[index]
+        if not field[0]:
+            continue
+        key_upper = width(names[index])
+        keys_upper += key_upper + 1
+        raw_values += field[2]
+        normalized_values += field[3]
+        sorted_pairs += 3 + key_upper + field[2]
+        count += 1
+        for stage in ("readback-sort-key-str", "readback-key-str",
+                "readback-key-nfc-scratch", "readback-key-nfc-output"):
+            label_upper = 3 + prefix_upper + width(stage)
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-report-stage", stage), key_upper))
+        if field[1]:
+            for stage in ("readback-value-nfc-scratch", "readback-value-nfc-output"):
+                label_upper = 3 + prefix_upper + width(stage)
+                pair_upper = 3 + label_upper + 20
+                constructor += label_upper + pair_upper
+                pair_values += pair_upper
+                events += 1
+                if not _construction_only:
+                    entries.append((("native-memory-report-stage", stage), field[3]))
+    punctuation = 2 + max(0, count - 1)
+    raw_map = punctuation + keys_upper + raw_values
+    normalized_map = punctuation + keys_upper + normalized_values
+    for stage in ("readback-safe-map", "readback-items-view", "readback-sorted-pairs",
+            "readback-normalized-map", "readback-canonical", "readback-utf8", "readback-hexdigest"):
+        if stage == "readback-safe-map":
+            upper = raw_map
+        elif stage == "readback-items-view":
+            upper = 4
+        elif stage == "readback-sorted-pairs":
+            upper = punctuation + sorted_pairs
+        elif stage == "readback-hexdigest":
+            upper = 66
+        else:
+            upper = normalized_map
+        if upper > MAX_BYTES:
+            raise HeaderBoundsError("memory_source_readback_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    # Both numerical containers use the existing encoded pair grammar.
+    constructor += 2 * (2 + max(0, events - 1) + pair_values)
+    if _construction_only:
+        return constructor
+    return tuple(entries)
+
+
+def _native_memory_source_authority_numeric_issuance(operation, prepared, entries, *,
+        certificate, facts, retention_widths):
+    """Exact issued numerical output custody; it supplies no read permission."""
+    import asyncio
+    from src.memory.header_bounds import HeaderBoundsError
+    record = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    issued = getattr(record, "_source_authority_numeric_complete", None)
+    if (type(issued) is not tuple or len(issued) != 10
+            or issued[0] is not operation or issued[1] is not prepared
+            or issued[2] is not certificate or issued[3] is not facts
+            or issued[4] is not retention_widths or issued[5] is not asyncio.current_task()
+            or issued[6] is not operation.transaction or issued[7] is not operation.driver
+            or issued[8] is not record.budget or issued[9] is not entries
+            or type(entries) is not tuple or not entries):
+        raise HeaderBoundsError("memory_source_authority_numeric_issuance_unavailable")
+    return entries
+
+
+async def original_native_memory_source_authority_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE original owner validator, only when its entire graph is closed.
+
+    Authentic existing observations are checked before any output vector is
+    constructed. A named missing original term denies the complete schedule;
+    known isolated contributions are never returned as a partial owner total.
+    """
+    from src.workspace.accounting_witness import _native_memory_generic_future_bound_inputs
+    from src.workflows.job_runtime import _native_memory_completion_bound_input_construction_upper
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_source_authority_constructor_mode_changed")
+    # Scalar planning authenticates the existing owner without constructing
+    # projection dictionaries/sets. The original strong default validator is
+    # retained and is paid by the parent before its actual default invocation.
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    record = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    construction = _native_memory_completion_bound_input_construction_upper(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    construction += original_native_memory_source_readback_digest_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths, _construction_only=True)
+    construction += original_native_memory_source_proof_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths, _construction_only=True)
+    construction += original_native_memory_source_binding_trace_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths, _construction_only=True)
+    construction += original_native_memory_source_vault_consume_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths, _construction_only=True)
+    construction += original_native_memory_report_metadata_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths, _construction_only=True)
+    if _construction_only:
+        return construction
+    _native_memory_generic_future_bound_inputs(operation, prepared, certificate, facts, retention_widths)
+    _native_memory_report_authority_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    _native_memory_report_input_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    branches = getattr(record, "_principal_numeric_branches", None)
+    reverse_legacy = getattr(record, "_principal_reverse_legacy", None)
+    if (type(branches) is not tuple or len(branches) != 3
+            or type(branches[0]) is not bool or type(branches[1]) is not bool
+            or type(branches[2]) is not bool
+            or branches[0] is not True or branches[1] is not False
+            or type(reverse_legacy) is not bool):
+        raise HeaderBoundsError("memory_source_authority_auth_branch_unavailable")
+    cardinality = getattr(record, "_readback_numeric_cardinality", None)
+    stage = operation.source.admission.report_source._input_stage
+    if (type(cardinality) is not tuple or len(cardinality) != 4
+            or cardinality[0] != stage.attempt_id
+            or type(cardinality[1]) is not int or not 0 <= cardinality[1] <= MAX_BYTES
+            or type(cardinality[2]) is not int or not 0 <= cardinality[2] <= MAX_BYTES
+            or type(cardinality[3]) is not int or not 0 <= cardinality[3] <= cardinality[2]):
+        raise HeaderBoundsError("memory_source_authority_readback_cardinality_unavailable")
+    fields = getattr(record, "_verification_numeric_fields", None)
+    if type(fields) is not tuple or len(fields) != 10:
+        raise HeaderBoundsError("memory_source_authority_verified_fields_unavailable")
+    for field in fields:
+        if (type(field) is not tuple or len(field) != 2 or type(field[0]) is not bool
+                or type(field[1]) is not int or not 0 <= field[1] <= MAX_BYTES
+                or (field[0] is False and field[1] != 0)):
+            raise HeaderBoundsError("memory_source_authority_verified_fields_unavailable")
+    scan = getattr(record, "_readback_numeric_scan", None)
+    if (type(scan) is not tuple or not scan or len(scan) > cardinality[2]
+            or type(scan[-1]) is not tuple or len(scan[-1]) != 13
+            or scan[-1][0] != 6):
+        raise HeaderBoundsError("memory_source_authority_raw_readback_widths_unavailable")
+    for index in range(len(scan)):
+        row = scan[index]
+        if type(row) is not tuple or len(row) != 13:
+            raise HeaderBoundsError("memory_source_authority_raw_readback_widths_unavailable")
+        for value in row:
+            if type(value) is not int or not 0 <= value <= MAX_BYTES:
+                raise HeaderBoundsError("memory_source_authority_raw_readback_widths_unavailable")
+        if (not 0 <= row[0] <= 6 or not 0 <= row[12] <= 63
+                or (row[0] == 6 and index != len(scan) - 1)):
+            raise HeaderBoundsError("memory_source_authority_raw_readback_widths_unavailable")
+    _native_memory_report_journal_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    _native_memory_source_proof_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    _native_memory_source_binding_numeric_lineage(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    readback_digest_entries = original_native_memory_source_readback_digest_numeric_schedule(
+        operation, prepared, certificate=certificate, facts=facts, retention_widths=retention_widths)
+    proof_entries = original_native_memory_source_proof_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    binding_trace_entries = original_native_memory_source_binding_trace_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    vault_consume_entries = original_native_memory_source_vault_consume_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    metadata_entries = original_native_memory_report_metadata_numeric_schedule(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    # These separately prepaid closed children are not a whole-owner result
+    # or retained issuance. The proof's nested readback digest is its own
+    # original occurrence; the standalone child above belongs to binding.
+    # The successful original receipt now supplies its exact raw/scanned
+    # numerical branch facts. The original source-binding locator and six
+    # pre-REPORT certificate invocations still need their own authentic issuer
+    # recurrence, never a REPORT8/common certificate substitution.
+    raise HeaderBoundsError("memory_source_authority_source_binding_certificate_trace_unavailable")
 
 
 def original_native_memory_report_dependency_numeric_schedule(operation, prepared, *, certificate, facts, retention_widths):
@@ -1497,11 +2410,10 @@ def _native_memory_source_proof_pay(budget, task, attempt, readback):
     refs_count = refs_values = 0
     # The original five-key scan retains each distinct safe ref once. Count
     # duplicates by rescanning the earlier keys, without constructing refs.
-    from src.memory.m5 import _SAFE_ID
     keys = ("readback_id", "artifact_id", "verification_id", "verifier_id", "effect_id_digest")
     for index, key in enumerate(keys):
         value = readback.get(key)
-        if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
+        if not _native_memory_source_safe_ref_numeric(value):
             continue
         duplicate = False
         for prior in range(index):
@@ -1519,7 +2431,7 @@ def _native_memory_source_proof_pay(budget, task, attempt, readback):
     refs_normalized = 2 + max(0, refs_count - 1) + refs_values
     for index, key in enumerate(keys):
         value = readback.get(key)
-        if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
+        if not _native_memory_source_safe_ref_numeric(value):
             continue
         duplicate = False
         for prior in range(index):
@@ -1605,19 +2517,594 @@ def _native_memory_source_proof_pay(budget, task, attempt, readback):
         constructor_upper += width(name) + 1
     _memory_report_stage_pay(budget, "proof-constructor-kwargs", constructor_upper)
     _memory_report_stage_pay(budget, "proof-constructor", constructor_upper)
+    _native_memory_source_proof_numeric_observe(budget, task, attempt, readback)
+
+
+
+def _native_memory_report_metadata_label_numeric_upper(value):
+    """Original metadata label codec, without generator/container allocation."""
+    from src.memory.header_bounds import HeaderBoundsError
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 4 if value else 5
+    if type(value) is int:
+        if not -(2**63) <= value < 2**63:
+            raise HeaderBoundsError("memory_report_metadata_label_unavailable")
+        return 20
+    if type(value) is str:
+        upper = 2
+        for char in value:
+            code = ord(char)
+            upper += (2 if char in '\"\\' else 6 if code < 32 or 127 <= code <= 65535
+                else 12 if code > 65535 else 1)
+        return upper
+    if type(value) is tuple:
+        upper = 2 + max(0, len(value) - 1)
+        for item in value:
+            upper += _native_memory_report_metadata_label_numeric_upper(item)
+        return upper
+    raise HeaderBoundsError("memory_report_metadata_label_unavailable")
+
+
+def original_native_memory_report_metadata_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE successful original metadata trace and its exact observer storage.
+
+    The original owner issues the trace only after all metadata checks succeed.
+    Nested Runtime/auth/candidate/parser payments stay in their observed order;
+    the separate Source proof outside that lexical region is not included.
+    Scalar mode prices this helper's new labels/pairs/list/tuple, not body reads.
+    """
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_report_metadata_constructor_mode_changed")
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    lineage = _native_memory_report_metadata_numeric_lineage(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    from src.security.site_policy import (_memory_policy_dimensions_match,
+        _memory_policy_dimensions_valid, settings)
+    policy = getattr(lineage[0], "_site_policy_numeric_inputs", None)
+    if (type(policy) is not tuple or len(policy) != 3 or type(policy[0]) is not tuple
+            or not 1 <= len(policy[0]) <= 8
+            or not _memory_policy_dimensions_match(settings.browser_site_allowlist, policy[1])
+            or not _memory_policy_dimensions_match(settings.browser_site_blocklist, policy[2])):
+        raise HeaderBoundsError("memory_report_metadata_policy_changed")
+    for dimensions in policy[0]:
+        if not _memory_policy_dimensions_valid(dimensions):
+            raise HeaderBoundsError("memory_report_metadata_policy_changed")
+    # The getter validates the privately issued record, original input stage,
+    # same current DB/TX/driver/Task/frame, four Source certs and policy facts.
+    # No copied tuples, missing success trace or caller-defined rows qualify.
+    trace = lineage[8]
+    if type(trace) is not tuple or not trace:
+        raise HeaderBoundsError("memory_report_metadata_trace_unavailable")
+    prefix_upper = _native_memory_report_metadata_label_numeric_upper("native-memory-report-trace")
+    constructor_upper = 2 + 9 + 9 * 4 + 2
+    for name in ("db", "budget", "task_row", "issuer_task", "transaction", "driver",
+            "certificates", "guard", "prior", "entries"):
+        constructor_upper += _native_memory_report_metadata_label_numeric_upper(name) + 1
+    entries = None if _construction_only else []
+    construction = pair_values = count = 0
+    # Original first three issuer payments, the two private mode slots and
+    # four-cert tuple21, then the original four context/return payments.
+    for stage in ("collector-construction", "collector-weak-reference", "collector-registry-entry",
+            "metadata-record-slot", "metadata-input-stage-slot", "metadata-certificates-tuple",
+            "active-context-token", "trace-context-token", "trace-binding-tuple", "collector-return-tuple"):
+        if stage == "collector-construction":
+            upper = constructor_upper
+        elif stage == "collector-registry-entry":
+            upper = 27
+        elif stage == "trace-binding-tuple":
+            upper = 11
+        elif stage == "collector-return-tuple":
+            upper = 16
+        elif stage == "metadata-record-slot":
+            upper = 3 + _native_memory_report_metadata_label_numeric_upper("_metadata_record") + 4
+        elif stage == "metadata-input-stage-slot":
+            upper = 3 + _native_memory_report_metadata_label_numeric_upper("_metadata_input_stage") + 4
+        elif stage == "metadata-certificates-tuple":
+            upper = 21
+        else:
+            upper = 4
+        label_upper = 3 + prefix_upper + _native_memory_report_metadata_label_numeric_upper(stage)
+        pair_upper = 3 + label_upper + 20
+        construction += label_upper + pair_upper
+        pair_values += pair_upper
+        count += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-trace", stage), upper))
+    core_upper = 2 + max(0, len(trace) - 1)
+    for index in range(len(trace)):
+        entry = trace[index]
+        if (type(entry) is not tuple or len(entry) != 2 or type(entry[1]) is not int
+                or not 0 <= entry[1] <= MAX_BYTES):
+            raise HeaderBoundsError("memory_report_metadata_trace_unavailable")
+        observed_pair = 3 + _native_memory_report_metadata_label_numeric_upper(entry[0]) + 20
+        core_upper += observed_pair
+        # append_charge prepays pair/list storage before the original debit.
+        # Its numeric index is a signed-int64 encoded scalar, not a new ref.
+        for stage in ("entry-pair", "entry-list-slot"):
+            upper = observed_pair + (1 if stage == "entry-list-slot" else 0)
+            label_upper = 2 + 2 + prefix_upper + _native_memory_report_metadata_label_numeric_upper(stage) + 20
+            pair_upper = 3 + label_upper + 20
+            construction += label_upper + pair_upper
+            pair_values += pair_upper
+            count += 1
+            if not _construction_only:
+                entries.append((("native-memory-report-trace", stage, index), upper))
+        # Reuse the SAME original pair, never rebuild or suppress its charge.
+        pair_values += observed_pair
+        count += 1
+        if not _construction_only:
+            entries.append(entry)
+    lineage_upper = 2 + 8 + 7 * 4 + 21 + core_upper
+    for stage in ("metadata-retained-core-tuple", "metadata-retained-lineage", "metadata-record-slot"):
+        if stage == "metadata-retained-core-tuple":
+            upper = core_upper
+        elif stage == "metadata-retained-lineage":
+            upper = lineage_upper
+        else:
+            upper = 3 + _native_memory_report_metadata_label_numeric_upper("_report_metadata_numeric_trace") + 4
+        label_upper = 2 + 2 + prefix_upper + _native_memory_report_metadata_label_numeric_upper(stage) + 20
+        pair_upper = 3 + label_upper + 20
+        construction += label_upper + pair_upper
+        pair_values += pair_upper
+        count += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-trace", stage, len(trace)), upper))
+    # The list and returned immutable tuple are distinct encoded containers.
+    construction += 2 * (2 + max(0, count - 1) + pair_values)
+    if _construction_only:
+        return construction
+    return tuple(entries)
+
+
+def original_native_memory_source_proof_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE original proof pay vector; scalar mode prepays its constructors only."""
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES, _native_memory_ascii_string_width as width
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_source_proof_constructor_mode_changed")
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    observed = _native_memory_source_proof_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    record = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    child_constructor = original_native_memory_source_readback_digest_numeric_schedule(
+        operation, prepared, certificate=certificate, facts=facts,
+        retention_widths=retention_widths, _construction_only=True)
+    fields = record._source_readback_digest_numeric_fields
+    entries = None if _construction_only else []
+    constructor = child_constructor
+    pair_values = events = 0
+    prefix_upper = width("native-memory-report-stage")
+    scalars = observed[2]
+    refs = observed[3]
+    refs_upper = 2 + max(0, len(refs) - 1)
+    for value in refs:
+        refs_upper += value
+    for stage in ("proof-refs-list", "proof-refs-slice"):
+        upper = refs_upper
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    for field in fields:
+        if not field[0]:
+            continue
+        for stage in ("readback-sort-key-str", "readback-key-str",
+                "readback-key-nfc-scratch", "readback-key-nfc-output"):
+            pair_values += 3 + (3 + prefix_upper + width(stage)) + 20
+            events += 1
+        if field[1]:
+            for stage in ("readback-value-nfc-scratch", "readback-value-nfc-output"):
+                pair_values += 3 + (3 + prefix_upper + width(stage)) + 20
+                events += 1
+    for stage in ("readback-safe-map", "readback-items-view", "readback-sorted-pairs",
+            "readback-normalized-map", "readback-canonical", "readback-utf8", "readback-hexdigest"):
+        pair_values += 3 + (3 + prefix_upper + width(stage)) + 20
+        events += 1
+    if not _construction_only:
+        child = original_native_memory_source_readback_digest_numeric_schedule(
+            operation, prepared, certificate=certificate, facts=facts,
+            retention_widths=retention_widths)
+        entries.extend(child)
+    for value in refs:
+        for stage in ("proof-ref-nfc-scratch", "proof-ref-nfc-output"):
+            upper = value
+            if not 0 <= upper <= MAX_BYTES:
+                raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+            label_upper = 3 + prefix_upper + width(stage)
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-report-stage", stage), upper))
+    stage = "proof-normalized-refs-list"
+    upper = refs_upper
+    if not 0 <= upper <= MAX_BYTES:
+        raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+    label_upper = 3 + prefix_upper + width(stage)
+    pair_upper = 3 + label_upper + 20
+    constructor += label_upper + pair_upper
+    pair_values += pair_upper
+    events += 1
+    if not _construction_only:
+        entries.append((("native-memory-report-stage", stage), upper))
+    nested_upper = 3 + width("refs") + 1 + refs_upper + width("digest") + 1 + 66
+    for stage in ("proof-readback-map", "proof-readback-items-view", "proof-readback-sorted-pairs"):
+        upper = (4 if stage == "proof-readback-items-view" else
+            3 + (3 + width("refs") + refs_upper) + (3 + width("digest") + 66)
+            if stage == "proof-readback-sorted-pairs" else nested_upper)
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    for key in ("refs", "digest"):
+        for stage in ("proof-readback-sort-key-str", "proof-readback-key-str",
+                "proof-readback-key-nfc-scratch", "proof-readback-key-nfc-output"):
+            upper = width(key)
+            if not 0 <= upper <= MAX_BYTES:
+                raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+            label_upper = 3 + prefix_upper + width(stage)
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-report-stage", stage), upper))
+    for stage in ("proof-readback-digest-nfc-scratch", "proof-readback-digest-nfc-output",
+            "proof-normalized-readback-map"):
+        upper = nested_upper if stage == "proof-normalized-readback-map" else 66
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    for kind in ("intent", "context", "evidence"):
+        if kind == "intent":
+            names = ("version", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id", "capability_version", "typed_input_digest", "title", "body", "handoff_ids")
+        elif kind == "context":
+            names = ("version", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "title", "body")
+        else:
+            names = ("version", "owner_principal_id", "owner_session_id", "source_task_id", "source_task_revision", "source_attempt_id", "source_attempt_fence", "workflow_run_id", "goal_id", "goal_revision", "capability_id", "capability_version", "typed_input_digest", "readback")
+        raw_map = normalized_map = sorted_pairs = 2 + len(names) - 1
+        for name in names:
+            if name == "handoff_ids":
+                raw_upper = normalized_upper = 2
+                for stage in ("proof-empty-handoffs-sorted-list", "proof-empty-handoffs-normalized-list"):
+                    upper = 2
+                    if not 0 <= upper <= MAX_BYTES:
+                        raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+                    label_upper = 3 + prefix_upper + width(stage)
+                    pair_upper = 3 + label_upper + 20
+                    constructor += label_upper + pair_upper
+                    pair_values += pair_upper
+                    events += 1
+                    if not _construction_only:
+                        entries.append((("native-memory-report-stage", stage), upper))
+            elif name == "readback":
+                raw_upper = normalized_upper = nested_upper
+            else:
+                field = scalars[name]
+                raw_upper, normalized_upper = field[0], field[1]
+                if name in ("title", "body") and field[4]:
+                    for stage in ("proof-text-crlf-replace", "proof-text-cr-replace",
+                            "proof-text-nfc-scratch", "proof-text-nfc-output", "proof-text-strip"):
+                        upper = field[2] if stage in ("proof-text-crlf-replace", "proof-text-cr-replace") else raw_upper
+                        if not 0 <= upper <= MAX_BYTES:
+                            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+                        label_upper = 3 + prefix_upper + width(stage)
+                        pair_upper = 3 + label_upper + 20
+                        constructor += label_upper + pair_upper
+                        pair_values += pair_upper
+                        events += 1
+                        if not _construction_only:
+                            entries.append((("native-memory-report-stage", stage), upper))
+                if name in ("capability_id", "capability_version", "typed_input_digest"):
+                    stage = "proof-field-str"
+                    upper = raw_upper
+                    if not 0 <= upper <= MAX_BYTES:
+                        raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+                    label_upper = 3 + prefix_upper + width(stage)
+                    pair_upper = 3 + label_upper + 20
+                    constructor += label_upper + pair_upper
+                    pair_values += pair_upper
+                    events += 1
+                    if not _construction_only:
+                        entries.append((("native-memory-report-stage", stage), upper))
+                    if name == "capability_version":
+                        stage = "proof-capability-lookup-str"
+                        upper = scalars["capability_id"][0]
+                        if not 0 <= upper <= MAX_BYTES:
+                            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+                        label_upper = 3 + prefix_upper + width(stage)
+                        pair_upper = 3 + label_upper + 20
+                        constructor += label_upper + pair_upper
+                        pair_values += pair_upper
+                        events += 1
+                        if not _construction_only:
+                            entries.append((("native-memory-report-stage", stage), upper))
+                if field[3]:
+                    for stage in ("proof-value-nfc-scratch", "proof-value-nfc-output"):
+                        upper = normalized_upper
+                        if not 0 <= upper <= MAX_BYTES:
+                            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+                        label_upper = 3 + prefix_upper + width(stage)
+                        pair_upper = 3 + label_upper + 20
+                        constructor += label_upper + pair_upper
+                        pair_values += pair_upper
+                        events += 1
+                        if not _construction_only:
+                            entries.append((("native-memory-report-stage", stage), upper))
+            key_upper = width(name)
+            raw_map += key_upper + 1 + raw_upper
+            normalized_map += key_upper + 1 + normalized_upper
+            sorted_pairs += 3 + key_upper + raw_upper
+            for stage in ("proof-sort-key-str", "proof-key-str", "proof-key-nfc-scratch", "proof-key-nfc-output"):
+                upper = key_upper
+                if not 0 <= upper <= MAX_BYTES:
+                    raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+                label_upper = 3 + prefix_upper + width(stage)
+                pair_upper = 3 + label_upper + 20
+                constructor += label_upper + pair_upper
+                pair_values += pair_upper
+                events += 1
+                if not _construction_only:
+                    entries.append((("native-memory-report-stage", stage), upper))
+        for stage in ("proof-map", "proof-items-view", "proof-sorted-pairs",
+                "proof-normalized-map", "proof-canonical", "proof-utf8", "proof-hexdigest"):
+            upper = (raw_map if stage == "proof-map" else 4 if stage == "proof-items-view"
+                else sorted_pairs if stage == "proof-sorted-pairs" else 66 if stage == "proof-hexdigest"
+                else normalized_map)
+            if not 0 <= upper <= MAX_BYTES:
+                raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+            label_upper = 3 + prefix_upper + width(stage)
+            pair_upper = 3 + label_upper + 20
+            constructor += label_upper + pair_upper
+            pair_values += pair_upper
+            events += 1
+            if not _construction_only:
+                entries.append((("native-memory-report-stage", stage), upper))
+    constructor_upper = 2 + 7 + 3 * 4 + observed[4] + 3 * 66 + observed[5]
+    for name in ("task", "attempt", "run", "readback", "evidence_digest", "source_context_digest", "task_intent_digest", "capability_version"):
+        constructor_upper += width(name) + 1
+    for stage in ("proof-final-capability-lookup-str", "proof-final-capability-version-str",
+            "proof-readback-copy", "proof-constructor-kwargs", "proof-constructor"):
+        upper = (scalars["capability_id"][0] if stage == "proof-final-capability-lookup-str"
+            else observed[5] if stage == "proof-final-capability-version-str"
+            else observed[4] if stage == "proof-readback-copy" else constructor_upper)
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    scalar_names = ("version", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id",
+        "capability_version", "typed_input_digest", "title", "body", "source_task_id", "source_task_revision",
+        "source_attempt_id", "source_attempt_fence", "workflow_run_id")
+    map_upper = 2 + len(scalar_names) - 1
+    for name in scalar_names:
+        map_upper += width(name) + 1 + 76
+    stage = "proof-numeric-scalar-map"
+    upper = map_upper
+    if not 0 <= upper <= MAX_BYTES:
+        raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+    label_upper = 3 + prefix_upper + width(stage)
+    pair_upper = 3 + label_upper + 20
+    constructor += label_upper + pair_upper
+    pair_values += pair_upper
+    events += 1
+    if not _construction_only:
+        entries.append((("native-memory-report-stage", stage), upper))
+    for name in scalar_names:
+        stage = "proof-numeric-scalar-tuple"
+        upper = 76
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    numeric_refs_upper = 2 + max(0, len(refs) - 1) + 20 * len(refs)
+    retained_upper = 2 + 5 + width(observed[0]) + width(observed[1]) + map_upper + numeric_refs_upper + 20 + 20
+    digest_fields_upper = 2 + 10 + 11 * 55
+    for stage in ("proof-numeric-scalar-proxy", "proof-numeric-ref-list", "proof-numeric-ref-tuple",
+            "proof-numeric-retained-tuple", "proof-numeric-record-slot", "proof-readback-numeric-field-list"):
+        upper = (4 if stage == "proof-numeric-scalar-proxy" else
+            numeric_refs_upper if stage in ("proof-numeric-ref-list", "proof-numeric-ref-tuple") else
+            retained_upper if stage == "proof-numeric-retained-tuple" else
+            3 + width("_source_proof_numeric_dimensions") + 4 if stage == "proof-numeric-record-slot" else digest_fields_upper)
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    for index in range(11):
+        stage = "proof-readback-numeric-field-pair"
+        upper = 55
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    for stage in ("proof-readback-numeric-field-tuple", "proof-readback-numeric-field-slot"):
+        upper = (digest_fields_upper if stage == "proof-readback-numeric-field-tuple" else
+            3 + width("_source_readback_digest_numeric_fields") + 4)
+        if not 0 <= upper <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_upper_unavailable")
+        label_upper = 3 + prefix_upper + width(stage)
+        pair_upper = 3 + label_upper + 20
+        constructor += label_upper + pair_upper
+        pair_values += pair_upper
+        events += 1
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    # Child pairs/labels are already priced by child_constructor; its SAME
+    # objects occupy the separately paid outer list and final tuple too.
+    constructor += 2 * (2 + max(0, events - 1) + pair_values)
+    if _construction_only:
+        return constructor
+    return tuple(entries)
+
+
+def _native_memory_source_safe_ref_numeric(value):
+    """Original SAFE_ID grammar, scalar sizing without a regex match object."""
+    if not isinstance(value, str) or not 1 <= len(value) <= 512:
+        return False
+    for character in value:
+        codepoint = ord(character)
+        if not (65 <= codepoint <= 90 or 97 <= codepoint <= 122
+                or 48 <= codepoint <= 57 or character in "_.:/-"):
+            return False
+    return True
+
+
+def _native_memory_source_proof_numeric_observe(budget, task, attempt, readback):
+    """Retain only original proof scalar capacities on the actual REPORT owner."""
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width as width
+    from src.work_board.review import (_MemoryReportDependencyNumericInventory,
+        _MEMORY_REPORT_DEPENDENCY_NUMERIC, _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL,
+        _memory_report_row_certificate)
+    record = getattr(budget, "_native_memory_report_dependency_numeric", None)
+    if (type(record) is not _MemoryReportDependencyNumericInventory
+            or _MEMORY_REPORT_DEPENDENCY_NUMERIC.get(record) is not _MEMORY_REPORT_DEPENDENCY_NUMERIC_SEAL):
+        raise HeaderBoundsError("memory_source_proof_numeric_owner_changed")
+    task_certificate = _memory_report_row_certificate(record.db, task, budget, "work_board_tasks")
+    attempt_certificate = _memory_report_row_certificate(record.db, task, budget, "work_board_attempts")
+    if (task.task_id not in task_certificate.row_ids or attempt.attempt_id not in attempt_certificate.row_ids
+            or attempt.task_id != task.task_id or attempt.workflow_run_id is None):
+        raise HeaderBoundsError("memory_source_proof_numeric_owner_changed")
+    names = ("version", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id",
+        "capability_version", "typed_input_digest", "title", "body", "source_task_id", "source_task_revision",
+        "source_attempt_id", "source_attempt_fence", "workflow_run_id")
+    map_upper = 2 + len(names) - 1
+    for name in names:
+        map_upper += width(name) + 1 + 76
+    _memory_report_stage_pay(budget, "proof-numeric-scalar-map", map_upper)
+    scalars = {}
+    for name in names:
+        raw = _native_memory_source_proof_scalar_upper(task, attempt, name, normalized=False)
+        normalized = _native_memory_source_proof_scalar_upper(task, attempt, name, normalized=True)
+        # All original transformed fixed scalar fields are strings except the
+        # three original revision/fence fields and genuinely nullable IDs.
+        string_value = name not in ("goal_revision", "source_task_revision", "source_attempt_fence")
+        if name in ("owner_principal_id", "owner_session_id", "goal_id") and getattr(task, name) is None:
+            string_value = False
+        text_nonempty = name in ("title", "body") and bool(getattr(task, name))
+        original_text = width(getattr(task, name) or "") if name in ("title", "body") else 0
+        _memory_report_stage_pay(budget, "proof-numeric-scalar-tuple", 76)
+        scalars[name] = (raw, normalized, original_text, string_value, text_nonempty)
+    _memory_report_stage_pay(budget, "proof-numeric-scalar-proxy", 4)
+    scalars = MappingProxyType(scalars)
+    ref_count = 0
+    keys = ("readback_id", "artifact_id", "verification_id", "verifier_id", "effect_id_digest")
+    for index in range(len(keys)):
+        value = readback.get(keys[index])
+        if not _native_memory_source_safe_ref_numeric(value):
+            continue
+        duplicate = False
+        for earlier in range(index):
+            if readback.get(keys[earlier]) == value:
+                duplicate = True
+                break
+        ref_count += not duplicate
+    ref_upper = 2 + max(0, ref_count - 1) + 20 * ref_count
+    _memory_report_stage_pay(budget, "proof-numeric-ref-list", ref_upper)
+    refs = []
+    for index in range(len(keys)):
+        value = readback.get(keys[index])
+        if not _native_memory_source_safe_ref_numeric(value):
+            continue
+        duplicate = False
+        for earlier in range(index):
+            if readback.get(keys[earlier]) == value:
+                duplicate = True
+                break
+        if not duplicate:
+            refs.append(width(value))
+    _memory_report_stage_pay(budget, "proof-numeric-ref-tuple", ref_upper)
+    refs = tuple(refs)
+    retained_upper = (2 + 5 + width(task.task_id) + width(attempt.attempt_id)
+        + map_upper + ref_upper + 20 + 20)
+    _memory_report_stage_pay(budget, "proof-numeric-retained-tuple", retained_upper)
+    retained = (task.task_id, attempt.attempt_id, scalars, refs,
+        _native_memory_source_value_upper(readback),
+        _native_memory_source_proof_scalar_upper(task, attempt, "capability_version", normalized=False))
+    _memory_report_stage_pay(budget, "proof-numeric-record-slot",
+        3 + width("_source_proof_numeric_dimensions") + 4)
+    object.__setattr__(record, "_source_proof_numeric_dimensions", retained)
+    # The canonical readback digest has its own scalar appearances. The
+    # original proof-copy total cannot identify their presence/type/NFC
+    # branches. Observe only numbers from this same already-read value.
+    digest_fields_upper = 2 + 10 + 11 * 55
+    _memory_report_stage_pay(budget, "proof-readback-numeric-field-list", digest_fields_upper)
+    digest_fields = []
+    for name in ("receipt_kind", "workflow_run_id", "status", "content_sha256", "readback_id",
+            "artifact_id", "verification_id", "verifier_id", "effect_id_digest", "digest", "verified_at"):
+        value = readback.get(name)
+        present = value is not None
+        string_value = type(value) is str
+        raw = _native_memory_source_value_upper(value) if present else 0
+        if string_value:
+            from src.memory.header_bounds import _native_memory_utf8_width
+            from src.memory.m5 import _original_memory_vault_nfc_utf8_upper
+            normalized = 6 * _original_memory_vault_nfc_utf8_upper(_native_memory_utf8_width(value)) + 2
+        else:
+            normalized = raw
+        _memory_report_stage_pay(budget, "proof-readback-numeric-field-pair", 55)
+        digest_fields.append((present, string_value, raw, normalized))
+    _memory_report_stage_pay(budget, "proof-readback-numeric-field-tuple", digest_fields_upper)
+    digest_fields = tuple(digest_fields)
+    _memory_report_stage_pay(budget, "proof-readback-numeric-field-slot",
+        3 + width("_source_readback_digest_numeric_fields") + 4)
+    object.__setattr__(record, "_source_readback_digest_numeric_fields", digest_fields)
 
 
 def _native_memory_source_candidate_text_pay(budget, proof):
     """ONE original structured candidate, including its repeated refs scan."""
     from src.memory.header_bounds import _native_memory_ascii_string_width as width, _native_memory_utf8_width
-    from src.memory.m5 import _SAFE_ID, _original_memory_vault_nfc_utf8_upper
+    from src.memory.m5 import _original_memory_vault_nfc_utf8_upper
     ref = proof.evidence_digest
     found = False
     refs_count = refs_values = 0
     keys = ("readback_id", "artifact_id", "verification_id", "verifier_id", "effect_id_digest")
     for index, key in enumerate(keys):
         value = proof.readback.get(key)
-        if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
+        if not _native_memory_source_safe_ref_numeric(value):
             continue
         if not found:
             ref = value
@@ -1654,6 +3141,70 @@ def _native_memory_source_candidate_text_pay(budget, proof):
     _memory_report_stage_pay(budget, "candidate-strip", normalized_upper)
 
 
+def original_native_memory_source_candidate_text_numeric_schedule(operation, prepared, *,
+        certificate, facts, retention_widths, _construction_only=False):
+    """ONE original candidate-text payment; scalar prepays its nine pairs."""
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    from src.memory.m5 import _original_memory_vault_nfc_utf8_upper
+    if type(_construction_only) is not bool:
+        raise HeaderBoundsError("memory_source_candidate_text_constructor_mode_changed")
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    observed = _native_memory_source_proof_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    scalars = observed[2]
+    capability = scalars["capability_id"]
+    goal = scalars["goal_id"]
+    revision = scalars["goal_revision"]
+    if (capability[3] is not True or goal[3] is not True or revision[3] is not False
+            or capability[0] < 2 or goal[0] < 2 or revision[0] != 20):
+        raise HeaderBoundsError("memory_source_candidate_text_shape_unavailable")
+    refs = observed[3]
+    refs_upper = 2 + max(0, len(refs) - 1)
+    for ref_upper in refs:
+        # Original _SAFE_ID accepts only 1..512 ASCII characters. Its exact
+        # JSON string width is byte length+2, unlike general UTF capacities.
+        if not 3 <= ref_upper <= 514:
+            raise HeaderBoundsError("memory_source_candidate_text_shape_unavailable")
+        refs_upper += ref_upper
+    ref_utf8 = refs[0] - 2 if refs else 64
+    # The proof observer's raw capability/Goal strings use ensure_ascii JSON
+    # widths, NOT 6*UTF+2. JSON width-2 bounds their original UTF8 safely;
+    # division by six would underprice ordinary ASCII identifiers.
+    utf8_upper = (len("Verified  completed successfully for goal  at revision ; independent readback  is bound to the source attempt.")
+        + capability[0] - 2 + goal[0] - 2 + revision[0] + ref_utf8)
+    raw_upper = 6 * utf8_upper + 2
+    normalized_upper = 6 * _original_memory_vault_nfc_utf8_upper(utf8_upper) + 2
+    if raw_upper > MAX_BYTES or normalized_upper > MAX_BYTES:
+        raise HeaderBoundsError("memory_source_candidate_text_bound")
+    entries = None if _construction_only else []
+    construction = pair_values = 0
+    prefix_upper = len("native-memory-report-stage") + 2
+    for stage in ("candidate-refs-list", "candidate-refs-slice", "candidate-revision-format",
+            "candidate-format", "candidate-crlf-replace", "candidate-cr-replace",
+            "candidate-nfc-scratch", "candidate-nfc-output", "candidate-strip"):
+        if stage in ("candidate-refs-list", "candidate-refs-slice"):
+            upper = refs_upper
+        elif stage == "candidate-revision-format":
+            upper = revision[0] + 2
+        elif stage in ("candidate-format", "candidate-crlf-replace", "candidate-cr-replace"):
+            upper = raw_upper
+        else:
+            upper = normalized_upper
+        # Prefix/stage names are literal ASCII without escapes. No JSON,
+        # generator, label or forecast container is built in scalar mode.
+        label_upper = 3 + prefix_upper + len(stage) + 2
+        pair_upper = 3 + label_upper + 20
+        construction += label_upper + pair_upper
+        pair_values += pair_upper
+        if not _construction_only:
+            entries.append((("native-memory-report-stage", stage), upper))
+    construction += 2 * (2 + 8 + pair_values)
+    if _construction_only:
+        return construction
+    return tuple(entries)
+
+
 def _native_memory_source_prepared_text_model_pay(budget, prepared_text):
     """Original three-field kwargs and dataclass, before ** mapping expansion."""
     upper = _native_memory_source_value_upper(prepared_text)
@@ -1685,8 +3236,43 @@ def _native_memory_source_binding_model_pay(budget, task, proof):
     _native_memory_source_readback_digest_pay(budget, proof.readback)
 
 
+def _native_memory_source_binding_delivery_pay(budget, certificate, identity, stage, datetime_fields):
+    """Original closed ORM row delivery, independent of its read permission."""
+    if budget is None:
+        return
+    from src.memory.header_bounds import HeaderBoundsError, HeaderReadBudget, HeaderCertificate, _SEAL
+    from src.extensions.capability_execution import _configured_mac_numeric_frame
+    frame = _configured_mac_numeric_frame()
+    if (type(budget) is not HeaderReadBudget or (frame is not None and frame is not budget)
+            or type(certificate) is not HeaderCertificate or getattr(certificate, "_seal", None) is not _SEAL
+            or getattr(certificate, "_issued_id", None) != id(certificate)
+            or type(certificate.row_ids) is not tuple or len(certificate.row_ids) != 1
+            or certificate.row_ids[0] != identity
+            or type(certificate.row_upper_bytes) is not tuple or len(certificate.row_upper_bytes) != 1
+            or certificate._transaction is not certificate._db.sync_session.get_transaction()
+            or not certificate._driver.in_transaction
+            or certificate._changes != certificate._driver.total_changes):
+        raise HeaderBoundsError("memory_source_binding_delivery_numeric_owner_changed")
+    # The actual existing PK certificate supplies the original row's encoded
+    # field sum. The mapped datetime constructor has the same fixed44 capacity
+    # used by the reviewed original REPORT lookup payer; nullable fields need
+    # no additional body read to reserve that finite original column capacity.
+    if stage == "task":
+        model_label, date_label = "source-binding-task-model-delivery", "source-binding-task-date-delivery"
+    elif stage == "goal":
+        model_label, date_label = "source-binding-goal-model-delivery", "source-binding-goal-date-delivery"
+    elif stage == "attempt":
+        model_label, date_label = "source-binding-attempt-model-delivery", "source-binding-attempt-date-delivery"
+    elif stage == "run":
+        model_label, date_label = "source-binding-run-model-delivery", "source-binding-run-date-delivery"
+    else:
+        raise HeaderBoundsError("memory_source_binding_delivery_numeric_owner_changed")
+    _memory_report_stage_pay(budget, model_label, certificate.row_upper_bytes[0])
+    _memory_report_stage_pay(budget, date_label, datetime_fields * 44)
+
+
 async def source_binding(db, *, principal_id, session_id, task_id, revision, attempt_id, header_budget=None,
-        _report_input_stage=None, _report_source=None):
+        _report_input_stage=None, _report_source=None, _numeric_source=None):
     from src.db.models import Goal, WorkBoardTask
     from src.memory import m5
     from sqlalchemy import text
@@ -1704,36 +3290,85 @@ async def source_binding(db, *, principal_id, session_id, task_id, revision, att
         # connection. It remains separate from the later original writer.
         await db.execute(text("BEGIN"))
     from src.memory.composition_headers import locate_exact_rows
-    # Certify the exact original source rows before even their bounded
-    # relationship projections. The later full-body appearance is charged
-    # separately below on this same frame.
+    pending_numeric_trace = None
+    source_collector = source_active_token = source_trace_token = None
+    if _numeric_source is not None:
+        _native_memory_report_source_capacity_checked(_numeric_source, db, budget)
+        if (_numeric_source.report_source is not _report_source
+                or _report_source._input_stage.task_id != task_id
+                or _report_source._input_stage.attempt_id != attempt_id
+                or _numeric_source.operator.principal.principal_id != principal_id
+                or _numeric_source.operator.session_id != session_id):
+            raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+        source_collector, source_active_token, source_trace_token = _begin_memory_report_source_numeric_trace(
+            db, _numeric_source, budget, "source-binding")
     try:
-        for descriptor, identity in ((WORK_BOARD_TASK, task_id), (WORK_BOARD_ATTEMPT, attempt_id)):
-            if not await locate_exact_rows(db, descriptor, identity, budget):
-                raise NativeServiceBlocked("native_memory_original_source_changed")
-            await budget.certify(db, descriptor, (identity,))
-    except HeaderBoundsError as error:
-        raise NativeServiceBlocked("native_memory_source_bound_not_certified") from error
-    # Locators are selected without Task/Attempt JSON or free text. Every full
-    # source row is certified before the first ORM body/proof reader.
-    def bounded(column):
-        return (f"CASE WHEN typeof({column})='text' THEN CASE WHEN "
-                f"octet_length({column}) BETWEEN 1 AND 512 THEN {column} END END")
-    goal_id = await db.scalar(text(f"SELECT {bounded('goal_id')} FROM work_board_tasks "
-                                  "WHERE task_id=:id LIMIT 1"), {"id": task_id})
-    run_id = await db.scalar(text(f"SELECT {bounded('workflow_run_id')} FROM work_board_attempts "
-                                 "WHERE attempt_id=:id LIMIT 1"), {"id": attempt_id})
-    if type(goal_id) is not str or type(run_id) is not str:
-        raise NativeServiceBlocked("native_memory_original_source_changed")
-    certificates = []
-    try:
-        for descriptor, identity in ((WORK_BOARD_TASK, task_id), (WORK_BOARD_ATTEMPT, attempt_id),
-                                     (GOAL, goal_id), (WRS_BY_RUN, run_id)):
-            certificates.append(await budget.certify(db, descriptor, (identity,)))
-        for certificate in certificates:
-            await validate_certificate(db, certificate)
-    except HeaderBoundsError as error:
-        raise NativeServiceBlocked("native_memory_source_bound_not_certified") from error
+        # Certify the exact original source rows before even their bounded
+        # relationship projections. The later full-body appearance is charged
+        # separately below on this same frame.
+        try:
+            for descriptor, identity in ((WORK_BOARD_TASK, task_id), (WORK_BOARD_ATTEMPT, attempt_id)):
+                if not await locate_exact_rows(db, descriptor, identity, budget,
+                        _header_budget=budget if source_collector is not None else None):
+                    raise NativeServiceBlocked("native_memory_original_source_changed")
+                initial_certificate = await budget.certify(db, descriptor, (identity,),
+                    _header_budget=budget if source_collector is not None else None)
+                if source_collector is not None:
+                    _checked_memory_report_source_trace_certificate(source_collector, initial_certificate, descriptor, identity)
+        except HeaderBoundsError as error:
+            raise NativeServiceBlocked("native_memory_source_bound_not_certified") from error
+        # Locators are selected without Task/Attempt JSON or free text. Every full
+        # source row is certified before the first ORM body/proof reader.
+        if source_collector is not None:
+            # Original local function construction is a logical Source object;
+            # numeric payment adds no relationship/body read permission.
+            _memory_report_stage_pay(budget, "source-binding-projection-function", 32)
+        def bounded(column):
+            return (f"CASE WHEN typeof({column})='text' THEN CASE WHEN "
+                    f"octet_length({column}) BETWEEN 1 AND 512 THEN {column} END END")
+        if source_collector is not None:
+            from src.memory.header_bounds import _native_memory_ascii_string_width as width
+            # This literal is the exact original bounded expression. It sizes
+            # the new f-string before bounded() or the outer SELECT runs.
+            expression_upper = width("CASE WHEN typeof(goal_id)='text' THEN CASE WHEN octet_length(goal_id) BETWEEN 1 AND 512 THEN goal_id END END")
+            _memory_report_stage_pay(budget, "source-binding-goal-expression", expression_upper)
+            _memory_report_stage_pay(budget, "source-binding-goal-query", expression_upper
+                + len("SELECT ") + len(" FROM work_board_tasks WHERE task_id=:id LIMIT 1"))
+            _memory_report_stage_pay(budget, "source-binding-goal-parameters", 3 + width("id") + width(task_id))
+            _memory_report_stage_pay(budget, "source-binding-goal-projection-delivery", 6 * 512 + 2)
+        goal_id = await db.scalar(text(f"SELECT {bounded('goal_id')} FROM work_board_tasks "
+                                      "WHERE task_id=:id LIMIT 1"), {"id": task_id})
+        if source_collector is not None:
+            expression_upper = width("CASE WHEN typeof(workflow_run_id)='text' THEN CASE WHEN octet_length(workflow_run_id) BETWEEN 1 AND 512 THEN workflow_run_id END END")
+            _memory_report_stage_pay(budget, "source-binding-run-expression", expression_upper)
+            _memory_report_stage_pay(budget, "source-binding-run-query", expression_upper
+                + len("SELECT ") + len(" FROM work_board_attempts WHERE attempt_id=:id LIMIT 1"))
+            _memory_report_stage_pay(budget, "source-binding-run-parameters", 3 + width("id") + width(attempt_id))
+            _memory_report_stage_pay(budget, "source-binding-run-projection-delivery", 6 * 512 + 2)
+        run_id = await db.scalar(text(f"SELECT {bounded('workflow_run_id')} FROM work_board_attempts "
+                                     "WHERE attempt_id=:id LIMIT 1"), {"id": attempt_id})
+        if type(goal_id) is not str or type(run_id) is not str:
+            raise NativeServiceBlocked("native_memory_original_source_changed")
+        certificates = []
+        try:
+            for descriptor, identity in ((WORK_BOARD_TASK, task_id), (WORK_BOARD_ATTEMPT, attempt_id),
+                                         (GOAL, goal_id), (WRS_BY_RUN, run_id)):
+                certificates.append(await budget.certify(db, descriptor, (identity,),
+                    _header_budget=budget if source_collector is not None else None))
+            for certificate in certificates:
+                await validate_certificate(db, certificate)
+        except HeaderBoundsError as error:
+            raise NativeServiceBlocked("native_memory_source_bound_not_certified") from error
+        if source_collector is not None:
+            for index in range(4):
+                descriptor = WORK_BOARD_TASK if index == 0 else WORK_BOARD_ATTEMPT if index == 1 else GOAL if index == 2 else WRS_BY_RUN
+                identity = task_id if index == 0 else attempt_id if index == 1 else goal_id if index == 2 else run_id
+                _checked_memory_report_source_trace_certificate(source_collector, certificates[index], descriptor, identity)
+            pending_numeric_trace = _finish_memory_report_source_numeric_trace(source_collector)
+    finally:
+        if source_collector is not None:
+            _end_memory_report_numeric_trace(source_collector, source_active_token, source_trace_token)
+    _native_memory_source_binding_delivery_pay(header_budget, certificates[0], task_id, "task", 7)
     task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
     if (task is None or task.owner_principal_id != principal_id or task.owner_session_id != session_id
         or task.task_revision != revision):
@@ -1742,6 +3377,7 @@ async def source_binding(db, *, principal_id, session_id, task_id, revision, att
         # Other existing source owners reopen private files or require their
         # own staged source token. Their legacy routes retain that behavior.
         raise NativeServiceBlocked("native_memory_source_profile_unsupported")
+    _native_memory_source_binding_delivery_pay(header_budget, certificates[2], task.goal_id, "goal", 4)
     goal = await db.get(Goal, task.goal_id)
     if (goal is None or goal.owner_principal_id != principal_id or goal.owner_session_id != session_id
         or goal.revision != task.goal_revision or goal.status != "active"):
@@ -1749,7 +3385,9 @@ async def source_binding(db, *, principal_id, session_id, task_id, revision, att
     if task.capability_id == REPORT_SOURCE_CAPABILITY:
         from src.db.models import WorkBoardAttempt, WorkflowRunState
         from src.work_board.review import native_report_memory_metadata, _stage_terminal_report_input
+        _native_memory_source_binding_delivery_pay(header_budget, certificates[1], attempt_id, "attempt", 7)
         attempt = await db.get(WorkBoardAttempt, attempt_id, populate_existing=True)
+        _native_memory_source_binding_delivery_pay(header_budget, certificates[3], run_id, "run", 6)
         run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity ==
             (attempt.workflow_run_id if attempt is not None else "")).execution_options(populate_existing=True))
         if attempt is None or run is None:
@@ -1785,6 +3423,11 @@ async def source_binding(db, *, principal_id, session_id, task_id, revision, att
         object.__setattr__(proof, "_native_memory_report_input_stage", stage)
     else:
         proof = await m5._verified_source(db, task, requested_attempt_id=attempt_id)
+    if pending_numeric_trace is not None:
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        _memory_report_stage_pay(budget, "source-binding-pending-proof-slot",
+            3 + _native_memory_ascii_string_width("_source_binding_numeric_pending") + 4)
+        object.__setattr__(proof, "_source_binding_numeric_pending", pending_numeric_trace)
     if task.capability_id == REPORT_SOURCE_CAPABILITY:
         _native_memory_source_binding_model_pay(budget, task, proof)
     return MemorySourceBinding(task_id=task.task_id, expected_task_revision=task.task_revision,
@@ -1972,6 +3615,78 @@ def _native_memory_report_input_numeric_facts(operation, prepared, *, certificat
             raise HeaderBoundsError("memory_report_input_numeric_shape_unavailable")
         index += 1
     return record
+
+
+
+def _native_memory_report_journal_numeric_facts(operation, prepared, *, certificate, facts, retention_widths):
+    """Borrow this original REPORT reader's authenticated numeric dimensions."""
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    from src.runtime_plugins.task_capability import _ADMISSION_FIELDS, REPORT_CHECKPOINT_IDS
+    inventory = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    authority = _native_memory_report_authority_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    observed = getattr(inventory, "_report_journal_numeric", None)
+    if (type(observed) is not tuple or len(observed) != 9 or observed[0] != authority[2]
+            or type(observed[1]) is not MappingProxyType or len(observed[1]) != len(_ADMISSION_FIELDS)
+            or type(observed[2]) is not tuple or not 1 <= len(observed[2]) <= 50
+            or type(observed[3]) is not int or not 0 <= observed[3] <= MAX_BYTES
+            or type(observed[4]) is not int or not 0 <= observed[4] <= MAX_BYTES):
+        raise HeaderBoundsError("memory_report_journal_numeric_owner_changed")
+    for index in (5, 6, 7, 8):
+        if type(observed[index]) is not int or not 0 <= observed[index] <= MAX_BYTES:
+            raise HeaderBoundsError("memory_report_journal_numeric_shape_unavailable")
+    for name in observed[1]:
+        pair = observed[1][name]
+        if name not in _ADMISSION_FIELDS or type(pair) is not tuple or len(pair) != 2:
+            raise HeaderBoundsError("memory_report_journal_numeric_shape_unavailable")
+        for value in pair:
+            if type(value) is not int or not 0 <= value <= MAX_BYTES:
+                raise HeaderBoundsError("memory_report_journal_numeric_shape_unavailable")
+    for row in observed[2]:
+        if type(row) is not tuple or len(row) != 9:
+            raise HeaderBoundsError("memory_report_journal_numeric_shape_unavailable")
+        for value in row:
+            if type(value) is not int or not 0 <= value <= MAX_BYTES:
+                raise HeaderBoundsError("memory_report_journal_numeric_shape_unavailable")
+        if not 0 <= row[5] <= len(REPORT_CHECKPOINT_IDS) or not 0 <= row[7] <= 34:
+            raise HeaderBoundsError("memory_report_journal_numeric_shape_unavailable")
+    return observed
+
+
+
+def _native_memory_source_proof_numeric_facts(operation, prepared, *, certificate, facts, retention_widths):
+    from types import MappingProxyType
+    from src.memory.header_bounds import HeaderBoundsError, MAX_BYTES
+    inventory = _native_memory_report_dependency_numeric_inventory(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    authority = _native_memory_report_authority_numeric_facts(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    observed = getattr(inventory, "_source_proof_numeric_dimensions", None)
+    names = ("version", "owner_principal_id", "owner_session_id", "goal_id", "goal_revision", "capability_id",
+        "capability_version", "typed_input_digest", "title", "body", "source_task_id", "source_task_revision",
+        "source_attempt_id", "source_attempt_fence", "workflow_run_id")
+    if (type(observed) is not tuple or len(observed) != 6
+            or observed[0] != authority[0] or observed[1] != authority[1]
+            or type(observed[2]) is not MappingProxyType or len(observed[2]) != len(names)
+            or type(observed[3]) is not tuple or len(observed[3]) > 5
+            or type(observed[4]) is not int or not 0 <= observed[4] <= MAX_BYTES
+            or type(observed[5]) is not int or not 0 <= observed[5] <= MAX_BYTES):
+        raise HeaderBoundsError("memory_source_proof_numeric_owner_changed")
+    for name in names:
+        row = observed[2].get(name)
+        if (type(row) is not tuple or len(row) != 5
+                or type(row[0]) is not int or not 0 <= row[0] <= MAX_BYTES
+                or type(row[1]) is not int or not 0 <= row[1] <= MAX_BYTES
+                or type(row[2]) is not int or not 0 <= row[2] <= MAX_BYTES
+                or type(row[3]) is not bool or type(row[4]) is not bool
+                or (name not in ("title", "body") and (row[2] != 0 or row[4]))):
+            raise HeaderBoundsError("memory_source_proof_numeric_shape_unavailable")
+    for value in observed[3]:
+        if type(value) is not int or not 0 <= value <= MAX_BYTES:
+            raise HeaderBoundsError("memory_source_proof_numeric_shape_unavailable")
+    return observed
 
 
 def _memory_report_input_stage_digest(stage):
@@ -2167,10 +3882,11 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
         or old["capability_id"] != REPORT_SOURCE_CAPABILITY):
         raise NativeServiceBlocked("native_memory_original_source_changed")
     await context.authority_check(db)
+    numeric_source = _memory_report_source_for_revalidation(db, context.admission)
     current, proof = await source_binding(db, principal_id=value["operator_principal_id"],
         session_id=value["operator_session_id"], task_id=old["task_id"],
         revision=old["expected_task_revision"], attempt_id=old["attempt_id"],
-        header_budget=context.admission.header_budget, _report_source=source)
+        header_budget=context.admission.header_budget, _report_source=source, _numeric_source=numeric_source)
     if (current != old or await _memory_report_rows(db, proof,
             header_budget=context.admission.header_budget) != source.row_tokens
         or _canonical(proof.readback) != source.proof_json
@@ -2197,6 +3913,9 @@ async def recheck_memory_report_source(db, task, attempt, context, *, read_curre
         await context.authority_check(db)
         if datetime.now(timezone.utc) >= datetime.fromisoformat(value["original_deadline"]):
             raise NativeServiceBlocked("native_memory_original_cutoff_expired")
+    _memory_report_stage_pay(context.admission.header_budget, "recheck-readback-return-copy",
+        _native_memory_source_value_upper(proof.readback))
+    _commit_memory_report_source_numeric_trace(numeric_source, proof, recheck=True, read_current=read_current)
     return dict(proof.readback)
 
 
@@ -2221,7 +3940,36 @@ async def _prepare_original_memory_text(db, value, budget):
 
 async def _consume_original_memory_text(db, value, prepared, budget):
     from src.memory import m5
-    return await m5._consume_prepared_m5_text(db, value, prepared, header_budget=budget)
+    guard = db.info.get("composition_guard")
+    owner = getattr(guard, "_native_memory_authority_read_numeric", None)
+    source = None
+    if owner is not None:
+        from src.memory.header_bounds import HeaderBoundsError
+        if type(owner) is not tuple or len(owner) != 10:
+            raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+        candidate_source = owner[0]
+        if (type(candidate_source) is not _NativeMemoryDispatchSource
+                or _MEMORY_SOURCES.get(id(candidate_source)) is not candidate_source):
+            raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+        if candidate_source.admission.report_source is not None:
+            source = _memory_report_source_for_revalidation(db, candidate_source.admission)
+    if source is None:
+        return await m5._consume_prepared_m5_text(db, value, prepared, header_budget=budget)
+    collector, active_token, trace_token = _begin_memory_report_source_numeric_trace(
+        db, source, budget, "vault-consume")
+    try:
+        # The original UTF/digest, bounded Secret inventory and structural
+        # sanitization remain one unchanged original call. Retention follows
+        # its actual digest comparison and successful sanitized result.
+        result = await m5._consume_prepared_m5_text(db, value, prepared, header_budget=budget)
+        retained = _finish_memory_report_source_numeric_trace(collector)
+        from src.memory.header_bounds import _native_memory_ascii_string_width
+        collector._storage_debit(3 + _native_memory_ascii_string_width("_source_vault_numeric_confirmed") + 4,
+            "source-vault-success-slot")
+        object.__setattr__(collector.stage, "_source_vault_numeric_confirmed", retained)
+        return result
+    finally:
+        _end_memory_report_numeric_trace(collector, active_token, trace_token)
 
 
 async def prepare_memory_admission(db, *, operator, method, request, idempotency_key,
@@ -2307,7 +4055,7 @@ async def prepare_memory_admission(db, *, operator, method, request, idempotency
     return admission
 
 
-async def validate_original_memory_owner(db, admission):
+async def validate_original_memory_owner(db, admission, *, _numeric_source=None):
     """Metadata-only recheck in the original authority/effect writer."""
     from src.memory import m5
     from src.db.models import Memory, MemoryProposal, MemoryProposalStatus, MemoryTombstone
@@ -2318,9 +4066,32 @@ async def validate_original_memory_owner(db, admission):
     budget = admission.header_budget
     if type(budget) is not HeaderReadBudget:
         raise NativeServiceBlocked("native_memory_source_budget_unavailable")
+    if _numeric_source is not None:
+        _native_memory_report_source_capacity_checked(_numeric_source, db, budget)
     value = admission.candidate()
-    await budget.certify(db, SESSION, (value["operator_session_id"],))
+    session_trace = None
+    session_collector = session_active_token = session_trace_token = None
+    if _numeric_source is not None:
+        if (_numeric_source.admission is not admission
+                or _numeric_source.operator.session_id != value["operator_session_id"]
+                or _numeric_source.operator.principal.principal_id != value["operator_principal_id"]):
+            from src.memory.header_bounds import HeaderBoundsError
+            raise HeaderBoundsError("memory_report_source_resource_owner_changed")
+        session_collector, session_active_token, session_trace_token = _begin_memory_report_source_numeric_trace(
+            db, _numeric_source, budget, "owner-session")
+    try:
+        session_certificate = await budget.certify(db, SESSION, (value["operator_session_id"],),
+            _header_budget=budget if session_collector is not None else None)
+        if session_collector is not None:
+            _checked_memory_report_source_trace_certificate(session_collector, session_certificate, SESSION, value["operator_session_id"])
+            session_trace = _finish_memory_report_source_numeric_trace(session_collector)
+    finally:
+        if session_collector is not None:
+            _end_memory_report_numeric_trace(session_collector, session_active_token, session_trace_token)
+    _native_memory_source_pay("authority", "session-model-delivery", session_certificate.upper_bytes)
     await m5._require_original_m5_session(db, value["operator_principal_id"], value["operator_session_id"])
+    _native_memory_source_pay("authority", "deadline-current-time", 44)
+    _native_memory_source_pay("authority", "deadline-parse", 44)
     if datetime.now(timezone.utc) >= datetime.fromisoformat(value["original_deadline"]):
         raise NativeServiceBlocked("native_memory_original_cutoff_expired")
     if value["method"] != "memory.forget":
@@ -2328,7 +4099,7 @@ async def validate_original_memory_owner(db, admission):
         current, proof = await source_binding(db, principal_id=value["operator_principal_id"],
             session_id=value["operator_session_id"], task_id=old["task_id"],
             revision=old["expected_task_revision"], attempt_id=old["attempt_id"], header_budget=admission.header_budget,
-            _report_source=admission.report_source)
+            _report_source=admission.report_source, _numeric_source=_numeric_source)
         if current != old:
             raise NativeServiceBlocked("native_memory_original_source_changed")
         if proof.task.capability_id == REPORT_SOURCE_CAPABILITY:
@@ -2367,6 +4138,8 @@ async def validate_original_memory_owner(db, admission):
         if value["prepared_reason"] is not None:
             _native_memory_source_prepared_text_model_pay(budget, value["prepared_reason"])
             await _consume_original_memory_text(db, value["reason"], m5.PreparedM5Text(**value["prepared_reason"]), budget)
+    if _numeric_source is not None:
+        _commit_memory_report_source_numeric_trace(_numeric_source, proof, session_trace)
     return value
 
 
@@ -2384,7 +4157,7 @@ class MemoryOwnerEffect:
 
 def _native_memory_mutation_allocation_upper(method, widths, stage, *, audit=None):
     """Scalar sizing at the actual allocation site; no fee-vector copy."""
-    from src.memory.header_bounds import HeaderBoundsError, _native_memory_object_width
+    from src.memory.header_bounds import HeaderBoundsError, _native_memory_ascii_string_width
     if stage in ("prepared-text-kwargs", "prepared-text-construction") and method != "memory.forget":
         return widths["source_upper"]
     if stage == "audit-details-construction" and method == "memory.propose":
@@ -2393,14 +4166,17 @@ def _native_memory_mutation_allocation_upper(method, widths, stage, *, audit=Non
         from src.db.models import AuditEvent
         if type(audit) is not AuditEvent:
             raise HeaderBoundsError("memory_mutation_numeric_audit_unavailable")
-        return _native_memory_object_width({
-            "actor": _native_memory_source_value_upper(audit.actor),
-            "session_id": _native_memory_source_value_upper(audit.session_id),
-            "event_type": _native_memory_source_value_upper(audit.event_type),
-            "tool_name": _native_memory_source_value_upper(audit.tool_name),
-            "policy_mode": _native_memory_source_value_upper(audit.policy_mode),
-            "summary": _native_memory_source_value_upper(audit.summary),
-            "details": widths["details_upper"], "_prepared_event": widths["audit_upper"]})
+        # Eight original kwargs fields: arithmetic only. The actual effect
+        # hook must not first allocate an unpaid numeric sizing dictionary.
+        return (2 + 7
+            + _native_memory_ascii_string_width("actor") + 1 + _native_memory_source_value_upper(audit.actor)
+            + _native_memory_ascii_string_width("session_id") + 1 + _native_memory_source_value_upper(audit.session_id)
+            + _native_memory_ascii_string_width("event_type") + 1 + _native_memory_source_value_upper(audit.event_type)
+            + _native_memory_ascii_string_width("tool_name") + 1 + _native_memory_source_value_upper(audit.tool_name)
+            + _native_memory_ascii_string_width("policy_mode") + 1 + _native_memory_source_value_upper(audit.policy_mode)
+            + _native_memory_ascii_string_width("summary") + 1 + _native_memory_source_value_upper(audit.summary)
+            + _native_memory_ascii_string_width("details") + 1 + widths["details_upper"]
+            + _native_memory_ascii_string_width("_prepared_event") + 1 + widths["audit_upper"])
     if stage in ("result-value-construction", "result-canonical"):
         return widths["result_upper"]
     if stage in ("cutoff-now", "cutoff-parse"):
@@ -2440,6 +4216,49 @@ def _native_memory_mutation_allocation_entries(method, widths, *, audit=None):
     add("effect-construction", widths["effect_upper"])
     add("effect-return", widths["effect_upper"])
     return tuple(entries)
+
+
+def _native_memory_mutation_allocation_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """ONE original mutation forecast constructor, no retained parent tuple."""
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    from src.memory.header_bounds import HeaderBoundsError
+    method = prepared._method
+    if method == "memory.propose":
+        count = 10
+    elif method == "memory.applyReviewed":
+        count = 8
+    elif method == "memory.forget":
+        count = 6
+    else:
+        raise HeaderBoundsError("memory_mutation_numeric_method_unavailable")
+    # Same five closed original capacities are validated without constructing
+    # the helper's appearance list or future effect/result/PreparedM5Text.
+    for name in ("source_upper", "audit_upper", "details_upper", "result_upper", "effect_upper"):
+        _native_memory_source_capacity(retention_widths[name])
+    stage = len("prepared-text-construction") + 2
+    appearance = 3 + len("native-memory-mutation") + 2 + stage
+    pair = 3 + appearance + 20
+    triple = 4 + len("effect") + 2 + appearance + 20
+    result = (2 + 2 + 3 * (len("memory.applyReviewed") + 3)
+        + 2 * (2 + count - 1 + count * pair)
+        + count * appearance + 2 + count - 1 + count * triple
+        + 2 * (2 + 7 + 8 * 4))  # add closure and outer tuple generator
+    if method == "memory.propose":
+        from src.db.models import AuditEvent
+        audit = prepared.audit_event
+        if type(audit) is not AuditEvent:
+            raise HeaderBoundsError("memory_mutation_numeric_audit_unavailable")
+        # The original nested audit kwargs helper allocates exactly one eight
+        # entry numerical map and one object-width generator. Its values are
+        # encoded-width integers, not a copied audit body. Original six scalar
+        # attributes must retain the source helper's closed-value domain.
+        for name in ("actor", "session_id", "event_type", "tool_name", "policy_mode", "summary"):
+            _native_memory_source_value_upper(getattr(audit, name))
+        result += 2 + 7 + 8 * (6 * len("_prepared_event") + 3 + 20)
+        result += 2 + 7 + 8 * 4
+    return result
 
 
 def original_native_memory_mutation_allocation_numeric_schedule(operation, prepared, *,
@@ -2897,7 +4716,8 @@ async def perform_memory_mutation(db, admission, *, authority_check, source_oper
         await m5.validate_native_memory_mutation_plan(native_prepared_mutation, db=db,
             candidate_digest=admission.candidate_digest)
     await authority_check(db)
-    value = await validate_original_memory_owner(db, admission)
+    value = await validate_original_memory_owner(db, admission,
+        _numeric_source=source if source_operation is not None and admission.report_source is not None else None)
     method = value["method"]
     native_report_source = native_memory_report_source
     if value.get("source", {}).get("capability_id") == REPORT_SOURCE_CAPABILITY:
@@ -3520,7 +5340,8 @@ async def dispatch_memory_mutation(dispatcher, db, run, witness, method, payload
     if admission.candidate().get("source", {}).get("capability_id") == REPORT_SOURCE_CAPABILITY:
         report_context = _MemoryReportReadContext(admission.report_source, admission, db, authority)
     prepared = await m5.prepare_native_memory_mutation(db, admission=admission,
-        native_memory_report_source=report_context)
+        native_memory_report_source=report_context,
+        native_memory_source=source if report_context is not None else None)
     operation = await _begin_memory_owner_source(db, run, original_scope, prepared=prepared)
     retention_owner = await begin_native_memory_effect(db, run, witness["claim_ref"], admission,
         source_operation=operation, prepared=prepared)
@@ -3569,8 +5390,67 @@ class NativeMemoryOwnerReference:
     row_ref: str
 
 
-async def _memory_locator_rows(db, model, fields, *predicates, limit=129):
+def _native_memory_original_lookup_payer(db, operation):
+    """Original registered writer resource custody; never locator permission."""
+    import asyncio
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    from src.memory.composition_headers import CompositionHeaderCertificate, _SEAL
+    from src.workspace.accounting_witness import CompositionSessionGuard, _COMPOSITION_METADATA_GUARDS
+    if (type(operation) is not _MemoryOwnerSourceOperation
+            or _MEMORY_OPERATIONS.get(id(operation)) is not operation
+            or operation._seal is not _MEMORY_SOURCE_SEAL or operation._issued_id != id(operation)
+            or operation.db is not db):
+        raise HeaderBoundsError("memory_original_lookup_payer_changed")
+    source = operation.source
+    if (type(source) is not _NativeMemoryDispatchSource or _MEMORY_SOURCES.get(id(source)) is not source
+            or source._seal is not _MEMORY_SOURCE_SEAL or source._issued_id != id(source)
+            or not source._live.is_set() or operation.scope is not source._scope
+            or source._scope.native_memory_source is not source):
+        raise HeaderBoundsError("memory_original_lookup_payer_changed")
+    from src.memory.m5 import PreparedNativeMemoryMutation, _NATIVE_MUTATION_PLANS, _NATIVE_MUTATION_PLAN_SEAL
+    plan = operation._prepared
+    if (type(plan) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(plan)) is not plan
+            or plan._seal is not _NATIVE_MUTATION_PLAN_SEAL or plan._db is not db
+            or plan._transaction is not operation.transaction or plan._driver is not operation.driver
+            or plan._candidate_digest != source.admission.candidate_digest or plan.consumed):
+        raise HeaderBoundsError("memory_original_lookup_payer_changed")
+    guard = db.info.get("composition_guard")
+    custody = getattr(guard, "_native_memory_authority_read_numeric", None)
+    common = getattr(guard, "_native_memory_source_common_numeric", None)
+    frame = source.admission.header_budget
+    if (type(guard) is not CompositionSessionGuard or guard not in _COMPOSITION_METADATA_GUARDS
+            or guard.db is not db or guard._retention_closed or guard.header_budget is not frame
+            or type(frame) is not HeaderReadBudget or not db.info.get("native_writer_started")
+            or type(custody) is not tuple or len(custody) != 10 or custody[0] is not source
+            or custody[1] is not source._scope or custody[2] is not db
+            or custody[3] is not operation.transaction or custody[4] is not operation.driver
+            or custody[5] is not asyncio.current_task() or custody[6] is not frame
+            or db.sync_session.get_transaction() is not operation.transaction
+            or not operation.driver.in_transaction or not source.host.admitting
+            or source.claim._host is not source.host or source.host.boot_nonce != source.claim.host_boot_nonce
+            or type(common) is not tuple or len(common) != 3 or common[0] is not operation):
+        raise HeaderBoundsError("memory_original_lookup_payer_changed")
+    certificate = common[1]
+    if (type(certificate) is not CompositionHeaderCertificate or certificate.seal is not _SEAL
+            or certificate.issued_id != id(certificate) or certificate.budget is not frame
+            or certificate.driver is not operation.driver
+            or certificate.changes != operation.driver.total_changes
+            or not certificate.connection.in_transaction()
+            or certificate.connection.get_transaction() is not certificate.transaction):
+        raise HeaderBoundsError("memory_original_lookup_payer_changed")
+    from src.memory.composition_headers import current_budget
+    current = current_budget()
+    if current is not None and current is not frame:
+        raise HeaderBoundsError("memory_original_lookup_payer_changed")
+    return frame
+
+
+async def _memory_locator_rows(db, model, fields, *predicates, limit=129,
+        _native_memory_operation=None):
     """Closed owner locators only; never full proposal, alias or private bodies."""
+    original_payer = (None if _native_memory_operation is None
+        else _native_memory_original_lookup_payer(db, _native_memory_operation))
     from sqlalchemy import case, func
     allowed = {
         "goals": {"id", "parent_id", "owner_principal_id", "owner_session_id"},
@@ -3587,7 +5467,7 @@ async def _memory_locator_rows(db, model, fields, *predicates, limit=129):
         raise NativeServiceBlocked("native_memory_retention_locator_unavailable")
     from src.memory.composition_headers import current_budget, _metadata_upper
     from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger
-    payer = current_budget()
+    payer = original_payer if original_payer is not None else current_budget()
     active = _MEMORY_LEDGER_PHASE.get()
     if active is not None:
         ledger, phase = active
@@ -3640,6 +5520,89 @@ async def _memory_locator_rows(db, model, fields, *predicates, limit=129):
     return result
 
 
+def original_native_memory_source_candidate_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """Storage for ONE original candidate9 builder; no context or body fee."""
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    _native_memory_source_capacity(retention_widths["source_upper"])
+    # Actual arrays: validation4, comparison3, final9; nine fresh labels/pairs.
+    # Longest closed source/owner/stage strings each occupy <=22 JSON bytes.
+    label = 4 + 3 * 22
+    pair = 3 + label + 20
+    return ((2 + 3 + 4 * pair) + (2 + 2 + 3 * pair)
+        + (2 + 8 + 9 * pair) + 9 * (pair + label) + 2 * 41)
+
+
+def original_native_memory_reference_lookup_construction_numeric_upper(operation, prepared, *,
+        certificate, facts, retention_widths):
+    """ONE original propose lookup forecast constructor, no queries/vectors."""
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    from src.memory.header_bounds import HeaderBoundsError
+    if prepared._method != "memory.propose" or prepared._result.get("status") != "proposed":
+        raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
+    guard = operation.db.info["composition_guard"]
+    projection = getattr(guard, "_native_memory_source_projection", None)
+    if type(projection) is not tuple or len(projection) != 3 or projection[0] is not operation:
+        raise HeaderBoundsError("memory_lookup_numeric_source_changed")
+    proposal_id = prepared._result.get("proposal_id")
+    proposed = None
+    proposal_count = 0
+    for descriptor, key, row in projection[1]:
+        if descriptor.table == "memory_proposals" and key == proposal_id:
+            proposed = row
+            proposal_count += 1
+    if proposal_count != 1 or proposed["corrects_memory_id"] is not None or proposed["recovered_from_proposal_id"] is not None:
+        raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
+    goals = 0
+    for table, key in facts["row_uppers"]:
+        if table == "goals":
+            goals += 1
+    board = int(proposed["proposal_job_id"] is not None)
+    addresses = goals + 2 + board
+    if not 2 <= addresses <= 128:
+        raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
+    locators = goals + 2 + board
+    entries = 38 + 12 * goals + 11 * board
+    # Actual eight locator labels have four fields including the closed field
+    # tuple (at most six ASCII column names, longest recovered_from_proposal_id26).
+    field_tuple = 2 + 5 + 6 * (len("recovered_from_proposal_id") + 2)
+    label = 5 + len("native-memory-locator") + 2 + len("work_board_decision_receipts") + 2 + field_tuple + 40 + 2
+    pair = 3 + label + 20
+    vector = 2 + entries - 1 + entries * pair
+    result = 2 * vector + entries * (pair + label)  # entries list + return tuple + pairs/labels
+    # Candidate9: validation4, comparison/digest3 and final9 arrays; all
+    # source-owned appearance pairs/labels and the two original generators.
+    result += original_native_memory_source_candidate_construction_numeric_upper(
+        operation, prepared, certificate=certificate, facts=facts,
+        retention_widths=retention_widths)
+    # Actual address/seen sets and every constructed (table,key) tuple use
+    # the existing locator's UTF8<=512 limit. No future identity is minted.
+    address = 3 + len("work_board_decision_receipts") + 2 + 6 * 512 + 2
+    result += 2 * (2 + addresses - 1 + addresses * address)
+    result += 2 + max(0, goals - 1) + goals * (6 * 512 + 2)
+    # Two original projection-selection generators/materialized tuples and
+    # three helper closures plus the async call resource wrapper.
+    result += 2 * (2 + len(projection[1]) - 1 + len(projection[1]) * 4)
+    result += 6 * 41 + 3 * (2 + 5 + 6 * 4)
+    # Each locator has <=one original row (LIMIT2 unsaturated), plus <=one
+    # prospective row from the authentic plan. Cover both before its original
+    # len(rows)>=2 STOP, with six selected fields and real512-byte text cap.
+    row = 2 + 5 + 6 * (len("recovered_from_proposal_id") + 3 + 6 * 512 + 2)
+    trace = 2 + 7 + 8 * pair
+    per_locator = 2 * trace + 8 * pair  # observed trace list/pairs and stored tuple view
+    per_locator += 2 * (2 + 1 + 2 * row) + row  # combined copy/list + projected field map
+    per_locator += 2 + 1 + 2 * 4  # original old+projected splice tuple
+    per_locator += 40 * 41  # copy/row/field/collision and string-width generators
+    per_locator += 2 * (2 + 5 + 6 * 4) + 41 + 11 + 8 + 2  # trace scope/async closure/token
+    result += locators * per_locator
+    # Final numeric-vector width walk: one list sum + per-pair/per-label tuple
+    # sums + at most twelve ASCII string walkers per original locator label.
+    result += (1 + 14 * entries) * 41
+    return result
+
+
 async def original_native_memory_reference_lookup_numeric_schedule(operation, prepared, *, certificate, facts):
     """Close the original propose locators from paid rows and its sealed plan.
 
@@ -3648,12 +5611,22 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
     predicates and permissions; a prospective result comes only from the
     exact original plan already retained by the Source.
     """
+    from src.memory.header_bounds import HeaderBoundsError
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if type(operation) is not _MemoryOwnerSourceOperation or _MEMORY_OPERATIONS.get(id(operation)) is not operation:
+        raise HeaderBoundsError("memory_lookup_numeric_source_changed")
+    guard = operation.db.info.get("composition_guard")
+    widths_owner = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    if type(guard) is not CompositionSessionGuard or type(widths_owner) is not tuple or len(widths_owner) != 4:
+        raise HeaderBoundsError("memory_lookup_numeric_source_changed")
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths_owner[3])
     from src.db.models import Goal, MemoryProposal, WorkBoardProposal, WorkBoardDecisionReceipt, WorkBoardDecisionReceiptStage
     from src.memory.header_bounds import (
         HeaderBoundsError, _trace_memory_numeric_charges,
         _native_memory_ascii_string_width, _native_memory_utf8_width)
     from src.workspace.accounting_witness import CompositionSessionGuard, _native_memory_closed_value_width
-    source = await _validate_memory_owner_source(operation.db, operation.run, operation)
+    source = operation.source
     guard = operation.db.info.get("composition_guard")
     retained = getattr(guard, "_native_memory_source_capacity_facts", None)
     projection = getattr(guard, "_native_memory_source_projection", None)
@@ -3664,6 +5637,24 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
             or projection is None or projection[0] is not operation
             or certificate.budget is not source.admission.header_budget):
         raise HeaderBoundsError("memory_lookup_numeric_source_changed")
+    original_lookup = getattr(guard, "_native_memory_reference_lookup_original", None)
+    import asyncio
+    existing_rows = getattr(guard, "_native_memory_existing_source_rows", None)
+    if (type(original_lookup) is not tuple or len(original_lookup) != 7
+            or original_lookup[0] is not operation or original_lookup[1] is not certificate.budget
+            or original_lookup[2] is not asyncio.current_task()
+            or original_lookup[3] is not operation.transaction
+            or original_lookup[4] is not operation.driver
+            or original_lookup[6] is not source
+            or existing_rows is None or existing_rows[0] is not operation):
+        raise HeaderBoundsError("memory_lookup_original_numeric_unavailable")
+    for reference in original_lookup[5]:
+        found = False
+        for table, key in existing_rows[1]:
+            if table == reference.table and key == reference.row_ref:
+                found = True
+        if not found or (reference.table, reference.row_ref) not in certificate.rows:
+            raise HeaderBoundsError("memory_lookup_original_numeric_unavailable")
     value = source.admission.candidate()
     if (prepared._method != "memory.propose" or value["method"] != prepared._method
             or prepared._result.get("status") != "proposed"
@@ -3694,8 +5685,11 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
         if len(addresses) > 128:
             raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
     async def locate(model, fields, predicates, *, projected):
-        with _trace_memory_numeric_charges(certificate.budget) as trace:
-            old = await _memory_locator_rows(operation.db, model, fields, *predicates, limit=2)
+        # Reuse only rows already read by the original Source owner. No SQL,
+        # locator callback or future certificate is produced by this forecast.
+        old = tuple(raw for descriptor, key, raw, _encoded in existing_rows[2]
+            if descriptor.table == model.__tablename__
+            and all(raw[name] == expected for name, expected in predicates))
         copy_upper = 2 + sum(3 + sum(string(name) + 1 +
             (4 if row[name] is None else string(row[name])) + 1 for name in fields)
             for row in (*old, *projected))
@@ -3712,13 +5706,12 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
         row_upper = 2 + sum(3 + sum((4 if row[name] is None else
             6 * _native_memory_utf8_width(row[name]) + 2) + 3 for name in fields) for row in rows)
         result_upper = row_upper + sum(6 * len(name) + 3 for name in fields) * len(rows)
-        for appearance, amount in trace:
-            if (type(appearance) is tuple and len(appearance) == 4
-                    and appearance[0] == "native-memory-locator"
-                    and appearance[1] == model.__tablename__ and appearance[2] == fields
-                    and appearance[3] in {"delivery", "row-copy", "encoded-copy", "result-construction", "return"}):
-                amount = result_upper
-            entries.append((appearance, amount))
+        from src.memory.composition_headers import _metadata_upper
+        for stage in ("header-delivery", "header-row-copy", "header-encoded-copy"):
+            entries.append((("native-memory-locator", model.__tablename__, fields, stage),
+                _metadata_upper(2, (20, 20) * len(fields))))
+        for stage in ("delivery", "row-copy", "encoded-copy", "result-construction", "return"):
+            entries.append((("native-memory-locator", model.__tablename__, fields, stage), result_upper))
         return rows
     pay("reference-set", 2)
     goal_id = value["source"]["goal_id"]
@@ -3730,7 +5723,7 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
         pay("goal-seen-add", string(goal_id))
         seen.add(goal_id)
         rows = await locate(Goal, ("id", "parent_id", "owner_principal_id", "owner_session_id"),
-            (Goal.id == goal_id,), projected=())
+            (("id", goal_id),), projected=())
         if (len(rows) != 1 or rows[0]["owner_principal_id"] != value["operator_principal_id"]
                 or rows[0]["owner_session_id"] != value["operator_session_id"]):
             raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
@@ -3744,7 +5737,7 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
         raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
     rows = await locate(MemoryProposal, ("proposal_id", "owner_principal_id", "owner_session_id",
         "recovered_from_proposal_id", "proposal_job_id", "corrects_memory_id"),
-        (MemoryProposal.proposal_id == proposal_id,), projected=proposed)
+        (("proposal_id", proposal_id),), projected=proposed)
     proposal = rows[0]
     if (proposal["owner_principal_id"] != value["operator_principal_id"]
             or proposal["owner_session_id"] != value["operator_session_id"]
@@ -3754,7 +5747,10 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
     add("memory_proposals", proposal_id)
     if proposal["proposal_job_id"] is not None:
         board = await locate(WorkBoardProposal, ("proposal_id", "owner_principal_id", "owner_session_id"),
-            (WorkBoardProposal.admission_job_id == proposal["proposal_job_id"],), projected=())
+            (("admission_job_id", proposal["proposal_job_id"]),), projected=tuple(
+                raw for descriptor, _key, raw in projection[1]
+                if descriptor.table == "work_board_proposals"
+                and raw["admission_job_id"] == proposal["proposal_job_id"]))
         if (len(board) != 1 or board[0]["owner_principal_id"] != value["operator_principal_id"]
                 or board[0]["owner_session_id"] != value["operator_session_id"]):
             raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
@@ -3763,8 +5759,8 @@ async def original_native_memory_reference_lookup_numeric_schedule(operation, pr
         if descriptor.table == "work_board_decision_receipts" and raw["source_proposal_id"] == proposal_id
         and raw["receipt_stage"] == WorkBoardDecisionReceiptStage.source_baseline.value)
     rows = await locate(WorkBoardDecisionReceipt, ("receipt_id",),
-        (WorkBoardDecisionReceipt.source_proposal_id == proposal_id,
-         WorkBoardDecisionReceipt.receipt_stage == WorkBoardDecisionReceiptStage.source_baseline), projected=baselines)
+        (("source_proposal_id", proposal_id),
+         ("receipt_stage", WorkBoardDecisionReceiptStage.source_baseline.value)), projected=baselines)
     if len(rows) != 1:
         raise HeaderBoundsError("memory_lookup_numeric_graph_unavailable")
     add("work_board_decision_receipts", rows[0]["receipt_id"])
@@ -3799,11 +5795,25 @@ async def prospective_memory_existing_references(db, run, source_operation):
     references = await _memory_existing_reference_lookup(db, source.admission,
         proposal_id=value.get("proposal_id"),
         record_id=value.get("record_ref") or value.get("corrects_memory_id"),
-        require_baseline=value["method"] == "memory.applyReviewed")
+        require_baseline=value["method"] == "memory.applyReviewed",
+        _native_memory_operation=source_operation)
+    # Numeric custody only. Preserve the SAME original references object;
+    # no replay of its selectors or returned private row bodies.
+    import asyncio
+    frame = _native_memory_original_lookup_payer(db, source_operation)
+    guard = db.info.get("composition_guard")
+    if (guard.header_budget is not frame
+            or db.sync_session.get_transaction() is not source_operation.transaction
+            or not source_operation.driver.in_transaction):
+        raise NativeServiceBlocked("native_memory_retention_original_source_changed")
+    frame.debit(7 * 4 + 8, appearance=("memory-source-capacity", "original-lookup-lineage"))
+    guard._native_memory_reference_lookup_original = (source_operation, frame,
+        asyncio.current_task(), source_operation.transaction, source_operation.driver, references, source)
     return references
 
 
-async def _memory_existing_reference_lookup(db, admission, *, proposal_id, record_id, require_baseline):
+async def _memory_existing_reference_lookup(db, admission, *, proposal_id, record_id, require_baseline,
+        _native_memory_operation=None):
     from src.db.models import (Goal, Memory, MemoryEntity, MemoryProposal, MemorySource,
         MemoryEdge, MemoryTombstone, WorkBoardProposal, WorkBoardDecisionReceipt, WorkBoardDecisionReceiptStage)
     from sqlalchemy import or_
@@ -3811,7 +5821,8 @@ async def _memory_existing_reference_lookup(db, admission, *, proposal_id, recor
     from src.memory.header_bounds import (
         _MEMORY_LEDGER_PHASE, _NativeMemoryNumericLedger,
         _native_memory_ascii_string_width, _native_memory_utf8_width)
-    payer = current_budget()
+    payer = (current_budget() if _native_memory_operation is None
+        else _native_memory_original_lookup_payer(db, _native_memory_operation))
     active = _MEMORY_LEDGER_PHASE.get()
     if active is not None:
         ledger, phase = active
@@ -3850,7 +5861,7 @@ async def _memory_existing_reference_lookup(db, admission, *, proposal_id, recor
             pay("goal-seen-add", string_upper(goal_id))
             seen.add(goal_id)
             matches = await _memory_locator_rows(db, Goal,
-                ("id", "parent_id", "owner_principal_id", "owner_session_id"), Goal.id == goal_id, limit=2)
+                ("id", "parent_id", "owner_principal_id", "owner_session_id"), Goal.id == goal_id, limit=2, _native_memory_operation=_native_memory_operation)
             goal = matches[0] if len(matches) == 1 else None
             if (goal is None or goal["owner_principal_id"] != value["operator_principal_id"]
                 or goal["owner_session_id"] != value["operator_session_id"]):
@@ -3862,7 +5873,7 @@ async def _memory_existing_reference_lookup(db, admission, *, proposal_id, recor
     if proposal_id is not None:
         matches = await _memory_locator_rows(db, MemoryProposal,
             ("proposal_id", "owner_principal_id", "owner_session_id", "recovered_from_proposal_id",
-             "proposal_job_id", "corrects_memory_id"), MemoryProposal.proposal_id == proposal_id, limit=2)
+             "proposal_job_id", "corrects_memory_id"), MemoryProposal.proposal_id == proposal_id, limit=2, _native_memory_operation=_native_memory_operation)
         proposal = matches[0] if len(matches) == 1 else None
         if (proposal is None or proposal["owner_principal_id"] != value["operator_principal_id"]
             or proposal["owner_session_id"] != value["operator_session_id"]):
@@ -3873,14 +5884,14 @@ async def _memory_existing_reference_lookup(db, admission, *, proposal_id, recor
         if proposal["proposal_job_id"] is not None:
             board = await _memory_locator_rows(db, WorkBoardProposal,
                 ("proposal_id", "owner_principal_id", "owner_session_id"),
-                WorkBoardProposal.admission_job_id == proposal["proposal_job_id"], limit=2)
+                WorkBoardProposal.admission_job_id == proposal["proposal_job_id"], limit=2, _native_memory_operation=_native_memory_operation)
             if (len(board) != 1 or board[0]["owner_principal_id"] != value["operator_principal_id"]
                 or board[0]["owner_session_id"] != value["operator_session_id"]):
                 raise NativeServiceBlocked("native_memory_retention_board_proposal_changed")
             add("work_board_proposals", board[0]["proposal_id"])
         baselines = await _memory_locator_rows(db, WorkBoardDecisionReceipt, ("receipt_id",),
             WorkBoardDecisionReceipt.source_proposal_id == proposal["proposal_id"],
-            WorkBoardDecisionReceipt.receipt_stage == WorkBoardDecisionReceiptStage.source_baseline, limit=2)
+            WorkBoardDecisionReceipt.receipt_stage == WorkBoardDecisionReceiptStage.source_baseline, limit=2, _native_memory_operation=_native_memory_operation)
         if require_baseline and len(baselines) != 1:
             raise NativeServiceBlocked("native_memory_retention_baseline_changed")
         if len(baselines) > 1:
@@ -3896,7 +5907,7 @@ async def _memory_existing_reference_lookup(db, admission, *, proposal_id, recor
     pay("memory-id-sort", 2 + sum(string_upper(key) + 1 for key in memory_ids))
     for key in sorted(memory_ids):
         matches = await _memory_locator_rows(db, Memory,
-            ("id", "source_session_id", "subject_entity_id", "project_entity_id"), Memory.id == key, limit=2)
+            ("id", "source_session_id", "subject_entity_id", "project_entity_id"), Memory.id == key, limit=2, _native_memory_operation=_native_memory_operation)
         record = matches[0] if len(matches) == 1 else None
         if record is None or record["source_session_id"] != value["operator_session_id"]:
             raise NativeServiceBlocked("native_memory_retention_record_changed")
@@ -3905,17 +5916,17 @@ async def _memory_existing_reference_lookup(db, admission, *, proposal_id, recor
             for name in ("subject_entity_id", "project_entity_id")))
         for entity_id in (record["subject_entity_id"], record["project_entity_id"]):
             if entity_id is not None:
-                entities = await _memory_locator_rows(db, MemoryEntity, ("id",), MemoryEntity.id == entity_id, limit=2)
+                entities = await _memory_locator_rows(db, MemoryEntity, ("id",), MemoryEntity.id == entity_id, limit=2, _native_memory_operation=_native_memory_operation)
                 if len(entities) != 1:
                     raise NativeServiceBlocked("native_memory_retention_entity_changed")
                 add("memory_entities", entities[0]["id"])
         for cls, table in ((MemorySource, "memory_sources"), (MemoryTombstone, "memory_tombstones")):
-            rows = await _memory_locator_rows(db, cls, ("id",), cls.memory_id == key)
+            rows = await _memory_locator_rows(db, cls, ("id",), cls.memory_id == key, _native_memory_operation=_native_memory_operation)
             for row in rows:
                 add(table, row["id"])
     if value["method"] == "memory.applyReviewed" and record_id is not None:
         edges = await _memory_locator_rows(db, MemoryEdge, ("id", "from_memory_id", "to_memory_id"), or_(
-            MemoryEdge.from_memory_id == record_id, MemoryEdge.to_memory_id == record_id))
+            MemoryEdge.from_memory_id == record_id, MemoryEdge.to_memory_id == record_id), _native_memory_operation=_native_memory_operation)
         for row in edges:
             if row["from_memory_id"] not in memory_ids or row["to_memory_id"] not in memory_ids:
                 raise NativeServiceBlocked("native_memory_retention_edge_changed")

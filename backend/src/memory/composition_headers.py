@@ -176,6 +176,12 @@ def _metadata_size(value):
 
 
 def _metadata_rows(connection, query, parameters, *, _header_budget, upper, appearance, bounded_query=None):
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, _header_budget)
+    if source_frame is not None:
+        source_query = bounded_query if _header_budget is not None and bounded_query is not None else query
+        source_frame.debit(2 * _native_memory_metadata_logical_width(source_query)
+            + 2 * _native_memory_metadata_logical_width(parameters) + 2 * upper,
+            appearance=("native-memory-header-logical", "metadata-input-result"))
     if _header_budget is None:
         return list(_sql(connection, query, parameters))
     # Delivery, original list-of-row copy and JSON metadata copy are distinct.
@@ -185,6 +191,69 @@ def _metadata_rows(connection, query, parameters, *, _header_budget, upper, appe
     if _metadata_size(rows) > upper:
         raise HeaderBoundsError("header_metadata_bound")
     return rows
+
+
+def _native_memory_metadata_logical_width(value):
+    """Scalar encoded input width; no SQL, JSON, UTF8 or container copy."""
+    if value is None:
+        return 4
+    if type(value) is bool:
+        return 5
+    if type(value) is int:
+        if not -(2**63) <= value < 2**63:
+            raise HeaderBoundsError("header_metadata_bound")
+        return 20
+    if type(value) is str:
+        return 2 + 6 * _compiler_bounds._native_memory_utf8_width(value)
+    if type(value) is tuple:
+        width = 2 + max(0, len(value) - 1)
+        for item in value:
+            width += _native_memory_metadata_logical_width(item)
+        return width
+    raise HeaderBoundsError("memory_header_logical_input_unavailable")
+
+
+def _native_memory_discover_logical_upper(descriptor, key, tombstone, remaining):
+    """Original locator construction, bounded by its unchanged LIMIT."""
+    known = False
+    for item in _compiler_bounds._DESCRIPTORS:
+        if descriptor is item:
+            known = True
+            break
+    if not known or type(tombstone) is not bool:
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    limit = MAX_ROWS if remaining is None else remaining
+    if type(limit) is not int or not 0 <= limit <= MAX_ROWS:
+        raise HeaderBoundsError("header_request_bound")
+    if key is not None:
+        if type(key) is not str or not key or _compiler_bounds._native_memory_utf8_width(key) > 512:
+            raise HeaderBoundsError("header_request_bound")
+        key_width = _native_memory_metadata_logical_width(key)
+    else:
+        key_width = 4
+    count = 2 if key is not None or tombstone else limit + 1
+    # The original query template contains seven column substitutions and
+    # one table substitution. The optional suffix adds one key or <=128-char
+    # closed model index identifier. No selector or row body is evaluated.
+    suffix = 0
+    if tombstone:
+        suffix = len(' INDEXED BY "" WHERE memory_id=?') + 128
+    elif key is not None:
+        suffix = len(' WHERE ""=?') + len(descriptor.key)
+    query = 212 + 7 * len(descriptor.key) + len(descriptor.table) + suffix
+    row_width = 2 + 4 + 20 + 44 + 20 + 3074 + 20
+    rows_width = 2 + count * row_width + max(0, count - 1)
+    id_width = 20 if descriptor.table == "work_board_events" else 3074
+    ids = 2 + count * id_width + max(0, count - 1)
+    # Format/concatenation frontiers, suffix and parameter tuple; original
+    # ids list, uniqueness set, returned tuple and physical enrollment tuples.
+    upper = 3 * (6 * query + 2) + 6 * suffix + 2 + 3 + key_width + 20
+    upper += 3 * ids + count * (3 + 6 * len(descriptor.table) + 2 + 20)
+    # The default path's list-of-row metadata copy, canonical JSON and UTF8
+    # copies are prepaid from the same original five-field locator bound.
+    upper += 3 * rows_width + (2 + 3 + 6 * len(descriptor.table) + 2 + key_width + 5 + ids)
+    upper += 4 * 41 + count * 41
+    return upper
 
 
 # Source-pinned complete common33 plus selected Identity3 widths; no compiler claim.
@@ -249,6 +318,12 @@ def _descriptor_xinfo_size(rows):
 
 def _descriptor_metadata_rows(connection, query, parameters, *, _header_budget, upper, appearance, bounded_query=None):
     """One delivered result for the audited descriptor-only call sites."""
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, _header_budget)
+    if source_frame is not None:
+        source_query = bounded_query if _header_budget is not None and bounded_query is not None else query
+        source_frame.debit(2 * _native_memory_metadata_logical_width(source_query)
+            + 2 * _native_memory_metadata_logical_width(parameters) + 2 * upper,
+            appearance=("native-memory-header-logical", "descriptor-input-result"))
     if _header_budget is None:
         return list(_sql(connection, query, parameters))
     _metadata_precharge(connection, _header_budget, upper, (*appearance, "delivery"))
@@ -258,15 +333,79 @@ def _descriptor_metadata_rows(connection, query, parameters, *, _header_budget, 
     return rows
 
 
-def _descriptor_xinfo_rows(connection, parameters, *, budget, upper):
-    _metadata_precharge(connection, budget, upper, ("descriptor-xinfo", "delivery"))
+def _descriptor_xinfo_rows(connection, parameters, *, budget, upper, _source_exact_descriptor=None):
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, budget)
+    if _source_exact_descriptor is not None:
+        if source_frame is None or source_frame is not budget:
+            raise HeaderBoundsError("memory_header_exact_schema_owner_unavailable")
+        descriptor = _source_exact_descriptor
+        known = False
+        for item in _compiler_bounds._DESCRIPTORS:
+            if descriptor is item:
+                known = True
+                break
+        if not known:
+            raise HeaderBoundsError("header_descriptor_unavailable")
+        widths = _DESCRIPTOR_XINFO_WIDTHS.get(descriptor.table)
+        n = len(descriptor.columns)
+        if (widths is None or widths[0] != n or n > 99
+                or type(parameters) is not tuple or len(parameters) != 5
+                or parameters[0] != widths[1] or parameters[1] != widths[2]
+                or parameters[2] != n or parameters[3] != descriptor.table
+                or parameters[4] != n + 1
+                or type(upper) is not int or upper != (n + 1) * (widths[1] + widths[2] + 16) + 1):
+            raise HeaderBoundsError("header_descriptor_unavailable")
+    if source_frame is not None:
+        source_frame.debit(2 * _native_memory_metadata_logical_width(_DESCRIPTOR_XINFO_SQL)
+            + 2 * _native_memory_metadata_logical_width(parameters) + 2 * upper,
+            appearance=("native-memory-header-logical", "xinfo-input-result"))
+    if _source_exact_descriptor is None:
+        _metadata_precharge(connection, budget, upper, ("descriptor-xinfo", "delivery"))
+    else:
+        # Preserve the exact preflight's three original appearances. The
+        # existing wrapper's normal first-read delivery is a different call.
+        for stage in ("delivery", "row-copy", "encoded-copy"):
+            budget.debit(upper, appearance=("exact-metadata", "schema", descriptor.table, stage))
     rows = list(_sql(connection, _DESCRIPTOR_XINFO_SQL, parameters))
     if _descriptor_xinfo_size(rows) > upper:
         raise HeaderBoundsError("header_metadata_bound")
     return rows
 
 
+def _native_memory_exact_source_schema_rows(connection, descriptor, budget):
+    """Reuse the existing bounded xinfo query for the original second read."""
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, budget)
+    if source_frame is None or source_frame is not budget:
+        raise HeaderBoundsError("memory_header_exact_schema_owner_unavailable")
+    known = False
+    for item in _compiler_bounds._DESCRIPTORS:
+        if descriptor is item:
+            known = True
+            break
+    if not known:
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    widths = _DESCRIPTOR_XINFO_WIDTHS.get(descriptor.table)
+    n = len(descriptor.columns)
+    if widths is None or widths[0] != n or n > 99:
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    # FIVE params, FIVE returned field-width values, both metadata-upper
+    # generator passes and wrapper validation controls, before construction.
+    source_frame.debit(2 * (2 + 4 + 4 * 20 + 6 * len(descriptor.table) + 2)
+        + 2 * (2 + 4 + 5 * 20) + 4 * 41
+        + 3 * (2 + 3 + (6 * 14 + 2) + (6 * 6 + 2)
+            + (6 * len(descriptor.table) + 2) + (6 * 12 + 2)),
+        appearance=("native-memory-header-logical", "exact-xinfo-controls"))
+    upper = _metadata_upper(n + 1, (widths[1] + 2, widths[2] + 2, 2, 2, 1))
+    return _descriptor_xinfo_rows(connection, (widths[1], widths[2], n, descriptor.table, n + 1),
+        budget=budget, upper=upper, _source_exact_descriptor=descriptor)
+
+
 def _metadata_scalar(connection, query, parameters=(), *, _header_budget, width, appearance, bounded_query=None):
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, _header_budget)
+    if source_frame is not None:
+        source_frame.debit(2 * _native_memory_metadata_logical_width(query)
+            + 2 * _native_memory_metadata_logical_width(parameters) + width + 5,
+            appearance=("native-memory-header-logical", "scalar-input-result"))
     if _header_budget is None:
         return _one_scalar(connection, query, parameters)
     rows = _metadata_rows(connection, query, parameters, _header_budget=_header_budget,
@@ -771,7 +910,69 @@ def _prepay_descriptor_compiler(connection, model, columns, spellings, budget, *
     _metadata_precharge(connection, budget, upper, ("descriptor-compiler", table))
 
 
+def _native_memory_descriptor_logical_upper(descriptor, *, _bounded=False):
+    """Original fixed schema inputs and bounded result-copy constructions."""
+    known = False
+    for item in _compiler_bounds._DESCRIPTORS:
+        if descriptor is item:
+            known = True
+            break
+    if not known:
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    n = len(descriptor.columns)
+    if type(_bounded) is not bool:
+        raise HeaderBoundsError("header_metadata_bound")
+    if _bounded:
+        widths = _DESCRIPTOR_XINFO_WIDTHS.get(descriptor.table)
+        if widths is None or widths[0] != n or n > 99:
+            raise HeaderBoundsError("header_descriptor_unavailable")
+        rows = (n + 1) * (widths[1] + widths[2] + 16) + 1
+        names = 2 + n + (n + 1) * (widths[1] + 2)
+        expected_names = 2 + max(0, n - 1)
+        for name in descriptor.columns:
+            expected_names += len(name) + 2
+        # Actual bounded path: FIVE parameters and FIVE scalar widths before
+        # the original wrapper, two name sets, sorted schema list and both
+        # primary-key tuples. It returns0; no None-path JSON/UTF copy exists.
+        upper = 2 + 4 + 4 * 20 + 6 * len(descriptor.table) + 2
+        upper += 2 + 4 + 5 * 20
+        upper += names + 2 * expected_names + rows + 2 * names
+        # Original metadata upper, schema predicates/PK controls and the
+        # TWO per-row string sizing generators of _descriptor_xinfo_size.
+        upper += (10 + 2 * (n + 1)) * 41
+        # The original table-list caller tuple and metadata-upper input.
+        upper += 2 + 6 * len(descriptor.table) + 2 + 2 + 20 + 41
+        return upper
+    # The unchanged pragma clips both strings to128 bytes before delivery.
+    row = 2 + 4 + 770 + 770 + 3 * 20
+    rows = 2 + (n + 1) * row + n
+    # List-of-row copy, canonical JSON and UTF8, including the original
+    # final schema-cost return. The SQL literal is169 ASCII characters.
+    upper = 3 * rows + 2 * (6 * 169 + 2)
+    upper += 2 * (2 + 1 + 6 * len(descriptor.table) + 2 + 20)
+    # The existing metered xinfo branch passes FIVE original parameters;
+    # include its caller tuple before _descriptor_xinfo_rows receives it.
+    upper += 2 + 4 + 4 * 20 + 6 * len(descriptor.table) + 2
+    names = 2 + max(0, n - 1)
+    for name in descriptor.columns:
+        names += 6 * len(name) + 2
+    # Original name sets, sorted schema list, primary-key output and model
+    # primary-key generator; unsupported schema still fits the clipped rows.
+    upper += 2 * rows + 5 * names + 8 * 41 + n * 41
+    upper += 2 * (6 * 71 + 2) + 2 * (2 + 6 * len(descriptor.table) + 2)
+    # Original per-column compiled spelling and its .upper() result. The
+    # compiler's existing private typed grammar is paid separately below.
+    for spelling in descriptor.sql_types:
+        upper += 2 * (6 * len(spelling) + 2)
+    return upper
+
+
 def validate_descriptor_schema(connection, descriptor, *, _header_budget=None):
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, _header_budget)
+    if source_frame is not None:
+        source_frame.debit(_native_memory_descriptor_logical_upper(descriptor,
+            _bounded=_header_budget is source_frame),
+            appearance=("native-memory-header-logical", "schema-construction"))
     model = _COMPOSITION_MODELS.get(descriptor.table)
     if model is None:
         # Original byte-only legacy descriptors use the same actual mapped table.
@@ -780,6 +981,9 @@ def validate_descriptor_schema(connection, descriptor, *, _header_budget=None):
                       and getattr(c, "__tablename__", None) == descriptor.table), None)
     if model is None:
         raise HeaderBoundsError("header_descriptor_unavailable")
+    if source_frame is not None and _header_budget is None:
+        _prepay_descriptor_compiler(connection, model, descriptor.columns, descriptor.sql_types,
+            source_frame, table=descriptor.table)
     if _header_budget is not None:
         _prepay_descriptor_compiler(connection, model, descriptor.columns, descriptor.sql_types,
             _header_budget, table=descriptor.table)
@@ -825,7 +1029,44 @@ def validate_descriptor_schema(connection, descriptor, *, _header_budget=None):
     return _metadata_cost([list(r) for r in schema]) if _header_budget is None else 0
 
 
+def _native_memory_index_logical_upper(table, column, model):
+    """The original fixed index grammar, before any filtered index list."""
+    if _COMPOSITION_MODELS.get(table) is not model:
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    count = len(model.__table__.indexes) + len(model.__table__.constraints) + 1
+    names = 2
+    for index in model.__table__.indexes:
+        if type(index.name) is not str or not index.name.isascii() or len(index.name) > 128:
+            raise HeaderBoundsError("header_locator_unsupported")
+        names += 6 * len(index.name) + 3
+    # Original source filter/list and each column-name tuple; the original
+    # SQL clips metadata names at128 bytes and limits index parts to3.
+    upper = names + 2 + 2 * 41
+    for index in model.__table__.indexes:
+        upper += 2 + 41
+        for item in index.columns:
+            upper += 6 * len(item.name) + 3
+    index_rows = 2 + count * (2 + 3 + 770 + 20 + 14 + 20) + max(0, count - 1)
+    part_rows = 2 + 3 * (2 + 4 + 770 + 770 + 3 * 20) + 2
+    # Both unchanged SQL templates/parameter tuples, matches/keys/slices,
+    # and original list-of-row/JSON/UTF8 copies on the default metadata path.
+    upper += 2 * (6 * 155 + 2) + 2 * (6 * 150 + 2)
+    upper += 2 * (3 + 6 * len(table) + 2 + 20) + 2 * (2 + 770)
+    upper += 4 * index_rows + 4 * part_rows + 4 * 41 + 2 + 3 * 20
+    upper += 2 + 4 * 20 + 6 * len(column) + 2
+    return upper
+
+
 def _validate_locator(connection, table, column, model=None, *, budget=None, _header_budget=None):
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, budget)
+    if source_frame is not None:
+        if _header_budget is None:
+            # The unchanged default query does not clip arbitrary SQLite
+            # index names. A model index is not evidence of the live schema.
+            raise HeaderBoundsError("memory_header_logical_index_dimensions_unavailable")
+        source_model = model or _COMPOSITION_MODELS.get(table)
+        source_frame.debit(_native_memory_index_logical_upper(table, column, source_model),
+            appearance=("native-memory-header-logical", "index-construction"))
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
     model = model or _COMPOSITION_MODELS[table]
@@ -949,6 +1190,10 @@ def _selected_whole_locator_bound(connection, descriptor, budget, *, remaining):
 
 
 def _discover(connection, descriptor, budget, key=None, tombstone=False, remaining=None, *, database_identity=None, _header_budget=None):
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(connection, budget)
+    if source_frame is not None:
+        source_frame.debit(_native_memory_discover_logical_upper(descriptor, key, tombstone, remaining),
+            appearance=("native-memory-header-logical", "locator-construction"))
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
     schema_cost = validate_descriptor_schema(connection, descriptor, _header_budget=_header_budget)
@@ -1021,6 +1266,15 @@ async def discover_rows(db, descriptor, budget, *, _header_budget=None):
 
 
 async def locate_exact_rows(db, descriptor, identity, budget, *, _header_budget=None):
+    source_frame = _compiler_bounds._native_memory_header_logical_frame(db, budget)
+    if source_frame is not None:
+        if type(identity) is not str:
+            raise HeaderBoundsError("header_request_bound")
+        identity_bytes = _compiler_bounds._native_memory_utf8_width(identity)
+        if not 0 < identity_bytes <= 512:
+            raise HeaderBoundsError("header_request_bound")
+        source_frame.debit(identity_bytes + 2 * (6 * identity_bytes + 2) + 2 * 41 + 4,
+            appearance=("native-memory-header-logical", "locator-request"))
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
     if type(identity) is not str or not 0<len(identity.encode())<=512:

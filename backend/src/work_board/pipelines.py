@@ -920,6 +920,7 @@ def _memory_report_policy_numeric_inputs(hosts, budget):
             raise HeaderBoundsError("memory_report_site_policy_numeric_shape_unavailable")
         commas = colons = slashes = dots = hyphens = 0
         ascii_only = plain_dns = True
+        whitespace = percent = brackets = at_sign = question = hash_sign = ascii_letter = non_hex_dns_letter = False
         for character in value:
             code = ord(character)
             if code > 127:
@@ -931,10 +932,20 @@ def _memory_report_policy_numeric_inputs(hosts, budget):
             slashes += character == "/"
             dots += character == "."
             hyphens += character == "-"
+            whitespace = whitespace or character.isspace()
+            percent = percent or character == "%"
+            brackets = brackets or character in "[]"
+            at_sign = at_sign or character == "@"
+            question = question or character == "?"
+            hash_sign = hash_sign or character == "#"
+            ascii_letter = ascii_letter or 65 <= code <= 90 or 97 <= code <= 122
+            non_hex_dns_letter = non_hex_dns_letter or ((65 <= code <= 90 or 97 <= code <= 122)
+                and character not in "abcdefABCDEFxX")
         utf8 = _native_memory_utf8_width(value)
-        _report_memory_allocation_pay(budget, "policy-input-dimension-tuple", 160)
-        return (utf8, 6 * utf8 + 2, ascii_only, commas, colons, slashes, dots, hyphens, plain_dns)
-    host_upper = 2 + max(0, len(hosts) - 1) + 160 * len(hosts)
+        _report_memory_allocation_pay(budget, "policy-input-dimension-tuple", 235)
+        return (utf8, 6 * utf8 + 2, ascii_only, commas, colons, slashes, dots, hyphens, plain_dns,
+            len(value), whitespace, percent, brackets, at_sign, question, hash_sign, "://" in value, ascii_letter, non_hex_dns_letter)
+    host_upper = 2 + max(0, len(hosts) - 1) + 235 * len(hosts)
     _report_memory_allocation_pay(budget, "policy-input-host-list", host_upper)
     observed_hosts = []
     for host in hosts:
@@ -943,7 +954,7 @@ def _memory_report_policy_numeric_inputs(hosts, budget):
     observed_hosts = tuple(observed_hosts)
     allowlist = dimensions(settings.browser_site_allowlist)
     blocklist = dimensions(settings.browser_site_blocklist)
-    _report_memory_allocation_pay(budget, "policy-input-retained-tuple", host_upper + 324)
+    _report_memory_allocation_pay(budget, "policy-input-retained-tuple", host_upper + 474)
     retained = (observed_hosts, allowlist, blocklist)
     _report_memory_allocation_pay(budget, "policy-input-record-slot", 171)
     object.__setattr__(record, "_site_policy_numeric_inputs", retained)
@@ -954,12 +965,8 @@ def _memory_report_site_access(host, budget):
     if budget is None:
         return evaluate_site_access(host, resolve_dns=False)
     from src.runtime_plugins.task_capability import _report_memory_admission_payer
-    from src.memory.header_bounds import HeaderBoundsError
     _report_memory_admission_payer(budget)
-    # The genuine policy owner has not yet supplied its parser/constructor
-    # numerical grammar. Do not invoke an unsupported private keyword or
-    # execute an unpriced policy allocation under this resource scope.
-    raise HeaderBoundsError("memory_report_site_policy_numeric_unavailable")
+    return evaluate_site_access(host, resolve_dns=False, _memory_header_budget=budget)
 
 
 def require_source_permission(scope: Mapping[str, Any], *, _memory_header_budget=None) -> None:

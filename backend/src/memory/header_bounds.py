@@ -1111,12 +1111,47 @@ class _NativeMemoryNumericLedger:
         _MEMORY_LEDGERS.pop(id(self), None)
 
 
+async def _validate_native_memory_preledger_plan(db, operation, prepared, source):
+    """Pay ONE original unconsumed validation before a Memory ledger exists."""
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    from src.memory.m5 import (
+        original_native_memory_prepared_construction_numeric_upper,
+        original_native_memory_prepared_validation_numeric_schedule,
+        validate_native_memory_mutation_plan)
+    guard = db.info.get("composition_guard")
+    owner = getattr(guard, "_native_memory_source_capacity_facts", None)
+    dimensions = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    if (type(owner) is not tuple or len(owner) != 4
+            or type(dimensions) is not tuple or len(dimensions) != 4
+            or owner[0] is not operation or owner[1] is not prepared
+            or dimensions[0] is not operation or dimensions[1] is not prepared
+            or dimensions[2] is not owner[2] or source is not operation.source
+            or _MEMORY_LEDGER_PHASE.get() is not None):
+        raise HeaderBoundsError("memory_preledger_validation_owner_changed")
+    certificate, facts, widths = owner[2], owner[3], dimensions[3]
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths)
+    frame = source.admission.header_budget
+    planning = original_native_memory_prepared_construction_numeric_upper(operation, prepared,
+        certificate=certificate, facts=facts, retention_widths=widths,
+        kind="validation", consumed=False)
+    frame.debit(planning, appearance=("native-memory-preledger", "validation-constructor"))
+    entries = original_native_memory_prepared_validation_numeric_schedule(prepared, consumed=False)
+    for phase, label, amount in entries:
+        if phase != "effect" or type(amount) is not int or amount < 0:
+            raise HeaderBoundsError("memory_preledger_validation_shape_changed")
+        # These are actual Source-time calls, not future effect appearances.
+        # The existing prepared hooks debit only with an active effect ledger.
+        frame.debit(amount, appearance=label)
+    return await validate_native_memory_mutation_plan(prepared, db=db,
+        candidate_digest=source.admission.candidate_digest)
+
+
 async def _reserve_native_memory_numeric_ledger(db, run, operation, prepared, appearances):
     """Actual Source/SAME plan enrollment; serializable data never enrolls it."""
     from src.runtime_plugins.memory_producer import _validate_memory_owner_source
-    from src.memory.m5 import validate_native_memory_mutation_plan
     source = await _validate_memory_owner_source(db, run, operation)
-    await validate_native_memory_mutation_plan(prepared, db=db, candidate_digest=source.admission.candidate_digest)
+    await _validate_native_memory_preledger_plan(db, operation, prepared, source)
     if operation._prepared is not prepared or type(source.admission.header_budget) is not HeaderReadBudget:
         raise HeaderBoundsError("memory_numeric_ledger_plan_changed")
     entries, total = {}, 0
@@ -1135,6 +1170,94 @@ async def _reserve_native_memory_numeric_ledger(db, run, operation, prepared, ap
     return ledger
 
 
+def _native_memory_ledger_label_string_count(value):
+    """Count original string-width generators without making a label copy."""
+    if type(value) is str:
+        return 1
+    if type(value) is tuple:
+        count = 0
+        for item in value:
+            count += _native_memory_ledger_label_string_count(item)
+        return count
+    return 0
+
+
+def _prepay_native_memory_ledger_storage(db, operation, prepared, source, appearances):
+    """Storage for the original ledger and all its finite consumed records."""
+    import sys
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    from src.workspace.accounting_witness import _native_memory_capacity_label_width
+    if (sys._getframe(1).f_code is not _reserve_native_memory_effect_ledger.__code__
+            or type(appearances) is not tuple or not appearances
+            or _MEMORY_LEDGER_PHASE.get() is not None):
+        raise HeaderBoundsError("memory_numeric_ledger_storage_owner_changed")
+    guard = db.info.get("composition_guard")
+    owner = getattr(guard, "_native_memory_source_capacity_facts", None)
+    dimensions = getattr(guard, "_native_memory_retention_numeric_facts", None)
+    if (type(owner) is not tuple or len(owner) != 4
+            or type(dimensions) is not tuple or len(dimensions) != 4
+            or owner[0] is not operation or owner[1] is not prepared
+            or dimensions[0] is not operation or dimensions[1] is not prepared
+            or dimensions[2] is not owner[2] or source is not operation.source):
+        raise HeaderBoundsError("memory_numeric_ledger_storage_owner_changed")
+    certificate = owner[2]
+    _native_memory_dispatch_validation_numeric_owner(operation, prepared,
+        certificate=certificate, facts=owner[3], retention_widths=dimensions[3])
+    count = strings = 0
+    for entry in appearances:
+        if type(entry) is not tuple or len(entry) != 3:
+            raise HeaderBoundsError("memory_numeric_ledger_entry_invalid")
+        phase, label, amount = entry
+        if (phase != "effect" and phase != "capture" and phase != "completion"
+                or (label is not None and type(label) is not tuple)
+                or type(amount) is not int or not 0 <= amount <= MAX_BYTES):
+            raise HeaderBoundsError("memory_numeric_ledger_entry_invalid")
+        count += 1
+        strings += _native_memory_ledger_label_string_count(label)
+    frame = source.admission.header_budget
+    # The existing ensure_ascii scalar walker creates one generator per
+    # string. Its scratch is paid before any such walker is invoked below.
+    frame.debit(41 * strings,
+        appearance=("native-memory-preledger", "storage-width-planning"))
+    storage = 2 + 2 + 2 + 2  # entries, bindings, consumed, init args empty bases
+    # The original factory validates through an any generator and a phase
+    # set comprehension plus the literal three-phase set. The enrollment
+    # loop also creates that literal set once per entry.
+    storage += 2 * 41 + 2 * (2 + 2 + 8 + 9 + 12) + count * (2 + 2 + 8 + 9 + 12 + 13)
+    for phase, label, amount in appearances:
+        phase_width = len(phase) + 2  # the three closed ASCII phase literals
+        label_width = _native_memory_capacity_label_width(label,
+            operation=operation, prepared=prepared, certificate=certificate)
+        key_width = 3 + phase_width + label_width
+        # setdefault constructs its key and empty list EACH occurrence. Price
+        # every occurrence as a new map key; collisions leave unused capacity.
+        storage += key_width + 2 + key_width + 1 + 2 + 1 + 21
+        # consume appends one four-field tuple to the original consumed list.
+        # Both numeric scalars have the original finite int64 width20.
+        storage += 5 + phase_width + label_width + 40 + 1
+    # Dataclass eleven fields, the six positional argument references and
+    # its one registry entry; object references use the existing four-unit
+    # pointer convention, not a recursive copy of the entries dictionary.
+    storage += 2 + 10 + 2 + 5 + 6 * 4 + 20 + 1 + 4
+    for name in ("budget", "operation", "prepared", "source", "entries", "seal",
+            "bindings", "consumed", "closed", "_complete_owner", "_completion_capacity_task"):
+        storage += len(name) + 3 + 20
+    # Initial effect enrollment + effect scope; capture scope + publication;
+    # completion reader preparation + actual writer + explicit job binding.
+    # Each six-field binding copies pointers/scalars into its original dict.
+    binding_width = 2 + 5 + 6 * 20
+    storage += 7 * (binding_width + len("completion") + 2 + 1 + binding_width + 1
+        + 2 + 2 + 8 + 9 + 12 + 2 + 2 + 3 * 20)
+    cohort = getattr(guard, "_native_memory_integer_slots", None)
+    if (type(cohort) is not tuple or len(cohort) != 2 or cohort[0] is not operation
+            or type(cohort[1]) is not tuple):
+        raise HeaderBoundsError("memory_future_integer_slot_changed")
+    # Authentic slots are checked again at the original enrollment site.
+    # Their private set marker occupies canonical-int capacity, never a Ref.
+    storage += len(cohort[1]) * (22 + 1 + 41)
+    frame.debit(storage, appearance=("native-memory-preledger", "ledger-storage"))
+
+
 async def _reserve_native_memory_effect_ledger(db, run, operation, prepared, *,
         existing_references, before_row, certificate):
     """Enroll only the complete original owner's pre-effect numeric forecast.
@@ -1145,14 +1268,12 @@ async def _reserve_native_memory_effect_ledger(db, run, operation, prepared, *,
     never become a partial ledger or a caller-supplied list of fees.
     """
     from src.runtime_plugins.memory_producer import _validate_memory_owner_source
-    from src.memory.m5 import validate_native_memory_mutation_plan
     from src.memory.composition_headers import (
         CompositionHeaderCertificate, validate_composition_certificate)
     from src.workspace import accounting_witness
     source = await _validate_memory_owner_source(db, run, operation)
     budget = source.admission.header_budget
-    await validate_native_memory_mutation_plan(prepared, db=db,
-        candidate_digest=source.admission.candidate_digest)
+    await _validate_native_memory_preledger_plan(db, operation, prepared, source)
     if (operation._prepared is not prepared or type(budget) is not HeaderReadBudget
             or type(certificate) is not CompositionHeaderCertificate
             or certificate.budget is not budget
@@ -1173,6 +1294,7 @@ async def _reserve_native_memory_effect_ledger(db, run, operation, prepared, *,
         raise HeaderBoundsError("memory_complete_numeric_forecast_unavailable")
     appearances = await schedule_owner(db, run, operation, prepared,
         existing_references=existing_references, before_row=before_row, certificate=certificate)
+    _prepay_native_memory_ledger_storage(db, operation, prepared, source, appearances)
     if (type(appearances) is not tuple or not appearances
             or any(type(entry) is not tuple or len(entry) != 3 for entry in appearances)
             or {entry[0] for entry in appearances} != {"effect", "capture", "completion"}):
@@ -1515,6 +1637,12 @@ class HeaderCertificate:
 
 
 async def _connection_state(db):
+    source_frame = _native_memory_header_logical_frame(db, None)
+    if source_frame is not None:
+        # Original total_changes SQL/TextClause/driver input and returned
+        # transaction/driver/change tuple, including validation-only calls.
+        source_frame.debit(2 * (6 * 22 + 2) + 2 + 2 + 2 * 4 + 20,
+            appearance=("native-memory-header-logical", "connection-state"))
     if not db.in_transaction():
         raise HeaderBoundsError("header_transaction_required")
     connection = await db.connection()
@@ -1544,7 +1672,106 @@ def _quoted(identifier):
     return '"' + identifier + '"'
 
 
+def _native_memory_header_logical_frame(db_or_connection, budget):
+    """Resource payer only inside the original registered REPORT Source modes."""
+    from src.runtime_plugins.memory_producer import _native_memory_report_source_resource_owner
+    candidate = budget
+    if candidate is None:
+        trace = _MEMORY_CHARGE_TRACE.get()
+        if trace is not None:
+            candidate = trace[0]
+    owner = _native_memory_report_source_resource_owner(db_or_connection, candidate)
+    return None if owner is None else owner.budget
+
+
+def _native_memory_exact_logical_upper(descriptor, identities):
+    """Scalar construction bound of the unchanged exact-header templates."""
+    known = False
+    for item in _DESCRIPTORS:
+        if descriptor is item:
+            known = True
+            break
+    if not known:
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    if type(identities) is not tuple or len(identities) > MAX_ROWS:
+        raise HeaderBoundsError("header_request_bound")
+    n = len(descriptor.columns)
+    from src.memory.composition_headers import _DESCRIPTOR_XINFO_WIDTHS
+    schema_widths = _DESCRIPTOR_XINFO_WIDTHS.get(descriptor.table)
+    if schema_widths is None or schema_widths[0] != n or n > 99:
+        raise HeaderBoundsError("header_descriptor_unavailable")
+    identity_width = identity_utf8 = 0
+    for value in identities:
+        if type(value) is int and descriptor is COMPOSITION_DESCRIPTORS["work_board_events"]:
+            if not -(2**63) <= value < 2**63:
+                raise HeaderBoundsError("header_request_bound")
+            identity_width += 20
+        elif type(value) is str and value:
+            width = _native_memory_utf8_width(value)
+            if width > 512:
+                raise HeaderBoundsError("header_request_bound")
+            identity_utf8 += width
+            identity_width += 6 * width + 2
+        else:
+            raise HeaderBoundsError("header_request_bound")
+    # Original descriptor/id predicates, set and UTF8 validation copies.
+    upper = 6 * 41 + 2 + max(0, len(identities) - 1) + identity_width + identity_utf8
+    # Original version TextClause, split/list/map/tuple and bounded numeric
+    # components (the existing version scalar bound770 allows128 characters).
+    upper += 2 * (6 * len("SELECT sqlite_version()") + 2) + 2 + 127 + 128 * 20
+    upper += 2 * (6 * len("PRAGMA encoding") + 2) + 2
+    # Source second-read query/parameter copies and wrapper controls are
+    # paid at their original bounded wrapper. This Source-only prefix no
+    # longer allocates the default247-character TextClause/named bind maps.
+    # names list, expected name->(SQL type,nullable) map and its zip tuples.
+    upper += 2 + n + (n + 1) * (schema_widths[1] + 2) + 3 * 41
+    field_chars = len("_rowid_")
+    fragments = 1
+    index = 0
+    for name in descriptor.columns:
+        sql_type = descriptor.sql_types[index]
+        index += 1
+        name_width = 6 * len(name) + 2
+        type_width = 6 * len(sql_type) + 2
+        upper += 3 * name_width + 3 + type_width + 5
+        quoted = len(name) + 2
+        # Both _quoted concatenations, three original format strings, their
+        # extend tuple and three appended field-list slots.
+        fragment_chars = (8 + quoted) + (14 + quoted) + (60 + 2 * quoted)
+        upper += 6 * (len(name) + 1) + 2 + 6 * quoted + 2
+        upper += 6 * fragment_chars + 6 + 2 + 2 + 3 * 4 + 3
+        field_chars += fragment_chars
+        fragments += 3
+    joined = field_chars + fragments - 1
+    statement_chars = (len("SELECT ") + joined + len(" FROM ") + len(descriptor.table) + 2
+        + len(" WHERE ") + len(descriptor.key) + 2 + len(" COLLATE BINARY=:key LIMIT 2"))
+    # join and the seven concatenation/TextClause frontiers of this literal
+    # source expression; two _quoted calls each have two intermediates.
+    upper += 6 * joined + 2 + 8 * (6 * statement_chars + 2)
+    upper += 2 * (6 * len(descriptor.table) + 2) + 2 * (6 * len(descriptor.key) + 2)
+    # Lists plus each exact-row key parameter/bind map, row-header result
+    # list, original JSON skeleton/list/UTF copies and final certificate.
+    upper += 4
+    for value in identities:
+        key_width = 20 if type(value) is int else 6 * _native_memory_utf8_width(value) + 2
+        skeleton = 2 + 3 + len("native-composition-memory.v1") + 2 + 6 * len(descriptor.table) + 2 + key_width
+        skeleton += 2 + max(0, n - 1)
+        for name in descriptor.columns:
+            skeleton += 3 + 6 * len(name) + 2 + 4
+        row_upper = 2 + 1 + 2 * (2 + 3 * n + 20 + n * (44 + 20 + 64))
+        upper += 2 * (2 + len("key") + 3 + key_width) + row_upper
+        upper += 3 * skeleton + 128 + 2 * 21 + n * (41 + 2 + 2 + 3 * 20)
+    upper += 2 * (2 + max(0, len(identities) - 1) + 20 * len(identities))
+    upper += 2 * (6 * len("SELECT total_changes()") + 2)
+    upper += 2 + 10 + 11 * 20  # original certificate constructor fields
+    return upper
+
+
 async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes, *, _header_budget=None):
+    source_frame = _native_memory_header_logical_frame(db, _header_budget)
+    if source_frame is not None:
+        source_frame.debit(_native_memory_exact_logical_upper(descriptor, exact_row_ids),
+            appearance=("native-memory-header-logical", "exact-construction"))
     if not any(descriptor is item for item in _DESCRIPTORS):
         raise HeaderBoundsError("header_descriptor_unavailable")
     event_identity = descriptor is COMPOSITION_DESCRIPTORS["work_board_events"] and descriptor.key == "event_id"
@@ -1577,16 +1804,25 @@ async def preflight_exact_rows(db, descriptor, exact_row_ids, remaining_bytes, *
     if await db.scalar(text("PRAGMA encoding")) != "UTF-8":
         raise HeaderBoundsError("header_encoding_unsupported")
     # The virtual pragma returns only bounded schema metadata, never defaults.
-    if _header_budget is not None:
-        for appearance in ("delivery", "row-copy", "encoded-copy"):
-            _header_budget.debit(_metadata_upper(len(descriptor.columns) + 1, (770, 770, 20, 20, 20)),
-                appearance=("exact-metadata", "schema", descriptor.table, appearance))
-    schema = list(await db.execute(text(
-        "SELECT CASE WHEN typeof(name)='text' THEN CASE WHEN octet_length(name)<=128 THEN name END END, "
-        "CASE WHEN typeof(type)='text' THEN CASE WHEN octet_length(type)<=128 THEN type END END, "
-        "\"notnull\",pk,hidden "
-        "FROM pragma_table_xinfo(:table) LIMIT :limit"),
-        {"table": descriptor.table, "limit": len(descriptor.columns)+1}))
+    if source_frame is not None:
+        from src.memory.composition_headers import _native_memory_exact_source_schema_rows
+        # The existing original bounded wrapper performs this same second
+        # pragma read with its existing descriptor-specific field limits.
+        # Pay the new run_sync callback before creating its closure.
+        source_frame.debit(41, appearance=("native-memory-header-logical", "exact-xinfo-callback"))
+        schema = await (await db.connection()).run_sync(
+            lambda c: _native_memory_exact_source_schema_rows(c, descriptor, source_frame))
+    else:
+        if _header_budget is not None:
+            for appearance in ("delivery", "row-copy", "encoded-copy"):
+                _header_budget.debit(_metadata_upper(len(descriptor.columns) + 1, (770, 770, 20, 20, 20)),
+                    appearance=("exact-metadata", "schema", descriptor.table, appearance))
+        schema = list(await db.execute(text(
+            "SELECT CASE WHEN typeof(name)='text' THEN CASE WHEN octet_length(name)<=128 THEN name END END, "
+            "CASE WHEN typeof(type)='text' THEN CASE WHEN octet_length(type)<=128 THEN type END END, "
+            "\"notnull\",pk,hidden "
+            "FROM pragma_table_xinfo(:table) LIMIT :limit"),
+            {"table": descriptor.table, "limit": len(descriptor.columns)+1}))
     names = [row[0] for row in schema]
     if (len(schema) != len(descriptor.columns) or set(names) != set(descriptor.columns)
             or any(name in {"rowid", "_rowid_", "oid"} for name in names)):

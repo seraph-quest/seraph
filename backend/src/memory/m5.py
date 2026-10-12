@@ -195,6 +195,116 @@ def _native_prepared_control_readback_width(prepared):
         for name, value in prepared.before)
 
 
+def _native_prepared_width_planning_scratch(value):
+    """Scalar scratch of the existing recursive width walker; no copied tree."""
+    from enum import Enum
+    if isinstance(value, Enum):
+        return _native_prepared_width_planning_scratch(value.value)
+    if type(value) is str:
+        return 41  # original ensure_ascii character generator
+    if type(value) is tuple or type(value) is list:
+        upper = 41 + 9  # recursive sum generator and original two-type set
+        for child in value:
+            upper += _native_prepared_width_planning_scratch(child)
+        return upper
+    if type(value) is dict:
+        upper = 2 * 41 + 9  # key predicate + width sum + original type set
+        for key, child in value.items():
+            upper += _native_prepared_width_planning_scratch(key)
+            upper += _native_prepared_width_planning_scratch(child)
+        return upper
+    return 0
+
+
+def original_native_memory_prepared_construction_numeric_upper(operation, plan, *,
+        certificate, facts, retention_widths, kind="local", consumed=False):
+    """ONE unchanged prepared-child forecast constructor, excluding parent custody."""
+    from src.runtime_plugins.memory_producer import _native_memory_dispatch_validation_numeric_owner
+    from src.memory.header_bounds import HeaderBoundsError
+    _native_memory_dispatch_validation_numeric_owner(operation, plan,
+        certificate=certificate, facts=facts, retention_widths=retention_widths)
+    if type(consumed) is not bool or type(kind) is not str:
+        raise HeaderBoundsError("memory_prepared_construction_kind_unavailable")
+    scratch = 0
+    if kind == "validation":
+        count = 3 if consumed else 4
+        scratch += 4 * 41  # list comprehension plus three _metadata_upper predicate generators
+        if not consumed:
+            scratch += _native_prepared_width_planning_scratch(plan._row_values)
+            scratch += _native_prepared_width_planning_scratch(plan._update_before)
+    elif kind == "local":
+        scratch += _native_prepared_width_planning_scratch(plan._result)
+        scratch += _native_prepared_width_planning_scratch(plan._row_values)
+        scratch += _native_prepared_width_planning_scratch(plan._update_before)
+        count = 8
+        scratch += 6 * 41  # six original _metadata_upper predicate generators
+        if plan._method == "memory.applyReviewed":
+            if plan._prepared.canonical is not None and plan._prepared.canonical.memory_plan.rows:
+                count += 1
+                scratch += _native_prepared_width_planning_scratch(plan._row_values)
+        elif plan._method == "memory.forget":
+            count = 16
+            update = plan._prepared.update_plan
+            scratch += _native_prepared_width_planning_scratch(plan._prepared.audit_event.details_json)
+            scratch += 2 * 41  # change-pair sum and readback sum
+            for name, value in update.changes:
+                scratch += _native_prepared_width_planning_scratch(name)
+                scratch += _native_prepared_width_planning_scratch(value)
+            for name, value in update.before:
+                scratch += 41  # original next(replacement ...) generator
+                scratch += _native_prepared_width_planning_scratch(name)
+                for key, replacement in update.changes:
+                    if key == name:
+                        value = replacement
+                        break
+                scratch += _native_prepared_width_planning_scratch(value)
+            scratch += 41  # original control-conditions pair sum
+            for name, value in update.before:
+                scratch += _native_prepared_width_planning_scratch(name)
+                scratch += _native_prepared_width_planning_scratch(value)
+            metadata = update.memory.metadata_json
+            confirmed = update.memory.last_confirmed_at
+            for name, value in update.changes:
+                if name == "metadata_json":
+                    metadata = value
+                if name == "last_confirmed_at":
+                    confirmed = value
+            scratch += 2 * 41  # metadata and confirmed original next generators
+            scratch += _native_prepared_width_planning_scratch(metadata or "{}")
+            if confirmed is not None:
+                count += 1
+        elif plan._method != "memory.propose":
+            raise HeaderBoundsError("memory_prepared_construction_kind_unavailable")
+    elif kind == "audit":
+        from src.audit.repository import _PREPARED_AUDIT_EXPECTED_FIELDS
+        event = plan.audit_event
+        if event is None:
+            return 0  # exact literal empty tuple; no dynamic child constructor
+        if type(event) is not AuditEvent:
+            raise HeaderBoundsError("memory_prepared_construction_audit_changed")
+        count = 1 if event.details_json is None else 2
+        scratch += 41  # original expected-map sum
+        for name in _PREPARED_AUDIT_EXPECTED_FIELDS:
+            scratch += _native_prepared_width_planning_scratch(name)
+            scratch += _native_prepared_width_planning_scratch(getattr(event, name))
+        if event.details_json is not None:
+            scratch += _native_prepared_width_planning_scratch(event.details_json)
+    else:
+        raise HeaderBoundsError("memory_prepared_construction_kind_unavailable")
+    # Closed ASCII label grammar: at most three strings, bounded by the
+    # actual longest source names memory-prepared-audit / plan-validation-values /
+    # encoded-copy. No body/model upper is used as constructor capacity.
+    label = 4 + 23 + 24 + 14
+    triple = 4 + 8 + label + 20
+    container = 2 + max(0, count - 1) + count * triple
+    # One list + return tuple; original local forget also creates two literal
+    # three-entry extend tuples. Validation/audit use fewer intermediates.
+    containers = 2 * container
+    if kind == "local" and plan._method == "memory.forget":
+        containers += 2 * (2 + 2 + 3 * triple)
+    return scratch + containers + count * (triple + label)
+
+
 def original_native_memory_prepared_numeric_schedule(plan):
     """Pure effect terms from the registered original sealed constructor plan."""
     if (type(plan) is not PreparedNativeMemoryMutation
@@ -288,7 +398,51 @@ def _native_memory_mapped_values(row):
     return tuple((name, getattr(row, name)) for name in row.__table__.columns.keys())
 
 
-async def validate_native_memory_mutation_plan(plan, *, db, candidate_digest, consumed=False):
+def _native_prepared_original_source_frame(plan, db, source):
+    """Existing initial-authority custody; capacity only, never plan permission."""
+    import asyncio
+    from src.runtime_plugins.memory_producer import (
+        _NativeMemoryDispatchSource, _MEMORY_SOURCES, _MEMORY_SOURCE_SEAL,
+        _native_memory_source_numeric_frame)
+    from src.memory.header_bounds import HeaderReadBudget, HeaderBoundsError
+    from src.workspace.accounting_witness import CompositionSessionGuard
+    if (type(source) is not _NativeMemoryDispatchSource
+            or _MEMORY_SOURCES.get(id(source)) is not source
+            or source._issued_id != id(source) or source._seal is not _MEMORY_SOURCE_SEAL
+            or not source._live.is_set()
+            or type(plan) is not PreparedNativeMemoryMutation
+            or _NATIVE_MUTATION_PLANS.get(id(plan)) is not plan
+            or plan._seal is not _NATIVE_MUTATION_PLAN_SEAL or plan._db is not db
+            or plan._candidate_digest != source.admission.candidate_digest
+            or source._scope.native_memory_source is not source):
+        raise HeaderBoundsError("memory_prepared_original_source_changed")
+    guard = db.info.get("composition_guard")
+    lineage = getattr(guard, "_native_memory_authority_read_numeric", None)
+    frame = source.admission.header_budget
+    if (type(guard) is not CompositionSessionGuard
+            or type(lineage) is not tuple or len(lineage) != 10
+            or lineage[0] is not source or lineage[1] is not source._scope
+            or lineage[2] is not db or lineage[3] is not plan._transaction
+            or lineage[4] is not plan._driver or lineage[5] is not asyncio.current_task()
+            or lineage[6] is not frame or type(frame) is not HeaderReadBudget
+            or guard.header_budget is not frame or _native_memory_source_numeric_frame() is not frame
+            or db.sync_session.get_transaction() is not plan._transaction
+            or not plan._driver.in_transaction or not source.host.admitting
+            or source.claim._host is not source.host
+            or source.host.boot_nonce != source.claim.host_boot_nonce):
+        raise HeaderBoundsError("memory_prepared_original_source_changed")
+    enrolled = False
+    for connection, transaction, _commit, _close in plan._transaction._connections.values():
+        if (transaction is plan._sql_transaction and connection.in_transaction()
+                and connection.connection.driver_connection is plan._driver):
+            enrolled = True
+    if not enrolled:
+        raise HeaderBoundsError("memory_prepared_original_source_changed")
+    return frame
+
+
+async def validate_native_memory_mutation_plan(plan, *, db, candidate_digest, consumed=False,
+        native_memory_source=None):
     from sqlalchemy import inspect
     if (type(plan) is not PreparedNativeMemoryMutation
         or _NATIVE_MUTATION_PLANS.get(id(plan)) is not plan
@@ -296,11 +450,28 @@ async def validate_native_memory_mutation_plan(plan, *, db, candidate_digest, co
         or plan._transaction is not db.sync_session.get_transaction()
         or plan._candidate_digest != candidate_digest or plan._consumed is not consumed):
         raise ValueError("prepared_memory_mutation_changed")
+    original_frame = None
+    if native_memory_source is not None:
+        original_frame = _native_prepared_original_source_frame(plan, db, native_memory_source)
+        from src.memory.header_bounds import _MEMORY_LEDGER_PHASE, HeaderBoundsError
+        if _MEMORY_LEDGER_PHASE.get() is not None:
+            raise HeaderBoundsError("memory_prepared_original_source_changed")
+        from src.memory.composition_headers import _metadata_upper
+        for stage in ("delivery", "row-copy", "encoded-copy"):
+            original_frame.debit(_metadata_upper(1, (20,)),
+                appearance=("memory-prepared", "writer-state", stage))
     sql_transaction, driver, changes = await _native_memory_writer_state(db)
     expected_changes = plan._applied_total_changes if consumed else plan._total_changes
     if (sql_transaction is not plan._sql_transaction or driver is not plan._driver
         or changes != expected_changes):
         raise ValueError("prepared_memory_writer_changed")
+    if not consumed and original_frame is not None:
+        scratch = (_native_prepared_width_planning_scratch(plan._row_values)
+            + _native_prepared_width_planning_scratch(plan._update_before))
+        original_frame.debit(scratch, appearance=("memory-prepared", "preledger-width-scratch"))
+        original_frame.debit(_native_prepared_value_width(plan._row_values)
+            + _native_prepared_value_width(plan._update_before),
+            appearance=("memory-prepared", "plan-validation-values"))
     if not consumed and _native_prepared_numeric_frame(db, plan) is not None:
         _native_prepared_allocation_debit(db, plan, "plan-validation-values",
             _native_prepared_value_width(plan._row_values) + _native_prepared_value_width(plan._update_before))
@@ -313,7 +484,7 @@ async def validate_native_memory_mutation_plan(plan, *, db, candidate_digest, co
     return plan
 
 
-async def prepare_native_memory_mutation(db, *, admission, native_memory_report_source=None):
+async def prepare_native_memory_mutation(db, *, admission, native_memory_report_source=None, native_memory_source=None):
     from src.runtime_plugins.memory_producer import (
         NativeMemoryMutationAdmission, validate_original_memory_owner, _consume_original_memory_text)
     from src.memory.header_bounds import HeaderReadBudget
@@ -325,7 +496,7 @@ async def prepare_native_memory_mutation(db, *, admission, native_memory_report_
         raise ValueError("prepared_memory_admission_unavailable")
     initial_state = await _native_memory_writer_state(db)
     transaction = db.sync_session.get_transaction()
-    value = await validate_original_memory_owner(db, admission)
+    value = await validate_original_memory_owner(db, admission, _numeric_source=native_memory_source)
     principal, session = value["operator_principal_id"], value["operator_session_id"]
     rows, updates = [], []
     audit = None

@@ -39,6 +39,17 @@ async def test_genuine_completion_planning_does_not_construct_future_vectors(act
         monkeypatch.setattr(accounting_witness, "_native_memory_generic_future_bound_inputs", forbidden)
         monkeypatch.setattr(memory_producer, "_native_memory_dispatch_binding_json_entries", forbidden)
         before = certificate.budget.remaining
+        scratch = job_runtime._native_memory_claim_checkpoint_scratch_upper(operation.source, db)
+        methods = operation.source.claim.checkpoint["payload"]["allowed_child_methods"]
+        assert scratch == (85 + 3 * len(methods)) * 41
+        assert certificate.budget.remaining == before
+        import copy
+        with pytest.raises(HeaderBoundsError):
+            job_runtime._native_memory_claim_checkpoint_scratch_upper(copy.copy(operation.source), db)
+        async def wrong_scratch_task():
+            with pytest.raises(HeaderBoundsError):
+                job_runtime._native_memory_claim_checkpoint_scratch_upper(operation.source, db)
+        await asyncio.create_task(wrong_scratch_task())
         for helper in HELPERS:
             kwargs = dict(certificate=certificate, facts=facts, retention_widths=widths,
                 _construction_only=True)
@@ -67,3 +78,12 @@ async def test_genuine_completion_planning_does_not_construct_future_vectors(act
         "attempt_id": attempt.attempt_id, "idempotency_key": "completion-construction-observer",
     })
     assert response.status_code == 409 and len(observed) == 4
+
+
+def test_unissued_checkpoint_scratch_denies_before_db_or_checkpoint():
+    class Poison:
+        @property
+        def info(self):
+            raise AssertionError("unissued Source reached DB")
+    with pytest.raises(HeaderBoundsError):
+        job_runtime._native_memory_claim_checkpoint_scratch_upper(object(), Poison())

@@ -61,7 +61,7 @@ def test_mutation_output_bounds_cover_original_escaped_canonical_result():
         assert entries[("native-memory-mutation", stage)] >= len(_canonical(asdict(effect)).encode("utf-8"))
 
 
-def test_mutation_audit_kwargs_cover_actual_eight_argument_copy():
+def test_mutation_audit_kwargs_cover_actual_eight_argument_copy(monkeypatch):
     details = {"proposal_id": "proposal:\U0001f642", "source_task_id": "task:\x7f",
         "source_attempt_id": "attempt:\"", "status": "proposed"}
     audit = audit_repository._prepare_event(actor="principal:" + "p" * 512,
@@ -80,6 +80,14 @@ def test_mutation_audit_kwargs_cover_actual_eight_argument_copy():
         "audit_upper": _native_memory_source_value_upper(event),
         "details_upper": _native_memory_source_value_upper(details),
         "result_upper": 4096, "effect_upper": 4096})
+    from src.memory import header_bounds
+
+    def unpaid_sizing_map(*args, **kwargs):
+        pytest.fail("actual audit kwargs sizing allocated a temporary numeric map")
+
+    # The actual payer must compute this eight-field upper arithmetically,
+    # before any body-copy fee. This component check creates no Source grant.
+    monkeypatch.setattr(header_bounds, "_native_memory_object_width", unpaid_sizing_map)
     entries = dict(_native_memory_mutation_allocation_entries("memory.propose", widths, audit=audit))
     assert entries[("native-memory-mutation", "audit-event-kwargs")] >= len(_canonical(kwargs).encode("utf-8"))
 

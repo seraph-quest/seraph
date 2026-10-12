@@ -340,6 +340,21 @@ def _native_memory_report_principal_pay(db, stage, *, principal_id=None, record=
     if record is not None and (record.id not in certificate.row_ids
             or record.principal_id != owner.owner_principal_id):
         raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
+    if stage in ("reverse-legacy-tuple", "reverse-results"):
+        legacy_reverse = stage == "reverse-legacy-tuple"
+        observed = getattr(owner, "_principal_reverse_legacy", None)
+        if observed is None:
+            # Retain only the observed branch scalar, after authentic owner
+            # validation and before allocating its private record slot.
+            owner.budget.debit(5,
+                appearance=("native-memory-report-auth", "reverse-branch-retained"))
+            # Same original record-field storage grammar as the REPORT
+            # numeric-branch slot: map punctuation + reference + JSON key.
+            owner.budget.debit(3 + 4 + (6 * 25 + 2),
+                appearance=("native-memory-report-auth", "reverse-branch-slot"))
+            object.__setattr__(owner, "_principal_reverse_legacy", legacy_reverse)
+        elif type(observed) is not bool or observed is not legacy_reverse:
+            raise HeaderBoundsError("memory_report_principal_numeric_branch_changed")
     if stage == "reverse-legacy-tuple":
         owner.budget.debit(_native_memory_report_legacy_tuple_upper(),
             appearance=("native-memory-report-auth", "reverse-legacy-tuple"))
@@ -381,7 +396,11 @@ def original_native_memory_report_principal_numeric_schedule(db, principal_id):
     if owner is None:
         raise HeaderBoundsError("memory_report_principal_numeric_owner_changed")
     upper = owner.certificates[0].upper_bytes
-    return _native_memory_report_principal_numeric_entries(upper)
+    legacy_reverse = getattr(owner, "_principal_reverse_legacy", None)
+    if type(legacy_reverse) is not bool:
+        raise HeaderBoundsError("memory_report_principal_numeric_branch_unavailable")
+    return _native_memory_report_principal_numeric_entries(
+        upper, legacy_reverse=legacy_reverse)
 
 
 def _operator_for_record(

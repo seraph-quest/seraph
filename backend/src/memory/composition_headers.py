@@ -334,6 +334,8 @@ class _MemoryCurrentSnapshotScope:
     seal: object = field(default=_SNAPSHOT_SCOPE_SEAL, repr=False)
     certificates: dict = field(default_factory=dict, repr=False)
     live: bool = True
+    session: object = field(default=None, repr=False)
+    connection: object = field(default=None, repr=False)
 
 
 def _checked_current_snapshot_scope(budget):
@@ -356,15 +358,22 @@ def _snapshot_current_task():
 
 
 @contextmanager
-def _memory_current_snapshot_scope(budget):
+def _memory_current_snapshot_scope(budget, *, _session=None):
     """One lexical numeric operation; never a Source or writer permission."""
     if type(budget) is not HeaderReadBudget:
         raise HeaderBoundsError("header_request_bound")
+    if _session is not None:
+        from src.db.engine import get_session
+        if sys._getframe(2).f_code is not get_session.__wrapped__.__code__:
+            raise HeaderBoundsError("memory_snapshot_scope_unavailable")
     current = _checked_current_snapshot_scope(budget)
     if current is not None:
+        if _session is not None and current.session is not _session:
+            raise HeaderBoundsError("memory_snapshot_scope_unavailable")
         yield current
         return
     scope = _MemoryCurrentSnapshotScope(budget, _snapshot_current_task(), threading.get_ident())
+    scope.session = _session
     _SNAPSHOT_SCOPES[id(scope)] = scope
     token = _CURRENT_SNAPSHOT_SCOPE.set(scope)
     try:
@@ -372,8 +381,23 @@ def _memory_current_snapshot_scope(budget):
     finally:
         scope.live = False
         scope.certificates.clear()
+        scope.session = None
+        scope.connection = None
         _SNAPSHOT_SCOPES.pop(id(scope), None)
         _CURRENT_SNAPSHOT_SCOPE.reset(token)
+
+
+
+def _check_snapshot_scope_connection(scope, connection):
+    if scope is None or scope.session is None:
+        return
+    # The original factory owner retains this bind across rollback/new BEGIN.
+    # Comparing the actual bind avoids a caller-controlled db.info credential.
+    if scope.session.sync_session.bind is not connection:
+        raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+    if scope.connection is not None and scope.connection is not connection:
+        raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+    scope.connection = connection
 
 
 def _snapshot_schema_cookies(connection, budget, *, _header_budget=None):
@@ -395,6 +419,7 @@ def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_ow
     if type(budget) is not HeaderReadBudget:
         raise HeaderBoundsError("header_request_bound")
     scope = _checked_current_snapshot_scope(budget)
+    _check_snapshot_scope_connection(scope, connection)
     if scope is None:
         return preflight_composition_superset(connection, budget, raw_owner=raw_owner, _header_budget=_header_budget)
     current = scope.certificates.get(connection)
@@ -426,6 +451,9 @@ def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_ow
 async def _certify_current_memory_snapshot(db, budget, *, _header_budget=None):
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
+    scope = _checked_current_snapshot_scope(budget)
+    if scope is not None and scope.session is not None and scope.session is not db:
+        raise HeaderBoundsError("memory_snapshot_scope_unavailable")
     return await (await db.connection()).run_sync(
         lambda connection: _certify_current_memory_snapshot_on_connection(connection, budget, _header_budget=_header_budget))
 
@@ -1775,7 +1803,25 @@ def preflight_composition_superset(connection,budget, *, raw_owner=None, _header
 async def certify_composition_superset(db,budget, *, _header_budget=None):
     if _header_budget is not None and _header_budget is not budget:
         raise HeaderBoundsError("header_metadata_owner_unavailable")
-    return await (await db.connection()).run_sync(lambda c:preflight_composition_superset(c,budget,_header_budget=_header_budget))
+    scope = _checked_current_snapshot_scope(budget)
+    if scope is not None and scope.session is not None and scope.session is not db:
+        raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+    def certify_fresh(connection):
+        # Public certification always pays and issues a fresh certificate.  Only
+        # the resulting live writer snapshot may replace a stale reader entry.
+        scope = _checked_current_snapshot_scope(budget)
+        _check_snapshot_scope_connection(scope, connection)
+        if scope is None:
+            return preflight_composition_superset(connection, budget, _header_budget=_header_budget)
+        cookies = _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget)
+        certificate = preflight_composition_superset(connection, budget, _header_budget=_header_budget)
+        if _snapshot_schema_cookies(connection, budget, _header_budget=_header_budget) != cookies:
+            raise HeaderBoundsError("header_schema_cookie_changed")
+        _validate(connection, certificate)
+        _SNAPSHOT_CERTIFICATES[id(certificate)] = certificate
+        scope.certificates[connection] = (certificate, cookies)
+        return certificate
+    return await (await db.connection()).run_sync(certify_fresh)
 
 
 async def validate_composition_certificate(db,certificate):

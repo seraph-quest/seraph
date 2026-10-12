@@ -243,7 +243,8 @@ class GoalProgrammeService:
             # Recertification spends the already-used original frame.
             async with discovery_writer_scope() as policy:
                 owned.validate()
-                common = await certify_composition_superset(owned.db, owned.header_budget)
+                common = await certify_composition_superset(owned.db, owned.header_budget,
+                    _header_budget=owned.header_budget)
                 connection = await owned.db.connection()
                 _, binding, _, identity = await connection.run_sync(lambda conn:
                     owned.guard._select_programme_admission(conn, common,
@@ -351,7 +352,8 @@ class GoalProgrammeService:
             if original_admission_guard is None:
                 if identity_certificate is not None:
                     raise GoalProgrammeError("programme_original_selection_unavailable")
-                common = await certify_composition_superset(db, owned.header_budget)
+                common = await certify_composition_superset(db, owned.header_budget,
+                    _header_budget=owned.header_budget)
                 connection = await db.connection()
                 def current_selection(conn):
                     owned.validate(db=db)

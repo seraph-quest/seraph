@@ -158,7 +158,7 @@ async def test_genuine_identity_factory_and_validator_paid_separately(original_a
     class ObservedRollback(RuntimeError):
         pass
     with pytest.raises(ObservedRollback):
-        async with get_session() as db:
+        async with get_session(header_budget=budget) as db:
             guard = await begin_native_writer(db, owner="finite_service", header_budget=budget)
             connection = await db.connection()
             common = await connection.run_sync(lambda conn: headers._certify_current_memory_snapshot_on_connection(

@@ -43,7 +43,7 @@ async def test_current_pointer_read_uses_original_selection_and_spent_frame(
             guard = await begin_native_writer(db, owner="finite_service", header_budget=budget)
             connection = await db.connection()
             common = await connection.run_sync(lambda current:
-                _certify_current_memory_snapshot_on_connection(current, budget))
+                _certify_current_memory_snapshot_on_connection(current, budget, _header_budget=budget))
             await connection.run_sync(lambda current: guard._select_programme_admission(
                 current, common, service=goal_discovery_service, host=cordis_host,
                 goal_id=case.goal_id, programme_id=case.programme["id"],

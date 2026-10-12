@@ -498,6 +498,23 @@ async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
     if owner not in {"native_ingress", "composition_maintenance", "durable_jobs", "finite_service"}:
         raise CompositionBindingError("composition_native_writer_required")
     guard = db.info.get("composition_guard")
+    if guard is None and header_budget is not None and not fresh:
+        from src.memory.composition_headers import _checked_current_snapshot_scope
+        scope = _checked_current_snapshot_scope(header_budget)
+        if scope is not None and scope.session is not None:
+            from sqlalchemy.ext.asyncio import AsyncConnection
+            from src.workspace.accounting_witness import CompositionReadGuard
+            connection = db.bind
+            if (scope.session is not db or type(connection) is not AsyncConnection
+                    or db.sync_session.bind is not connection.sync_connection
+                    or (scope.connection is not None and scope.connection is not connection.sync_connection)):
+                raise CompositionBindingError("composition_native_writer_budget_changed")
+            read_guard = db.info.get("composition_read_guard")
+            if type(read_guard) is CompositionReadGuard and read_guard.db is db:
+                # The original factory already retains this physical connection.
+                # Keep the first genuine writer instead of certifying a reader
+                # snapshot, rolling it back, then certifying the whole graph again.
+                return await _begin_native_writer_first(db, owner=owner, header_budget=header_budget)
     if guard is None:
         guard = await prepare_composition_session(db, fresh=fresh, **(
             {"header_budget": header_budget} if header_budget is not None else {}))
@@ -511,7 +528,7 @@ async def begin_native_writer(db, *, owner, fresh=False, header_budget=None):
     await db.execute(text("BEGIN IMMEDIATE"))
     if header_budget is not None:
         from src.memory.composition_headers import certify_composition_superset
-        await certify_composition_superset(db, header_budget)
+        await certify_composition_superset(db, header_budget, _header_budget=header_budget)
     db.info["native_writer_started"] = True
     db.info["composition_writer_owner"] = owner
     if header_budget is not None and guard is not None:

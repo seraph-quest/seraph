@@ -60,31 +60,39 @@ async def test_nested_memory_frame_retains_original_planning_trace(model_db):
 @pytest.mark.asyncio
 async def test_original_auth_keeps_both_certificates_without_unused_collector(
         original_artifact_owner, monkeypatch):
+    from sqlalchemy import event
     from src.auth.service import authenticate_session
-    owner, _request, _factory, _operator = original_artifact_owner
-    original = headers.preflight_composition_superset
-    certificates, charges = [], []
+    owner, _request, factory, _operator = original_artifact_owner
+    certificates, frames, remaining = [], [], []
+    engine = factory.kw["bind"].sync_engine
 
-    def observed_preflight(connection, budget, **kwargs):
-        auth_frame = _auth_header_budget.get()
-        assert budget is auth_frame
-        with _trace_memory_numeric_charges(budget) as observed:
-            certificate = original(connection, budget, **kwargs)
-        certificates.append(certificate)
-        charges.extend(observed)
-        assert certificate.budget is auth_frame
-        assert getattr(certificate, "_common_numeric_trace", None) is None
-        with pytest.raises(HeaderBoundsError, match="memory_common_numeric_trace_unavailable"):
-            headers.native_memory_certification_numeric_trace(certificate, header_budget=budget)
-        return certificate
+    def observed_query(connection, cursor, statement, parameters, context, executemany):
+        frame = _auth_header_budget.get()
+        certificate = headers._CURRENT.get()
+        if frame is None:
+            return
+        frames.append(frame)
+        remaining.append(frame.remaining)
+        assert headers._COMMON_TRACE_COLLECTOR_ACTIVE.get() is None
+        if certificate is not None:
+            assert certificate.budget is frame
+            assert getattr(certificate, "_common_numeric_trace", None) is None
+            if not any(item is certificate for item in certificates):
+                certificates.append(certificate)
 
-    monkeypatch.setattr(headers, "preflight_composition_superset", observed_preflight)
-    authenticated = await authenticate_session(owner.session_id, touch=False)
+    event.listen(engine, "before_cursor_execute", observed_query)
+    try:
+        authenticated = await authenticate_session(owner.session_id, touch=False)
+    finally:
+        event.remove(engine, "before_cursor_execute", observed_query)
     assert authenticated.session_id == owner.session_id
-    # Real read issuance and fresh writer issuance both execute, without substituting either.
     assert len(certificates) >= 2
     assert len({id(certificate.transaction) for certificate in certificates}) >= 2
     assert len({id(certificate.budget) for certificate in certificates}) == 1
-    assert charges and all(certificate.budget.remaining < 1048576 for certificate in certificates)
-    assert not any(label[:2] == ("metadata-prequery", "common-certification-trace")
-        for label, _ in charges)
+    assert frames and all(frame is certificates[0].budget for frame in frames)
+    assert min(remaining) < max(remaining) < 1048576
+    assert all(certificate.budget.remaining < 1048576 for certificate in certificates)
+    for certificate in certificates:
+        with pytest.raises(HeaderBoundsError, match="memory_common_numeric_trace_unavailable"):
+            headers.native_memory_certification_numeric_trace(
+                certificate, header_budget=certificate.budget)

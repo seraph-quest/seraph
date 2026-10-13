@@ -3,6 +3,7 @@ from contextlib import contextmanager, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import asyncio
+import sys
 import threading
 from weakref import WeakValueDictionary
 import json
@@ -430,6 +431,8 @@ class _MemoryCurrentSnapshotScope:
     seal: object = field(default=_SNAPSHOT_SCOPE_SEAL, repr=False)
     certificates: dict = field(default_factory=dict, repr=False)
     live: bool = True
+    session: object = field(default=None, repr=False)
+    connection: object = field(default=None, repr=False)
 
 
 def _checked_current_snapshot_scope(budget):
@@ -452,15 +455,22 @@ def _snapshot_current_task():
 
 
 @contextmanager
-def _memory_current_snapshot_scope(budget):
+def _memory_current_snapshot_scope(budget, *, _session=None):
     """One lexical numeric operation; never a Source or writer permission."""
     if type(budget) is not HeaderReadBudget:
         raise HeaderBoundsError("header_request_bound")
+    if _session is not None:
+        from src.db.engine import get_session
+        if sys._getframe(2).f_code is not get_session.__wrapped__.__code__:
+            raise HeaderBoundsError("memory_snapshot_scope_unavailable")
     current = _checked_current_snapshot_scope(budget)
     if current is not None:
+        if _session is not None and current.session is not _session:
+            raise HeaderBoundsError("memory_snapshot_scope_unavailable")
         yield current
         return
     scope = _MemoryCurrentSnapshotScope(budget, _snapshot_current_task(), threading.get_ident())
+    scope.session = _session
     _SNAPSHOT_SCOPES[id(scope)] = scope
     token = _CURRENT_SNAPSHOT_SCOPE.set(scope)
     try:
@@ -468,6 +478,8 @@ def _memory_current_snapshot_scope(budget):
     finally:
         scope.live = False
         scope.certificates.clear()
+        scope.session = None
+        scope.connection = None
         _SNAPSHOT_SCOPES.pop(id(scope), None)
         _CURRENT_SNAPSHOT_SCOPE.reset(token)
 
@@ -672,6 +684,7 @@ def _certify_current_memory_snapshot_on_connection(connection, budget, *, raw_ow
     if type(budget) is not HeaderReadBudget:
         raise HeaderBoundsError("header_request_bound")
     scope = _checked_current_snapshot_scope(budget)
+    _check_snapshot_scope_connection(scope, connection)
     if scope is None:
         return _issue_current_memory_numeric_certificate(connection, budget, scope=None,
             raw_owner=raw_owner, _header_budget=_header_budget)
@@ -1077,14 +1090,49 @@ def _validate_locator(connection, table, column, model=None, *, budget=None, _he
     if len(source) != 1:
         raise HeaderBoundsError("header_locator_unsupported")
     name = source[0].name
-    rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770,20,14,20)), appearance=('locator-indexes',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?')
+    index_width = (_original_locator_schema_width(connection, table, model, _header_budget)
+        if _header_budget is not None else None)
+    targeted_index = False
+    if index_width is not None:
+        # The original same-frame schema proof authenticates this mapped name.
+        # Pay sizing arithmetic, membership/type predicates and parameter work
+        # before sizing or constructing the new three-parameter tuple.
+        _metadata_precharge(connection, _header_budget, 256,
+            ("locator-indexes", "target-planning"))
+        targeted_index = (type(name) is str and name in _NAMED_INDEXES
+                and name.isascii() and len(name) <= 128)
+    if targeted_index:
+        index_limit = len(model.__table__.indexes)+len(model.__table__.constraints)+1
+        target_width = max(4, len(name)+2)
+        table_width = len(table)+2
+        parameter_width = target_width+table_width+24
+        _metadata_precharge(connection, _header_budget, 3*parameter_width,
+            ("locator-indexes", "target-parameters"))
+        # Exact closed ASCII SQL: 182 bytes, JSON quoted width186.
+        # Three independent input copies remain separately paid.
+        _metadata_precharge(connection, _header_budget, 558,
+            ("locator-indexes", "target-sql-input"))
+        parameters = (name, table, index_limit)
+        rows = _metadata_rows(connection,
+            'SELECT CASE WHEN name COLLATE BINARY=? AND octet_length(name)<=128 THEN name END,"unique",CASE WHEN origin IN (\'pk\',\'u\',\'c\') THEN origin END,partial FROM pragma_index_list(?) LIMIT ?',
+            parameters, _header_budget=_header_budget,
+            upper=_metadata_upper(index_limit, (target_width,20,4,20)),
+            appearance=('locator-indexes',))
+    else:
+        rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770 if index_width is None else index_width,20,14 if index_width is None else 4,20)), appearance=('locator-indexes',), bounded_query=('SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?' if index_width is None else 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN origin IN (\'pk\',\'u\',\'c\') THEN origin END,partial FROM pragma_index_list(?) LIMIT ?'))
     if budget is not None:
         if _header_budget is None:
             budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-index-list",))
     match = [r for r in rows if r[0] == name]
     if len(match) != 1 or tuple(match[0][1:]) != (1,"c",0):
         raise HeaderBoundsError("header_locator_changed")
-    parts = _metadata_rows(connection, 'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3', (name,), _header_budget=_header_budget, upper=_metadata_upper(3, (770,770,20,20,20)), appearance=('locator-parts',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(coll)<=128 THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3')
+    column_width = (_original_locator_schema_width(connection, table, model, _header_budget, column_names=True)
+        if _header_budget is not None else None)
+    # Only this issuer's already-paid mapped schema proof narrows collation.
+    # Key rows accept BINARY only; nonkey collation is not an authority input.
+    # NULL preserves rejection for a non-BINARY key without bounding its raw
+    # collation name. Ordinary/default and other metered callers stay unchanged.
+    parts = _metadata_rows(connection, 'SELECT name,coll,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3', (name,), _header_budget=_header_budget, upper=_metadata_upper(3, (770 if column_width is None else column_width,770 if column_width is None else 8,20,20,20)), appearance=('locator-parts',), bounded_query=('SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN octet_length(coll)<=128 THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3' if column_width is None else 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,CASE WHEN coll=\'BINARY\' THEN coll END,desc,key,cid FROM pragma_index_xinfo(?) LIMIT 3'))
     if budget is not None:
         if _header_budget is None:
             budget.debit(_metadata_cost([list(r) for r in parts]), appearance=("operator-token-index-parts",))
@@ -1109,6 +1157,17 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
             number = ("NULL" if kind == "text" else
                 f"CASE WHEN typeof(\"{name}\")='{kind}' THEN \"{name}\" END")
         fields += [storage, f'octet_length("{name}")', number]
+    row_bound = 1 if (_header_budget is not None and
+        _original_common_header_single_row(connection, descriptor, identities, _header_budget)) else 2
+    source_name_factor = 6
+    if row_bound == 1 and descriptor.table.isascii() and descriptor.table.isidentifier():
+        source_names_closed = True
+        for name in descriptor.columns:
+            if not name.isascii() or not name.isidentifier():
+                source_names_closed = False
+                break
+        if source_names_closed:
+            source_name_factor = 1
     result={}
     for key in identities:
         if _header_budget is not None:
@@ -1123,16 +1182,16 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
             else:
                 # Original SQLite integer locators fit signed int64 JSON.
                 key_copy_upper = 20
-        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(2, (20, *(
+        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(row_bound, (20, *(
             [width for kind in descriptor.kinds for width in
                 (9, 20, 4 if kind == "text" else 20 if kind == "integer" else 64)]
             if _header_budget is not None else [44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
         if len(rows)!=1: raise HeaderBoundsError("header_row_unavailable")
         row=rows[0]
         if _header_budget is not None:
-            copy_upper = key_copy_upper + 6*len(descriptor.table) + sum(6*len(name)+12 for name in descriptor.columns) + 256
+            copy_upper = key_copy_upper + source_name_factor*len(descriptor.table) + sum(source_name_factor*len(name)+12 for name in descriptor.columns) + 256
             _metadata_precharge(connection, _header_budget, copy_upper, ("row-header", "skeleton-copy"))
-            fact_upper = key_copy_upper + 6*len(descriptor.table) + 256
+            fact_upper = key_copy_upper + source_name_factor*len(descriptor.table) + 256
             _metadata_precharge(connection, _header_budget, fact_upper, ("row-header", "header-fact-copy"))
         skeleton=["native-composition-memory.v1",descriptor.table,key,[[n,None] for n in descriptor.columns]]
         cost=len(json.dumps(skeleton,ensure_ascii=True,separators=(",",":")).encode())+128
@@ -2241,3 +2300,191 @@ def charge_table(connection,table):
 def current_budget():
     cert=_CURRENT.get()
     return cert.budget if cert is not None else None
+
+
+def _check_snapshot_scope_connection(scope, connection):
+    if scope is None or scope.session is None:
+        return
+    # The original factory owner retains this bind across rollback/new BEGIN.
+    # Comparing the actual bind avoids a caller-controlled db.info credential.
+    if scope.session.sync_session.bind is not connection:
+        raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+    if scope.connection is not None and scope.connection is not connection:
+        raise HeaderBoundsError("memory_snapshot_scope_unavailable")
+    scope.connection = connection
+
+
+
+def _original_locator_schema_width(connection, table, model, budget, *, column_names=False):
+    """Numerical width only from this live issuer's already-paid schema checks."""
+    scope = _checked_current_snapshot_scope(budget)
+    if scope is None or scope.session is None:
+        return None
+    _check_snapshot_scope_connection(scope, connection)
+    locator = sys._getframe(1)
+    schema = locator.f_back
+    discovery = schema.f_back if schema is not None else None
+    issuer = discovery.f_back if discovery is not None else None
+    wrapper = issuer.f_back if issuer is not None else None
+    # Native keeps its original paid trace issuer between preflight and certifier.
+    # The ordinary direct chain remains accepted; no unknown wrapper is skipped.
+    if wrapper is not None and wrapper.f_code is _issue_current_memory_numeric_certificate.__code__:
+        if (wrapper.f_locals.get("connection") is not connection
+                or wrapper.f_locals.get("budget") is not budget
+                or wrapper.f_locals.get("scope") is not scope
+                or wrapper.f_locals.get("raw_owner") is not None
+                or wrapper.f_locals.get("_header_budget") is not budget):
+            raise HeaderBoundsError("header_metadata_owner_unavailable")
+        wrapper = wrapper.f_back
+    if (locator.f_code is not _validate_locator.__code__
+            or schema is None or schema.f_code is not validate_descriptor_schema.__code__
+            or discovery is None or discovery.f_code is not _discover.__code__
+            or issuer is None or issuer.f_code is not preflight_composition_superset.__code__
+            or wrapper is None or wrapper.f_code is not _certify_current_memory_snapshot_on_connection.__code__):
+        return None
+    descriptor = schema.f_locals.get("descriptor")
+    state = issuer.f_locals.get("state")
+    cookies = wrapper.f_locals.get("cookies")
+    if (descriptor is not COMPOSITION_DESCRIPTORS.get(table)
+            or schema.f_locals.get("model") is not model
+            or schema.f_locals.get("_header_budget") is not budget
+            or issuer.f_locals.get("connection") is not connection
+            or issuer.f_locals.get("budget") is not budget
+            or issuer.f_locals.get("_header_budget") is not budget
+            or issuer.f_locals.get("raw_owner") is not None
+            or "present" not in issuer.f_locals
+            or wrapper.f_locals.get("scope") is not scope
+            or wrapper.f_locals.get("connection") is not connection
+            or wrapper.f_locals.get("budget") is not budget
+            or type(cookies) is not tuple or len(cookies) != 2
+            or type(state) is not tuple or len(state) != 3
+            or connection.get_transaction() is not state[0]
+            or connection.connection.driver_connection is not state[1]
+            or state[1].total_changes != state[2]):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    # The original enclosing cache-miss owner checks these same paid cookies
+    # again before issuing a certificate. No schema/body authority is returned.
+    if column_names:
+        upper = 0
+        for name in descriptor.columns:
+            if not name.isascii():
+                return None
+            upper = max(upper, len(name) + 2)
+        return upper
+    upper = 0
+    for name in _NAMED_INDEXES:
+        if not name.isascii():
+            return None
+        upper = max(upper, len(name) + 2)
+    # The accepted autoindex grammar permits leading-zero decimal suffixes.
+    # The unchanged delivery SQL limits names to 128 bytes; the paid schema
+    # census proves their ASCII prefix/digits, so quotes give an upper of 130.
+    return max(upper, 130)
+
+
+
+def _original_common_header_single_row(connection, descriptor, identities, budget):
+    """Only the immediate protected common issuer consumes its paid key proof."""
+    scope = _checked_current_snapshot_scope(budget)
+    if scope is None or scope.session is None:
+        return False
+    headers = sys._getframe(1)
+    issuer = headers.f_back
+    wrapper = issuer.f_back if issuer is not None else None
+    # Native keeps its original paid trace issuer between preflight and certifier.
+    # The ordinary direct chain remains accepted; no unknown wrapper is skipped.
+    if wrapper is not None and wrapper.f_code is _issue_current_memory_numeric_certificate.__code__:
+        if (wrapper.f_locals.get("connection") is not connection
+                or wrapper.f_locals.get("budget") is not budget
+                or wrapper.f_locals.get("scope") is not scope
+                or wrapper.f_locals.get("raw_owner") is not None
+                or wrapper.f_locals.get("_header_budget") is not budget):
+            raise HeaderBoundsError("header_metadata_owner_unavailable")
+        wrapper = wrapper.f_back
+    if (headers.f_code is not _headers.__code__ or issuer is None
+            or issuer.f_code is not preflight_composition_superset.__code__
+            or wrapper is None
+            or wrapper.f_code is not _certify_current_memory_snapshot_on_connection.__code__):
+        return False
+    _check_snapshot_scope_connection(scope, connection)
+    state = issuer.f_locals.get("state")
+    if (type(budget) is not HeaderReadBudget or _discover is not _COMMON_HEADER_DISCOVER
+            or validate_descriptor_schema is not _COMMON_HEADER_SCHEMA
+            or _validate_locator is not _COMMON_HEADER_LOCATOR
+            or HeaderReadBudget.resolve_future is not _COMMON_HEADER_RESOLVE
+            or HeaderReadBudget.enroll is not _COMMON_HEADER_ENROLL
+            or "resolve_future" in budget.__dict__ or "enroll" in budget.__dict__
+            or type(budget.future_references) is not set
+            or type(budget.physical_references) is not set
+            or descriptor is not COMPOSITION_DESCRIPTORS.get(descriptor.table)
+            or issuer.f_locals.get("descriptor") is not descriptor
+            or issuer.f_locals.get("ids") is not identities or type(identities) is not tuple
+            or issuer.f_locals.get("connection") is not connection
+            or issuer.f_locals.get("budget") is not budget
+            or issuer.f_locals.get("_header_budget") is not budget
+            or issuer.f_locals.get("raw_owner") is not None
+            or "present" not in issuer.f_locals
+            or wrapper.f_locals.get("scope") is not scope
+            or wrapper.f_locals.get("connection") is not connection
+            or wrapper.f_locals.get("budget") is not budget
+            or type(wrapper.f_locals.get("cookies")) is not tuple
+            or type(state) is not tuple or len(state) != 3
+            or connection.get_transaction() is not state[0]
+            or not state[0].is_active
+            or connection.connection.driver_connection is not state[1]
+            or state[1].total_changes != state[2]):
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    from src.workspace.accounting_witness import CompositionReadGuard, RETAINED_FIELDS
+    guard = scope.session.info.get("composition_read_guard")
+    if descriptor.table not in RETAINED_FIELDS:
+        return False
+    # A selected single-column PK cannot lose its implicit uniqueness index.
+    # For the alternate named unique locator, the existing reader guard must
+    # recognize its DDL by the protected table spelling in the original name.
+    model = _COMPOSITION_MODELS[descriptor.table]
+    primary = model.__table__.primary_key.columns
+    if len(primary) != 1 or next(iter(primary)).name != descriptor.key:
+        protected_index = False
+        for index in model.__table__.indexes:
+            if (index.unique and len(index.columns) == 1
+                    and next(iter(index.columns)).name == descriptor.key
+                    and type(index.name) is str and descriptor.table in index.name.lower()):
+                protected_index = True
+        if not protected_index:
+            return False
+    if type(guard) is not CompositionReadGuard or guard.closed:
+        # Publication re-certifies after the original reader guard is retired.
+        # This optional reduction supplies no owner or read permission.
+        return False
+    if guard.db is not scope.session:
+        raise HeaderBoundsError("header_metadata_owner_unavailable")
+    # The original reader guard remains installed through the first census.
+    # Its connection listener rejects retained-table DDL/DML, including writes
+    # attempted by synchronous SQLAlchemy instrumentation callbacks.
+    from sqlalchemy import event
+    from types import CodeType, FunctionType
+    install = CompositionReadGuard.install.__code__
+    denied_code = next(code for code in install.co_consts
+        if type(code) is CodeType and code.co_name == "denied")
+    begin_code = next(code for code in install.co_consts
+        if type(code) is CodeType and code.co_name == "after_begin")
+    listener_code = next(code for code in begin_code.co_consts
+        if type(code) is CodeType and code.co_name == "before_cursor_execute")
+    for bound, listener in guard.connection_listeners:
+        if (bound is connection and type(listener) is FunctionType
+                and listener.__code__ is listener_code
+                and any(type(cell.cell_contents) is FunctionType
+                    and cell.cell_contents.__code__ is denied_code
+                    and any(owner.cell_contents is guard
+                        for owner in cell.cell_contents.__closure__ or ())
+                    for cell in listener.__closure__ or ())
+                and event.contains(connection, "before_cursor_execute", listener)):
+            return True
+    raise HeaderBoundsError("header_metadata_owner_unavailable")
+
+
+_COMMON_HEADER_DISCOVER = _discover
+_COMMON_HEADER_SCHEMA = validate_descriptor_schema
+_COMMON_HEADER_LOCATOR = _validate_locator
+_COMMON_HEADER_RESOLVE = HeaderReadBudget.resolve_future
+_COMMON_HEADER_ENROLL = HeaderReadBudget.enroll

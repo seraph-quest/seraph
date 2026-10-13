@@ -1,6 +1,6 @@
 import json
 import os
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from typing import AsyncGenerator, Callable, Iterable, Iterator
 
@@ -2043,13 +2043,14 @@ async def _exit_owned_discovery_writer(owned, *, phase, job_id):
 
 @asynccontextmanager
 async def _retain_discovery_connection(session, service, header_budget):
-    if service is None:
+    if service is None and header_budget is None:
         yield
         return
     from src.approval.runtime import _get_current_discovery_invocation
     from src.memory.header_bounds import HeaderReadBudget
-    marker = _get_current_discovery_invocation(service)
-    marker.validate(service=service)
+    if service is not None:
+        marker = _get_current_discovery_invocation(service)
+        marker.validate(service=service)
     if type(header_budget) is not HeaderReadBudget or session.in_transaction():
         raise RuntimeError("goal_discovery_original_connection_unavailable")
     original_bind = session.bind
@@ -2060,11 +2061,13 @@ async def _retain_discovery_connection(session, service, header_budget):
     async with original_bind.connect() as connection:
         session.bind = connection
         session.sync_session.bind = connection.sync_connection
-        session.info["owned_discovery_connection"] = connection
+        if service is not None:
+            session.info["owned_discovery_connection"] = connection
         try:
             yield
         finally:
-            session.info.pop("owned_discovery_connection", None)
+            if service is not None:
+                session.info.pop("owned_discovery_connection", None)
             session.bind = original_bind
             session.sync_session.bind = original_bind.sync_engine
 
@@ -2075,30 +2078,33 @@ async def get_session(*, header_budget=None, discovery_service=None) -> AsyncGen
     header_budget = header_budget if header_budget is not None else _auth_header_budget.get()
     factory = _session_factory_override.get() or async_session_factory
     async with factory() as session:
-        async with _retain_discovery_connection(session, discovery_service, header_budget):
-            from src.workspace.accounting_witness import prepare_composition_read_session
-            read_guard = await prepare_composition_read_session(session, header_budget=header_budget)
-            composition_guard = None
-            try:
-                yield session
-                if discovery_service is None:
-                    await _commit_original_session_owner(session)
-                else:
-                    owned = discovery_service._owned_discovery_session
-                    if owned is None or owned.db is not session:
-                        raise RuntimeError("goal_discovery_original_exit_unavailable")
-                    await owned.guard._finish_original_discovery_owner(owned)
-            except BaseException:
-                if discovery_service is None or session.in_transaction():
-                    await session.rollback()
-                session.info.pop("work_board_events_after_commit", None)
-                raise
-            finally:
-                composition_guard = session.info.get("composition_guard", composition_guard)
-                if composition_guard is not None:
-                    composition_guard.close()
-                if read_guard is not None:
-                    read_guard.close()
+        from src.memory.composition_headers import _memory_current_snapshot_scope
+        with (_memory_current_snapshot_scope(header_budget, _session=session)
+                if header_budget is not None else nullcontext()):
+            async with _retain_discovery_connection(session, discovery_service, header_budget):
+                from src.workspace.accounting_witness import prepare_composition_read_session
+                read_guard = await prepare_composition_read_session(session, header_budget=header_budget)
+                composition_guard = None
+                try:
+                    yield session
+                    if discovery_service is None:
+                        await _commit_original_session_owner(session)
+                    else:
+                        owned = discovery_service._owned_discovery_session
+                        if owned is None or owned.db is not session:
+                            raise RuntimeError("goal_discovery_original_exit_unavailable")
+                        await owned.guard._finish_original_discovery_owner(owned)
+                except BaseException:
+                    if discovery_service is None or session.in_transaction():
+                        await session.rollback()
+                    session.info.pop("work_board_events_after_commit", None)
+                    raise
+                finally:
+                    composition_guard = session.info.get("composition_guard", composition_guard)
+                    if composition_guard is not None:
+                        composition_guard.close()
+                    if read_guard is not None:
+                        read_guard.close()
 
 
 async def check_required_tables(required_tables: Iterable[str]) -> dict[str, object]:

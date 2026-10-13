@@ -768,6 +768,50 @@ def _read_bounded_private_file(path: Path, *, maximum: int, private_mode: bool, 
             os.close(descriptor)
 
 
+def _private_json_value_upper(raw):
+    """Bound canonical parsed values from an already paid private byte input.
+
+    This is only a width eligibility scan. The original JSON parser still
+    validates grammar and the existing receipt/checkpoint checks remain exact.
+    """
+    if type(raw) is not bytes:
+        raise TypeError("private JSON input must be bytes")
+    index = 0
+    quoted = False
+    while index < len(raw):
+        value = raw[index]
+        if value >= 127 or value == 92:
+            return 6 * len(raw) + 2
+        if quoted:
+            if value < 32:
+                return 6 * len(raw) + 2
+            if value == 34:
+                quoted = False
+            index += 1
+            continue
+        if value == 34:
+            quoted = True
+        elif value in (9, 10, 13, 32, 44, 45, 58, 91, 93, 123, 125):
+            pass
+        elif 48 <= value <= 57:
+            pass
+        elif raw.startswith(b"true", index):
+            index += 4
+            continue
+        elif raw.startswith(b"false", index):
+            index += 5
+            continue
+        elif raw.startswith(b"null", index):
+            index += 4
+            continue
+        else:
+            return 6 * len(raw) + 2
+        index += 1
+    if quoted:
+        return 6 * len(raw) + 2
+    return len(raw)
+
+
 def read_lifecycle_receipt(workspace: ProductionWorkspace, *, header_budget=None) -> dict[str, Any] | None:
     """Read the durable operator receipt, failing closed on tampering."""
     path = lifecycle_receipt_path(workspace)
@@ -779,8 +823,9 @@ def read_lifecycle_receipt(workspace: ProductionWorkspace, *, header_budget=None
         return None
     if header_budget is not None:
         header_budget.debit(len(raw), appearance=("composition-publication", "receipt", "decode"))
+        upper = _private_json_value_upper(raw)
         for appearance in ("json-parse", "materialization", "return"):
-            header_budget.debit(6 * len(raw) + 2,
+            header_budget.debit(upper,
                 appearance=("composition-publication", "receipt", appearance))
     try:
         value = json.loads(raw.decode("utf-8"))
@@ -844,8 +889,9 @@ def _read_private_checkpoint(path: Path, *, header_budget=None) -> dict[str, Any
     if raw is None:
         return None
     if header_budget is not None:
+        upper = _private_json_value_upper(raw)
         for appearance in ("json-parse", "materialization", "return"):
-            header_budget.debit(6 * len(raw) + 2,
+            header_budget.debit(upper,
                 appearance=("composition-publication", "checkpoint", appearance))
     try:
         payload = json.loads(raw)

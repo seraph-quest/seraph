@@ -1093,9 +1093,19 @@ def _validate_locator(connection, table, column, model=None, *, budget=None, _he
 
 def _headers(connection, descriptor, identities, *, _header_budget=None):
     fields=['_rowid_']
-    for name in descriptor.columns:
-        fields += [f'typeof("{name}")', f'octet_length("{name}")',
-                   f"CASE WHEN typeof(\"{name}\") IN ('integer','real') THEN \"{name}\" END"]
+    for index, name in enumerate(descriptor.columns):
+        if _header_budget is None:
+            storage = f'typeof("{name}")'
+            number = f"CASE WHEN typeof(\"{name}\") IN ('integer','real') THEN \"{name}\" END"
+        else:
+            storage = (f'CASE typeof("{name}") '
+                "WHEN 'null' THEN 'null' WHEN 'text' THEN 'text' "
+                "WHEN 'integer' THEN 'integer' WHEN 'real' THEN 'real' "
+                "WHEN 'blob' THEN 'blob' ELSE NULL END")
+            kind = descriptor.kinds[index]
+            number = ("NULL" if kind == "text" else
+                f"CASE WHEN typeof(\"{name}\")='{kind}' THEN \"{name}\" END")
+        fields += [storage, f'octet_length("{name}")', number]
     result={}
     for key in identities:
         if _header_budget is not None:
@@ -1110,7 +1120,10 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
             else:
                 # Original SQLite integer locators fit signed int64 JSON.
                 key_copy_upper = 20
-        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(2, (20, *([44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
+        rows=_metadata_rows(connection, 'SELECT '+','.join(fields)+f' FROM "{descriptor.table}" WHERE "{descriptor.key}"=? LIMIT 2', (key,), _header_budget=_header_budget, upper=_metadata_upper(2, (20, *(
+            [width for kind in descriptor.kinds for width in
+                (9, 20, 4 if kind == "text" else 20 if kind == "integer" else 64)]
+            if _header_budget is not None else [44,20,64] * len(descriptor.columns)))), appearance=('row-header',))
         if len(rows)!=1: raise HeaderBoundsError("header_row_unavailable")
         row=rows[0]
         if _header_budget is not None:
@@ -2093,7 +2106,15 @@ def _validate_fts_metadata(connection,budget,objects, *, _header_budget=None, _p
         columns=_metadata_rows(connection, 'SELECT cid,CASE WHEN octet_length(name)<=128 THEN name END,'
             'CASE WHEN octet_length(type)<=128 THEN type END,"notnull",'
             'CASE WHEN dflt_value IS NULL THEN NULL WHEN octet_length(dflt_value)<=128 THEN dflt_value END,'
-            'pk,hidden FROM pragma_table_xinfo(?) LIMIT ?', (name,len(expected["columns"])+1), _header_budget=_header_budget, upper=_metadata_upper((len(expected["columns"])+1), (20,770,770,20,770,20,20)), appearance=('fts-columns',))
+            'pk,hidden FROM pragma_table_xinfo(?) LIMIT ?', (name,len(expected["columns"])+1), _header_budget=_header_budget,
+            upper=_metadata_upper((len(expected["columns"])+1),
+                (20,770,9 if _header_budget is not None else 770,20,770,20,20)),
+            appearance=('fts-columns',), bounded_query=(
+                'SELECT cid,CASE WHEN octet_length(name)<=128 THEN name END,'
+                "CASE type WHEN '' THEN '' WHEN 'INTEGER' THEN 'INTEGER' WHEN 'BLOB' THEN 'BLOB' ELSE NULL END,"
+                '"notnull",CASE WHEN dflt_value IS NULL THEN NULL WHEN octet_length(dflt_value)<=128 THEN dflt_value END,'
+                'pk,hidden FROM pragma_table_xinfo(?) LIMIT ?'
+                if _header_budget is not None else None))
         layout=_metadata_rows(connection, 'SELECT type,ncol,wr,strict FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2', (name,), _header_budget=_header_budget, upper=_metadata_upper(2, (44,20,20,20)), appearance=('fts-layout',))
         indexes=_metadata_rows(connection, 'SELECT seq,CASE WHEN octet_length(name)<=128 THEN name END,"unique",'
             'CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?', (name,len(expected["indexes"])+1), _header_budget=_header_budget, upper=_metadata_upper((len(expected["indexes"])+1), (20,770,20,14,20)), appearance=('fts-indexes',))

@@ -121,15 +121,46 @@ async def _terminal_report(sessions, operator, monkeypatch, root):
         from sqlalchemy import event
         from src.work_board import dispatcher as dispatcher_module
         from src.work_board import input_artifacts as artifact_module
+        from src.guardian import opportunity_plans as opportunity_module
         observations = {}
         def error(exc):
             code = getattr(exc, "code", None)
+            frames = []
+            trace = exc.__traceback__
+            while trace is not None:
+                frame = trace.tb_frame
+                frames.append({"function": frame.f_code.co_name, "line": trace.tb_lineno,
+                    "source": Path(frame.f_code.co_filename).name})
+                trace = trace.tb_next
             return {"class": type(exc).__name__, "code": code if type(code) is str
-                and len(code) <= 128 and all(c in "abcdefghijklmnopqrstuvwxyz_" for c in code) else None}
+                and len(code) <= 128 and all(c in "abcdefghijklmnopqrstuvwxyz_" for c in code) else None,
+                "frames": frames[-12:]}
         def observe_call(label, original):
             async def forwarded(*args, **kwargs):
                 try:
-                    result = await original(*args, **kwargs)
+                    if label == "auth":
+                        import asyncio
+                        from src.memory.header_bounds import HeaderReadBudget
+                        original_debit = HeaderReadBudget.debit
+                        original_task = asyncio.current_task()
+                        first_budget = None
+                        debit_count = 0
+                        def observe_debit(budget, amount, *, appearance=None):
+                            nonlocal first_budget, debit_count
+                            if asyncio.current_task() is original_task:
+                                if first_budget is None:
+                                    first_budget = budget
+                                debit_count += 1
+                                observations["auth_debit"] = {"count": debit_count,
+                                    "same_first_budget": budget is first_budget,
+                                    "amount": amount if type(amount) is int else None,
+                                    "remaining_before": budget.remaining}
+                            return original_debit(budget, amount, appearance=appearance)
+                        with monkeypatch.context() as auth_debit_patch:
+                            auth_debit_patch.setattr(HeaderReadBudget, "debit", observe_debit)
+                            result = await original(*args, **kwargs)
+                    else:
+                        result = await original(*args, **kwargs)
                 except BaseException as exc:
                     observations[label] = error(exc)
                     raise
@@ -169,6 +200,8 @@ async def _terminal_report(sessions, operator, monkeypatch, root):
                 callback_patch.setattr(board, "get_task", observe_call("task", board.get_task))
                 callback_patch.setattr(dispatcher_module, "authenticate_session",
                     observe_call("auth", dispatcher_module.authenticate_session))
+                callback_patch.setattr(opportunity_module, "stage_accepted_plan_task",
+                    observe_call("accepted_plan", opportunity_module.stage_accepted_plan_task))
                 callback_patch.setattr(pipelines, "task_guard", observe_call("pipeline", pipelines.task_guard))
                 callback_patch.setattr(artifact_module, "resolve_input_artifact_for_task",
                     observe_call("artifact", artifact_module.resolve_input_artifact_for_task))

@@ -26,6 +26,12 @@ from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
 
 @pytest_asyncio.fixture
 async def accounting_db(tmp_path, monkeypatch):
+    # Register both canonical SQLModel owners before materializing this file DB.
+    # Reviewed-method selection can otherwise register its table during a later
+    # test, after create_all, leaving full-metadata readback without that table.
+    from src.db import models as _models  # noqa: F401
+    from src.db import task_method_models as _task_method_models  # noqa: F401
+
     root = tmp_path / "workspace"
     root.mkdir()
     monkeypatch.setattr(settings, "workspace_dir", str(root))
@@ -56,6 +62,17 @@ async def accounting_db(tmp_path, monkeypatch):
     factory.accounting_sessions = sessions
     yield root, engine, factory
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_accounting_db_materializes_all_canonical_model_tables(accounting_db):
+    from sqlalchemy import inspect
+    from src.db.task_method_models import TaskMethodActive
+
+    async with accounting_db[1].connect() as connection:
+        tables = await connection.run_sync(lambda db: set(inspect(db).get_table_names()))
+    assert TaskMethodActive.__tablename__ in tables
+    assert set(SQLModel.metadata.tables).issubset(tables)
 
 
 def setup_configuration(*, ceiling=1000, bound=100):

@@ -1400,27 +1400,29 @@ async def read_current_method_pointer(db, *, original_selection):
             or guard._prospective_admission is None
             or guard._prospective_admission[0] is not original_selection):
         raise HeaderBoundsError("task_method_pointer_owner_unavailable")
-    guard._validate_programme_selection(original_selection)
     common33 = original_selection.common33
     budget = common33.budget
-    binding = guard._prospective_admission_facts[2]
-    # Width work is paid before inspecting already-paid binding values. The
-    # scope and its suffix are distinct output tuples, each paid before creation.
-    # Ten captured cells/function/closure refs95; six bounded scalar sums64.
+    # Pay the existing callback/sizing allowance before creating read.
     budget.debit(64 + 95, appearance=("task-method-pointer", "validation-inputs"))
-    owner_upper = _programme_value_upper(binding.owner_identity_id, budget=budget)
-    goal_upper = _programme_value_upper(binding.goal_id, budget=budget)
-    revision_upper = _programme_value_upper(binding.goal_revision, budget=budget)
-    scope_upper = 15 + owner_upper + goal_upper + revision_upper
-    foreign_upper = 14 + goal_upper + revision_upper
-    budget.debit(scope_upper, appearance=("task-method-pointer", "scope-input"))
-    scope = (binding.owner_identity_id, binding.goal_id, binding.goal_revision, "research")
-    columns = ("id", "owner_identity_id", "goal_id", "goal_revision", "family", "revision",
-        "binding_json", "previous_binding_json", "baseline", "signature_key_id", "signature_mac", "updated_at")
-    sql_types = ("VARCHAR", "VARCHAR", "VARCHAR", "INTEGER", "VARCHAR", "INTEGER",
-        "VARCHAR", "VARCHAR", "BOOLEAN", "VARCHAR", "VARCHAR", "DATETIME")
 
     def read(connection):
+        guard._validate_programme_selection(original_selection)
+        binding = guard._prospective_admission_facts[2]
+        # Width work is paid before inspecting already-paid binding values. The
+        # scope and its suffix are distinct output tuples, each paid before creation.
+        # Ten captured cells/function/closure refs95; six bounded scalar sums64.
+        owner_upper = _programme_value_upper(binding.owner_identity_id, budget=budget)
+        goal_upper = _programme_value_upper(binding.goal_id, budget=budget)
+        revision_upper = _programme_value_upper(binding.goal_revision, budget=budget)
+        scope_upper = 15 + owner_upper + goal_upper + revision_upper
+        foreign_upper = 14 + goal_upper + revision_upper
+        budget.debit(scope_upper, appearance=("task-method-pointer", "scope-input"))
+        scope = (binding.owner_identity_id, binding.goal_id, binding.goal_revision, "research")
+        columns = ("id", "owner_identity_id", "goal_id", "goal_revision", "family", "revision",
+            "binding_json", "previous_binding_json", "baseline", "signature_key_id", "signature_mac", "updated_at")
+        sql_types = ("VARCHAR", "VARCHAR", "VARCHAR", "INTEGER", "VARCHAR", "INTEGER",
+            "VARCHAR", "VARCHAR", "BOOLEAN", "VARCHAR", "VARCHAR", "DATETIME")
+
         guard._validate_programme_selection(original_selection)
         _validate(connection, common33)
         if connection is not common33.connection:

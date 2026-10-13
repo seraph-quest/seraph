@@ -107,7 +107,7 @@ def _programme_utf8_upper(value, *, budget=None):
 
 def _programme_parse_upper(raw, *, budget):
     """Prepaid byte lexical expansion counter, never JSON validation."""
-    budget.debit(2 + 4 * 5 + 20 + 14 + 5,
+    budget.debit(2 + 5 * 5 + 20 + 14 + 5,
         appearance=("programme-constructor", "json-width-scratch"))
     encoded_upper = _programme_utf8_upper(raw, budget=budget)
     budget.debit(encoded_upper, appearance=("programme-constructor", "json-scan-input"))
@@ -115,7 +115,7 @@ def _programme_parse_upper(raw, *, budget):
     # prepaid even if this interpreter happens to cache small integers.
     budget.debit(3 * encoded_upper, appearance=("programme-constructor", "json-scan-byte-scalars"))
     encoded = raw.encode("utf-8", errors="surrogatepass")
-    quoted = escaped = numeric = floating = False
+    quoted = escaped = numeric = floating = nonfinite = False
     extra = 0
     for char in encoded:
         if quoted:
@@ -126,17 +126,23 @@ def _programme_parse_upper(raw, *, budget):
             elif char == 34:
                 quoted = False
             continue
+        if nonfinite:
+            if char in b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                continue
+            nonfinite = False
         if numeric and char not in b"0123456789.eE+-":
             if floating:
                 budget.debit(20, appearance=("programme-constructor", "json-counter-update"))
                 extra += 64
             numeric = floating = False
         # Python's original json.loads also accepts these nonfinite tokens.
-        # Counting any outside-string N/I is conservative for malformed words;
-        # only the original parser validates the token.
+        # Count an outside-string nonfinite word once, including both N bytes
+        # in NaN. Only the original parser validates its spelling and boundary.
         if char in b"NI":
             budget.debit(20, appearance=("programme-constructor", "json-counter-update"))
             extra += 64
+            nonfinite = True
+            continue
         if char == 34:
             quoted = True
         elif char in b"0123456789-" and not numeric:

@@ -783,7 +783,7 @@ def _validate_locator(connection, table, column, model=None, *, budget=None, _he
     name = source[0].name
     index_width = (_original_locator_schema_width(connection, table, model, _header_budget)
         if _header_budget is not None else None)
-    rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770 if index_width is None else index_width,20,14,20)), appearance=('locator-indexes',), bounded_query='SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?')
+    rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770 if index_width is None else index_width,20,14 if index_width is None else 4,20)), appearance=('locator-indexes',), bounded_query=('SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?' if index_width is None else 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN origin IN (\'pk\',\'u\',\'c\') THEN origin END,partial FROM pragma_index_list(?) LIMIT ?'))
     if budget is not None:
         if _header_budget is None:
             budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-index-list",))
@@ -1332,6 +1332,30 @@ def read_programme_identity(certificate, identity):
 
 
 
+def _programme_pointer_metadata_matches(rows, expected, budget, row_count, planning_upper):
+    """Compare paid metadata against fixed Source tuples without row copies."""
+    # Fixed state32; row lengths/counter outputs8 each; scalar equality and
+    # column counter6 per cell. Expectations are compiler constants, not
+    # newly created runtime row/list/dict containers.
+    budget.debit(planning_upper,
+        appearance=("task-method-pointer", "stream-validation"))
+    if len(rows) != row_count:
+        return False
+    row_index = 0
+    while row_index < row_count:
+        row = rows[row_index]
+        fixed = expected[row_index]
+        if len(row) != len(fixed):
+            return False
+        cell_index = 0
+        while cell_index < len(fixed):
+            if row[cell_index] != fixed[cell_index]:
+                return False
+            cell_index += 1
+        row_index += 1
+    return True
+
+
 async def read_current_method_pointer(db, *, original_selection):
     """ADR-035 transient read selected by the genuine original admission guard.
 
@@ -1341,7 +1365,7 @@ async def read_current_method_pointer(db, *, original_selection):
     from src.workspace.accounting_witness import CompositionSessionGuard
     from src.db.task_method_models import TaskMethodActive
     from src.memory.header_bounds import _descriptor
-    from src.workspace.accounting_continuity import _ProgrammeSelection
+    from src.workspace.accounting_continuity import _ProgrammeSelection, _programme_value_upper
     if type(original_selection) is not _ProgrammeSelection:
         raise HeaderBoundsError("task_method_pointer_owner_unavailable")
     guard = original_selection.owner
@@ -1353,6 +1377,16 @@ async def read_current_method_pointer(db, *, original_selection):
     common33 = original_selection.common33
     budget = common33.budget
     binding = guard._prospective_admission_facts[2]
+    # Width work is paid before inspecting already-paid binding values. The
+    # scope and its suffix are distinct output tuples, each paid before creation.
+    # Ten captured cells/function/closure refs95; six bounded scalar sums64.
+    budget.debit(64 + 95, appearance=("task-method-pointer", "validation-inputs"))
+    owner_upper = _programme_value_upper(binding.owner_identity_id, budget=budget)
+    goal_upper = _programme_value_upper(binding.goal_id, budget=budget)
+    revision_upper = _programme_value_upper(binding.goal_revision, budget=budget)
+    scope_upper = 15 + owner_upper + goal_upper + revision_upper
+    foreign_upper = 14 + goal_upper + revision_upper
+    budget.debit(scope_upper, appearance=("task-method-pointer", "scope-input"))
     scope = (binding.owner_identity_id, binding.goal_id, binding.goal_revision, "research")
     columns = ("id", "owner_identity_id", "goal_id", "goal_revision", "family", "revision",
         "binding_json", "previous_binding_json", "baseline", "signature_key_id", "signature_mac", "updated_at")
@@ -1372,14 +1406,20 @@ async def read_current_method_pointer(db, *, original_selection):
             raise HeaderBoundsError("task_method_pointer_schema_changed")
         schema = _descriptor_xinfo_rows(connection, (21, 8, 12, "task_method_active", 13),
             budget=budget, upper=_metadata_upper(13, (23, 10, 2, 2, 1)))
-        expected = [(name, kind, 1, int(name == "id"), 0) for name, kind in zip(columns, sql_types)]
-        if [tuple(row) for row in schema] != expected:
+        expected = (("id", "VARCHAR", 1, 1, 0),
+            ("owner_identity_id", "VARCHAR", 1, 0, 0), ("goal_id", "VARCHAR", 1, 0, 0),
+            ("goal_revision", "INTEGER", 1, 0, 0), ("family", "VARCHAR", 1, 0, 0),
+            ("revision", "INTEGER", 1, 0, 0), ("binding_json", "VARCHAR", 1, 0, 0),
+            ("previous_binding_json", "VARCHAR", 1, 0, 0), ("baseline", "BOOLEAN", 1, 0, 0),
+            ("signature_key_id", "VARCHAR", 1, 0, 0), ("signature_mac", "VARCHAR", 1, 0, 0),
+            ("updated_at", "DATETIME", 1, 0, 0))
+        if not _programme_pointer_metadata_matches(schema, expected, budget, 12, 488):
             raise HeaderBoundsError("task_method_pointer_schema_changed")
         layout = _metadata_rows(connection,
             'SELECT wr FROM pragma_table_list WHERE schema="main" AND name=? LIMIT 2',
             ("task_method_active",), _header_budget=budget,
             upper=_metadata_upper(2, (20,)), appearance=("task-method-pointer-layout",))
-        if [tuple(row) for row in layout] != [(0,)]:
+        if not _programme_pointer_metadata_matches(layout, ((0,),), budget, 1, 46):
             raise HeaderBoundsError("task_method_pointer_schema_changed")
         indexes = _metadata_rows(connection,
             "SELECT seq,CASE WHEN name IN ('sqlite_autoindex_task_method_active_1',"
@@ -1389,20 +1429,42 @@ async def read_current_method_pointer(db, *, original_selection):
             'FROM pragma_index_list(?) LIMIT 5', ("task_method_active",),
             _header_budget=budget, upper=_metadata_upper(5, (20, 41, 20, 4, 20)),
             appearance=("task-method-pointer-indexes",))
-        definitions = {
-            "sqlite_autoindex_task_method_active_1": (1, "pk", ("id",)),
-            "sqlite_autoindex_task_method_active_2": (1, "u", columns[1:5]),
-            "ix_task_method_active_owner_identity_id": (0, "c", ("owner_identity_id",)),
-            "ix_task_method_active_goal_id": (0, "c", ("goal_id",)),
-        }
-        if (len(indexes) != 4 or {row[1] for row in indexes} != set(definitions)
-                or {row[0] for row in indexes} != set(range(4))):
+        budget.debit(192, appearance=("task-method-pointer", "index-validation"))
+        if len(indexes) != 4:
             raise HeaderBoundsError("task_method_pointer_locator_changed")
-        for seq, name, unique, origin, partial in indexes:
-            if (any(type(value) is not int for value in (seq, unique, partial))
-                    or (unique, origin, partial) != (*definitions[name][:2], 0)):
+        for index_row in indexes:
+            seq, name, unique, origin, partial = index_row
+            if (type(seq) is not int or type(unique) is not int or type(partial) is not int
+                    or not 0 <= seq < 4 or partial != 0):
                 raise HeaderBoundsError("task_method_pointer_locator_changed")
-            keys = definitions[name][2]
+            matches = 0
+            for other in indexes:
+                if other[0] == seq or other[1] == name:
+                    matches += 1
+            if matches != 1:
+                raise HeaderBoundsError("task_method_pointer_locator_changed")
+            if name == "sqlite_autoindex_task_method_active_1":
+                expected_unique, expected_origin = 1, "pk"
+                expected_parts = ((0, 0, "id", 0, "BINARY", 1), (1, -1, None, 0, "BINARY", 0))
+                keys_count = 1
+            elif name == "sqlite_autoindex_task_method_active_2":
+                expected_unique, expected_origin = 1, "u"
+                expected_parts = ((0, 1, "owner_identity_id", 0, "BINARY", 1),
+                    (1, 2, "goal_id", 0, "BINARY", 1), (2, 3, "goal_revision", 0, "BINARY", 1),
+                    (3, 4, "family", 0, "BINARY", 1), (4, -1, None, 0, "BINARY", 0))
+                keys_count = 4
+            elif name == "ix_task_method_active_owner_identity_id":
+                expected_unique, expected_origin = 0, "c"
+                expected_parts = ((0, 1, "owner_identity_id", 0, "BINARY", 1), (1, -1, None, 0, "BINARY", 0))
+                keys_count = 1
+            elif name == "ix_task_method_active_goal_id":
+                expected_unique, expected_origin = 0, "c"
+                expected_parts = ((0, 2, "goal_id", 0, "BINARY", 1), (1, -1, None, 0, "BINARY", 0))
+                keys_count = 1
+            else:
+                raise HeaderBoundsError("task_method_pointer_locator_changed")
+            if unique != expected_unique or origin != expected_origin:
+                raise HeaderBoundsError("task_method_pointer_locator_changed")
             if name == "sqlite_autoindex_task_method_active_1":
                 parts_query = "SELECT seqno,cid,CASE WHEN name IS NULL THEN NULL WHEN name='id' THEN name ELSE '' END,desc,CASE WHEN coll='BINARY' THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?"
                 name_upper = 4
@@ -1415,12 +1477,11 @@ async def read_current_method_pointer(db, *, original_selection):
             else:
                 parts_query = "SELECT seqno,cid,CASE WHEN name IS NULL THEN NULL WHEN name='goal_id' THEN name ELSE '' END,desc,CASE WHEN coll='BINARY' THEN coll END,key FROM pragma_index_xinfo(?) LIMIT ?"
                 name_upper = 9
-            parts = _metadata_rows(connection, parts_query, (name, len(keys) + 2),
-                _header_budget=budget, upper=_metadata_upper(len(keys) + 2, (20,20,name_upper,20,8,20)),
+            parts = _metadata_rows(connection, parts_query, (name, keys_count + 2),
+                _header_budget=budget, upper=_metadata_upper(keys_count + 2, (20,20,name_upper,20,8,20)),
                 appearance=("task-method-pointer-index-parts", name))
-            expected_parts = [(index, columns.index(key), key, 0, "BINARY", 1)
-                for index, key in enumerate(keys)] + [(len(keys), -1, None, 0, "BINARY", 0)]
-            if [tuple(row) for row in parts] != expected_parts:
+            if not _programme_pointer_metadata_matches(parts, expected_parts, budget,
+                    keys_count + 1, 252 if keys_count == 4 else 120):
                 raise HeaderBoundsError("task_method_pointer_locator_changed")
         # Exact compound scope, no status filter or unbounded ID delivery.
         # All four compound keys are NOT NULL and the exact UNIQUE,
@@ -1439,6 +1500,7 @@ async def read_current_method_pointer(db, *, original_selection):
         if len(selected) > 1:
             raise HeaderBoundsError("task_method_pointer_ambiguous")
         if not selected:
+            budget.debit(foreign_upper, appearance=("task-method-pointer", "foreign-input"))
             foreign = _metadata_rows(connection,
                 'SELECT _rowid_ FROM task_method_active '
                 'WHERE goal_id COLLATE BINARY=? AND goal_revision COLLATE BINARY=? '

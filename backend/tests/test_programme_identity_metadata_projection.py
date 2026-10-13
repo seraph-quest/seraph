@@ -196,3 +196,101 @@ def test_identity_prequery_bound_precedes_original_locator_sql():
     helper = ast.parse(inspect.getsource(headers._original_programme_identity_key_upper)).body[0]
     assert any(isinstance(node, ast.Raise) for node in ast.walk(helper))
     assert "encode" not in inspect.getsource(headers._original_programme_identity_key_upper)
+
+
+@pytest.mark.parametrize("collation,accepted", [("BINARY", True), ("NOCASE", False), ("RTRIM", False)])
+def test_common_source_collation_projection_preserves_key_rejection(collation, accepted):
+    function = ast.parse(inspect.getsource(headers._validate_locator)).body[0]
+    call = next(node for node in ast.walk(function) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == "_metadata_rows"
+        and any(item.arg == "appearance" and ast.literal_eval(item.value) == ("locator-parts",)
+            for item in node.keywords))
+    branch = next(item.value for item in call.keywords if item.arg == "bounded_query")
+    assert isinstance(branch, ast.IfExp)
+    query = ast.literal_eval(branch.orelse)
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE fixture(id INTEGER PRIMARY KEY, key TEXT)")
+        connection.execute("CREATE UNIQUE INDEX fixture_key ON fixture(key COLLATE " + collation + ")")
+        original = connection.execute(ast.literal_eval(call.args[1]), ("fixture_key",)).fetchall()
+        projected = connection.execute(query, ("fixture_key",)).fetchall()
+        def valid(rows):
+            keys = [row for row in rows if row[3] == 1]
+            return len(rows) == 2 and len(keys) == 1 and keys[0][:4] == ("key", "BINARY", 0, 1)
+        assert valid(original) is accepted
+        assert valid(projected) is accepted
+        assert headers._metadata_size(projected) <= headers._metadata_upper(3, (38, 8, 20, 20, 20))
+        assert "octet_length(coll)<=128" in ast.literal_eval(branch.body)
+
+
+@pytest.mark.parametrize("rows,expected,result", [
+    ([(0, "id")], ((0, "id"),), True),
+    ([], ((0, "id"),), False),
+    ([(0, "id"), (0, "id")], ((0, "id"),), False),
+    ([(0, "id", 1)], ((0, "id"),), False),
+    ([(None, "id")], ((0, "id"),), False),
+    ([(0, "other")], ((0, "id"),), False),
+])
+def test_pointer_streaming_preserves_exact_metadata_comparison(rows, expected, result):
+    payments = []
+    budget = SimpleNamespace(debit=lambda amount, **kwargs: payments.append(amount))
+    assert headers._programme_pointer_metadata_matches(rows, expected, budget, 1, 52) is result
+    assert payments == [52]
+    assert result == ([tuple(row) for row in rows] == list(expected))
+
+
+def test_pointer_metadata_expectations_are_source_constants_without_runtime_copies():
+    source = inspect.getsource(headers.read_current_method_pointer)
+    assert "[tuple(row) for row" not in source
+    assert "definitions = {" not in source
+    assert "expected_parts = [(" not in source
+    assert "set(range(" not in source
+    assert "if matches != 1:" in source
+
+
+@pytest.mark.parametrize("origin", ["pk", "u", "c", None, "unexpected", "é"])
+def test_common_source_origin_projection_preserves_selected_c_predicate(origin):
+    with sqlite3.connect(":memory:") as connection:
+        row = connection.execute("SELECT CASE WHEN ? IN ('pk','u','c') THEN ? END", (origin, origin)).fetchone()
+        assert (row[0] == "c") == (origin == "c")
+        assert headers._metadata_size(row[0]) <= 4
+    source = inspect.getsource(headers._validate_locator)
+    assert "14 if index_width is None else 4" in source
+    assert "octet_length(origin)<=2" in source
+    assert "origin IN" in source
+
+
+@pytest.mark.parametrize("owner,goal,revision", [("a", "b", 1),
+    ("é" * 128, "𐀀" * 64, 10 ** 40), ("a" * 512, 'quoted"key', -9)])
+def test_pointer_scope_width_is_derived_and_paid_before_tuple(owner, goal, revision):
+    # Extract only the numerical paid-value tail; no fabricated guard, selection,
+    # certificate, Source, transaction or authority invocation is involved.
+    from src.workspace.accounting_continuity import _programme_value_upper
+    function = ast.parse(inspect.getsource(headers.read_current_method_pointer)).body[0]
+    start = next(index for index, node in enumerate(function.body)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "debit")
+    end = next(index for index, node in enumerate(function.body)
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "columns"
+            for target in node.targets))
+    tail = ast.FunctionDef(name="numeric_scope", args=ast.arguments(posonlyargs=[],
+        args=[ast.arg(arg="binding"), ast.arg(arg="budget")], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=function.body[start:end] + [ast.Return(value=ast.Tuple(elts=[ast.Name(id="scope",ctx=ast.Load()),
+            ast.Name(id="foreign_upper",ctx=ast.Load())],ctx=ast.Load()))], decorator_list=[])
+    namespace = {"_programme_value_upper": _programme_value_upper}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[tail],type_ignores=[])),
+        "pointer-scope-numeric-tail", "exec"), namespace)
+    payments = []
+    budget = SimpleNamespace(debit=lambda amount, **kwargs: payments.append((amount,kwargs["appearance"])))
+    scope, suffix_upper = namespace["numeric_scope"](SimpleNamespace(owner_identity_id=owner,
+        goal_id=goal, goal_revision=revision), budget)
+    assert scope == (owner, goal, revision, "research")
+    expected = 15 + _programme_value_upper(owner) + _programme_value_upper(goal) + _programme_value_upper(revision)
+    assert payments[0][0] == 159 and payments[-1] == (expected, ("task-method-pointer", "scope-input"))
+    assert suffix_upper == 14 + _programme_value_upper(goal) + _programme_value_upper(revision)
+
+
+def test_pointer_index_and_suffix_precharges_precede_construction():
+    source = inspect.getsource(headers.read_current_method_pointer)
+    assert source.index('"index-validation"') < source.index("if len(indexes) != 4:")
+    assert source.index('"foreign-input"') < source.index("scope[1:]")
+    assert source.index('"scope-input"') < source.index("scope = (")

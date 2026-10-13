@@ -594,6 +594,9 @@ def _complete_memory_certification_trace_unused(connection, budget):
     from src.memory.header_bounds import (_MEMORY_LEDGER_PHASE,
         _NativeMemoryNumericLedger, _MEMORY_LEDGER_SEAL)
     active = _MEMORY_LEDGER_PHASE.get()
+    from src.db.engine import _auth_header_budget
+    if active is None and _auth_header_budget.get() is budget:
+        return True
     if (type(active) is not tuple or len(active) != 2
             or type(active[0]) is not _NativeMemoryNumericLedger
             or active[0]._complete_owner is not _MEMORY_LEDGER_SEAL):

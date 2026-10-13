@@ -191,6 +191,63 @@ async def test_authenticated_unknown_original_recovery_stays_held(
 
 
 @pytest.mark.asyncio
+async def test_authenticated_historical_v4_recovery_is_unavailable_without_mutation(
+        accounting_db, monkeypatch, repository_admission_signer):
+    import hashlib
+    import os
+    from pathlib import Path
+    import stat
+    from src.workflows import repo_repair_source as source
+
+    real_append = source._append_repository_record
+    sealed = []
+
+    def legacy_first_seal(run, identity, payload, **kwargs):
+        if identity == "repository:inventory:v1":
+            assert source._repository_record(run, identity) is None
+            assert payload["schema"] == "repository.checkpoint_inventory.v5"
+            payload = {**payload, "schema": "repository.checkpoint_inventory.v4"}
+            sealed.append(run.run_identity)
+        return real_append(run, identity, payload, **kwargs)
+
+    # Select a legacy negative at the original first seal. No sealed evidence
+    # rewrite, null adapter, copied owner, or replacement recovery witness.
+    monkeypatch.setattr(source, "_append_repository_record", legacy_first_seal)
+    async with _authenticated_original_api(accounting_db, monkeypatch, "test_python") as (flow, _tasks, client):
+        monkeypatch.setattr(source, "_append_repository_record", real_append)
+        jobs, job_id = flow["jobs"], flow["kwargs"]["job_id"]
+        assert sealed == [job_id]
+
+        def material_snapshot():
+            directory = Path(flow["registration"]["directory_path"])
+            paths = set(directory.rglob("*")) | {directory, Path(flow["registration"]["guard_path"])}
+            observed = {}
+            for path in paths:
+                info = path.lstat()
+                body = (hashlib.sha256(path.read_bytes()).hexdigest() if stat.S_ISREG(info.st_mode)
+                        else os.readlink(path) if stat.S_ISLNK(info.st_mode) else None)
+                observed[str(path)] = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                                      info.st_size, info.st_mtime_ns, info.st_ctime_ns, body)
+            return observed
+
+        before, files = await _rows(jobs), material_snapshot()
+        url = f"/api/workflows/repo-repair/{job_id}"
+        current = await client.get(url)
+        assert current.status_code == 200, current.text
+        packet = current.json()["source_recovery"]
+        assert packet["state"] == "held_unknown"
+        assert packet["reason"] == "historical_format_incompatible"
+        assert packet["public_actions"] == "unavailable"
+        denied = await client.post(url + "/source-recovery", json={
+            "expected_job_revision": current.json()["revision"],
+            "action": "reconcile_original_cleanup"})
+        assert denied.status_code == 503, denied.text
+        assert denied.json()["detail"]["code"] == "repository_source_recovery_historical_format_incompatible"
+        assert await _rows(jobs) == before
+        assert material_snapshot() == files
+
+
+@pytest.mark.asyncio
 async def test_authenticated_missing_original_registration_never_advertises_or_recovers(
         accounting_db, monkeypatch, repository_admission_signer):
     async with _authenticated_original_api(accounting_db, monkeypatch, "test_python") as (flow, _tasks, client):

@@ -58,6 +58,18 @@ def _latest_original_repository_registration(run):
     return latest
 
 
+def _public_recovery_format_compatible(run):
+    """Keep a literal historical v4 Root held when its field roster changed."""
+    if not _v4_root(run):
+        return True
+    from src.workflows.repo_repair_stop import _static_projection_v4
+    try:
+        _static_projection_v4(run.model_dump(mode="json"), "WorkflowRunState", "root")
+    except DurableJobLeaseError:
+        return False
+    return True
+
+
 def repository_source_recovery_projection(service, jobs, run):
     """Current durable metadata only; unknown liveness stays unproven."""
     source = _source()
@@ -116,7 +128,10 @@ def repository_source_recovery_projection(service, jobs, run):
     # An explicit reconciliation attempt is metadata, never a physical witness
     # or a grant. The original owner checks current authority again on POST.
     action = "unavailable"
-    if (_commitment_root(run) and physical_hold is True and terminal is None
+    compatible = _public_recovery_format_compatible(run)
+    if not compatible:
+        state, reason = "held_unknown", "historical_format_incompatible"
+    if (compatible and _commitment_root(run) and physical_hold is True and terminal is None
             and run.status in {"running", "unknown_external_effect"}
             and (run.status == "running" or stop is not None)
             and ((cleanup is None and readback is None)
@@ -1315,6 +1330,8 @@ async def _load_recovery_original(service, jobs, *, job_id, owner, expected_job_
 
 
 def _assert_public_recovery_eligible(service, jobs, run):
+    if not _public_recovery_format_compatible(run):
+        raise RepositorySourceRecoveryError("repository_source_recovery_historical_format_incompatible", status_code=503)
     if not _commitment_root(run):
         raise RepositorySourceRecoveryError("repository_source_recovery_unavailable", status_code=503)
     packet = repository_source_recovery_projection(service, jobs, run)
@@ -1698,6 +1715,8 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
             raise RepositorySourceRecoveryError("repository_source_recovery_owner_changed")
         if run.revision != expected_job_revision:
             raise RepositorySourceRecoveryError("repository_source_recovery_stale")
+        if _public_action and not _public_recovery_format_compatible(run):
+            raise RepositorySourceRecoveryError("repository_source_recovery_historical_format_incompatible", status_code=503)
         registration = _latest_original_repository_registration(run)
         if registration is None:
             raise RepositorySourceRecoveryError("original_producer_registration_missing")

@@ -1,0 +1,37 @@
+{
+  "base_commit": "e43ad4b20dcc2ca6baa90e31ff38146f1d50c7ea",
+  "overlays": {
+    "backend/src/execution/repo_node.py": {
+      "sha256": "ba26b36ed334719b1a58db5af883bba74008af434e244df5a2441934801d2802",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/repository-bytecode-r185-r2-candidate/source/backend/src/execution/repo_node.py"
+    },
+    "backend/src/execution/repo_original_producer.py": {
+      "sha256": "7b3c87cf8472e2ce89f725af277ad28016e9e6e6432bc43096eb20b42bf2d1a1",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/repository-bytecode-source-preflight-proof-r253/source/backend/src/execution/repo_original_producer.py"
+    },
+    "backend/src/execution/repo_publication_supervisor.py": {
+      "sha256": "6cdbc5a5d1c0377589d0989be8aadff3b2e34730215f5a0329f20de7cb57018f",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/repository-bytecode-r185-r2-candidate/source/backend/src/execution/repo_publication_supervisor.py"
+    },
+    "backend/src/execution/repo_sandbox.py": {
+      "sha256": "b76ed9b07ea2e9979bb7c795bc7bc29a61d0a70ef706982e702e0fa168e76fb4",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/repository-bytecode-r185-r2-candidate/source/backend/src/execution/repo_sandbox.py"
+    },
+    "backend/tests/test_repo_original_producer.py": {
+      "sha256": "63c664c40f72eebf3c8aff73a937cedcd87cc73d0216ed0f9b494b4654bd8225",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/repository-bytecode-r185-r2-candidate/source/backend/tests/test_repo_original_producer.py"
+    },
+    "backend/tests/test_repo_source_recovered_finalizer.py": {
+      "sha256": "5c9cea4b7507003918fa5657afbef12f790f103b77ef83b0f737ec68a24cde88",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/historical-source-vector-regression-r203/test_repo_source_recovered_finalizer.py"
+    },
+    "backend/tests/test_repository_python_bytecode_startup.py": {
+      "sha256": "0f2b6a409d68f52662440145d1b7d498b42d7ff58c4e13d6dce4a1324c18107b",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/repository-bytecode-r185-r2-candidate/source/backend/tests/test_repository_python_bytecode_startup.py"
+    },
+    "manage.sh": {
+      "sha256": "213869f572840802565b09299310b4ea8bb39b416a0e919d37e9fe99e7d1bc7c",
+      "source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/manage-bytecode-r188-candidate/manage.sh.source"
+    }
+  }
+}

@@ -1,0 +1,175 @@
+{
+  "cycles": [],
+  "edges": [
+    {
+      "consumer": "source/bootstrap/esbuild_offline.py",
+      "producers": [
+        "source/bootstrap/server_guard.py"
+      ],
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d"
+    },
+    {
+      "consumer": "source/bootstrap/role_stdio.py",
+      "producers": [
+        "source/bootstrap/startup_owned_fd.py"
+      ],
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614"
+    },
+    {
+      "consumer": "source/bootstrap/sitecustomize.py",
+      "producers": [
+        "source/bootstrap/managed_fixture_dotenv.py"
+      ],
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be"
+    },
+    {
+      "consumer": "source/bootstrap/sitecustomize.py",
+      "producers": [
+        "source/bootstrap/server_guard.py"
+      ],
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d"
+    },
+    {
+      "consumer": "source/bootstrap/sitecustomize.py",
+      "producers": [
+        "source/bootstrap/startup_owned_fd.py"
+      ],
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614"
+    },
+    {
+      "consumer": "source/bootstrap/sitecustomize.py",
+      "producers": [
+        "source/paired/negative_context_binding.py"
+      ],
+      "sha256": "abfddd557b61f193e20564aca85217ec22019336943645c7d4fd41ea6854159c"
+    },
+    {
+      "consumer": "source/bootstrap/sitecustomize.py",
+      "producers": [
+        "source/bootstrap/server_guard.py"
+      ],
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d"
+    },
+    {
+      "consumer": "source/bootstrap/sitecustomize.py",
+      "producers": [
+        "source/bootstrap/startup_owned_fd.py"
+      ],
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614"
+    },
+    {
+      "consumer": "source/bootstrap/test_repo_source_managed_restart.py",
+      "producers": [
+        "source/bootstrap/managed_fixture_dotenv.py"
+      ],
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be"
+    },
+    {
+      "consumer": "source/controller/browser_readback_inputs.py",
+      "producers": [
+        "source/bootstrap/optimizer_import_scan.mjs"
+      ],
+      "sha256": "7e974f8d76f5be06a266fbe8bd2acbe3681ac662f5fc95c45caef76cc711386e"
+    },
+    {
+      "consumer": "source/controller/test_repo_source_managed_restart.py",
+      "producers": [
+        "source/paired/pidfd_compat.py"
+      ],
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e"
+    },
+    {
+      "consumer": "source/controller/test_repo_source_managed_restart.py",
+      "producers": [
+        "source/controller/browser_readback_inputs.py"
+      ],
+      "sha256": "9169c3b1c8523a2717b41b814fe1ac5a038b06cf77f228433ca4b323ac33b179"
+    },
+    {
+      "consumer": "source/controller/test_repo_source_managed_restart.py",
+      "producers": [
+        "source/bootstrap/managed_fixture_dotenv.py"
+      ],
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be"
+    },
+    {
+      "consumer": "source/paired/collect_rejected_role.py",
+      "producers": [
+        "source/paired/pidfd_compat.py"
+      ],
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e"
+    },
+    {
+      "consumer": "source/paired/collect_rejected_role.py",
+      "producers": [
+        "source/paired/negative_context_binding.py"
+      ],
+      "sha256": "abfddd557b61f193e20564aca85217ec22019336943645c7d4fd41ea6854159c"
+    },
+    {
+      "consumer": "source/paired/external-prepare/prepare_inputs_r2.py",
+      "producers": [
+        "source/paired/external-prepare/root_prepare.py"
+      ],
+      "sha256": "6369e9a3907a41b49dd74271d254bfb37287e8078e7af713ac0dcd291295e371"
+    },
+    {
+      "consumer": "source/paired/external-prepare/prepare_inputs_r2.py",
+      "producers": [
+        "source/paired/external-prepare/materializer.py"
+      ],
+      "sha256": "da06e65589980df8c8413f5a0a98471bc7dc38c946454aa0406af6b1bdf6e396"
+    },
+    {
+      "consumer": "source/paired/run_root_fd_owner.py",
+      "producers": [
+        "source/bootstrap/root_prepare.py"
+      ],
+      "sha256": "5ebac196353eeff4befa978df23839a4d2b173c29610b38ca734329b7fd96923"
+    },
+    {
+      "consumer": "source/paired/run_root_fd_owner.py",
+      "producers": [
+        "source/bootstrap/role_stdio.py"
+      ],
+      "sha256": "f53433085733780c93af370fa9d30bb115558c1d8c7e3430c33df33a7896f99c"
+    },
+    {
+      "consumer": "source/paired/run_root_fd_owner.py",
+      "producers": [
+        "source/paired/negative_context_binding.py"
+      ],
+      "sha256": "abfddd557b61f193e20564aca85217ec22019336943645c7d4fd41ea6854159c"
+    },
+    {
+      "consumer": "source/paired/run_root_fd_owner.py",
+      "producers": [
+        "source/paired/pidfd_compat.py"
+      ],
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e"
+    },
+    {
+      "consumer": "source/paired/run_root_fd_owner.py",
+      "producers": [
+        "source/paired/negative_context_binding.py"
+      ],
+      "sha256": "abfddd557b61f193e20564aca85217ec22019336943645c7d4fd41ea6854159c"
+    },
+    {
+      "consumer": "source/preparation-inputs/compile_inputs.py",
+      "producers": [
+        "source/bootstrap/server_guard.py"
+      ],
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d"
+    },
+    {
+      "consumer": "source/preparation-inputs/compile_positive.py",
+      "producers": [
+        "source/bootstrap/server_guard.py"
+      ],
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d"
+    }
+  ],
+  "helpers": 37,
+  "source_only": true
+}

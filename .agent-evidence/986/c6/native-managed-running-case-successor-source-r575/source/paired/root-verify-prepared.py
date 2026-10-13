@@ -1,0 +1,54 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+
+p = Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/n12')
+physical = p / 'managed-execution'
+def verify(path, expected):
+    assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == expected, 'digest_drift'
+manifest = json.loads((p / 'preparation-inputs/compiled-manifest-r2.json').read_bytes())
+context = json.loads((physical / 'context.json').read_bytes())
+assert context == manifest['context']
+assert context['node_options'] == context['launcher_env']['NODE_OPTIONS']
+for name, entry in manifest['files'].items():
+    path = physical / name
+    info = path.lstat()
+    assert path.resolve(strict=True) == path and stat.S_ISREG(info.st_mode)
+    assert info.st_uid == os.getuid() and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == entry['mode']
+    verify(path, entry['sha256'])
+for name, entry in manifest['links'].items():
+    path = physical / name
+    assert path.is_symlink() and os.readlink(path) == entry['target']
+    if entry.get('target_sha256'):
+        verify(path.resolve(strict=True), entry['target_sha256'])
+for key in ('bootstrap_pins', 'browser_pins', 'cache_pins', 'executable_pins', 'startup_pins'):
+    for name, expected in manifest[key].items():
+        verify(name, expected)
+for name, entry in manifest['readonly_cache_metadata'].items():
+    info = Path(name).stat()
+    assert (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink) == (entry['device'], entry['inode'], entry['mode'], entry['uid'], entry['nlink'])
+    verify(name, entry['sha256'])
+python = Path('/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python')
+assert str(python.resolve(strict=True)) == '/home/pawel/.local/share/uv/python/cpython-3.12.8-linux-x86_64-gnu/bin/python3.12'
+verify(python, '0dc3a692fa85fcdb7f1a5877d2adf179809ac417a07ffde2373c832863800a15')
+for proc in ('/proc/net/tcp', '/proc/net/tcp6'):
+    for line in Path(proc).read_text().splitlines()[1:]:
+        fields = line.split()
+        assert not (int(fields[1].split(':')[1], 16) in {18241, 13241, 18241, 18242} and fields[3] == '0A')
+values = json.loads((p / 'preparation-inputs/private-values.json').read_bytes())
+assert set(values) == {'nonce', 'private_secret', 'source_commit', 'base_commit'}
+assert values['source_commit'] == 'e43ad4b20dcc2ca6baa90e31ff38146f1d50c7ea'
+assert len(values['nonce']) == 64
+assert not (physical / 'adapter-launch-once.json').exists()
+result = {'status': 'PASS', 'prepared_regular_files': len(manifest['files']), 'prepared_links': len(manifest['links']),
+          'context_sha256': hashlib.sha256((physical / 'context.json').read_bytes()).hexdigest(),
+          'helper_pins_sha256': hashlib.sha256((p / 'bootstrap/PINS.txt').read_bytes()).hexdigest(),
+          'private_values_emitted': False, 'ports_clear': True}
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+with os.fdopen(os.open(p / 'root-prepared-readback.json', flags, 0o600), 'w') as stream:
+    json.dump(result, stream, sort_keys=True)
+    stream.flush()
+    os.fsync(stream.fileno())
+print(json.dumps(result, sort_keys=True))

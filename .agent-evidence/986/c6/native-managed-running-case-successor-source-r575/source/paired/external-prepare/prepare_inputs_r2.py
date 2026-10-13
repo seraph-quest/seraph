@@ -1,0 +1,66 @@
+'Explicit Root filesystem preparation only; no process/app launch.'
+import hashlib
+import importlib.util
+import json
+import os
+import stat
+from pathlib import Path
+import sys
+
+OUT = Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs')
+
+
+def main():
+    private = json.loads(Path(sys.argv[1]).read_bytes())
+    pins_path = Path(sys.argv[2])
+    pins = json.loads(pins_path.read_bytes())
+    parents = {str(Path(p).parent) for p in pins}
+    if len(parents) != 1:
+        raise ValueError('one_exact_helper_packet_required')
+    HELPER = Path(next(iter(parents))) / 'root_prepare.py'
+    raw = HELPER.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != pins[str(HELPER)]:
+        raise ValueError('reviewed_root_prepare_drift')
+    # Original helper map remains the compiled immutable dependency closure.
+    HELPER = Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/external-prepare/root_prepare.py')
+    if hashlib.sha256(HELPER.read_bytes()).hexdigest() != '6369e9a3907a41b49dd74271d254bfb37287e8078e7af713ac0dcd291295e371':
+        raise ValueError('reviewed_external_root_prepare_drift')
+    spec = importlib.util.spec_from_file_location('_reviewed_root_prepare_r11', HELPER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    manifest = json.loads((OUT / 'compiled-manifest-r2.json').read_bytes())
+    binding = json.loads((OUT / 'compiled-binding-r2.json').read_bytes())
+    if hashlib.sha256(pins_path.read_bytes()).hexdigest() != binding['helper_pins_sha256']:
+        raise ValueError('compiled_helper_pin_map_changed')
+    result = module.prepare_case(manifest, manifest_sha256=binding['manifest_sha256'],
+        private_secret=private['private_secret'], materializer_sha256='da06e65589980df8c8413f5a0a98471bc7dc38c946454aa0406af6b1bdf6e396')
+    if result.get('prepared') is not True:
+        raise ValueError('filesystem_prepare_incomplete')
+    # Exact former adapter-generated inputs, now prepared for no-CREATE runner.
+    fixture = Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/managed-execution')
+    logs = fixture / 'source/logs'
+    backend_log = logs / 'seraph-local-backend.log'
+    failures = fixture / 'journey/startup-failures'
+    if backend_log.exists() or backend_log.is_symlink() or failures.exists() or failures.is_symlink():
+        raise ValueError('fresh_diagnostic_generated_inputs_required')
+    if logs.exists():
+        info = logs.lstat()
+        if logs.resolve(strict=True) != logs or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError('private_original_log_parent_required')
+    else:
+        logs.mkdir(mode=0o700)
+    fd = os.open(backend_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    failures.mkdir(mode=0o700)
+    # Empty files/directories are diagnostic inputs, never authority receipts.
+    # Preparation result carries no permission to launch. Root must rehash the
+    # entire copied closure and seal actual preopened stdio for EACH start.
+    print(json.dumps({'prepared': True, 'execution_authorized': False}, sort_keys=True))
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,191 @@
+"""Root-only original preparation readback/releases; never launches a phase."""
+
+import ast
+
+import hashlib
+
+import json
+
+import os
+
+from pathlib import Path
+
+import stat
+
+import sys
+
+import re
+
+ROOT = Path('/home/pawel/repos/seraph')
+
+C6 = ROOT / '.agent-evidence/986/c6'
+
+SOURCE = C6 / 'native-managed-running-case-successor-source-r575'
+
+STAGING = SOURCE / 'staging'
+
+N8 = C6 / 'n12'
+
+FIXTURE = N8 / 'preparation-inputs/staged-example'
+
+RELEASE = C6 / 'ROOT-N12-PHASE02-RELEASE-r558.json'
+
+EXPECTED_INPUT_HASHES = {'/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-PINS.json': '43ff2a85c08d4bebf6f1b66c4c8a59d99ff04e1f0dc6b2ae77b56e49dc11c9aa', '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PREPARATION-COMMANDS.PROPOSED.json': '61763232918b7e37b4740f282aaac4972e1e69e06362381242b239449a6396e5', '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/ROOT-stage-receipt.json': 'da41b7db949780d894f6949307062dc774bb11075320541e895a0ce0cdd84cd2', '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/TARGET-SOURCE-MAP.json': '9ba7f52ddb9ace1278b0791636c2b68dea490abb0d049f8e3b911348ce39209f', '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/ORIGINAL-THREE-METADATA.json': '81c18b655055ee2ccd078f6acc9d8673957788a690d9e47f2f718a11834243b2'}
+
+STABLE = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+          'st_size', 'st_mtime_ns', 'st_ctime_ns')
+
+def require(condition, code):
+    if not condition:
+        raise RuntimeError(code)
+
+def read(path, *, mode=None):
+    path = Path(path)
+    require(path.is_absolute() and path.resolve(strict=True) == path, 'canonical_read_required')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == 1000
+            and before.st_gid == 1000 and before.st_nlink == 1, 'private_owned_regular_required')
+        require(mode is None or stat.S_IMODE(before.st_mode) == mode, 'original_mode_required')
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1048576)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b''.join(chunks)
+        after = os.fstat(fd)
+        current = path.lstat()
+        require(len(raw) == before.st_size and all(getattr(before, name) == getattr(after, name)
+            == getattr(current, name) for name in STABLE), 'read_changed')
+        return raw, before
+    finally:
+        os.close(fd)
+
+def load(path, *, mode=0o600):
+    return json.loads(read(path, mode=mode)[0])
+
+def binding(path):
+    raw, _info = read(path)
+    return {'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+
+def absent(path):
+    require(not os.path.lexists(path), 'fresh_phase_output_required')
+
+def private_directory(path):
+    require(path.resolve(strict=True) == path, 'canonical_directory_required')
+    info = path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == 1000 and info.st_gid == 1000
+        and stat.S_IMODE(info.st_mode) == 0o700, 'private_directory_required')
+
+def original_output_directory(path):
+    require(path == C6 and path.resolve(strict=True) == path, 'original_output_directory_required')
+    info = path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == 1000 and info.st_gid == 1000
+        and stat.S_IMODE(info.st_mode) == 0o775, 'original_evidence_parent_changed')
+    private_directory(ROOT / '.agent-evidence/986')
+
+INPUTS = N8 / 'preparation-inputs'
+
+PHYSICAL = N8 / 'managed-execution'
+
+DISPOSABLE = Path('/tmp/seraph-1009-n12-runtime')
+
+MANIFEST_PATH = INPUTS / 'compiled-manifest-r2.json'
+
+COMMANDS = SOURCE / 'PREPARATION-COMMANDS.PROPOSED.json'
+
+GUARD = C6 / 'accounting-r31-source/run-offline-command-r3.py'
+
+GUARD_SHA = '90c1868440ce1a0e3ef39ba2af722f764f41b5b9ca4955572bb801f5e5b3340a'
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+
+def arbitrary_read(path):
+    # Original system/cache aliases are resolved and validated separately.
+    path = Path(path).resolve(strict=True)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode), 'original_regular_input_required')
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1048576)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b''.join(chunks)
+        after = os.fstat(fd)
+        current = path.lstat()
+        require(len(raw) == before.st_size and all(getattr(before, n) == getattr(after, n)
+            == getattr(current, n) for n in STABLE), 'original_input_changed')
+        return raw, before
+    finally:
+        os.close(fd)
+
+def hash_input(path, digest):
+    raw, info = arbitrary_read(path)
+    require(hashlib.sha256(raw).hexdigest() == digest, 'original_input_hash_drift')
+    return info
+
+def source_closure():
+    require(os.getuid() == 1000 and os.getgid() == 1000, 'original_root_host_identity_required')
+    original_output_directory(C6)
+    for name, digest in EXPECTED_INPUT_HASHES.items():
+        require(hashlib.sha256(read(name)[0]).hexdigest() == digest, 'original_source_binding_changed')
+    receipt = load(STAGING / 'ROOT-stage-receipt.json')
+    pins = load(SOURCE / 'SOURCE-PINS.json')
+    require(receipt['state'] == 'SOURCE_ONLY_STAGED' and receipt['runtime_started'] is False
+        and receipt['staged_files'] == 55 and len(receipt['targets']) == 55, 'original_stage_required')
+    for target, row in receipt['targets'].items():
+        require(set(row) == {'proposal_source', 'sha256'}, 'original_target_schema_required')
+        expected = pins[row['proposal_source']]
+        proposal, _ = read(row['proposal_source'])
+        actual, _ = read(target, mode=0o600)
+        require(len(proposal) == expected['size'] and hashlib.sha256(proposal).hexdigest()
+            == expected['sha256'] == row['sha256'] and actual == proposal, 'staged_source_drift')
+    seals_raw, _ = read(Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/REQUIRED-SEALS.json'), mode=0o600)
+    require(len(seals_raw) == int('4004') and hashlib.sha256(seals_raw).hexdigest()
+        == '893e649193b781bff19773e31e8a7294eaf75176a25fb79edb70d751315728a5',
+        'exact_approved_seal_inventory_required')
+    seals = json.loads(seals_raw)
+    require(len(seals) == 18, 'exact_18_approved_seals_required')
+    require(str(GUARD) in seals and seals[str(GUARD)] == {'sha256': GUARD_SHA, 'size': 3014},
+        'original_external_R3_seal_required')
+    for name, row in seals.items():
+        raw, _ = arbitrary_read(name)
+        require(len(raw) == row['size'] and hashlib.sha256(raw).hexdigest() == row['sha256'],
+            'external_required_seal_drift')
+    absent(INPUTS / 'UNUSED-CENSUS.json')
+    return receipt
+
+def fixture(root):
+    private_directory(root)
+    receipt = load(INPUTS / 'repository-receipt.json')
+    names = set()
+    for parent, dirs, files in os.walk(root, followlinks=False):
+        private_directory(Path(parent))
+        for name in dirs:
+            private_directory(Path(parent) / name)
+        for name in files:
+            path = Path(parent) / name
+            relative = str(path.relative_to(root))
+            require(relative in receipt['files'], 'unexpected_fixture_member')
+            raw, _ = read(path)
+            require(hashlib.sha256(raw).hexdigest() == receipt['files'][relative], 'fixture_hash_drift')
+            names.add(relative)
+    require(names == set(receipt['files']) and len(names) == 30, 'complete_fixture_tree_required')
+    require(read(root / '.git/HEAD')[0] == b'ref: refs/heads/fixture\n'
+        and read(root / '.git/refs/heads/fixture')[0].decode().strip() == receipt['head'],
+        'genuine_fixture_HEAD_required')
+    return receipt
+
+if __name__ == '__main__':
+    source_closure()
+    receipt=fixture(FIXTURE)
+    phase=load(COMMANDS)['phases'][1]
+    require(phase['phase']=='02_fresh_private_values','phase02_original_selection')
+    for path in phase['expected_outputs']:absent(Path(path))
+    print(json.dumps({'state':'ORIGINAL_PHASE01_FIXTURE_CURRENT_READBACK_PASS','fixture_files':30,'actual_receipt':binding(INPUTS/'repository-receipt.json'),'phase02_outputs_absent':True,'release_written':False,'runtime_authorized':False},sort_keys=True))

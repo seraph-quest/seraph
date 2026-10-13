@@ -1,0 +1,492 @@
+{
+  "Root_release": null,
+  "current_executable_edge_repair_scope": "stager candidate1 +HOST3 +fivephase SourcePINS/TARGETMAP2 each; historical STATIC_INPUTS unchanged",
+  "current_review": null,
+  "failed_R558_R574_preserved": true,
+  "files": [
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/CANDIDATE-PINS.json",
+      "sha256": "1041c0d27eeae9af77d81e5a33c44ba4aebea549e967b57e9a9ee797a61709c7",
+      "size": 76386
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/CONTROLLER-BINDER-CORRECTION.patch",
+      "sha256": "75120f1c5e2ba325eec9999f9a016a2867957dbc586f428a8b7124ce01f32b17",
+      "size": 11140
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/CURRENT-EIGHT-OVERLAYS.json",
+      "sha256": "91668cc43faa61f3c5be9780b410fd8cf5e191dd8abcf9a477cf3a1a992530a9",
+      "size": 2437
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/DEPENDENCY-DIGRAPH.json",
+      "sha256": "475451be2cb6dd1b685795904f192db6fc27a0d4b817df8c8acc47d01079cd51",
+      "size": 5731
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/EMBEDDED-PRODUCER-SHA-AUDIT.json",
+      "sha256": "15f7711beedf9c10b0bdcdf4a2823a0b17c6e855a9286600078807bf9fd3a466",
+      "size": 13883
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/EXACT-PRODUCER-CONSUMER-REBIND-AUDIT.json",
+      "sha256": "bb3f29b9b7c877ff2860af447988be3f880836956fff9d0650327344a7152cd7",
+      "size": 9645
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/HANDOFF.md",
+      "sha256": "5334d068e77f877b9fe57c70af6c0b731a29bfb007f0e51c10ca059adead3afc",
+      "size": 343
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/ORIGINAL-THREE-METADATA.json",
+      "sha256": "81c18b655055ee2ccd078f6acc9d8673957788a690d9e47f2f718a11834243b2",
+      "size": 746
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PAIRED-TARGET-SOURCE-MAP.json",
+      "sha256": "b9cf7f4086e01eb89dd8cffccdbf94e20ae321ad0fc23f8b58e5bb434d2bc98d",
+      "size": 3353
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PATH-CLOSURE.COMPLETE.json",
+      "sha256": "b634f0841ae3c91118766588af6fdbf0d3810499fac8e61a54446e58828d334c",
+      "size": 775551
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PINS.json",
+      "sha256": "213a336bbae898fb1abd8b15c4e78768a9b150afeadcebede01b4778434fd096",
+      "size": 21057
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/POST-PREPARED-COMMANDS.PROPOSED.json",
+      "sha256": "486779903ceeef0daec1a44e67be001cb0858bf6b738f4edfed826ad72e29f20",
+      "size": 8788
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PREPARATION-COMMANDS.PROPOSED.json",
+      "sha256": "61763232918b7e37b4740f282aaac4972e1e69e06362381242b239449a6396e5",
+      "size": 10570
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/REPORT.md",
+      "sha256": "0eb20dc84883eab422307804982d9c8ac40b351479bd32dd877fd54ef2149fec",
+      "size": 484
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/ROOT-ACTUAL-INPUTS.PROPOSED.json",
+      "sha256": "fa3605af1d6dc7c6e25d4095080bb43a3a827207a02caac390737831aed4ebe8",
+      "size": 118
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-CHANGE-INVENTORY.json",
+      "sha256": "573b759eecea49e6ac95f2953dec436e65b013f636d50ef86463a8052ae87fba",
+      "size": 10360
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-CLOSURE-READBACK.json",
+      "sha256": "e8613da1af13db8fee7f2a2d6f733938b979105906eabcd75c153f86410da780",
+      "size": 355
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-DELTA.patch",
+      "sha256": "837c127f851a365ec37c33e3b4ee66758fba22d145b6214a05d1c13a8a760fb4",
+      "size": 38749
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-PINS.json",
+      "sha256": "43ff2a85c08d4bebf6f1b66c4c8a59d99ff04e1f0dc6b2ae77b56e49dc11c9aa",
+      "size": 14136
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/STATIC-READBACK.json",
+      "sha256": "ad1dab4be888948db9755bcd61545a3dfde842d30bc75148dde1109fb405d4dd",
+      "size": 533
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/TARGET-SOURCE-MAP.json",
+      "sha256": "9ba7f52ddb9ace1278b0791636c2b68dea490abb0d049f8e3b911348ce39209f",
+      "size": 18571
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/TYPED-IMMUTABLE-RESTORATION-AUDIT.json",
+      "sha256": "23802c170f6467e58fed1869cac9cdb96d8822361483f486c0ac037b7e57c835",
+      "size": 2168
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ACTUAL-PRIOR-DISPOSITION-LINEAGE.json",
+      "sha256": "2b2c9a967f1aa6b4435e0a747103736f382c9f9fbc2a926e9b07ad9563c64243",
+      "size": 1800
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/COMMANDS.SOURCE.json",
+      "sha256": "8ab97748884116d08c46a3522397934d1d2bc6b70d69b24ca399f3159c80c23c",
+      "size": 14471
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-CURRENT-PROCESS-PORT-READBACK.PROPOSED.py.txt",
+      "sha256": "bfbdcb8a9bcea3866206bd2f11e54cd6be75024bb635aecb83a7dd0895f9f836",
+      "size": 18084
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-HOST-CONFIGURATION.SOURCE.json",
+      "sha256": "d9b2aec930e7b26cac0b098f195f8c24628209c47dc2b53e36f7a49f7ff65053",
+      "size": 954
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-HOST-ORIGINAL18-SEALS.PROPOSED.py.txt",
+      "sha256": "f9e9b166068e238bc30de8f063a32897cf65983dd5f2db100804b880b2c6ad34",
+      "size": 19221
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASE01-FIXTURE-CURRENT-READBACK.R558-CURRENT.CURRENT-SEAL.py.txt",
+      "sha256": "e3ddf01b1847276193cbd8dd697c1117a56b7b33f8594c62c28271d4a8dda45e",
+      "size": 8630
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASE01-RELEASE-STABLE.R558-CURRENT.CURRENT-SEAL.py.txt",
+      "sha256": "3eb303db8459e1b6eaadf26a1c384a3971cf13a9a45b0cfbe4ac32caed9e1c27",
+      "size": 3274
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASE02-PRIVATE-READBACK.R558-CURRENT.CURRENT-SEAL.py.txt",
+      "sha256": "f185489df84750641b1c540438979dd6aad7046fdd5a541058f55d1c2780b4bc",
+      "size": 10408
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASES02-07-GATE.R558-CURRENT.CURRENT-SEAL.py.txt",
+      "sha256": "6bc5210fc5b4a7bd434f8f7de19668812a7741b65c4cc285a683146e7ec20704",
+      "size": 17207
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASES03-07-READBACK.R558-CURRENT.CURRENT-SEAL.py.txt",
+      "sha256": "ff123b5034e69cab195787e61659cde761955879e30c01c2a07364952659cab3",
+      "size": 16788
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/WHOLE-CURRENT-SOURCE-CONTROL-AUDIT.json",
+      "sha256": "acd26fc4c480b181921159e250adfc5ff58b66cb4199162a233bd9fdee6f8eac",
+      "size": 9505
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/final-helper-pins.PROPOSED.json",
+      "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd",
+      "size": 5705
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/input-template.PROPOSED.json",
+      "sha256": "c78433a983a6831851c6a6816368ea4dc935f4e009175e76ee9f164f92017918",
+      "size": 7226211
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/assertions.py",
+      "sha256": "63c81e3703ef86976e941acc08ef081d86e29468e31d5f9b9366c528402ee3ca",
+      "size": 3196
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/backend_hooks.py",
+      "sha256": "98efefe94a0597786fd4cea85455e8f4aba57b0b597a21f4e38f8677e6f7fcb6",
+      "size": 19076
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/backend_observer.py",
+      "sha256": "601591be9a7e9ecb67bfbbaa18bb6dcb10bc44142dcd490f72676549aba1c891",
+      "size": 13380
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/browser_binding.py",
+      "sha256": "c3bcf8df7360e91e98ed3b16473e5b5ad1164532f8f5864905c6c4a9d7133d2e",
+      "size": 1458
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/cache_inputs.py",
+      "sha256": "b84e2190c9d33f784510304dc340fd672bde6e2dfe6d0b5d3aa982985dced41d",
+      "size": 3077
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/case_matrix.py",
+      "sha256": "22c1003d3830f99e36e27c05b9d1d672640c8a5b446726bd079c78cad60af717",
+      "size": 2247
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/client_boundary.py",
+      "sha256": "cc7990fb5135d6b43af33897750c7de9cddd1748a563926345c027b448a0b418",
+      "size": 2754
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/closure_diagnostics.py",
+      "sha256": "be5dd951f84a5ba682d5776aae07cf27f42e072202ebfde1a8da176db20083af",
+      "size": 2251
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/context_binding.py",
+      "sha256": "2e0d9d1076fa949b8f8892a07004a1a9f9e6c4baa10406dcdbe2800bfe1abcf7",
+      "size": 4419
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/controller_owned.py",
+      "sha256": "f82b3ff7bd781b0fa3a4c8b0e0bd93378841443831a1ea659742dd1caf0956bb",
+      "size": 2917
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/denial_probe.py",
+      "sha256": "5c857541b9c9e9bf65cabdeae807b48674a99c32cbae3565a686a504347438f6",
+      "size": 4427
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/esbuild_offline.py",
+      "sha256": "41d47d80406a993e6d08fa5486b8868ab1ae7ef2358e66dbeb6ae5e0f266b84d",
+      "size": 11029
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/held_outcomes.py",
+      "sha256": "925eb4fc14935d491d63178fe9d410119b02a1f55285342a8eaacedd798b0ece",
+      "size": 4938
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/inspector.py",
+      "sha256": "8ff5b5f77c607a0a594be5329c45f256cba95eab0d19b72dd13d6f8c770071c4",
+      "size": 4444
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/journey.py",
+      "sha256": "e738141efd8640112cce70620636a5b1cd02570ccb3491ad39837f26e4fd9b90",
+      "size": 33299
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/managed_fixture_dotenv.py",
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be",
+      "size": 3195
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/materializer.py",
+      "sha256": "9dde9ab8ab674f6d8fd009ea2046c5557220ae38ec9129b98dd7becc91b585d2",
+      "size": 20435
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/native_markers.py",
+      "sha256": "e2a7591496f4e689cdad427853d039d4ea735d4486bd645162ece5b488a3d797",
+      "size": 3492
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/node_preload.cjs",
+      "sha256": "43becb8dddc1bdcd24dce9689d75f3e20c588d5451f9a1463404ec50a8d687bc",
+      "size": 6081
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/operator_http.py",
+      "sha256": "ffe8a8e24d44709c3f3178fb75510d201269bd84715b02c71a04ee4531b1142a",
+      "size": 9292
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/optimizer_import_scan.mjs",
+      "sha256": "7e974f8d76f5be06a266fbe8bd2acbe3681ac662f5fc95c45caef76cc711386e",
+      "size": 2698
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/policy_canary_transport.py",
+      "sha256": "6a617a50355cfc332923d26d7512d775f012c0c6d10aa990e178c16e11544aed",
+      "size": 5049
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/policy_setup.py",
+      "sha256": "aa1f829ebca705b379af9846ffadad2a055e9d50b0b0a9adba73fdb7773fe01b",
+      "size": 1720
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/preparation_plan.py",
+      "sha256": "35196159bdf2b18dc53d655020b2dfeb0d04332de74d81178eaf8cb529f1fbcc",
+      "size": 8980
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/probe_listeners.py",
+      "sha256": "7d969266431ceb05d0393c5be89405c60692ac8c1ad33fd186045cf679e2b8de",
+      "size": 1608
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/role_stdio.py",
+      "sha256": "f53433085733780c93af370fa9d30bb115558c1d8c7e3430c33df33a7896f99c",
+      "size": 3933
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/root_prepare.py",
+      "sha256": "5ebac196353eeff4befa978df23839a4d2b173c29610b38ca734329b7fd96923",
+      "size": 5550
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/row_codec.py",
+      "sha256": "34584dde1c91b98ef2306d56307fdf277649b783f4b2eba5911c7f3c1f66eda1",
+      "size": 2330
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/server_guard.py",
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d",
+      "size": 11360
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/sitecustomize.py",
+      "sha256": "8b3f270bf9b918f3ceb819af93df392a89ea9bdadfede77afd8bdd2fde116446",
+      "size": 25445
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/startup_controller.py",
+      "sha256": "6980816e872c777f24bd64fd6ca878428717399ff1ad70d7d6703b77a1d84daa",
+      "size": 5458
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/startup_owned_fd.py",
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614",
+      "size": 5075
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/teardown.py",
+      "sha256": "56addee9eebd1070dc0edb229625466757021ad025dee32dc0786029fbbfe218",
+      "size": 5995
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/terminal_diagnostics.py",
+      "sha256": "6d493e91536d28ecf199006aa70eed4eced81d957aff87cf56c2ec9a1bca721a",
+      "size": 2982
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_policy_canary_transport.py",
+      "sha256": "3b3cf781ae5ac306693e6ec2547fdf51f8f1b16d35b9359eaea07701e431eb0e",
+      "size": 2236
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_repo_source_managed_restart.py",
+      "sha256": "c93764e4ef93c2ce69d71a04c80da568497b02c57affa023cb859fc7b1d4f454",
+      "size": 13325
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_startup_owned_fd.py",
+      "sha256": "7f86350d4cd2f26fa0b2f4cf6773c3dfc752d7d0268f3145532ce8851b2520c1",
+      "size": 3955
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/controller/browser_readback_inputs.py",
+      "sha256": "9169c3b1c8523a2717b41b814fe1ac5a038b06cf77f228433ca4b323ac33b179",
+      "size": 9100
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/controller/test_repo_source_managed_restart.py",
+      "sha256": "b67aa963d025375db1f8d9f42c36eeae24a393145c955752a5d0c1c2936d66dd",
+      "size": 31096
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/HELPER-PINS.json",
+      "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd",
+      "size": 5705
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/collect_rejected_role.py",
+      "sha256": "4fd25918150b70f2cd6e4b9b2fe8a20a40859ed921c2883e03b363aece326339",
+      "size": 11876
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/materializer.py",
+      "sha256": "da06e65589980df8c8413f5a0a98471bc7dc38c946454aa0406af6b1bdf6e396",
+      "size": 20668
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/prepare_inputs_r2.py",
+      "sha256": "bb9bc62748c8d42fe3268322fa3cf041850251c21c15c6267f4ed74a39a8782a",
+      "size": 3333
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/root_prepare.py",
+      "sha256": "6369e9a3907a41b49dd74271d254bfb37287e8078e7af713ac0dcd291295e371",
+      "size": 5616
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/negative_context_binding.py",
+      "sha256": "abfddd557b61f193e20564aca85217ec22019336943645c7d4fd41ea6854159c",
+      "size": 5132
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/pidfd_compat.py",
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e",
+      "size": 2420
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/root-seal-late-inputs.py",
+      "sha256": "18438ed4738bec51f8783cc0e497a36eb44e9aa668149dda56f188c31af8b90d",
+      "size": 1633
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/root-verify-prepared.py",
+      "sha256": "764771924ff76c3589cf9055cd1ac83c88109513f416bf736a966be51d9c40f2",
+      "size": 3185
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/run_root_fd_owner.py",
+      "sha256": "c1d720f6ac8fbf3fc7956f842cd67ef7697b74f85f89094365c33ad90908d6fe",
+      "size": 16222
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/compile_inputs.py",
+      "sha256": "5d02377823460012e184b49c791d220ba1f8b4e958c2477f09e1510fc6ed30fb",
+      "size": 18477
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/compile_positive.py",
+      "sha256": "91a32a3695ea2630126b3babcb17d12071e93ff3e1ba88232d11c114a30be014",
+      "size": 18495
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/derive_censuses_r3.py",
+      "sha256": "29a009c916e12be8f6133e1042192be94269bf747e8fbc598813b7267333bbd9",
+      "size": 2419
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/final-helper-pins.PROPOSED.json",
+      "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd",
+      "size": 5705
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/prepare_inputs_r2.py",
+      "sha256": "589b754f01dc287e40862b6745d37dd3c8639bf68037a115825db98ebd44192d",
+      "size": 2892
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/readback_inputs_r2.py",
+      "sha256": "ea5b4e74a001096bfb5f7bca0886ef7fa16fbfbd39ee16319711bffdd576d11b",
+      "size": 4281
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/repository_fixture.py",
+      "sha256": "3039a6a290a2fa17507bf799b46a682d5b759b27b24540eb4548f330b3adfa0e",
+      "size": 3170
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/COMMANDS.PROPOSED.json",
+      "sha256": "876491b61966a4be43ac21aaf1aafafdab9d41f633b7ab1e7a71fb34dd697de5",
+      "size": 10083
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/COUNT-CORRECTION.patch",
+      "sha256": "919d4ff3521faf4cec6446ab737ac89b617b8658275c1561f7204ae0d3ce3820",
+      "size": 58
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/REQUIRED-SEALS.PREVIEW.json",
+      "sha256": "107e10756ef6418e221107b7f6e24d10d1301cf395f8d54e3fe5c74a5f129d1d",
+      "size": 3879
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/STAGED-DESTINATIONS.json",
+      "sha256": "9ba7f52ddb9ace1278b0791636c2b68dea490abb0d049f8e3b911348ce39209f",
+      "size": 18571
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/root-preflight-stage.py",
+      "sha256": "09e2c63253094332dc2b27d1320f3c62eacbcc980ae0ead6561c48c34b4362a8",
+      "size": 27921
+    }
+  ],
+  "integrator_independent_audit_pending": true,
+  "runtime_release": null,
+  "same_unconsumed_namespace": "n12",
+  "source_only": true
+}

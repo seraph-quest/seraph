@@ -1,0 +1,1261 @@
+{
+  "actual_fields": null,
+  "files": {
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/CONTROLLER-BINDER-CORRECTION.patch": {
+      "sha256": "75120f1c5e2ba325eec9999f9a016a2867957dbc586f428a8b7124ce01f32b17",
+      "size": 11140
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/CURRENT-EIGHT-OVERLAYS.json": {
+      "sha256": "91668cc43faa61f3c5be9780b410fd8cf5e191dd8abcf9a477cf3a1a992530a9",
+      "size": 2437
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/DEPENDENCY-DIGRAPH.json": {
+      "sha256": "475451be2cb6dd1b685795904f192db6fc27a0d4b817df8c8acc47d01079cd51",
+      "size": 5731
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/EMBEDDED-PRODUCER-SHA-AUDIT.json": {
+      "sha256": "15f7711beedf9c10b0bdcdf4a2823a0b17c6e855a9286600078807bf9fd3a466",
+      "size": 13883
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/HANDOFF.md": {
+      "sha256": "5334d068e77f877b9fe57c70af6c0b731a29bfb007f0e51c10ca059adead3afc",
+      "size": 343
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PAIRED-TARGET-SOURCE-MAP.json": {
+      "sha256": "b9cf7f4086e01eb89dd8cffccdbf94e20ae321ad0fc23f8b58e5bb434d2bc98d",
+      "size": 3353
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PATH-CLOSURE.COMPLETE.json": {
+      "sha256": "b634f0841ae3c91118766588af6fdbf0d3810499fac8e61a54446e58828d334c",
+      "size": 775551
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/POST-PREPARED-COMMANDS.PROPOSED.json": {
+      "sha256": "486779903ceeef0daec1a44e67be001cb0858bf6b738f4edfed826ad72e29f20",
+      "size": 8788
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/PREPARATION-COMMANDS.PROPOSED.json": {
+      "sha256": "61763232918b7e37b4740f282aaac4972e1e69e06362381242b239449a6396e5",
+      "size": 10570
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/ROOT-ACTUAL-INPUTS.PROPOSED.json": {
+      "sha256": "fa3605af1d6dc7c6e25d4095080bb43a3a827207a02caac390737831aed4ebe8",
+      "size": 118
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-CHANGE-INVENTORY.json": {
+      "sha256": "573b759eecea49e6ac95f2953dec436e65b013f636d50ef86463a8052ae87fba",
+      "size": 10360
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-DELTA.patch": {
+      "sha256": "837c127f851a365ec37c33e3b4ee66758fba22d145b6214a05d1c13a8a760fb4",
+      "size": 38749
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/SOURCE-PINS.json": {
+      "sha256": "43ff2a85c08d4bebf6f1b66c4c8a59d99ff04e1f0dc6b2ae77b56e49dc11c9aa",
+      "size": 14136
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/TARGET-SOURCE-MAP.json": {
+      "sha256": "9ba7f52ddb9ace1278b0791636c2b68dea490abb0d049f8e3b911348ce39209f",
+      "size": 18571
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/final-helper-pins.PROPOSED.json": {
+      "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd",
+      "size": 5705
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/input-template.PROPOSED.json": {
+      "sha256": "c78433a983a6831851c6a6816368ea4dc935f4e009175e76ee9f164f92017918",
+      "size": 7226211
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/assertions.py": {
+      "sha256": "63c81e3703ef86976e941acc08ef081d86e29468e31d5f9b9366c528402ee3ca",
+      "size": 3196
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/backend_hooks.py": {
+      "sha256": "98efefe94a0597786fd4cea85455e8f4aba57b0b597a21f4e38f8677e6f7fcb6",
+      "size": 19076
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/backend_observer.py": {
+      "sha256": "601591be9a7e9ecb67bfbbaa18bb6dcb10bc44142dcd490f72676549aba1c891",
+      "size": 13380
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/browser_binding.py": {
+      "sha256": "c3bcf8df7360e91e98ed3b16473e5b5ad1164532f8f5864905c6c4a9d7133d2e",
+      "size": 1458
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/cache_inputs.py": {
+      "sha256": "b84e2190c9d33f784510304dc340fd672bde6e2dfe6d0b5d3aa982985dced41d",
+      "size": 3077
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/case_matrix.py": {
+      "sha256": "22c1003d3830f99e36e27c05b9d1d672640c8a5b446726bd079c78cad60af717",
+      "size": 2247
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/client_boundary.py": {
+      "sha256": "cc7990fb5135d6b43af33897750c7de9cddd1748a563926345c027b448a0b418",
+      "size": 2754
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/closure_diagnostics.py": {
+      "sha256": "be5dd951f84a5ba682d5776aae07cf27f42e072202ebfde1a8da176db20083af",
+      "size": 2251
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/context_binding.py": {
+      "sha256": "2e0d9d1076fa949b8f8892a07004a1a9f9e6c4baa10406dcdbe2800bfe1abcf7",
+      "size": 4419
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/controller_owned.py": {
+      "sha256": "f82b3ff7bd781b0fa3a4c8b0e0bd93378841443831a1ea659742dd1caf0956bb",
+      "size": 2917
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/denial_probe.py": {
+      "sha256": "5c857541b9c9e9bf65cabdeae807b48674a99c32cbae3565a686a504347438f6",
+      "size": 4427
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/esbuild_offline.py": {
+      "sha256": "41d47d80406a993e6d08fa5486b8868ab1ae7ef2358e66dbeb6ae5e0f266b84d",
+      "size": 11029
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/held_outcomes.py": {
+      "sha256": "925eb4fc14935d491d63178fe9d410119b02a1f55285342a8eaacedd798b0ece",
+      "size": 4938
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/inspector.py": {
+      "sha256": "8ff5b5f77c607a0a594be5329c45f256cba95eab0d19b72dd13d6f8c770071c4",
+      "size": 4444
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/journey.py": {
+      "sha256": "e738141efd8640112cce70620636a5b1cd02570ccb3491ad39837f26e4fd9b90",
+      "size": 33299
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/managed_fixture_dotenv.py": {
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be",
+      "size": 3195
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/materializer.py": {
+      "sha256": "9dde9ab8ab674f6d8fd009ea2046c5557220ae38ec9129b98dd7becc91b585d2",
+      "size": 20435
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/native_markers.py": {
+      "sha256": "e2a7591496f4e689cdad427853d039d4ea735d4486bd645162ece5b488a3d797",
+      "size": 3492
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/node_preload.cjs": {
+      "sha256": "43becb8dddc1bdcd24dce9689d75f3e20c588d5451f9a1463404ec50a8d687bc",
+      "size": 6081
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/operator_http.py": {
+      "sha256": "ffe8a8e24d44709c3f3178fb75510d201269bd84715b02c71a04ee4531b1142a",
+      "size": 9292
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/optimizer_import_scan.mjs": {
+      "sha256": "7e974f8d76f5be06a266fbe8bd2acbe3681ac662f5fc95c45caef76cc711386e",
+      "size": 2698
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/policy_canary_transport.py": {
+      "sha256": "6a617a50355cfc332923d26d7512d775f012c0c6d10aa990e178c16e11544aed",
+      "size": 5049
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/policy_setup.py": {
+      "sha256": "aa1f829ebca705b379af9846ffadad2a055e9d50b0b0a9adba73fdb7773fe01b",
+      "size": 1720
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/preparation_plan.py": {
+      "sha256": "35196159bdf2b18dc53d655020b2dfeb0d04332de74d81178eaf8cb529f1fbcc",
+      "size": 8980
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/probe_listeners.py": {
+      "sha256": "7d969266431ceb05d0393c5be89405c60692ac8c1ad33fd186045cf679e2b8de",
+      "size": 1608
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/role_stdio.py": {
+      "sha256": "f53433085733780c93af370fa9d30bb115558c1d8c7e3430c33df33a7896f99c",
+      "size": 3933
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/root_prepare.py": {
+      "sha256": "5ebac196353eeff4befa978df23839a4d2b173c29610b38ca734329b7fd96923",
+      "size": 5550
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/row_codec.py": {
+      "sha256": "34584dde1c91b98ef2306d56307fdf277649b783f4b2eba5911c7f3c1f66eda1",
+      "size": 2330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/server_guard.py": {
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d",
+      "size": 11360
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/sitecustomize.py": {
+      "sha256": "8b3f270bf9b918f3ceb819af93df392a89ea9bdadfede77afd8bdd2fde116446",
+      "size": 25445
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/startup_controller.py": {
+      "sha256": "6980816e872c777f24bd64fd6ca878428717399ff1ad70d7d6703b77a1d84daa",
+      "size": 5458
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/startup_owned_fd.py": {
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614",
+      "size": 5075
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/teardown.py": {
+      "sha256": "56addee9eebd1070dc0edb229625466757021ad025dee32dc0786029fbbfe218",
+      "size": 5995
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/terminal_diagnostics.py": {
+      "sha256": "6d493e91536d28ecf199006aa70eed4eced81d957aff87cf56c2ec9a1bca721a",
+      "size": 2982
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_policy_canary_transport.py": {
+      "sha256": "3b3cf781ae5ac306693e6ec2547fdf51f8f1b16d35b9359eaea07701e431eb0e",
+      "size": 2236
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_repo_source_managed_restart.py": {
+      "sha256": "c93764e4ef93c2ce69d71a04c80da568497b02c57affa023cb859fc7b1d4f454",
+      "size": 13325
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_startup_owned_fd.py": {
+      "sha256": "7f86350d4cd2f26fa0b2f4cf6773c3dfc752d7d0268f3145532ce8851b2520c1",
+      "size": 3955
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/controller/browser_readback_inputs.py": {
+      "sha256": "9169c3b1c8523a2717b41b814fe1ac5a038b06cf77f228433ca4b323ac33b179",
+      "size": 9100
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/controller/test_repo_source_managed_restart.py": {
+      "sha256": "b67aa963d025375db1f8d9f42c36eeae24a393145c955752a5d0c1c2936d66dd",
+      "size": 31096
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/HELPER-PINS.json": {
+      "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd",
+      "size": 5705
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/collect_rejected_role.py": {
+      "sha256": "4fd25918150b70f2cd6e4b9b2fe8a20a40859ed921c2883e03b363aece326339",
+      "size": 11876
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/materializer.py": {
+      "sha256": "da06e65589980df8c8413f5a0a98471bc7dc38c946454aa0406af6b1bdf6e396",
+      "size": 20668
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/prepare_inputs_r2.py": {
+      "sha256": "bb9bc62748c8d42fe3268322fa3cf041850251c21c15c6267f4ed74a39a8782a",
+      "size": 3333
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/root_prepare.py": {
+      "sha256": "6369e9a3907a41b49dd74271d254bfb37287e8078e7af713ac0dcd291295e371",
+      "size": 5616
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/negative_context_binding.py": {
+      "sha256": "abfddd557b61f193e20564aca85217ec22019336943645c7d4fd41ea6854159c",
+      "size": 5132
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/pidfd_compat.py": {
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e",
+      "size": 2420
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/root-seal-late-inputs.py": {
+      "sha256": "18438ed4738bec51f8783cc0e497a36eb44e9aa668149dda56f188c31af8b90d",
+      "size": 1633
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/root-verify-prepared.py": {
+      "sha256": "764771924ff76c3589cf9055cd1ac83c88109513f416bf736a966be51d9c40f2",
+      "size": 3185
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/run_root_fd_owner.py": {
+      "sha256": "c1d720f6ac8fbf3fc7956f842cd67ef7697b74f85f89094365c33ad90908d6fe",
+      "size": 16222
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/compile_inputs.py": {
+      "sha256": "5d02377823460012e184b49c791d220ba1f8b4e958c2477f09e1510fc6ed30fb",
+      "size": 18477
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/compile_positive.py": {
+      "sha256": "91a32a3695ea2630126b3babcb17d12071e93ff3e1ba88232d11c114a30be014",
+      "size": 18495
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/derive_censuses_r3.py": {
+      "sha256": "29a009c916e12be8f6133e1042192be94269bf747e8fbc598813b7267333bbd9",
+      "size": 2419
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/final-helper-pins.PROPOSED.json": {
+      "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd",
+      "size": 5705
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/prepare_inputs_r2.py": {
+      "sha256": "589b754f01dc287e40862b6745d37dd3c8639bf68037a115825db98ebd44192d",
+      "size": 2892
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/readback_inputs_r2.py": {
+      "sha256": "ea5b4e74a001096bfb5f7bca0886ef7fa16fbfbd39ee16319711bffdd576d11b",
+      "size": 4281
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/repository_fixture.py": {
+      "sha256": "3039a6a290a2fa17507bf799b46a682d5b759b27b24540eb4548f330b3adfa0e",
+      "size": 3170
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/COUNT-CORRECTION.patch": {
+      "sha256": "919d4ff3521faf4cec6446ab737ac89b617b8658275c1561f7204ae0d3ce3820",
+      "size": 58
+    }
+  },
+  "inputs": {
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/.reviews/NATIVE-MANAGED-JOURNEY-N8-ROOT-PREFLIGHT-SOURCE-CRITIC-R427/PINS.json": {
+      "sha256": "26ceb446548fc0f4bdd85788bb1ff5c0c5d6f2ae1c133ea3867c0515c41415ed",
+      "size": 7925
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/.reviews/NATIVE-MANAGED-JOURNEY-N8-ROOT-PREFLIGHT-SOURCE-CRITIC-R427/REPORT.md": {
+      "sha256": "a83fc4e7313e83b6f8713b13f212028ad47c37ba68541117ad7afd7479b3122e",
+      "size": 3527
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/.reviews/NATIVE-N8-OFFLINE-COMPARATOR-ACTUAL-CRITIC-R480/PINS.json": {
+      "sha256": "4e8e95e47b68a1625d312e5f711af1f50e298c43979a49c1632a890fc2dbccd8",
+      "size": 10011
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/.reviews/NATIVE-N8-OFFLINE-COMPARATOR-ACTUAL-CRITIC-R480/REPORT.md": {
+      "sha256": "8e3df86837afc706ec34583a56f42d2a5acf6590caa2085049daf72c26aaea70",
+      "size": 2086
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/ROOT-R479-NODE-COMPARATOR-ACTUAL.json": {
+      "sha256": "821cbb028b3e2ed1ef85ed32c3ca7dd18cb36bcb5eb55d48cdc2f33dc113137f",
+      "size": 2088
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/ROOT-native-short-root-ACTUAL-HOST-tool-readback-r282.json": {
+      "sha256": "ef3b33162af46e15c163a038fd77f480ac9ceb66f82198c2fdeb58cae95587c5",
+      "size": 572
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/ROOT-native-test-baseline-adoption-r344.json": {
+      "sha256": "5de137ae3e7c108fb1f39aa1a7ac2ca092ce0b9993ca093381f108b18c4c2493",
+      "size": 1102
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/INDEPENDENT-CRITIC-R316.md": {
+      "sha256": "4f5847a29edac65b251f26a30b5574750321b4457dc1e609367c804113857372",
+      "size": 3963
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/INDEPENDENT-CRITIC-R316.pins.json": {
+      "sha256": "6158c82da610b8ec86f2245f9e95c5750c4facb99450cf788ce62c6e242c3e22",
+      "size": 6898
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/PATCH-HANDOFF.md": {
+      "sha256": "0dd2f635106a5fed538dea98c2895e9e029a73e7fe94398e38fe0743404f7d07",
+      "size": 1206
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/PATCH-PINS.json": {
+      "sha256": "b614a85f0c2ab9f7995787095ae80ee6dc9a9d392de57f11df586d93814e9087",
+      "size": 1483
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/PINS.json": {
+      "sha256": "302070664b32d8b88f56cc9b1585d910526de33547cca22abe999cc4ae39b693",
+      "size": 3961
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/PROPOSED.patch": {
+      "sha256": "7dd5c414043eb69da1643410bb88dd55a7268dc577cc0b8c5ca2ae2b818426e2",
+      "size": 3020
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/REPORT.md": {
+      "sha256": "138c5fb6caa14d7de6788dbca8df53eba3c5ac707dd5acc41aac48be05399ec8",
+      "size": 7958
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/esbuild-context-disposition-r315/esbuild_offline.PROPOSED.py": {
+      "sha256": "643d8aa07ef746722e6bfd4f0b3e256b4fee96e2a652489b50fc46242f8e080b",
+      "size": 6171
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/managed-private-source-controls-r240/bootstrap/sitecustomize.py": {
+      "sha256": "f54ee1caae945938deb9876d0be250733291bd8a9c4f407c49d10b680bcc16d1",
+      "size": 19416
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/n3-negative-owner-failure-triage-r296/PINS.json": {
+      "sha256": "84903e09782759f197f94a0125f8c33c1922b3fb7f571c1b6a60493e31d835fc",
+      "size": 3660
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/n3-negative-owner-failure-triage-r296/REPORT.md": {
+      "sha256": "791bc0c0a85c142c8fa621253b305a13093f08d1fadcbe029f4671669451d59b",
+      "size": 2654
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/n4-positive-startup-restore-plan-r305/PINS.json": {
+      "sha256": "17c730ba11906746b9572319f592d8298361c4f30c94fb51a452ca7d9216a085",
+      "size": 2687
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/n4-positive-startup-restore-plan-r305/PLAN.md": {
+      "sha256": "87ea05488f69114a5efe087c33be75c09620012594864cb1bbf87eff5fca91a3",
+      "size": 6070
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/n8/collect_rejected_role.py": {
+      "sha256": "52c93ced6c3f2bc08e654af234bfe7cf79885531f6d4398bf9c9e06ebad00600",
+      "size": 11871
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/n8/run_root_fd_owner.py": {
+      "sha256": "afe396eabe171c8a6ddb596e3298ca753434b07fbb3b63cc896030b305ae8897",
+      "size": 16210
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-adopted-baseline-preparation-source-r347/HANDOFF.md": {
+      "sha256": "bc822c37b536274e27b851cf75e646e8ee6b2dea6ce0b3283048f6899a9e2301",
+      "size": 3096
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-adopted-baseline-preparation-source-r347/PINS.json": {
+      "sha256": "16807898f05f0553cef87e5a9677f8d500ca27d29945c07925e433f52b75a41b",
+      "size": 85494
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-adopted-baseline-preparation-source-r348/PINS.json": {
+      "sha256": "91d824f79e443debc4b1e91a5a5bb59135d55b877e8b3d98a28865b4fd9fa80e",
+      "size": 86674
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-adopted-baseline-preparation-source-r350/PINS.json": {
+      "sha256": "5f8013901edd8bf049fb46c773bda122e49c52c1d7f03fce7157949253d60682",
+      "size": 86652
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-adopted-baseline-preparation-source-r351/PINS.json": {
+      "sha256": "2c4e80214e3530346025a7d20571a854abeff28e7bdf45264fd33a039f73fe30",
+      "size": 87204
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-adopted-baseline-preparation-source-r352/PINS.json": {
+      "sha256": "06ec961646422a1d361681ac9ab454e79e1e3aba82ef1560a134b39b9f8dd151",
+      "size": 88037
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-adopted-baseline-preparation-source-r354/PINS.json": {
+      "sha256": "b98e163b28759b3e3ce739a191e8a802a61bb4eecab3f8dddf16e43bfb0ae350",
+      "size": 88306
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-cache-baseline-root-capture-r341/readonly-cache-metadata.json": {
+      "sha256": "d43efc2e51c62608cfc3f21be5149074d6ee01e73d0273bec35b6d985c8fd996",
+      "size": 9239672
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n5-exclusive-staging-proposal-r319/root-preflight-stage.py": {
+      "sha256": "3acee0fbb86ee8914950fa115964144b69e71cf74689cc713467902b4371dffc",
+      "size": 21375
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n5-poststage-phase-handoff-r322/COMMANDS.json": {
+      "sha256": "81b5e5869b25681ce0d5717977ec6f772e232ebe491b3a7858fc9b2ba210a9ec",
+      "size": 10603
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n5-poststage-phase-handoff-r322/HANDOFF.md": {
+      "sha256": "733f0201dab10a1f75093231d93d5400530b68d6f31b4a592375a72dc81f48f2",
+      "size": 4854
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n8-running-readiness-diagnosis-r475/PINS-CONTEXT.json": {
+      "sha256": "1aa655fa2363c2d8da2f78a4dfedf398ccab4f2574eac57e08f21a8485c2827d",
+      "size": 941
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n8-running-readiness-diagnosis-r475/PINS.json": {
+      "sha256": "58fc7889a58a4dcd8e4b7f2a013c9877c4bedaba9da4b7ad4041b156cb21ac57",
+      "size": 5672
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n8-running-readiness-diagnosis-r475/node_preload.STRUCTURAL.PROPOSED.cjs.txt": {
+      "sha256": "43becb8dddc1bdcd24dce9689d75f3e20c588d5451f9a1463404ec50a8d687bc",
+      "size": 6081
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r314/PINS.json": {
+      "sha256": "5b5df0982beba6dd6e84cc3668df4ae44eb237f538b464a77c90e183de1ab620",
+      "size": 48544
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r314/SOURCE-PINS.json": {
+      "sha256": "0bf6746ee52caa3f0b1496111255511cce8b96096f74cf0741a12ba3526a7f10",
+      "size": 13508
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r314/TARGET-SOURCE-MAP.json": {
+      "sha256": "1027dd1a04fd229987b19b95c1bfd4d0c94755c13ba4949a0d3834def6111a38",
+      "size": 17911
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/CANDIDATE-HANDOFF.md": {
+      "sha256": "3466bcec0170b75ce1c5ebe579abee1d9bf942f667f671105651f2a543219f71",
+      "size": 5196
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/COMMANDS.PROPOSED.json": {
+      "sha256": "b7b8688b9099ac35ad841fc04fc4b606e786d392c874b97f910e29a6635caf17",
+      "size": 8746
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/CURRENT-EIGHT-OVERLAYS.json": {
+      "sha256": "91668cc43faa61f3c5be9780b410fd8cf5e191dd8abcf9a477cf3a1a992530a9",
+      "size": 2437
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/DEPENDENCY-DIGRAPH.json": {
+      "sha256": "01a905b57586f46a8f13ecaf7b6974e10be0ae96f8fd6565ca64fa80485eab3d",
+      "size": 49084
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/EMBEDDED-PRODUCER-SHA-AUDIT.json": {
+      "sha256": "1e759e006da3b75c576c802ea0eefad82b69443d53e6b8ab5b72039f08aea9fc",
+      "size": 13177
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/FINAL-STATUS.json": {
+      "sha256": "8ffcd3e5407752b465e474b212f46bf46eae443068a15fdd58e12b532d2a5433",
+      "size": 373
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/NAMESPACE-PREPARATION-STATUS.json": {
+      "sha256": "4eaf609e858c3a30515f1ddfa000697f3e263f32e5256fdc7c8ed55a3ccfde55",
+      "size": 124
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/PAIRED-TARGET-SOURCE-MAP.json": {
+      "sha256": "966f0d54d570054ba30928fe54cb1d93bf8cacdfddeaf25ca024174254d07d28",
+      "size": 3233
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/PATH-CLOSURE.COMPLETE.json": {
+      "sha256": "b8846c2a88eead1e8b7ddce34dd57da97c80807b760fbd5fe8423fdba091a611",
+      "size": 8958073
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/PINS.json": {
+      "sha256": "6d379bba228985b97f41bff19885310b9b3121f5f8c15a8cbd9c57dd34576cc5",
+      "size": 15402
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/PLAN.md": {
+      "sha256": "84b66bd99413eeb7c5202792747adda691911d0060d9abf42d5b4f400834884c",
+      "size": 3909
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/ROOT-ACTUAL-INPUTS.PROPOSED.json": {
+      "sha256": "fa3605af1d6dc7c6e25d4095080bb43a3a827207a02caac390737831aed4ebe8",
+      "size": 118
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/SOURCE-PINS.json": {
+      "sha256": "11efd7c3b7be863fc71c7112eea26ccd80b5458e33475c161bedb92b6e834eb7",
+      "size": 13508
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/STALE-PATH-FACTS.json": {
+      "sha256": "2d450eac50bcd65aa9ef953b6e13796737c9fcba41f63570bf1a056dda7f89fb",
+      "size": 4449
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/STATIC.json": {
+      "sha256": "f342db07874d7a4d74302675b995e16fdb5021ae0a3c2dbb3a939d39106b4f39",
+      "size": 2919
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/TARGET-SOURCE-MAP.json": {
+      "sha256": "936b56a4320a5c3fc7f5d7bacc90ea976e149ec554d63de1a223dfab9d7fe738",
+      "size": 17911
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/candidate.patch": {
+      "sha256": "22dbc45ba53621328f50d8febbbcdf034b789bd29aa3e91c16dc84902ea4fb86",
+      "size": 26869
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/final-helper-pins.PROPOSED.json": {
+      "sha256": "00677180bcca05778711febf023ac7d2a28685c595df20de3ef9971fe294124c",
+      "size": 5668
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/input-template.PROPOSED.json": {
+      "sha256": "b885211f65ae9cbfa064ba0053aa3e170437b20a232d49e16480ca439db7ecb1",
+      "size": 7224571
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/input-template.PROPOSED.json": {
+      "sha256": "5e151cc5f63e2914710908710d3a22c7be444e396e625b8d102b364290fb21c0",
+      "size": 7224571
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/assertions.py": {
+      "sha256": "63c81e3703ef86976e941acc08ef081d86e29468e31d5f9b9366c528402ee3ca",
+      "size": 3196
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/backend_hooks.py": {
+      "sha256": "56443fc0dc1864fe80785bc5efa6af7e10f4c70d624973d305132140931d594e",
+      "size": 19106
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/backend_observer.py": {
+      "sha256": "601591be9a7e9ecb67bfbbaa18bb6dcb10bc44142dcd490f72676549aba1c891",
+      "size": 13380
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/browser_binding.py": {
+      "sha256": "c3bcf8df7360e91e98ed3b16473e5b5ad1164532f8f5864905c6c4a9d7133d2e",
+      "size": 1458
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/cache_inputs.py": {
+      "sha256": "b84e2190c9d33f784510304dc340fd672bde6e2dfe6d0b5d3aa982985dced41d",
+      "size": 3077
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/case_matrix.py": {
+      "sha256": "22c1003d3830f99e36e27c05b9d1d672640c8a5b446726bd079c78cad60af717",
+      "size": 2247
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/client_boundary.py": {
+      "sha256": "cc7990fb5135d6b43af33897750c7de9cddd1748a563926345c027b448a0b418",
+      "size": 2754
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/closure_diagnostics.py": {
+      "sha256": "be5dd951f84a5ba682d5776aae07cf27f42e072202ebfde1a8da176db20083af",
+      "size": 2251
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/context_binding.py": {
+      "sha256": "b4b5be8f930fd947249a7f4bd6f86d1c30ac22ff0a5e0acee086baee0c0d1f7a",
+      "size": 4447
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/controller_owned.py": {
+      "sha256": "a98a22bcecb6e9a16363669da5b02ccbdb91a873e56955ff6aab81bcc822581b",
+      "size": 2824
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/denial_probe.py": {
+      "sha256": "70bd77df9b1e3babd34b324a3354c5de55558d4891930f56db192b6494b8a144",
+      "size": 4426
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/esbuild_offline.py": {
+      "sha256": "66175b8c28e0fc44764c92dc7967f275f1c2fb662ffd140582f026d07d636a17",
+      "size": 4749
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/held_outcomes.py": {
+      "sha256": "814f2fc916df719ee7d5e57bca4b761df7dfc246832d526903d5bba836b31f08",
+      "size": 4967
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/inspector.py": {
+      "sha256": "9fa0aba9b4699570d14025a68874709c6751c3aa369aa3bef3b0a29750359b0c",
+      "size": 4444
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/journey.py": {
+      "sha256": "ed6dd09dfb7ef7f41c77e267f6d552b6b7686afa99d1bbd5eb1e8011a8316349",
+      "size": 33245
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/managed_fixture_dotenv.py": {
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be",
+      "size": 3195
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/materializer.py": {
+      "sha256": "ee34124ab2acb6f1b3335688677587d897bdf357c4e6198a8ed0de03743419db",
+      "size": 20461
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/native_markers.py": {
+      "sha256": "816d9592b59fb088f572ba96638afcc75aacb8099677a3552a0f9f8f4cfe0d03",
+      "size": 3491
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/node_preload.cjs": {
+      "sha256": "b847e17bb76c50f3a74fdba31fd15247b07fa5cfdc15c8a1a589d8f9fded1bf3",
+      "size": 5663
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/operator_http.py": {
+      "sha256": "42e379a11d90addd2991d3b7b6b3f4a7c30c94a2ed75d7485eb360c7cbbe1054",
+      "size": 9292
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/optimizer_import_scan.mjs": {
+      "sha256": "7e974f8d76f5be06a266fbe8bd2acbe3681ac662f5fc95c45caef76cc711386e",
+      "size": 2698
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/policy_canary_transport.py": {
+      "sha256": "362ae5cc99f4573aaa1ea573df02ef788047b51895ea11937f6811180166fb39",
+      "size": 5048
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/policy_setup.py": {
+      "sha256": "aa1f829ebca705b379af9846ffadad2a055e9d50b0b0a9adba73fdb7773fe01b",
+      "size": 1720
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/preparation_plan.py": {
+      "sha256": "cec43d90923d835d16685ef1d1e6d3fe8fc9167002db5abbb79e4497b00b5a89",
+      "size": 9007
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/probe_listeners.py": {
+      "sha256": "a6c3ad72263596d3b0c3bfd67fa3d8dc62b2f7e77ff9a3194f76253919589e8c",
+      "size": 1607
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/role_stdio.py": {
+      "sha256": "65b60914f1b9c0d787b76d5607e0970deb4113bd010e5faaa5c385ddd739a99f",
+      "size": 3932
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/root_prepare.py": {
+      "sha256": "ade72ef0a50881ac3fbfa4f5a19802ffc9d14efdec6c485b26c20944c8630946",
+      "size": 5547
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/row_codec.py": {
+      "sha256": "34584dde1c91b98ef2306d56307fdf277649b783f4b2eba5911c7f3c1f66eda1",
+      "size": 2330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/server_guard.py": {
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d",
+      "size": 11360
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/sitecustomize.py": {
+      "sha256": "e02d1f7f89a286e330fea8626996718603d37dcb436dc1f7f3472a69930664a5",
+      "size": 24930
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/startup_controller.py": {
+      "sha256": "1de71b40735f2b0f718a400310a8eca34961129672de5342431543c56880a78d",
+      "size": 4765
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/startup_owned_fd.py": {
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614",
+      "size": 5075
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/teardown.py": {
+      "sha256": "f2986e5e5b147e93b376aca7a773760a473fbae9ce89cb18f8e0fd9b2356e3da",
+      "size": 6134
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/terminal_diagnostics.py": {
+      "sha256": "6d493e91536d28ecf199006aa70eed4eced81d957aff87cf56c2ec9a1bca721a",
+      "size": 2982
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/test_policy_canary_transport.py": {
+      "sha256": "3b3cf781ae5ac306693e6ec2547fdf51f8f1b16d35b9359eaea07701e431eb0e",
+      "size": 2236
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/test_repo_source_managed_restart.py": {
+      "sha256": "b1a69b83c97006cd89f9dbc916dbccc1adca5779691a3fac463092849bcff9ac",
+      "size": 13323
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/bootstrap/test_startup_owned_fd.py": {
+      "sha256": "7f86350d4cd2f26fa0b2f4cf6773c3dfc752d7d0268f3145532ce8851b2520c1",
+      "size": 3955
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/controller/browser_readback_inputs.py": {
+      "sha256": "0af0c5dedc4004bcae804549f45db9da4012a3d2d25c56531efe27dbd964667a",
+      "size": 9098
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/controller/test_repo_source_managed_restart.py": {
+      "sha256": "666cb1ffde4772543abd4bfb7cada17f691c336646e486f95016220c4e67b814",
+      "size": 24522
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/HELPER-PINS.json": {
+      "sha256": "c07bace1c22dd7cea7692a348ae5dc10027ab7875b3605f66dd39320900c88c7",
+      "size": 5668
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/collect_rejected_role.py": {
+      "sha256": "3a963f487653ed6ee12c1689d3e92cbac9be70b3642eae0d35d60b2ff055acb2",
+      "size": 11837
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/external-prepare/materializer.py": {
+      "sha256": "33f9acb7671f504eedda8cc031e6cd874a605d1ecbbd3d694a4bd7a1e7f74f30",
+      "size": 20694
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/external-prepare/prepare_inputs_r2.py": {
+      "sha256": "9c4ac392c487621fef4a38cd18665aead7e71c44ea886a7431bc93b5703f4f76",
+      "size": 3330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/external-prepare/root_prepare.py": {
+      "sha256": "cf9fc30757b5f304d960bf51f09a58f94882cb4e271c484fbbb4e4c26ffcfcc7",
+      "size": 5612
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/negative_context_binding.py": {
+      "sha256": "e38d19ad792132ac6a7a6081261d681a1355b6538fc7ff7846cb3777adfcb111",
+      "size": 5156
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/pidfd_compat.py": {
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e",
+      "size": 2420
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/root-seal-late-inputs.py": {
+      "sha256": "1d5741424cd39a66ba4a57a56b78ee2ac5e03d6748d559feba94cb3f0e4c815b",
+      "size": 1632
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/root-verify-prepared.py": {
+      "sha256": "868ad7b2012fb136dc662b5359372017c8a6fed4221220cf6e10185861bc3488",
+      "size": 3184
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/paired/run_root_fd_owner.py": {
+      "sha256": "dcf3eb6c1a80db26482b3d35693b267197fd097a25ba2af047c0b6d7d97acab1",
+      "size": 16169
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/preparation-inputs/compile_inputs.py": {
+      "sha256": "0257c57c509922c3d67cf90ea7d3417ebff0819acb7bcaef31bb6dd5f490f702",
+      "size": 18312
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/preparation-inputs/compile_positive.py": {
+      "sha256": "0e6efecfc9c9c9d9089ebc6c6cdf228148c672ed9cfea0ad61e754388fe0404a",
+      "size": 18330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/preparation-inputs/derive_censuses_r3.py": {
+      "sha256": "29a009c916e12be8f6133e1042192be94269bf747e8fbc598813b7267333bbd9",
+      "size": 2419
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/preparation-inputs/final-helper-pins.PROPOSED.json": {
+      "sha256": "c07bace1c22dd7cea7692a348ae5dc10027ab7875b3605f66dd39320900c88c7",
+      "size": 5668
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/preparation-inputs/prepare_inputs_r2.py": {
+      "sha256": "15f9cddfcdefbf4b4440be123c40dd805e14f1ca73681abdf001ede01f820daa",
+      "size": 2891
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/preparation-inputs/readback_inputs_r2.py": {
+      "sha256": "e792f137fed4a67f0b5ceb3fda7b2ba2ce17849d54aef01b565b49d0aedcc137",
+      "size": 4280
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/preimages/source/preparation-inputs/repository_fixture.py": {
+      "sha256": "2958eb871b8ecb40f17225b61c5dd4cb72389730fbaf4f8e9ebdcbabf9635ec1",
+      "size": 3200
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/assertions.py": {
+      "sha256": "63c81e3703ef86976e941acc08ef081d86e29468e31d5f9b9366c528402ee3ca",
+      "size": 3196
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/backend_hooks.py": {
+      "sha256": "56443fc0dc1864fe80785bc5efa6af7e10f4c70d624973d305132140931d594e",
+      "size": 19106
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/backend_observer.py": {
+      "sha256": "601591be9a7e9ecb67bfbbaa18bb6dcb10bc44142dcd490f72676549aba1c891",
+      "size": 13380
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/browser_binding.py": {
+      "sha256": "c3bcf8df7360e91e98ed3b16473e5b5ad1164532f8f5864905c6c4a9d7133d2e",
+      "size": 1458
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/cache_inputs.py": {
+      "sha256": "b84e2190c9d33f784510304dc340fd672bde6e2dfe6d0b5d3aa982985dced41d",
+      "size": 3077
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/case_matrix.py": {
+      "sha256": "22c1003d3830f99e36e27c05b9d1d672640c8a5b446726bd079c78cad60af717",
+      "size": 2247
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/client_boundary.py": {
+      "sha256": "cc7990fb5135d6b43af33897750c7de9cddd1748a563926345c027b448a0b418",
+      "size": 2754
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/closure_diagnostics.py": {
+      "sha256": "be5dd951f84a5ba682d5776aae07cf27f42e072202ebfde1a8da176db20083af",
+      "size": 2251
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/context_binding.py": {
+      "sha256": "b4b5be8f930fd947249a7f4bd6f86d1c30ac22ff0a5e0acee086baee0c0d1f7a",
+      "size": 4447
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/controller_owned.py": {
+      "sha256": "a98a22bcecb6e9a16363669da5b02ccbdb91a873e56955ff6aab81bcc822581b",
+      "size": 2824
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/denial_probe.py": {
+      "sha256": "70bd77df9b1e3babd34b324a3354c5de55558d4891930f56db192b6494b8a144",
+      "size": 4426
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/esbuild_offline.py": {
+      "sha256": "643d8aa07ef746722e6bfd4f0b3e256b4fee96e2a652489b50fc46242f8e080b",
+      "size": 6171
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/held_outcomes.py": {
+      "sha256": "814f2fc916df719ee7d5e57bca4b761df7dfc246832d526903d5bba836b31f08",
+      "size": 4967
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/inspector.py": {
+      "sha256": "9fa0aba9b4699570d14025a68874709c6751c3aa369aa3bef3b0a29750359b0c",
+      "size": 4444
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/journey.py": {
+      "sha256": "ed6dd09dfb7ef7f41c77e267f6d552b6b7686afa99d1bbd5eb1e8011a8316349",
+      "size": 33245
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/managed_fixture_dotenv.py": {
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be",
+      "size": 3195
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/materializer.py": {
+      "sha256": "19aa746cee4633557c1c0c92bfdbd54e71fbf280f5e788ed7b8f42bad1395f5a",
+      "size": 20461
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/native_markers.py": {
+      "sha256": "816d9592b59fb088f572ba96638afcc75aacb8099677a3552a0f9f8f4cfe0d03",
+      "size": 3491
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/node_preload.cjs": {
+      "sha256": "b847e17bb76c50f3a74fdba31fd15247b07fa5cfdc15c8a1a589d8f9fded1bf3",
+      "size": 5663
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/operator_http.py": {
+      "sha256": "42e379a11d90addd2991d3b7b6b3f4a7c30c94a2ed75d7485eb360c7cbbe1054",
+      "size": 9292
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/optimizer_import_scan.mjs": {
+      "sha256": "7e974f8d76f5be06a266fbe8bd2acbe3681ac662f5fc95c45caef76cc711386e",
+      "size": 2698
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/policy_canary_transport.py": {
+      "sha256": "362ae5cc99f4573aaa1ea573df02ef788047b51895ea11937f6811180166fb39",
+      "size": 5048
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/policy_setup.py": {
+      "sha256": "aa1f829ebca705b379af9846ffadad2a055e9d50b0b0a9adba73fdb7773fe01b",
+      "size": 1720
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/preparation_plan.py": {
+      "sha256": "d3ffd666dac7f2876d3284299783e54208c548e2023b0a4b491f62425729359f",
+      "size": 9007
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/probe_listeners.py": {
+      "sha256": "a6c3ad72263596d3b0c3bfd67fa3d8dc62b2f7e77ff9a3194f76253919589e8c",
+      "size": 1607
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/role_stdio.py": {
+      "sha256": "65b60914f1b9c0d787b76d5607e0970deb4113bd010e5faaa5c385ddd739a99f",
+      "size": 3932
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/root_prepare.py": {
+      "sha256": "ade72ef0a50881ac3fbfa4f5a19802ffc9d14efdec6c485b26c20944c8630946",
+      "size": 5547
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/row_codec.py": {
+      "sha256": "34584dde1c91b98ef2306d56307fdf277649b783f4b2eba5911c7f3c1f66eda1",
+      "size": 2330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/server_guard.py": {
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d",
+      "size": 11360
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/sitecustomize.py": {
+      "sha256": "e02d1f7f89a286e330fea8626996718603d37dcb436dc1f7f3472a69930664a5",
+      "size": 24930
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/startup_controller.py": {
+      "sha256": "1de71b40735f2b0f718a400310a8eca34961129672de5342431543c56880a78d",
+      "size": 4765
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/startup_owned_fd.py": {
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614",
+      "size": 5075
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/teardown.py": {
+      "sha256": "f2986e5e5b147e93b376aca7a773760a473fbae9ce89cb18f8e0fd9b2356e3da",
+      "size": 6134
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/terminal_diagnostics.py": {
+      "sha256": "6d493e91536d28ecf199006aa70eed4eced81d957aff87cf56c2ec9a1bca721a",
+      "size": 2982
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/test_policy_canary_transport.py": {
+      "sha256": "3b3cf781ae5ac306693e6ec2547fdf51f8f1b16d35b9359eaea07701e431eb0e",
+      "size": 2236
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/test_repo_source_managed_restart.py": {
+      "sha256": "b1a69b83c97006cd89f9dbc916dbccc1adca5779691a3fac463092849bcff9ac",
+      "size": 13323
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/bootstrap/test_startup_owned_fd.py": {
+      "sha256": "7f86350d4cd2f26fa0b2f4cf6773c3dfc752d7d0268f3145532ce8851b2520c1",
+      "size": 3955
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/controller/browser_readback_inputs.py": {
+      "sha256": "0af0c5dedc4004bcae804549f45db9da4012a3d2d25c56531efe27dbd964667a",
+      "size": 9098
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/controller/test_repo_source_managed_restart.py": {
+      "sha256": "c69fa05e705dee4557d1c6e933499972053ba0f5efbb8c7fe093c1a5541a5ac7",
+      "size": 24522
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/HELPER-PINS.json": {
+      "sha256": "00677180bcca05778711febf023ac7d2a28685c595df20de3ef9971fe294124c",
+      "size": 5668
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/collect_rejected_role.py": {
+      "sha256": "3a963f487653ed6ee12c1689d3e92cbac9be70b3642eae0d35d60b2ff055acb2",
+      "size": 11837
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/external-prepare/materializer.py": {
+      "sha256": "b2e40786042a8e3cb122b7435326ec3024d5ec2d2f810b0aedc9356711c096cf",
+      "size": 20694
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/external-prepare/prepare_inputs_r2.py": {
+      "sha256": "65f7088539e46ab90632b541d0dc96fc62bdbaee3a9ba0c10787d18624b4a8e1",
+      "size": 3330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/external-prepare/root_prepare.py": {
+      "sha256": "cf9fc30757b5f304d960bf51f09a58f94882cb4e271c484fbbb4e4c26ffcfcc7",
+      "size": 5612
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/negative_context_binding.py": {
+      "sha256": "e38d19ad792132ac6a7a6081261d681a1355b6538fc7ff7846cb3777adfcb111",
+      "size": 5156
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/pidfd_compat.py": {
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e",
+      "size": 2420
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/root-seal-late-inputs.py": {
+      "sha256": "1d5741424cd39a66ba4a57a56b78ee2ac5e03d6748d559feba94cb3f0e4c815b",
+      "size": 1632
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/root-verify-prepared.py": {
+      "sha256": "868ad7b2012fb136dc662b5359372017c8a6fed4221220cf6e10185861bc3488",
+      "size": 3184
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/paired/run_root_fd_owner.py": {
+      "sha256": "823905774e91db31156a5bf4bce9f2ebf2391a1831703fe095ba2541e2c8ab54",
+      "size": 16169
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/preparation-inputs/compile_inputs.py": {
+      "sha256": "d084df863687d1515d5158bcca4a59be5f2151db6b01563e2ed645fba67bfcd8",
+      "size": 18312
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/preparation-inputs/compile_positive.py": {
+      "sha256": "41522739d63bb795ec429397a11fc68f642319099c4f6d5900c5d6cecc9797b2",
+      "size": 18330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/preparation-inputs/derive_censuses_r3.py": {
+      "sha256": "29a009c916e12be8f6133e1042192be94269bf747e8fbc598813b7267333bbd9",
+      "size": 2419
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/preparation-inputs/final-helper-pins.PROPOSED.json": {
+      "sha256": "00677180bcca05778711febf023ac7d2a28685c595df20de3ef9971fe294124c",
+      "size": 5668
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/preparation-inputs/prepare_inputs_r2.py": {
+      "sha256": "15f9cddfcdefbf4b4440be123c40dd805e14f1ca73681abdf001ede01f820daa",
+      "size": 2891
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/preparation-inputs/readback_inputs_r2.py": {
+      "sha256": "e792f137fed4a67f0b5ceb3fda7b2ba2ce17849d54aef01b565b49d0aedcc137",
+      "size": 4280
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-positive-startup-successor-r316/source/preparation-inputs/repository_fixture.py": {
+      "sha256": "2958eb871b8ecb40f17225b61c5dd4cb72389730fbaf4f8e9ebdcbabf9635ec1",
+      "size": 3200
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-negative-controls-r280-r3/PINS.json": {
+      "sha256": "2ede07d32c738e313dbb0d1b93212adf96bd92443952d391dc0af8c86ce39d0b",
+      "size": 44344
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-negative-controls-r280-r3/TARGET-SOURCE-MAP.json": {
+      "sha256": "4961c1e8b6969985b1ca632fca5af138bfa17d41b62eec1c473861a86d1eaff9",
+      "size": 3223
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r271/PINS.json": {
+      "sha256": "1bb8fa36f45b151dec12816947492d16c0d755bf18457525de1e10e62363712a",
+      "size": 15145
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r271/TARGET-SOURCE-MAP.json": {
+      "sha256": "a578032e5c6ba06ffb977c8021c1c45e5635a3933a85aa211a93bfc4dd612906",
+      "size": 14024
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r271/input-template.PROPOSED.json": {
+      "sha256": "63abc9cb25cb7b85f9d82f0d10f7eba99b91c0fafede74d2f4621dafdfbbba40",
+      "size": 7224571
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/PINS.json": {
+      "sha256": "bcde029d750651984e3a8d94b94028f0ea2a2a08f19e24ce9fec57ddd9b5f83c",
+      "size": 44644
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/SOURCE-PINS.json": {
+      "sha256": "3f06b32481d7818023e5d6a3980ca99029e7eafc29d3025f625c2640d9992cd2",
+      "size": 13166
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/TARGET-SOURCE-MAP.json": {
+      "sha256": "b2649af8828267f46f00098d48832ef99c49001d7062a758675cf130308c6345",
+      "size": 17581
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/assertions.py": {
+      "sha256": "63c81e3703ef86976e941acc08ef081d86e29468e31d5f9b9366c528402ee3ca",
+      "size": 3196
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/backend_hooks.py": {
+      "sha256": "937e153ea035a57ff08634f2a534a101729b9de1681bcd47ff3be45f50091b76",
+      "size": 19106
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/backend_observer.py": {
+      "sha256": "601591be9a7e9ecb67bfbbaa18bb6dcb10bc44142dcd490f72676549aba1c891",
+      "size": 13380
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/browser_binding.py": {
+      "sha256": "c3bcf8df7360e91e98ed3b16473e5b5ad1164532f8f5864905c6c4a9d7133d2e",
+      "size": 1458
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/cache_inputs.py": {
+      "sha256": "b84e2190c9d33f784510304dc340fd672bde6e2dfe6d0b5d3aa982985dced41d",
+      "size": 3077
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/case_matrix.py": {
+      "sha256": "22c1003d3830f99e36e27c05b9d1d672640c8a5b446726bd079c78cad60af717",
+      "size": 2247
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/client_boundary.py": {
+      "sha256": "cc7990fb5135d6b43af33897750c7de9cddd1748a563926345c027b448a0b418",
+      "size": 2754
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/closure_diagnostics.py": {
+      "sha256": "be5dd951f84a5ba682d5776aae07cf27f42e072202ebfde1a8da176db20083af",
+      "size": 2251
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/context_binding.py": {
+      "sha256": "5574ed519ebfc01ca490a0c180b9bf99971032331e9bab04ff4c527374b570e9",
+      "size": 4447
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/controller_owned.py": {
+      "sha256": "a98a22bcecb6e9a16363669da5b02ccbdb91a873e56955ff6aab81bcc822581b",
+      "size": 2824
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/denial_probe.py": {
+      "sha256": "38a58723ddf9b457de029dfa89d66ed8271710ccb15dc13af873b9ea7f061741",
+      "size": 4426
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/esbuild_offline.py": {
+      "sha256": "66175b8c28e0fc44764c92dc7967f275f1c2fb662ffd140582f026d07d636a17",
+      "size": 4749
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/held_outcomes.py": {
+      "sha256": "6f11d7f4160d5b43d7707cc09e6154da6244b1ce2e743ee704e127836d692713",
+      "size": 4967
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/inspector.py": {
+      "sha256": "9fa0aba9b4699570d14025a68874709c6751c3aa369aa3bef3b0a29750359b0c",
+      "size": 4444
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/journey.py": {
+      "sha256": "ed6dd09dfb7ef7f41c77e267f6d552b6b7686afa99d1bbd5eb1e8011a8316349",
+      "size": 33245
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/managed_fixture_dotenv.py": {
+      "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be",
+      "size": 3195
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/materializer.py": {
+      "sha256": "de0daf6c1ebf222cdf3510ee642dd75007a4c90f26261dade1192cbe90a3bd6e",
+      "size": 20461
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/native_markers.py": {
+      "sha256": "d845101151c0e65b8bb4293cf288fa29961d2edcb405c3ac0eaf167b6ac73b4b",
+      "size": 3491
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/node_preload.cjs": {
+      "sha256": "b847e17bb76c50f3a74fdba31fd15247b07fa5cfdc15c8a1a589d8f9fded1bf3",
+      "size": 5663
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/operator_http.py": {
+      "sha256": "42e379a11d90addd2991d3b7b6b3f4a7c30c94a2ed75d7485eb360c7cbbe1054",
+      "size": 9292
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/optimizer_import_scan.mjs": {
+      "sha256": "7e974f8d76f5be06a266fbe8bd2acbe3681ac662f5fc95c45caef76cc711386e",
+      "size": 2698
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/policy_canary_transport.py": {
+      "sha256": "eff7e2b8b09663992c843e7444467caac756411f299c4b05e830ac6f4f68e95c",
+      "size": 5048
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/policy_setup.py": {
+      "sha256": "aa1f829ebca705b379af9846ffadad2a055e9d50b0b0a9adba73fdb7773fe01b",
+      "size": 1720
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/preparation_plan.py": {
+      "sha256": "6cd9efeb38ccbce96e038b6c83b61ff2a86beefac92cffe9c313f5e4b4a788eb",
+      "size": 9007
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/probe_listeners.py": {
+      "sha256": "12e049094fa4024c326a82dbe6a77c2077ce1bd5e1645582b6ef0d34122479af",
+      "size": 1607
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/role_stdio.py": {
+      "sha256": "57dc623f8539cb074fa556953530cd043eecb2edde9744636af1f82a059b2bf4",
+      "size": 3932
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/root_prepare.py": {
+      "sha256": "eb53b5581493ed2b77c3719105633371e8b293ccc32742e0c25700ea03fe1489",
+      "size": 5547
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/row_codec.py": {
+      "sha256": "34584dde1c91b98ef2306d56307fdf277649b783f4b2eba5911c7f3c1f66eda1",
+      "size": 2330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/server_guard.py": {
+      "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d",
+      "size": 11360
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/sitecustomize.py": {
+      "sha256": "5c8fa000a55c3cf685938755f632d63fcb50824449a8975b728320308a6d4c3b",
+      "size": 22187
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/startup_controller.py": {
+      "sha256": "1de71b40735f2b0f718a400310a8eca34961129672de5342431543c56880a78d",
+      "size": 4765
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/startup_owned_fd.py": {
+      "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614",
+      "size": 5075
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/teardown.py": {
+      "sha256": "6093ad0c6b675a353fc4103884c823ff08f07df87386e5ffc8a56aa50685b499",
+      "size": 6134
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/terminal_diagnostics.py": {
+      "sha256": "6d493e91536d28ecf199006aa70eed4eced81d957aff87cf56c2ec9a1bca721a",
+      "size": 2982
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/test_policy_canary_transport.py": {
+      "sha256": "3b3cf781ae5ac306693e6ec2547fdf51f8f1b16d35b9359eaea07701e431eb0e",
+      "size": 2236
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/test_repo_source_managed_restart.py": {
+      "sha256": "8cd320026d78ea34d43b7854b54e0ef314e61887669ccc4129b75ab3f7f99940",
+      "size": 13323
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/bootstrap/test_startup_owned_fd.py": {
+      "sha256": "7f86350d4cd2f26fa0b2f4cf6773c3dfc752d7d0268f3145532ce8851b2520c1",
+      "size": 3955
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/controller/browser_readback_inputs.py": {
+      "sha256": "368251184333ee0713da294abb2d8abbd67b517d524472b88595dd1d79d4bc79",
+      "size": 9098
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/controller/test_repo_source_managed_restart.py": {
+      "sha256": "15f4b5afeff685f50d9525f579330097e7e65229fce52c3349838eb487fde00d",
+      "size": 24474
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/collect_rejected_role.py": {
+      "sha256": "9c28033667204cbae1a3bc8955c972421cb924b755eb4436baad492ec95cb7a5",
+      "size": 11837
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/external-prepare/materializer.py": {
+      "sha256": "ee0ff6ed1f8730981b1b81ffd3591d858adee8a8af65bd16bcb0bc82e814c33c",
+      "size": 20694
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/external-prepare/prepare_inputs_r2.py": {
+      "sha256": "b65d33d77ebb4229457f9d85c4bcbb0608a1e77c6d818d892ee27607ba48667b",
+      "size": 3330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/external-prepare/root_prepare.py": {
+      "sha256": "f8a33dcc8d58ae237e5d54f389c9e934378dbbc955d9c5204e6dac5bbd9d53da",
+      "size": 5612
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/negative_context_binding.py": {
+      "sha256": "aa885fa90d30b2ffc28cc4e209c8d2dc3166cf4bd307b97182674ed108fd1928",
+      "size": 5156
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/pidfd_compat.py": {
+      "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e",
+      "size": 2420
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/root-seal-late-inputs.py": {
+      "sha256": "c916a13755d98defa520e86b49833d48b23f9d7b32831e3cc987fb2cfc4b28f7",
+      "size": 1632
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/root-verify-prepared.py": {
+      "sha256": "7ef6d1c5ebab3e247122eefcdf1469783e4a514f6ee22b8e8222bf8d7945330f",
+      "size": 3184
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/paired/run_root_fd_owner.py": {
+      "sha256": "0a8e80232b84370402ea226bf9d28bee25060f514e4c584b04feced26dc90342",
+      "size": 16169
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/preparation-inputs/compile_inputs.py": {
+      "sha256": "20dc31536354dc4f1321bb8510a660f6d3171ee34f891990bcfb90e626c182b0",
+      "size": 18312
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/preparation-inputs/compile_positive.py": {
+      "sha256": "825749da50c9f310cf7da8622aaf586ffbc07d63af85947db5ec953be22eab6a",
+      "size": 18330
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/preparation-inputs/derive_censuses_r3.py": {
+      "sha256": "29a009c916e12be8f6133e1042192be94269bf747e8fbc598813b7267333bbd9",
+      "size": 2419
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/preparation-inputs/prepare_inputs_r2.py": {
+      "sha256": "e19d5259123d63f1a33b540b692a12f6b3b5529263b016d11d1000e1778eac95",
+      "size": 2891
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/preparation-inputs/readback_inputs_r2.py": {
+      "sha256": "0a54b919a3019bc85268d676309e5613705a90c4779a70f4681b934d90d47113",
+      "size": 4280
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-short-root-successor-r297/preimages/preparation-inputs/repository_fixture.py": {
+      "sha256": "e322c5e2d52f152b56737d8e4f1ce39292cefc24812480c1ed09c0ecefdaf004",
+      "size": 3200
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-startup-coherent-epoch-r253/preparation-inputs/venv-map.json": {
+      "sha256": "f2f8b3e9613511f112bf33e48a6a002293ecd7f94d7b79488eca72e87dd5f710",
+      "size": 4541632
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/reviews/A1-C6-NATIVE-POSITIVE-STARTUP-R314-SOURCE-FRESH.md": {
+      "sha256": "0abfa162726c0afdc073a76a9b273ed922b52d6c7f17d9d958f44be5d203960e",
+      "size": 5313
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/reviews/A1-C6-NATIVE-POSITIVE-STARTUP-R314-SOURCE-FRESH.pins.json": {
+      "sha256": "467d4dbe3388c9652a5c56d42a37f0675d7550a279021ce8854b41975f77182d",
+      "size": 52051
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/reviews/C6-N4-POSITIVE-STARTUP-RESTORE-R305-SOURCE-FRESH.md": {
+      "sha256": "56ff5bf26546050ab5bbc423cba3cf26e0c96c97115f65df264bcf22f30b3c79",
+      "size": 4478
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/reviews/C6-N4-POSITIVE-STARTUP-RESTORE-R305-SOURCE-FRESH.pins.json": {
+      "sha256": "7cdb217919e640ae09f4b8aac1642e9ba66e0afa51e7f0846098a4fb4ca8bd40",
+      "size": 5778
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/reviews/NATIVE-CACHE-BASELINE-ACTUAL-CAPTURE-CRITIC-R343/PINS.json": {
+      "sha256": "b0d6194d669d0bec71e76239e412ed5d1c3f60f57f6b2c6a1b89790e9fe6f365",
+      "size": 8097
+    },
+    "/home/pawel/repos/seraph/.agent-evidence/986/reviews/NATIVE-CACHE-BASELINE-ACTUAL-CAPTURE-CRITIC-R343/REPORT.md": {
+      "sha256": "70ce165730a3ed94f85fae3c0e8026f8f7fb44401623ab254812fe4859c4217a",
+      "size": 6364
+    }
+  },
+  "runtime_release": false,
+  "source_only": true
+}

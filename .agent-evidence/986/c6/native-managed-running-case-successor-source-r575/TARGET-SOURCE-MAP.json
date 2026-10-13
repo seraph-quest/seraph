@@ -1,0 +1,222 @@
+{
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/HELPER-PINS.json": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/HELPER-PINS.json",
+    "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/assertions.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/assertions.py",
+    "sha256": "63c81e3703ef86976e941acc08ef081d86e29468e31d5f9b9366c528402ee3ca"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/backend_hooks.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/backend_hooks.py",
+    "sha256": "98efefe94a0597786fd4cea85455e8f4aba57b0b597a21f4e38f8677e6f7fcb6"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/backend_observer.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/backend_observer.py",
+    "sha256": "601591be9a7e9ecb67bfbbaa18bb6dcb10bc44142dcd490f72676549aba1c891"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/browser_binding.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/browser_binding.py",
+    "sha256": "c3bcf8df7360e91e98ed3b16473e5b5ad1164532f8f5864905c6c4a9d7133d2e"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/cache_inputs.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/cache_inputs.py",
+    "sha256": "b84e2190c9d33f784510304dc340fd672bde6e2dfe6d0b5d3aa982985dced41d"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/case_matrix.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/case_matrix.py",
+    "sha256": "22c1003d3830f99e36e27c05b9d1d672640c8a5b446726bd079c78cad60af717"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/client_boundary.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/client_boundary.py",
+    "sha256": "cc7990fb5135d6b43af33897750c7de9cddd1748a563926345c027b448a0b418"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/closure_diagnostics.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/closure_diagnostics.py",
+    "sha256": "be5dd951f84a5ba682d5776aae07cf27f42e072202ebfde1a8da176db20083af"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/context_binding.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/context_binding.py",
+    "sha256": "2e0d9d1076fa949b8f8892a07004a1a9f9e6c4baa10406dcdbe2800bfe1abcf7"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/controller_owned.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/controller_owned.py",
+    "sha256": "f82b3ff7bd781b0fa3a4c8b0e0bd93378841443831a1ea659742dd1caf0956bb"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/denial_probe.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/denial_probe.py",
+    "sha256": "5c857541b9c9e9bf65cabdeae807b48674a99c32cbae3565a686a504347438f6"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/esbuild_offline.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/esbuild_offline.py",
+    "sha256": "41d47d80406a993e6d08fa5486b8868ab1ae7ef2358e66dbeb6ae5e0f266b84d"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/held_outcomes.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/held_outcomes.py",
+    "sha256": "925eb4fc14935d491d63178fe9d410119b02a1f55285342a8eaacedd798b0ece"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/inspector.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/inspector.py",
+    "sha256": "8ff5b5f77c607a0a594be5329c45f256cba95eab0d19b72dd13d6f8c770071c4"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/journey.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/journey.py",
+    "sha256": "e738141efd8640112cce70620636a5b1cd02570ccb3491ad39837f26e4fd9b90"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/managed_fixture_dotenv.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/managed_fixture_dotenv.py",
+    "sha256": "8354a1c5e83a76eecad4694b8ac7fc6ad0a2a1515294f765ae54568fc868b9be"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/materializer.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/materializer.py",
+    "sha256": "9dde9ab8ab674f6d8fd009ea2046c5557220ae38ec9129b98dd7becc91b585d2"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/native_markers.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/native_markers.py",
+    "sha256": "e2a7591496f4e689cdad427853d039d4ea735d4486bd645162ece5b488a3d797"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/node_preload.cjs": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/node_preload.cjs",
+    "sha256": "43becb8dddc1bdcd24dce9689d75f3e20c588d5451f9a1463404ec50a8d687bc"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/operator_http.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/operator_http.py",
+    "sha256": "ffe8a8e24d44709c3f3178fb75510d201269bd84715b02c71a04ee4531b1142a"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/optimizer_import_scan.mjs": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/optimizer_import_scan.mjs",
+    "sha256": "7e974f8d76f5be06a266fbe8bd2acbe3681ac662f5fc95c45caef76cc711386e"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/policy_canary_transport.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/policy_canary_transport.py",
+    "sha256": "6a617a50355cfc332923d26d7512d775f012c0c6d10aa990e178c16e11544aed"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/policy_setup.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/policy_setup.py",
+    "sha256": "aa1f829ebca705b379af9846ffadad2a055e9d50b0b0a9adba73fdb7773fe01b"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/preparation_plan.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/preparation_plan.py",
+    "sha256": "35196159bdf2b18dc53d655020b2dfeb0d04332de74d81178eaf8cb529f1fbcc"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/probe_listeners.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/probe_listeners.py",
+    "sha256": "7d969266431ceb05d0393c5be89405c60692ac8c1ad33fd186045cf679e2b8de"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/role_stdio.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/role_stdio.py",
+    "sha256": "f53433085733780c93af370fa9d30bb115558c1d8c7e3430c33df33a7896f99c"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/root_prepare.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/root_prepare.py",
+    "sha256": "5ebac196353eeff4befa978df23839a4d2b173c29610b38ca734329b7fd96923"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/row_codec.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/row_codec.py",
+    "sha256": "34584dde1c91b98ef2306d56307fdf277649b783f4b2eba5911c7f3c1f66eda1"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/server_guard.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/server_guard.py",
+    "sha256": "2390acb1aded0518771bf8ecb2875eea8a4a7423759ee842617e3e33ea76914d"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/sitecustomize.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/sitecustomize.py",
+    "sha256": "8b3f270bf9b918f3ceb819af93df392a89ea9bdadfede77afd8bdd2fde116446"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/startup_controller.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/startup_controller.py",
+    "sha256": "6980816e872c777f24bd64fd6ca878428717399ff1ad70d7d6703b77a1d84daa"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/startup_owned_fd.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/startup_owned_fd.py",
+    "sha256": "6d6e1e5fad9700fa953af81e1802910fc98a34e51c96154f19889ca6cd370614"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/teardown.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/teardown.py",
+    "sha256": "56addee9eebd1070dc0edb229625466757021ad025dee32dc0786029fbbfe218"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/terminal_diagnostics.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/terminal_diagnostics.py",
+    "sha256": "6d493e91536d28ecf199006aa70eed4eced81d957aff87cf56c2ec9a1bca721a"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/test_policy_canary_transport.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_policy_canary_transport.py",
+    "sha256": "3b3cf781ae5ac306693e6ec2547fdf51f8f1b16d35b9359eaea07701e431eb0e"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/test_repo_source_managed_restart.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_repo_source_managed_restart.py",
+    "sha256": "c93764e4ef93c2ce69d71a04c80da568497b02c57affa023cb859fc7b1d4f454"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/test_startup_owned_fd.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/bootstrap/test_startup_owned_fd.py",
+    "sha256": "7f86350d4cd2f26fa0b2f4cf6773c3dfc752d7d0268f3145532ce8851b2520c1"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/collect_rejected_role.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/collect_rejected_role.py",
+    "sha256": "4fd25918150b70f2cd6e4b9b2fe8a20a40859ed921c2883e03b363aece326339"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/external-prepare/materializer.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/materializer.py",
+    "sha256": "da06e65589980df8c8413f5a0a98471bc7dc38c946454aa0406af6b1bdf6e396"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/external-prepare/prepare_inputs_r2.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/prepare_inputs_r2.py",
+    "sha256": "bb9bc62748c8d42fe3268322fa3cf041850251c21c15c6267f4ed74a39a8782a"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/external-prepare/root_prepare.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/external-prepare/root_prepare.py",
+    "sha256": "6369e9a3907a41b49dd74271d254bfb37287e8078e7af713ac0dcd291295e371"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/negative_context_binding.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/negative_context_binding.py",
+    "sha256": "abfddd557b61f193e20564aca85217ec22019336943645c7d4fd41ea6854159c"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/pidfd_compat.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/pidfd_compat.py",
+    "sha256": "e8b7160de15c1020e7dbbf97abf364c2bf6cf34c5f467b81208bab4bc459289e"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/compile_inputs.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/compile_inputs.py",
+    "sha256": "5d02377823460012e184b49c791d220ba1f8b4e958c2477f09e1510fc6ed30fb"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/compile_positive.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/compile_positive.py",
+    "sha256": "91a32a3695ea2630126b3babcb17d12071e93ff3e1ba88232d11c114a30be014"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/derive_censuses_r3.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/derive_censuses_r3.py",
+    "sha256": "29a009c916e12be8f6133e1042192be94269bf747e8fbc598813b7267333bbd9"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/final-helper-pins.PROPOSED.json": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/final-helper-pins.PROPOSED.json",
+    "sha256": "3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/input-template-r2.json": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/input-template.PROPOSED.json",
+    "sha256": "c78433a983a6831851c6a6816368ea4dc935f4e009175e76ee9f164f92017918"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/prepare_inputs_r2.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/prepare_inputs_r2.py",
+    "sha256": "589b754f01dc287e40862b6745d37dd3c8639bf68037a115825db98ebd44192d"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/readback_inputs_r2.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/readback_inputs_r2.py",
+    "sha256": "ea5b4e74a001096bfb5f7bca0886ef7fa16fbfbd39ee16319711bffdd576d11b"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/repository_fixture.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/preparation-inputs/repository_fixture.py",
+    "sha256": "3039a6a290a2fa17507bf799b46a682d5b759b27b24540eb4548f330b3adfa0e"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/root-seal-late-inputs.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/root-seal-late-inputs.py",
+    "sha256": "18438ed4738bec51f8783cc0e497a36eb44e9aa668149dda56f188c31af8b90d"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/root-verify-prepared.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/root-verify-prepared.py",
+    "sha256": "764771924ff76c3589cf9055cd1ac83c88109513f416bf736a966be51d9c40f2"
+  },
+  "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/run_root_fd_owner.py": {
+    "proposal_source": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/source/paired/run_root_fd_owner.py",
+    "sha256": "c1d720f6ac8fbf3fc7956f842cd67ef7697b74f85f89094365c33ad90908d6fe"
+  }
+}

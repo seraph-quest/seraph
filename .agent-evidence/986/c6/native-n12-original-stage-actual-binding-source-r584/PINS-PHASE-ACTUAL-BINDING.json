@@ -1,0 +1,90 @@
+{
+  "Root_phase_release": null,
+  "actual_seals": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/REQUIRED-SEALS.json",
+    "sha256": "893e649193b781bff19773e31e8a7294eaf75176a25fb79edb70d751315728a5",
+    "size": 4004
+  },
+  "actual_stage": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/staging/ROOT-stage-receipt.json",
+    "sha256": "da41b7db949780d894f6949307062dc774bb11075320541e895a0ce0cdd84cd2",
+    "size": 19231
+  },
+  "current_binding_review": null,
+  "files": [
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/COMMANDS-ACTUAL-STAGE-SEALS.SOURCE.json",
+      "sha256": "61311e05a975277ae92e49ab07545fb2c3a63633bd0d6d50b72dfed65ace0118",
+      "size": 11925
+    },
+    {
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/REPORT-PHASE-ACTUAL-BINDING.md",
+      "sha256": "9057b3d7b443243643441ac13fa943d58199a90e4e285e392de2e7d3094f450d",
+      "size": 488
+    }
+  ],
+  "runtime_release": null,
+  "source_only": true,
+  "templates": [
+    {
+      "bound_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/ROOT-N12-PHASE01-FIXTURE-CURRENT-READBACK.R558-CURRENT.CURRENT-SEAL.ACTUAL-R584.py.txt",
+        "sha256": "f4b33a9bad114a947dd6dd6b8e74d0e84603e3b12521ae371821cd4bfdb46aa4",
+        "size": 8668
+      },
+      "original_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASE01-FIXTURE-CURRENT-READBACK.R558-CURRENT.CURRENT-SEAL.py.txt",
+        "sha256": "e3ddf01b1847276193cbd8dd697c1117a56b7b33f8594c62c28271d4a8dda45e",
+        "size": 8630
+      }
+    },
+    {
+      "bound_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/ROOT-N12-PHASE01-RELEASE-STABLE.R558-CURRENT.CURRENT-SEAL.ACTUAL-R584.py.txt",
+        "sha256": "b88f9cf2a62be5923689ea2be9123116ae059b00db92597c343961a8c15b07a8",
+        "size": 3306
+      },
+      "original_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASE01-RELEASE-STABLE.R558-CURRENT.CURRENT-SEAL.py.txt",
+        "sha256": "3eb303db8459e1b6eaadf26a1c384a3971cf13a9a45b0cfbe4ac32caed9e1c27",
+        "size": 3274
+      }
+    },
+    {
+      "bound_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/ROOT-N12-PHASE02-PRIVATE-READBACK.R558-CURRENT.CURRENT-SEAL.ACTUAL-R584.py.txt",
+        "sha256": "b773b5a2b151fefb236593f32fd5e09006935baf2c2fd4f2b457b207485675a2",
+        "size": 10446
+      },
+      "original_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASE02-PRIVATE-READBACK.R558-CURRENT.CURRENT-SEAL.py.txt",
+        "sha256": "f185489df84750641b1c540438979dd6aad7046fdd5a541058f55d1c2780b4bc",
+        "size": 10408
+      }
+    },
+    {
+      "bound_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/ROOT-N12-PHASES02-07-GATE.R558-CURRENT.CURRENT-SEAL.ACTUAL-R584.py.txt",
+        "sha256": "89fdee37ccfacbc7aca5763803ff74d65e8a61243fdaf639c44ac3ac93225e5d",
+        "size": 17245
+      },
+      "original_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASES02-07-GATE.R558-CURRENT.CURRENT-SEAL.py.txt",
+        "sha256": "6bc5210fc5b4a7bd434f8f7de19668812a7741b65c4cc285a683146e7ec20704",
+        "size": 17207
+      }
+    },
+    {
+      "bound_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/ROOT-N12-PHASES03-07-READBACK.R558-CURRENT.CURRENT-SEAL.ACTUAL-R584.py.txt",
+        "sha256": "847d56896f3a45f69c8f8f6af0bb3f441aea4a7bc7016ca1bf0c3d73263976a8",
+        "size": 16826
+      },
+      "original_source": {
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/controls/ROOT-N12-PHASES03-07-READBACK.R558-CURRENT.CURRENT-SEAL.py.txt",
+        "sha256": "ff123b5034e69cab195787e61659cde761955879e30c01c2a07364952659cab3",
+        "size": 16788
+      }
+    }
+  ]
+}

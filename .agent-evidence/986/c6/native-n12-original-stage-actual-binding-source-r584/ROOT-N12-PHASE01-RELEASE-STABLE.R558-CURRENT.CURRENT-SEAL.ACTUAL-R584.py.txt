@@ -1,0 +1,54 @@
+from pathlib import Path
+import hashlib,json,os,stat
+root=Path('/home/pawel/repos/seraph/.agent-evidence/986/c6')
+packet=root/'native-managed-running-case-successor-source-r575'
+assert os.getuid()==1000
+STABLE=('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+def identity(info): return tuple(getattr(info,name) for name in STABLE)
+
+def read(path):
+    before=path.lstat()
+    assert stat.S_ISREG(before.st_mode) and before.st_uid==1000 and before.st_gid==1000 and before.st_nlink==1 and stat.S_IMODE(before.st_mode)==0o600
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        info=os.fstat(fd)
+        assert identity(info)==identity(before)
+        with os.fdopen(fd,'rb',closefd=False) as stream: raw=stream.read()
+        assert identity(os.fstat(fd))==identity(info)==identity(path.lstat()) and len(raw)==info.st_size
+        return raw
+    finally: os.close(fd)
+
+def binding(path):
+    raw=read(path)
+    return {'path':str(path),'sha256':hashlib.sha256(raw).hexdigest(),'size':len(raw)}
+
+receipt_path=packet/'staging/ROOT-stage-receipt.json'
+receipt_raw=read(receipt_path)
+assert hashlib.sha256(receipt_raw).hexdigest()=='da41b7db949780d894f6949307062dc774bb11075320541e895a0ce0cdd84cd2'
+receipt=json.loads(receipt_raw)
+assert receipt['state']=='SOURCE_ONLY_STAGED' and receipt['staged_files']==55 and receipt['runtime_started'] is False and receipt['actual_ledger_created'] is False and receipt['helper_count']==37
+source_raw=read(packet/'SOURCE-PINS.json')
+assert hashlib.sha256(source_raw).hexdigest()=='43ff2a85c08d4bebf6f1b66c4c8a59d99ff04e1f0dc6b2ae77b56e49dc11c9aa'
+source=json.loads(source_raw)
+targets_raw=read(packet/'TARGET-SOURCE-MAP.json')
+assert hashlib.sha256(targets_raw).hexdigest()=='9ba7f52ddb9ace1278b0791636c2b68dea490abb0d049f8e3b911348ce39209f'
+targets=json.loads(targets_raw)
+assert receipt['targets']==targets and len(targets)==55
+for name,row in targets.items():
+    assert set(row)=={'proposal_source','sha256'} and row['proposal_source'] in source
+    expected=source[row['proposal_source']]
+    raw=read(Path(name))
+    assert hashlib.sha256(raw).hexdigest()==row['sha256']==expected['sha256'] and len(raw)==expected['size']
+commands=packet/'PREPARATION-COMMANDS.PROPOSED.json'
+commands_raw=read(commands)
+assert hashlib.sha256(commands_raw).hexdigest()=='61763232918b7e37b4740f282aaac4972e1e69e06362381242b239449a6396e5'
+phase=json.loads(commands_raw)['phases'][0]
+assert phase['phase']=='01_repository_stage' and phase['actual_outcome'] is None
+for name in phase['expected_outputs']: assert not os.path.lexists(name)
+value={'state':'ROOT_RELEASE_ORIGINAL_N11_PHASE01_ONLY','actual_staged_receipt':binding(receipt_path),'commands':binding(commands),'phase':phase['phase'],'argv':phase['argv'],'complete_staged_files_verified':55,'next_phase':None,'native_owner':None,'runtime':None,'same_epoch_retry':False}
+path=root/'ROOT-N12-PHASE01-RELEASE-r558.json'
+raw=(json.dumps(value,sort_keys=True,indent=2)+'\n').encode()
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'wb') as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+assert read(path)==raw
+print(json.dumps({'state':value['state'],'release':binding(path),'staged_files_verified':55}))

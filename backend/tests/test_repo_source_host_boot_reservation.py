@@ -42,7 +42,7 @@ async def test_original_host_boot_release_parser_rejects_negative_copied_journal
         assert source._repository_record(original, "repository:physical-cleanup:v1") is None
         assert source._repository_record(original, "repository:terminal:v1") is None
         assert source.read_repository_inventory(original)["schema"] in {
-            "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+            "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
         db.expunge(original)
     rows, files = await _rows(jobs), _private_files(flow["service"])
     original_bytes = _canonical(original.model_dump(mode="json"))

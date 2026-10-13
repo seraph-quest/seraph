@@ -62,7 +62,7 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
     stop = source._repository_record(run, STOP_ID)
     if witness is None:
         if stop is not None and source.read_repository_inventory(run)["schema"] in {
-                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
             raise DurableJobLeaseError("original pending uncertainty owner witness required")
         return
     if type(witness) is not _RepositoryUncertainty or witness not in _UNCERTAINTY:
@@ -74,7 +74,7 @@ async def append_repository_uncertainty_in_writer(db, jobs, run, *, witness, to_
             or run.status != "running" or to_status != "unknown_external_effect" or reason not in reasons
             or stop is None or source._source_digest(stop) != stop_digest
             or source.read_repository_inventory(run)["schema"] not in {
-                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+                "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or not isinstance(result, dict) or set(result) != {"no_learning", "operator_action", "iteration_id"}
             or result["no_learning"] is not True or result["operator_action"] != reasons[reason]):
         raise DurableJobLeaseError("original uncertainty projection changed")
@@ -166,22 +166,61 @@ def _static_digest_v4(values, model_name, role):
         _canonical(_static_projection_v4(values, model_name, role)).encode()).hexdigest()
 
 
+_V5_STATIC_FIELDS = {**_V4_STATIC_FIELDS,
+    "WorkflowRunState": _V4_STATIC_FIELDS["WorkflowRunState"] | {"composition_binding_json"}}
+
+
+def _static_projection_v5(values, model_name, role):
+    if type(values) is not dict or model_name not in _V5_STATIC_FIELDS or set(values) != _V5_STATIC_FIELDS[model_name]:
+        raise DurableJobLeaseError("original v5 static field inventory changed")
+    if model_name != "WorkflowRunState":
+        return _static_projection_v4(values, model_name, role)
+    binding = values["composition_binding_json"]
+    if binding is not None and (type(binding) is not str or not binding):
+        raise DurableJobLeaseError("original v5 composition binding changed")
+    # Project the exact 66-field row, including literal null or original string.
+    mutable = {"updated_at"}
+    if role == "root":
+        mutable |= {"revision", "checkpoint_receipts_json", "heartbeat_at"}
+    elif role == "original_parent":
+        mutable |= {"revision", "checkpoint_receipts_json"}
+    elif role == "native_invocation":
+        mutable |= {"revision", "status", "failure_reason", "heartbeat_at"}
+    else:
+        raise DurableJobLeaseError("original v5 static Root role changed")
+    return {key: value for key, value in values.items() if key not in mutable}
+
+
+def _static_digest_v5(values, model_name, role):
+    import hashlib
+    return hashlib.sha256(b"repository.stop_static.v3\0" +
+        _canonical(_static_projection_v5(values, model_name, role)).encode()).hexdigest()
+
+
+def _static_digest_for_run(run, values, model_name, role):
+    schema = _source().read_repository_inventory(run)["schema"]
+    if schema == "repository.checkpoint_inventory.v5":
+        return _static_digest_v5(values, model_name, role)
+    if schema == "repository.checkpoint_inventory.v4":
+        return _static_digest_v4(values, model_name, role)
+    raise DurableJobLeaseError("original repository static version changed")
+
+
 def _stop_schema(run, kind):
-    version = "v2" if _source().read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4" else "v1"
-    return "repository." + kind + "." + version
+    return _source()._repository_format_schema(_source().read_repository_inventory(run)["schema"], kind)
 
 
 def _static(row, context):
     """Only original, explicitly known callback/cleanup successor columns."""
     source = _source()
     values = row.model_dump(mode="json")
-    if source.read_repository_inventory(context["run"])["schema"] == "repository.checkpoint_inventory.v4":
+    if source.read_repository_inventory(context["run"])["schema"] in {"repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
         role = "row"
         if isinstance(row, WorkflowRunState):
             role = ("root" if row.run_identity == context["run"].run_identity else
                 "original_parent" if row.run_identity == context["binding"].parent_job_id else
                 "native_invocation" if row.run_identity == context["binding"].invocation_id else "foreign")
-        return _static_digest_v4(values, type(row).__name__, role)
+        return _static_digest_for_run(context["run"], values, type(row).__name__, role)
     mutable = {"updated_at"}
     if isinstance(row, WorkflowRunState):
         if row.run_identity == context["run"].run_identity:
@@ -219,6 +258,8 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
         original, work, compiled, group, binding, task_source = source.read_repository_original(run)
         if (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id):
             raise DurableJobLeaseError("original repository stop owner changed")
+        if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v5":
+            await source._validate_repository_composition_owner(db, run)
         if run.status not in {"running", "unknown_external_effect"}:
             raise DurableJobLeaseError("original repository stop is not nonterminal")
         permanent = _binding(owner_principal_id=binding.owner_principal_id, goal_id=binding.goal_id,
@@ -402,6 +443,9 @@ async def _validate_repository_stop_context_rows_sql(db, service, jobs, *, conte
         actual = await db.get(model, key, populate_existing=True)
         if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
             raise DurableJobLeaseError("original repository stop staging rows changed")
+        if (isinstance(actual, WorkflowRunState) and actual.run_identity == context["run"].run_identity
+                and _source().read_repository_inventory(actual)["schema"] == "repository.checkpoint_inventory.v5"):
+            await _source()._validate_repository_composition_owner(db, actual)
         if isinstance(actual, OperatorSession) and (actual.revoked_at or actual.replaced_by_id
                 or actual.is_bearer_tombstone or _as_utc(actual.idle_expires_at) <= _utc_now()
                 or _as_utc(actual.absolute_expires_at) <= _utc_now()):
@@ -539,7 +583,7 @@ def assert_repository_stop_witness(witness):
     if (type(witness) is not _RepositoryStopWitness or _ISSUED.get(witness) is not witness.service
             or type(witness.context) is not _RepositoryStopContext or _STAGED.get(witness.context) is not witness.service):
         raise DurableJobLeaseError("actual source-owned repository stop witness required")
-    if _source().read_repository_inventory(witness.context["run"])["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+    if _source().read_repository_inventory(witness.context["run"])["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
         from src.workflows.repo_repair_source_recovery import (
             assert_repository_recovery_fence, assert_repository_original_stop_completion)
         assert_repository_recovery_fence(witness.fence, service=witness.service, jobs=witness.jobs,
@@ -596,7 +640,7 @@ async def _positive_witness(service, jobs, context, stop, *, original_completion
             manifest = json.loads(service._read_private_artifact(readback["artifact_ref"],
                 expected_digest=readback["artifact_digest"]))
             transport = manifest.get("supervisor_transport", {})
-            if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+            if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
                 from src.workflows.repo_repair_source_recovery import (
                     assert_repository_original_stop_completion, repository_original_stop_completion_result,
                     repository_original_stop_completion_cleanup_envelope)
@@ -636,9 +680,9 @@ async def _positive_witness(service, jobs, context, stop, *, original_completion
                         or marker.get("cleanup_proven") is not True
                         or marker.get("terminal_receipt", {}).get("readback_sha256") != readback["artifact_digest"]):
                     raise DurableJobLeaseError("original full physical stop marker binding changed")
-                if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+                if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
                     if marker.get("process_cleanup") != {
-                            "transport_kind": ("original_producer_durable_v2" if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4" else "original_producer_durable_v1"),
+                            "transport_kind": ("original_producer_durable_v2" if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"} else "original_producer_durable_v1"),
                             "completion_digest": source._source_digest(actual["original_producer_completion"])}:
                         raise DurableJobLeaseError("original producer marker differs from active signed completion")
                 elif work.language_profile == "test_node":
@@ -690,6 +734,8 @@ async def validate_repository_stop_witness(db, witness, *, parent, task, attempt
         if row is None or _canonical(row.model_dump(mode="json")) != expected:
             raise DurableJobLeaseError("original stop SQL epoch changed")
     run = await witness.jobs._fetch(db, closure.repository_job_id)
+    if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v5":
+        await source._validate_repository_composition_owner(db, run)
     stop = source._repository_record(run, STOP_ID)
     if (stop is None or source._source_digest(stop) != closure.stop_intent_digest
             or await _accounting(db, context) != closure.all_original_accounting_digest):

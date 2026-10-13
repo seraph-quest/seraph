@@ -402,10 +402,10 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
     prefix = "artifacts/repo-repair/model/iteration-" + registration["iteration_id"]
     before_artifact = (captured["service"]._workspace() / (prefix + "-cleanup.json")).read_bytes()
     original_envelope = json.loads(before_artifact)
-    assert source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4"
+    assert source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v5"
     assert registration["schema"] == "repository.original_producer.v2"
     assert set(original_envelope) == {"schema", "physical_projection", "source_completion_cas", "source_append_metadata", "recovery_commitment"}
-    assert original_envelope["schema"] == "repository.original_cleanup_artifact.v2"
+    assert original_envelope["schema"] == "repository.original_cleanup_artifact.v3"
     assert len(original_envelope["recovery_commitment"]["non_root_static"]) == 10
     assert original_envelope["recovery_commitment"]["non_root_static"][4]["slot"] == "parent_input"
     assert len(original_envelope["source_append_metadata"]) == 2
@@ -431,7 +431,7 @@ async def test_actual_source_completion_writer_rolls_back_whole_cleanup_then_ret
             assert artifact_path.read_bytes() == altered_bytes
         finally:
             artifact_path.write_bytes(before_artifact)
-    # An authentic v4 Root cannot upgrade a legacy three-key artifact in place.
+    # An authentic new v5 Root cannot upgrade a legacy three-key artifact in place.
     legacy_envelope = {key: original_envelope[key] for key in (
         "physical_projection", "source_completion_cas", "source_append_metadata")}
     legacy_bytes = _canonical(legacy_envelope).encode()
@@ -721,14 +721,14 @@ async def test_actual_unknown_orphan_reuses_original_metadata_after_real_due_aut
     path = service._workspace() / ("artifacts/repo-repair/model/iteration-" + registration["iteration_id"] + "-cleanup.json")
     original_bytes = path.read_bytes()
     original_envelope = json.loads(original_bytes)
-    assert original_envelope["schema"] == "repository.original_cleanup_artifact.v2"
-    from src.workflows.repo_repair_stop import _static_digest_v4
+    assert original_envelope["schema"] == "repository.original_cleanup_artifact.v3"
+    from src.workflows.repo_repair_stop import _static_digest_v5
     commitment = original_envelope["recovery_commitment"]
     actual_unknown = captured["before_root"]
-    assert commitment["root_static_digest"] == _static_digest_v4(actual_unknown, "WorkflowRunState", "root")
+    assert commitment["root_static_digest"] == _static_digest_v5(actual_unknown, "WorkflowRunState", "root")
     predecessor = next(item["payload"]["predecessor_projection"] for item in json.loads(actual_unknown["checkpoint_receipts_json"])
         if item["checkpoint_id"] == "repository:stop-uncertainty-successor:v1")
-    assert commitment["root_static_digest"] != _static_digest_v4({**actual_unknown, **predecessor}, "WorkflowRunState", "root")
+    assert commitment["root_static_digest"] != _static_digest_v5({**actual_unknown, **predecessor}, "WorkflowRunState", "root")
     await asyncio.sleep(until_due + 0.02)
     operator = await auth.authenticate_session(kwargs["owner"].session_id, touch=True)
     assert operator.session_id == kwargs["owner"].session_id
@@ -767,8 +767,8 @@ async def test_actual_unknown_orphan_reuses_original_metadata_after_real_due_aut
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version,event", [("v4", "first"), ("v4", "refresh_retry"),
-    ("v4", "cost_changed"), ("v4", "revoked"), ("v3", "first")])
+@pytest.mark.parametrize("version,event", [("v5", "first"), ("v5", "refresh_retry"),
+    ("v5", "cost_changed"), ("v5", "revoked"), ("v3", "first")])
 async def test_actual_unknown_cleanup_dispatch_preserves_original_stop_and_liabilities(
         accounting_db, monkeypatch, repository_admission_signer, version, event):
     from sqlalchemy import select
@@ -911,8 +911,10 @@ def test_v4_static_projection_rejects_unknown_declared_fields(name):
     from src.workflows.repo_repair_stop import _V4_STATIC_FIELDS, _static_projection_v4
     from src.workflows.job_runtime import DurableJobLeaseError
     model = getattr(models, name)
-    assert set(model.model_fields) == _V4_STATIC_FIELDS[name]
-    values = {key: None for key in model.model_fields}
+    expected_current = _V4_STATIC_FIELDS[name] | ({"composition_binding_json"} if name == "WorkflowRunState" else set())
+    assert set(model.model_fields) == expected_current
+    # Literal historical parser evidence, not a current-row NULL adapter.
+    values = {key: None for key in _V4_STATIC_FIELDS[name]}
     values["unreviewed_column"] = "new"
     with pytest.raises(DurableJobLeaseError, match="field inventory changed"):
         _static_projection_v4(values, name, "root" if name == "WorkflowRunState" else "row")

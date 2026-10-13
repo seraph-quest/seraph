@@ -1874,6 +1874,9 @@ class WorkflowRunState(SQLModel, table=True):
     # Address projection only. Selected context checks immutable native
     # authority before using this field to locate a private task attachment.
     source_task_id: Optional[str] = Field(default=None)
+    # Server-derived immutable composition vector; absent legacy rows never
+    # gain plugin execution authority through a default epoch.
+    composition_binding_json: Optional[str] = Field(default=None)
     # Quota address projection only; charged until positively verified cleanup.
     selected_context_reserved_bytes: Optional[int] = Field(default=None)
     capability_version: str = Field(default="workflow-v1", index=True)

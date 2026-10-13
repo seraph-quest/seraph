@@ -42,7 +42,7 @@ def _latest_original_repository_registration(run):
     """Select only protected original registrations, within the original cap."""
     source = _source()
     original, work, *_ = source.read_repository_original(run)
-    if source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+    if source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
         return None
     latest = None
     for index in range(1, work.limits.max_iterations + 1):
@@ -116,7 +116,7 @@ def repository_source_recovery_projection(service, jobs, run):
     # An explicit reconciliation attempt is metadata, never a physical witness
     # or a grant. The original owner checks current authority again on POST.
     action = "unavailable"
-    if (_v4_root(run) and physical_hold is True and terminal is None
+    if (_commitment_root(run) and physical_hold is True and terminal is None
             and run.status in {"running", "unknown_external_effect"}
             and (run.status == "running" or stop is not None)
             and ((cleanup is None and readback is None)
@@ -167,16 +167,30 @@ def _v4_root(run):
     return _source().read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4"
 
 
+def _commitment_root(run):
+    return _source().read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
+
+
+def _commitment_version(run):
+    return "v2" if _source().read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v5" else "v1"
+
+
+def _cleanup_schema(run):
+    return _source()._repository_format_schema(_source().read_repository_inventory(run)["schema"], "original_cleanup_artifact")
+
+
 def _cleanup_artifact_keys(run):
-    return _CLEANUP_V2_KEYS if _v4_root(run) else _CLEANUP_V1_KEYS
+    return _CLEANUP_V2_KEYS if _commitment_root(run) else _CLEANUP_V1_KEYS
 
 
-def _validate_recovery_commitment(value):
+def _validate_recovery_commitment(value, *, _version="v1"):
+    if _version not in {"v1", "v2"}:
+        raise RepositorySourceRecoveryError("original_recovery_commitment_changed")
     """Closed immutable evidence parser; parsing registers no authority."""
     source = _source()
     if (type(value) is not dict or set(value) != _COMMITMENT_KEYS
-            or value["schema"] != "repository.recovery_commitment.v1"
-            or value["domain"] != "repository.source_recovery_immutable.v1"
+            or value["schema"] != "repository.recovery_commitment." + _version
+            or value["domain"] != "repository.source_recovery_immutable." + _version
             or type(value["root_key"]) is not str or not value["root_key"].startswith("workflow_run_states:")
             or not value["root_key"][len("workflow_run_states:"):]
             or type(value["before_revision"]) is not int or value["before_revision"] < 0
@@ -207,10 +221,10 @@ def _validate_recovery_commitment(value):
 
 def _validate_cleanup_artifact_version(run, envelope):
     if (type(envelope) is not dict or set(envelope) != _cleanup_artifact_keys(run)
-            or _v4_root(run) and envelope.get("schema") != "repository.original_cleanup_artifact.v2"):
+            or _commitment_root(run) and envelope.get("schema") != _cleanup_schema(run)):
         raise RepositorySourceRecoveryError("original_producer_artifact_changed")
-    if _v4_root(run):
-        value = _validate_recovery_commitment(envelope["recovery_commitment"])
+    if _commitment_root(run):
+        value = _validate_recovery_commitment(envelope["recovery_commitment"], _version=_commitment_version(run))
         cas = envelope["source_completion_cas"]
         if (type(cas) is not dict or set(cas) != _COMPLETION_CAS_KEYS
                 or type(cas["before_revision"]) is not int or cas["before_revision"] < 0
@@ -225,7 +239,7 @@ def _validate_cleanup_artifact_version(run, envelope):
 def _make_recovery_commitment(context, cas, *, root_values=None):
     """Project only actual eleven canonical mapped rows from a genuine stage."""
     from src.workflows.job_runtime import _canonical
-    from src.workflows.repo_repair_stop import _static_digest_v4, _static_projection_v4, _key
+    from src.workflows.repo_repair_stop import _static_digest_for_run, _static_projection_v4, _key
     run, binding, original = context["run"], context["binding"], context["original"]
     root = run.model_dump(mode="json") if root_values is None else root_values
     rows = [(model, key, json.loads(raw)) for model, key, raw in context["rows"]]
@@ -254,28 +268,29 @@ def _make_recovery_commitment(context, cas, *, root_values=None):
     history = json.loads(root["checkpoint_receipts_json"] or "[]")
     if type(history) is not list or len(history) > 50 or root["revision"] != cas["before_revision"]:
         raise RepositorySourceRecoveryError("original_recovery_context_changed")
-    value = {"schema": "repository.recovery_commitment.v1", "domain": "repository.source_recovery_immutable.v1",
+    version = _commitment_version(run)
+    value = {"schema": "repository.recovery_commitment." + version, "domain": "repository.source_recovery_immutable." + version,
         "root_key": "workflow_run_states:" + str(_key(run)), "before_revision": cas["before_revision"],
-        "root_static_digest": _static_digest_v4(root, "WorkflowRunState", "root"),
+        "root_static_digest": _static_digest_for_run(run, root, "WorkflowRunState", "root"),
         "root_updated_at": root["updated_at"], "journal_prefix_count": len(history),
         "journal_prefix_digest": hashlib.sha256(b"repository.source_recovery_journal.v1\0" + _canonical(history).encode()).hexdigest(),
         "owner_identity": _static_projection_v4(selected[6][2], "OperatorSession", "operator_session"),
         "non_root_static": [{"slot": slot, "table": table, "key": str(key),
-            "digest": _static_digest_v4(raw, name, slot)}
+            "digest": _static_digest_for_run(run, raw, name, slot)}
             for (slot, table, name), (model, key, raw) in zip(_COMMITMENT_SLOTS, selected)],
         **{key: cas[key] for key in ("producer_registration_digest", "producer_completion_digest", "stop_digest", "unknown_projection_digest")}}
-    return _validate_recovery_commitment(value)
+    return _validate_recovery_commitment(value, _version=version)
 
 
 def _validate_commitment_root(run, value, cas, root):
     from src.workflows.job_runtime import _canonical
-    from src.workflows.repo_repair_stop import _static_digest_v4, _key
-    value = _validate_recovery_commitment(value)
+    from src.workflows.repo_repair_stop import _static_digest_for_run, _key
+    value = _validate_recovery_commitment(value, _version=_commitment_version(run))
     history = json.loads(root["checkpoint_receipts_json"] or "[]")
     if (type(history) is not list or value["root_key"] != "workflow_run_states:" + str(_key(run))
             or value["before_revision"] != cas["before_revision"] or root["revision"] != cas["before_revision"]
             or value["root_updated_at"] != root["updated_at"]
-            or value["root_static_digest"] != _static_digest_v4(root, "WorkflowRunState", "root")
+            or value["root_static_digest"] != _static_digest_for_run(run, root, "WorkflowRunState", "root")
             or value["journal_prefix_count"] != len(history)
             or value["journal_prefix_digest"] != hashlib.sha256(b"repository.source_recovery_journal.v1\0" + _canonical(history).encode()).hexdigest()
             or any(value[key] != cas[key] for key in ("producer_registration_digest", "producer_completion_digest", "stop_digest", "unknown_projection_digest"))):
@@ -291,7 +306,7 @@ def read_registered_repository_producer(run, *, iteration_index):
     from datetime import datetime
     source = _source()
     original, work, _, _, binding, task_source = source.read_repository_original(run)
-    if (source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+    if (source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or type(iteration_index) is not int or not 1 <= iteration_index <= work.limits.max_iterations):
         raise RepositorySourceRecoveryError("original_producer_registration_missing")
     identity = source.iteration_identity(run.run_identity, original["repository_attempt_id"],
@@ -303,7 +318,7 @@ def read_registered_repository_producer(run, *, iteration_index):
             or len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()) > 16 * 1024
             or execution is None or prepared is None):
         raise RepositorySourceRecoveryError("original_producer_registration_changed")
-    expected = {"schema": ("repository.original_producer.v2" if source.read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4" else "repository.original_producer.v1"), "job_id": run.run_identity,
+    expected = {"schema": ("repository.original_producer.v2" if source.read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"} else "repository.original_producer.v1"), "job_id": run.run_identity,
         "iteration_id": identity, "iteration_index": iteration_index,
         "repository_attempt_id": original["repository_attempt_id"],
         "owner_principal_id": run.owner_principal_id, "owner_session_id": run.operator_session_id,
@@ -501,7 +516,7 @@ def _verify_repository_knownpost_root(run, registration, result, envelope):
     from src.work_board.contracts import TaskProposalGroupV1
     source = _source()
     if (run.status != "unknown_external_effect"
-            or source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+            or source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or type(envelope) is not dict or set(envelope) not in (_CLEANUP_V1_KEYS, _CLEANUP_V2_KEYS)):
         raise RepositorySourceRecoveryError("original_repository_knownpost_changed")
     _validate_cleanup_artifact_version(run, envelope)
@@ -556,7 +571,7 @@ def _verify_repository_knownpost_root(run, registration, result, envelope):
         "successor_digest", "authority_digest", "fencing_token", "from_revision", "to_revision",
         "predecessor_projection", "successor_projection"}
     if (type(successor) is not dict or set(successor) != successor_keys
-            or successor["schema"] != ("repository.stop_uncertainty_successor.v2" if _v4_root(run) else "repository.stop_uncertainty_successor.v1")
+            or successor["schema"] != source._repository_format_schema(source.read_repository_inventory(run)["schema"], "stop_uncertainty_successor")
             or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
             or successor["stop_digest"] != cas["stop_digest"]
             or successor["authority_digest"] != run.authority_digest
@@ -597,7 +612,7 @@ def _verify_repository_knownpost_root(run, registration, result, envelope):
         "current_digest": current_digest, "revision": candidate["revision"], "fencing_token": run.fencing_token}
     if source._source_digest(proof) != cas["unknown_projection_digest"]:
         raise RepositorySourceRecoveryError("original_repository_knownpost_root_changed")
-    if _v4_root(run):
+    if _commitment_root(run):
         _validate_commitment_root(run, envelope["recovery_commitment"], cas, candidate)
     return {"root_key": root_key, "current_static_digest": current_digest, "unknown_projection": proof}
 
@@ -629,7 +644,7 @@ async def _stage_repository_knownpost_identity(service, jobs, *, root, owner, fe
     original, *_ = source.read_repository_original(root)
     snapshot = json.loads(service._read_private_artifact(stop["snapshot_artifact_ref"],
         expected_digest=stop["snapshot_artifact_digest"]))
-    if snapshot != {"schema": ("repository.stop_snapshot.v2" if _v4_root(root) else "repository.stop_snapshot.v1"), "static_rows": stop["static_rows"],
+    if snapshot != {"schema": source._repository_format_schema(source.read_repository_inventory(root)["schema"], "stop_snapshot"), "static_rows": stop["static_rows"],
             "repository_job_id": root.run_identity, "source_checkpoint_digest": source._source_digest(original)}:
         raise RepositorySourceRecoveryError("original_repository_knownpost_stop_changed")
     # Recompute from the actual row/result/literal envelope at issuance; a
@@ -726,7 +741,7 @@ async def _stage_repository_completion_append_publication(service, jobs, *, cont
         "proposal_json": _canonical(proposal_json), "approval_json": _canonical(approval_json),
         "result": result, "result_status": result["status"], "status": status,
         "body_digest": source._source_digest(result["original_producer_completion"]),
-        "recovery_commitment": _canonical(_make_recovery_commitment(context, cas)) if _v4_root(run) else None,
+        "recovery_commitment": _canonical(_make_recovery_commitment(context, cas)) if _commitment_root(run) else None,
         "output_digests": {name: hashlib.sha256(raw).hexdigest() for name, raw in result["outputs"].items()}}
     for key, value in (("registration", registration), ("execution", execution), ("cas", cas),
             ("physical_projection", physical_projection), ("retry_metadata", retry_metadata)):
@@ -820,7 +835,7 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
     run, work = context["run"], context["work"]
     assert_repository_recovery_fence(fence, service=service, jobs=jobs,
         job_id=run.run_identity, owner=owner)
-    if (run.status != "running" or source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+    if (run.status != "running" or source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or source._repository_record(run, "repository:stop-uncertainty-successor:v1") is not None
             or source._repository_record(run, stop.STOP_ID) is None
             or (run.owner_principal_id, run.operator_session_id) != (owner.principal_id, owner.session_id)):
@@ -1277,7 +1292,9 @@ async def _load_recovery_original(service, jobs, *, job_id, owner, expected_job_
             raise RepositorySourceRecoveryError("repository_source_recovery_stale")
         original, work, compiled, group, binding, task_source = source.read_repository_original(run)
         inventory = source.read_repository_inventory(run)
-        if inventory["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+        if inventory["schema"] == "repository.checkpoint_inventory.v5":
+            await source._validate_repository_composition_owner(db, run)
+        if inventory["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
             raise RepositorySourceRecoveryError("original_producer_registration_missing")
         goal = await db.get(Goal, group.goal_id)
         source._assert_repository_original_limits(run, goal, staged_policy)
@@ -1298,7 +1315,7 @@ async def _load_recovery_original(service, jobs, *, job_id, owner, expected_job_
 
 
 def _assert_public_recovery_eligible(service, jobs, run):
-    if not _v4_root(run):
+    if not _commitment_root(run):
         raise RepositorySourceRecoveryError("repository_source_recovery_unavailable", status_code=503)
     packet = repository_source_recovery_projection(service, jobs, run)
     if packet is None or packet["public_actions"] != "reconcile_original_cleanup":
@@ -1339,7 +1356,7 @@ async def issue_repository_source_producer(service, jobs, job, *, owner):
         async with _repository_recovery_fence(service, jobs, job_id=job.job_id, owner=owner):
             context = await source._repository_precontact(service, jobs, job_id=job.job_id, owner=owner)
             run = context["run"]
-            if source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+            if source.read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
                 raise RepositorySourceRecoveryError("original_producer_registration_missing")
             identity = job.iteration_binding.iteration_id
             execution = source._repository_record(run, "repository:execution:" + identity)
@@ -1379,12 +1396,12 @@ async def issue_repository_source_producer(service, jobs, job, *, owner):
                     or host_binding.get("guard_identity") != list(ready.guard_identity)
                     or _utc_now() >= _as_utc(datetime.fromisoformat(job.execution_deadline_at))):
                 raise RepositorySourceRecoveryError("original_producer_admission_changed")
-            if _v4_root(run) and (durable.get("schema") != "repository.original_producer.v2"
+            if _commitment_root(run) and (durable.get("schema") != "repository.original_producer.v2"
                     or durable.get("original_deadline_at") != context["original"]["original_deadline_at"]
                     or _as_utc(run.deadline_at) != _as_utc(datetime.fromisoformat(context["original"]["original_deadline_at"]))
                     or durable.get("durability_filename") != "durability.json"):
                 raise RepositorySourceRecoveryError("original_producer_admission_changed")
-            payload = {"schema": ("repository.original_producer.v2" if _v4_root(run) else "repository.original_producer.v1"), "job_id": job.job_id,
+            payload = {"schema": ("repository.original_producer.v2" if _commitment_root(run) else "repository.original_producer.v1"), "job_id": job.job_id,
                 "iteration_id": identity, "iteration_index": job.iteration_binding.iteration_index,
                 "repository_attempt_id": context["original"]["repository_attempt_id"],
                 "owner_principal_id": owner.principal_id, "owner_session_id": owner.session_id,
@@ -1692,7 +1709,7 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
         committed = cleanup is not None or readback is not None
         _, work, *_ = source.read_repository_original(run)
         capped_failure = readback is not None and readback.get("status") == "failed" and index == work.limits.max_iterations
-    if _public_action and (not _v4_root(run) or
+    if _public_action and (not _commitment_root(run) or
             repository_source_recovery_projection(service, jobs, run)["public_actions"] != "reconcile_original_cleanup"):
         # Even denial is current-owner fenced; metadata never admits an action.
         async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
@@ -1701,7 +1718,7 @@ async def _reconcile_original_repository_cleanup(service, jobs, *, job_id, owner
     if unknown and committed:
         # The Source GET owns its one registered knownpost fence/primary.
         return await source.repository_operator_projection(service, jobs, job_id=job_id, owner=owner)
-    if unknown and _v4_root(run) and stopping is not None:
+    if unknown and _commitment_root(run) and stopping is not None:
         # NEW v4 may publish this authentic registered Source completion while
         # retaining Unknown and its original Stop/P/Q liabilities. The existing
         # publication owner acquires its own single fence and fresh physical and
@@ -1867,9 +1884,10 @@ def _read_original_cleanup_envelope_if_present(service, relative_path):
                 or _canonical(envelope).encode() != raw):
             raise RepositorySourceRecoveryError("original_producer_artifact_changed")
         if set(envelope) == _CLEANUP_V2_KEYS:
-            if envelope["schema"] != "repository.original_cleanup_artifact.v2":
+            if envelope["schema"] not in {"repository.original_cleanup_artifact.v2", "repository.original_cleanup_artifact.v3"}:
                 raise RepositorySourceRecoveryError("original_producer_artifact_changed")
-            _validate_recovery_commitment(envelope["recovery_commitment"])
+            _validate_recovery_commitment(envelope["recovery_commitment"], _version=(
+                "v2" if envelope["schema"] == "repository.original_cleanup_artifact.v3" else "v1"))
         return envelope
     except FileNotFoundError as exc:
         if opened:
@@ -2035,7 +2053,7 @@ async def stage_repository_knownpost_completion(service, jobs, *, job_id, owner,
                     stage=stage, owner=owner, fence=fence)
                 stop_owner.assert_repository_stop_context(staged, service=service, jobs=jobs)
                 context = staged.data
-                if _v4_root(root):
+                if _commitment_root(root):
                     candidate = json.loads(proof["unknown_projection"]["root_json"])
                     if _canonical(_make_recovery_commitment(context, envelope["source_completion_cas"], root_values=candidate)) != _canonical(envelope["recovery_commitment"]):
                         raise RepositorySourceRecoveryError("original_recovery_commitment_changed")
@@ -2237,7 +2255,7 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
             prefix = "artifacts/repo-repair/model/iteration-" + identity
             existing_envelope = _read_original_cleanup_envelope_if_present(service, prefix + "-cleanup.json")
             retry_metadata = None
-            commitment = _make_recovery_commitment(context, cas) if _v4_root(run) else None
+            commitment = _make_recovery_commitment(context, cas) if _commitment_root(run) else None
             if existing_envelope is not None:
                 _validate_cleanup_artifact_version(run, existing_envelope)
                 original_cas = existing_envelope["source_completion_cas"]
@@ -2251,8 +2269,8 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
                         or type(original_cas["rows_digest"]) is not str
                         or not source._SHA.fullmatch(original_cas["rows_digest"])
                         or _canonical(existing_envelope["physical_projection"]) != _canonical(projection)
-                        or not _v4_root(run) and unknown is None and original_cas["rows_digest"] != cas["rows_digest"]
-                        or _v4_root(run) and _canonical(existing_envelope["recovery_commitment"]) != _canonical(commitment)):
+                        or not _commitment_root(run) and unknown is None and original_cas["rows_digest"] != cas["rows_digest"]
+                        or _commitment_root(run) and _canonical(existing_envelope["recovery_commitment"]) != _canonical(commitment)):
                     raise RepositorySourceRecoveryError("original_producer_orphan_epoch_changed")
                 # Rows digest is the first staging audit receipt, never a current
                 # authority grant. Unknown's immutable full Root anchor proves
@@ -2271,7 +2289,7 @@ async def _original_repository_completion_publication(service, jobs, *, job_id, 
                     envelope = {"physical_projection": projection, "source_completion_cas": cas,
                         "source_append_metadata": [dict(item) for item in metadata]}
                     if commitment is not None:
-                        envelope.update(schema="repository.original_cleanup_artifact.v2", recovery_commitment=commitment)
+                        envelope.update(schema=_cleanup_schema(run), recovery_commitment=commitment)
                     _validate_cleanup_artifact_version(run, envelope)
                     envelope_raw = _canonical(envelope).encode()
                     if len(envelope_raw) > 1048576:

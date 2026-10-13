@@ -688,6 +688,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "plan_revision": "INTEGER",
             "candidate_id": "VARCHAR",
             "source_task_id": "VARCHAR",
+            "composition_binding_json": "VARCHAR",
             "selected_context_reserved_bytes": "INTEGER",
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",

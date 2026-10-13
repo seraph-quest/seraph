@@ -421,7 +421,7 @@ async def test_original_source_registers_actual_producer_before_native_command(
     async with flow["factory"]() as db:
         root = await flow["jobs"]._fetch(db, flow["root_id"])
         inventory = read_repository_inventory(root)
-        assert inventory["schema"] == "repository.checkpoint_inventory.v4"
+        assert inventory["schema"] == "repository.checkpoint_inventory.v5"
         assert len(inventory["identities"]) == 49
         registration = read_registered_repository_producer(root, iteration_index=1)
         assert registration["schema"] == "repository.original_producer.v2"
@@ -472,7 +472,7 @@ async def test_new_original_v4_inventory_keeps_exact_v3_vector_and_bounds(
         work = source.read_repository_original(root)[1]
         inventory = read_repository_inventory(root)
         before = root.model_dump_json()
-        assert inventory["schema"] == "repository.checkpoint_inventory.v4"
+        assert inventory["schema"] == "repository.checkpoint_inventory.v5"
         assert len(inventory["identities"]) == 10 + 13 * cap
         assert len(set(inventory["identities"])) == len(inventory["identities"])
         assert inventory["max_records"] == 50 and inventory["max_metadata_bytes_per_record"] == 16384
@@ -511,7 +511,7 @@ async def test_original_inventory_closed_v4_reader_denies_local_tamper_without_m
         wrapper = next(item for item in history if item["checkpoint_id"] == "repository:inventory:v1")
         payload = wrapper["payload"]
         if corruption == "missing_schema": payload.pop("schema")
-        elif corruption == "unknown_schema": payload["schema"] = "repository.checkpoint_inventory.v5"
+        elif corruption == "unknown_schema": payload["schema"] = "repository.checkpoint_inventory.v6"
         elif corruption == "untyped_schema": payload["schema"] = {}
         elif corruption == "duplicate": payload["identities"][-1] = payload["identities"][0]
         elif corruption == "subset": payload["identities"].pop()

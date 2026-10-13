@@ -767,7 +767,7 @@ async def issue_original_producer_owner(service, jobs, job, *, register_ready, a
     async with jobs._session() as db:
         run = await jobs._fetch(db, job.job_id)
         schema = read_repository_inventory(run)["schema"]
-        if schema not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+        if schema not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
             raise ValueError("original_producer_inventory_required")
         original_deadline = read_repository_original(run)[0]["original_deadline_at"]
     lane = service._iterative_lanes.get(job.job_id)
@@ -776,7 +776,7 @@ async def issue_original_producer_owner(service, jobs, job, *, register_ready, a
     owner = OriginalProducerOwner(job.job_id, job.iteration_binding.iteration_id,
         lane._descriptor, register_ready, authorize_command, registration_readback)
     _OWNERS[owner] = (service, jobs, str(lane.lock_path), str(lane.workspace_root),
-        PROFILE_V2 if schema == "repository.checkpoint_inventory.v4" else PROFILE, original_deadline, None)
+        PROFILE_V2 if schema in {"repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"} else PROFILE, original_deadline, None)
     return owner
 
 

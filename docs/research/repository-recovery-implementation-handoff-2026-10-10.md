@@ -120,3 +120,52 @@ Independent cumulative Critic review must specifically inspect immutable versus 
 ## Copyable implementation starting prompt
 
 Apply the reviewed documentation PR commit containing ADR-032 and this handoff to the latest #1009 feature branch; confirm it is not main/develop, verify the surviving baseline and any reviewed predecessors, and stop on contract drift. Implement #1009 strictly from ADR-032 plus unchanged ADR-030, following this handoff's numbered order. Preserve historical v3 startup debt protection, add NEW v4 authority only, and stage Running's original C1 input artifact before immutable commitment construction. Enforce the named child-process provider/local-model denial with only exact fixture loopback control allowances; run ordinary isolated tests and actual same-database managed crash/restart/auth-refresh/API/UI proof without inference or evals. Retain private evidence and report unrun/failed gates honestly; keep public recovery 503 until complete proof. Obtain independent Critic review of the exact pushed cumulative implementation head and resolve material findings. Do not merge or deploy without explicit user authorization.
+
+## PROPOSED v5 new-record exception — not accepted
+
+Only after contract-author approval of the precise proposed ADR032 v5 section,
+ALL genuinely new Roots may use its exact v5 discriminators,
+66-field WorkflowRunState roster/projections and existing46-field Task roster.
+This is the sole proposed exception to line53's new-field prohibition, limited
+to v5; the original v1–v4 field inventory/hashes and all old operations remain
+literal, and unsupported old operations stay held. Apply only the ADR section's
+exact producer/reader/hash/version dispatch. No legacy null adapter, history
+migration, default binding, Source/authority renewal or independent bridge is
+permitted. For a non-null composed Root, #1007's actual accepted typed owner
+remains a prerequisite, not a claim established by this proposal. An ordinary
+null-bound Root requires existing C6 authority and gains no composition grant. Required same-database/current-auth recovery
+and negative acceptance must pass before public or combined activation.
+
+### Proposed post-approval precedence over the legacy starting prompt
+
+Only AFTER contract-author approval of the exact v5 amendment, the following
+starting prompt supersedes the earlier “add NEW v4 authority only” instruction
+SOLELY for ALL genuinely newly admitted Roots covered by v5, ordinary or composed.
+The old prompt remains literal for its historical v4 scope; it grants no v5
+implementation while this proposal is unapproved, and neither prompt grants
+old operations new authority or permits a v4/v5 upgrade.
+
+> After approval, implement ONLY the approved ADR032 v5 field-compatibility
+> exception through the existing Source, producer, Stop, Unknown and recovery
+> owners. Use its exact discriminators/projections/hash rules. Bind actual JSON null for a
+> non-composed Root with all existing C6 authority; null grants no composition
+> permission. A non-null binding independently requires the actual accepted
+> typed composition owner. Preserve all historical v1–v4 evidence/readers and
+> unsupported old-operation holds. Preserve the original cutoffs, current auth,
+> revocation, row/physical comparison, guard, fence and budget gates. Do not add
+> a legacy-null adapter or rewrite any old operation. Use v5 for every genuinely
+> new66-field recovery-enabled admission; never strip a null field or issue v4
+> in that model. Bind each actual null/string value exactly. Keep existing
+> blocked/held503 behavior whenever current authority or proof is unavailable.
+> Prove BOTH actual ordinary-v5 and composed-v5 original managed crash/restart/
+> authenticated physical readback journeys, with all original controls, before
+> claiming combined completion. This proposal does not authorize activation.
+
+## Adoption of the exact v5 exception
+
+The operator approved this exact reviewed v5 amendment on 2026-10-13. Its
+proposal-only labels above are retained as the literal reviewed draft history;
+this adoption supersedes those labels only. The exact v5 rules are now the
+accepted target for #1007/#1009. Implementation, public activation, ordinary-v5
+and composed-v5 recovery acceptance, and shipped status are not claimed here.
+Historical v1-v4 and all other original constraints remain unchanged.

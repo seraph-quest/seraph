@@ -337,7 +337,7 @@ async def test_same_request_automatic_stop_followup_is_not_a_new_public_entry(mo
         return {'boundary_test_only': True}
     source.repository_operator_projection = projection
     monkeypatch.setattr(recovery, '_source', lambda: source)
-    monkeypatch.setattr(recovery, '_v4_root', lambda r: True)
+    monkeypatch.setattr(recovery, '_commitment_root', lambda r: True)
     monkeypatch.setattr(recovery, '_latest_original_repository_registration',
         lambda r: {'iteration_index': 1, 'iteration_id': 'identity'})
     monkeypatch.setattr(recovery, 'repository_source_recovery_projection',

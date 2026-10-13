@@ -15,7 +15,7 @@ from tests.test_repo_work_stop_metadata import stopped_original, forbid_private_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", ["v3", "v4"])
+@pytest.mark.parametrize("version", ["v3", "v4", "v5"])
 async def test_first_original_stop_intent_persists_selected_snapshot_version(
         accounting_db, monkeypatch, repository_admission_signer, version):
     from src.workflows import repo_repair_stop as stop_owner
@@ -29,7 +29,7 @@ async def test_first_original_stop_intent_persists_selected_snapshot_version(
             # seal, before any dispatch. Never rewrite a sealed Root, copy an
             # owner, or upgrade an old inventory during Stop.
             assert source_module._repository_record(run, identity) is None
-            assert payload["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+            assert payload["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             payload = {**payload, "schema": "repository.checkpoint_inventory." + version}
             sealed.append(run.run_identity)
         return real_append(run, identity, payload, **kwargs)
@@ -47,6 +47,18 @@ async def test_first_original_stop_intent_persists_selected_snapshot_version(
         assert source_module._repository_record(root, stop_owner.STOP_ID) is None
         assert not any(item["checkpoint_id"].startswith("repository:execution:")
             for item in json.loads(root.checkpoint_receipts_json))
+    if version == "v4":
+        # The current 66-field ORM is incompatible with the literal historical
+        # v4 roster, even when the added binding is null. Never strip the field.
+        async with _repository_recovery_fence(service, jobs, job_id=root_id, owner=owner):
+            with pytest.raises(DurableJobLeaseError, match="v4 static field inventory changed"):
+                await stop_owner._context(service, jobs, job_id=root_id, owner=owner)
+        async with factory() as db:
+            root = await jobs._fetch(db, root_id)
+            assert root.model_dump(mode="json") == before
+            assert jobs._repo_repair_reservation_state(root) == hold
+            assert source_module._repository_record(root, stop_owner.STOP_ID) is None
+        return
     async with _repository_recovery_fence(service, jobs, job_id=root_id, owner=owner) as fence:
         context = await stop_owner._context(service, jobs, job_id=root_id, owner=owner)
         committed = await stop_owner._persist_repository_stop_intent_locked(service, jobs,
@@ -60,7 +72,7 @@ async def test_first_original_stop_intent_persists_selected_snapshot_version(
         assert jobs._repo_repair_reservation_state(root) == hold
         assert (root.lease_owner, root.lease_expires_at, root.fencing_token) == (
             before["lease_owner"], context["run"].lease_expires_at, before["fencing_token"])
-        schema_version = "v2" if version == "v4" else "v1"
+        schema_version = "v3" if version == "v5" else "v1"
         assert intent["schema"] == "repository.stop_intent." + schema_version
     snapshot = json.loads(service._read_private_artifact(intent["snapshot_artifact_ref"],
         expected_digest=intent["snapshot_artifact_digest"]))

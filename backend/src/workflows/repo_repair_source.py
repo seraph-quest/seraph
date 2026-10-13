@@ -271,7 +271,7 @@ async def stage_repository_stop_original_producer_witnesses(service, jobs, *, co
     dispatched = any(_repository_record(run, "repository:execution:" + iteration_identity(
         run.run_identity, original["repository_attempt_id"], _source_digest(original["original_input"]), index))
         is not None for index in range(1, work.limits.max_iterations + 1))
-    if read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"} or not dispatched:
+    if read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"} or not dispatched:
         if completion_witness is not None:
             from src.workflows.job_runtime import DurableJobLeaseError
             raise DurableJobLeaseError("actual dispatched repository completion required")
@@ -293,7 +293,7 @@ async def _validate_repository_completion_post_context_sql(db, service, jobs, *,
     cas = repository_completion_post_cas(witness)
     run = context["run"]
     stop = _repository_record(run, "repository:stop-intent:v1")
-    if (read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+    if (read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or run.run_identity != before["run"].run_identity
             or context["owner"] != before["owner"]
             or type(cas["before_revision"]) is not int or type(cas["post_revision"]) is not int
@@ -433,10 +433,38 @@ def _checked_uncertainty_columns(value):
                 raise DurableJobLeaseError("original uncertainty timestamp projection changed")
 
 
+def _repository_format_schema(inventory_schema, kind):
+    """Select a grammar from the sealed inventory; this supplies no authority."""
+    from src.workflows.job_runtime import DurableJobLeaseError
+    if type(inventory_schema) is not str or inventory_schema not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2",
+            "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
+        raise DurableJobLeaseError("original repository inventory version changed")
+    version = ("v3" if inventory_schema == "repository.checkpoint_inventory.v5" else
+        "v2" if inventory_schema == "repository.checkpoint_inventory.v4" else "v1")
+    if type(kind) is not str or kind not in {"stop_intent", "stop_snapshot", "stop_uncertainty_successor", "original_cleanup_artifact"}:
+        raise DurableJobLeaseError("original repository evidence kind changed")
+    return "repository." + kind + "." + version
+
+
+async def _validate_repository_composition_owner(db, run):
+    """Null grants nothing; a bound current row needs the original typed owner."""
+    from src.workflows.job_runtime import DurableJobLeaseError
+    value = run.composition_binding_json
+    if value is None:
+        return
+    if type(value) is not str or not value:
+        raise DurableJobLeaseError("repository composition binding changed")
+    try:
+        from src.runtime_plugins.ownership import validate_run
+    except ImportError as exc:
+        raise DurableJobLeaseError("repository composition owner unavailable") from exc
+    await validate_run(db, run)
+
+
 def _repository_root_static_digest(run, values):
-    if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4":
-        from src.workflows.repo_repair_stop import _static_digest_v4
-        return _static_digest_v4(values, "WorkflowRunState", "root")
+    if read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
+        from src.workflows.repo_repair_stop import _static_digest_for_run
+        return _static_digest_for_run(run, values, "WorkflowRunState", "root")
     return _source_digest({key: value for key, value in values.items() if key not in _ROOT_BOOKKEEPING})
 
 
@@ -450,8 +478,8 @@ def _validate_repository_unknown_root_projection(run, stop, successor):
     root_key = type(run).__tablename__ + ":" + str(run.id)
     if (type(stop) is not dict or type(stop.get("static_rows")) is not dict
             or type(successor) is not dict or set(successor) != keys
-            or successor["schema"] != ("repository.stop_uncertainty_successor.v2" if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_uncertainty_successor.v1")
-            or inventory["schema"] not in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+            or successor["schema"] != _repository_format_schema(inventory["schema"], "stop_uncertainty_successor")
+            or inventory["schema"] not in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
             or successor["stop_digest"] != _source_digest(stop)
             or successor["authority_digest"] != run.authority_digest
@@ -524,8 +552,7 @@ def _host_boot_cleanup_static_rows_match(run, stop, current):
     root_key = type(run).__tablename__ + ":" + str(run.id)
     inventory = read_repository_inventory(run)
     if (set(successor) != keys
-            or successor["schema"] != ("repository.stop_uncertainty_successor.v2"
-                if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_uncertainty_successor.v1")
+            or successor["schema"] != _repository_format_schema(inventory["schema"], "stop_uncertainty_successor")
             or successor["job_id"] != run.run_identity or successor["root_key"] != root_key
             or successor["stop_digest"] != _source_digest(stop)
             or successor["authority_digest"] != run.authority_digest
@@ -700,7 +727,7 @@ def read_repository_inventory(run):
         raise DurableJobLeaseError("original repository limits inventory required")
     limits = record["original_limits"]
     if (type(record["schema"]) is not str
-            or record["schema"] not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+            or record["schema"] not in {"repository.checkpoint_inventory.v1", "repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or record["identities"] != repository_checkpoint_inventory(run, work)
             or type(record["max_records"]) is not int or record["max_records"] != 50
             or type(record["max_metadata_bytes_per_record"]) is not int or record["max_metadata_bytes_per_record"] != 16384
@@ -788,12 +815,12 @@ def repository_checkpoint_inventory(run, work, *, _admission_schema=None):
     if type(schema) is not str:
         from src.workflows.job_runtime import DurableJobLeaseError
         raise DurableJobLeaseError("original repository inventory version changed")
-    if schema in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+    if schema in {"repository.checkpoint_inventory.v2", "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
         ids.append("repository:stop-uncertainty-successor:v1")
     elif schema != "repository.checkpoint_inventory.v1":
         from src.workflows.job_runtime import DurableJobLeaseError
         raise DurableJobLeaseError("original repository inventory version changed")
-    if schema in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+    if schema in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
         ids.extend("repository:producer:" + iteration_identity(run.run_identity,
             original["repository_attempt_id"], _source_digest(original["original_input"]), index)
             for index in range(1, work.limits.max_iterations + 1))
@@ -868,7 +895,7 @@ async def stage_repository_completion_appends(service, jobs, *, stage, owner, fe
     if stage in _COMPLETION_APPEND_STAGES:
         raise DurableJobLeaseError("original completion append constructor already issued")
     from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
-    if (read_repository_inventory(binding["root"])["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+    if (read_repository_inventory(binding["root"])["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
             or _canonical(binding["root"].model_dump(mode="json")) != binding["root_json"]
             or read_registered_repository_producer(binding["root"], iteration_index=binding["iteration_index"])
                 != binding["registration"]):
@@ -932,8 +959,8 @@ def bind_repository_completion_append_payloads(stage, pending, *, service, jobs,
     envelope = {"physical_projection": binding["physical_projection"],
         "source_completion_cas": binding["cas"], "source_append_metadata": metadata}
     from src.workflows.repo_repair_source_recovery import _validate_cleanup_artifact_version
-    if read_repository_inventory(binding["root"])["schema"] == "repository.checkpoint_inventory.v4":
-        envelope.update(schema="repository.original_cleanup_artifact.v2",
+    if read_repository_inventory(binding["root"])["schema"] in {"repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
+        envelope.update(schema=_repository_format_schema(read_repository_inventory(binding["root"])["schema"], "original_cleanup_artifact"),
             recovery_commitment=binding["recovery_commitment"])
     _validate_cleanup_artifact_version(binding["root"], envelope)
     envelope_raw = _canonical(envelope).encode()
@@ -1294,6 +1321,7 @@ async def _recheck_repository_sql(db, context, *, allow_stop_cleanup=False):
         if not matches:
             raise DurableJobLeaseError("original repository preparation authority changed")
     current_root = await db.get(type(context["run"]), context["run"].id, populate_existing=True)
+    await _validate_repository_composition_owner(db, current_root)
     stopping = _repository_record(current_root, "repository:stop-intent:v1") is not None
     if stopping and not allow_stop_cleanup:
         raise DurableJobLeaseError("original repository stop prevents further execution")
@@ -1548,12 +1576,12 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
         "snapshot_artifact_ref", "snapshot_artifact_digest", "no_learning"}
     if automatic:
         expected_stop |= {"limit_evidence", "limit_evidence_digest"}
-    if (set(stop) != expected_stop or stop.get("schema") != ("repository.stop_intent.v2" if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_intent.v1")
+    if (set(stop) != expected_stop or stop.get("schema") != _repository_format_schema(inventory["schema"], "stop_intent")
             or reason not in {"operator_cancelled", "iterations_exhausted"} | AUTOMATIC_REASONS
             or stop.get("native_binding_digest") != _source_digest(binding.model_dump(mode="json"))
             or stop.get("no_learning") is not True or not isinstance(stop.get("static_rows"), dict)
             or stop.get("snapshot_artifact_ref") != "workspace-json:artifacts/repo-repair/stop-" + _source_digest(run.run_identity) + ".json"
-            or stop.get("snapshot_artifact_digest") != _source_digest({"schema": ("repository.stop_snapshot.v2" if inventory["schema"] == "repository.checkpoint_inventory.v4" else "repository.stop_snapshot.v1"),
+            or stop.get("snapshot_artifact_digest") != _source_digest({"schema": _repository_format_schema(inventory["schema"], "stop_snapshot"),
                 "static_rows": stop["static_rows"], "repository_job_id": run.run_identity,
                 "source_checkpoint_digest": _source_digest(original)})):
         raise DurableJobLeaseError("original repository stop discovery binding changed")
@@ -1865,7 +1893,7 @@ async def _repository_operator_projection_sql(db, service, jobs, *, job_id, owne
                 # A partial closure is recovery metadata, never a complete
                 # RepoIteration or a fabricated failed requested check.
                 from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
-                if read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+                if read_repository_inventory(run)["schema"] not in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
                     raise DurableJobLeaseError("original registered partial closure required")
                 read_registered_repository_producer(run, iteration_index=index)
                 if cleanup.get("status") != "held_partial" or readback.get("command_results") != []:
@@ -2725,7 +2753,7 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
         def before_dispatch():
             future = asyncio.run_coroutine_threadsafe(dispatch_sql_guard(), loop)
             future.result(timeout=min(10, max(1, remaining)))
-        if read_repository_inventory(context["run"])["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+        if read_repository_inventory(context["run"])["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
             from src.workflows.repo_repair_source_recovery import issue_repository_source_producer
             producer_owner = await issue_repository_source_producer(service, jobs, job, owner=owner)
             # Registration advances the canonical epoch before ACK. Each real
@@ -3568,7 +3596,7 @@ async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, i
         checks_passed = (manifest.get("exit_code") == 0 and manifest.get("timed_out") is False
             and manifest.get("stdout_truncated") is False and manifest.get("stderr_truncated") is False
             and manifest.get("test_args") == check_args)
-    if read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}:
+    if read_repository_inventory(run)["schema"] in {"repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}:
         from src.workflows.repo_repair_source_recovery import (
             assert_repository_completion_witness, repository_completion_result,
             repository_completion_post_cas, repository_completion_cleanup_envelope,
@@ -4248,7 +4276,8 @@ async def prepare_repository_original_admission(service, db, *, native_invocatio
         from src.execution.repo_original_producer import original_producer_service_enabled
         if not original_producer_service_enabled(service, service.jobs):
             raise DurableJobLeaseError("original producer admission owner changed")
-        inventory_schema = "repository.checkpoint_inventory.v4"
+        await _validate_repository_composition_owner(db, run)
+        inventory_schema = "repository.checkpoint_inventory.v5"
         inventory = repository_checkpoint_inventory(run, work, _admission_schema=inventory_schema)
         _append_repository_record(run, "repository:inventory:v1",
             {"schema": inventory_schema, "identities": inventory,

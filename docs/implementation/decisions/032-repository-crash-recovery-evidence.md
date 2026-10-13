@@ -408,3 +408,180 @@ Baseline `7c16313e34647fd9cae49f5d297bc64e69181df3`, source-inspected:
 
 The source pointers locate extension seams and gaps; they do not establish the
 proposed v4 protocol as implemented or runtime verified.
+
+## PROPOSED — new-record field compatibility (not accepted)
+
+This section is a proposal requiring contract-author approval. Until approval,
+the original v4 field rejection remains controlling and combined activation is
+held. It grants no implementation or runtime authority. It changes only the
+known second-landing field conflict; all earlier sections remain unchanged for
+v1–v4. The composition bridge is a #1007 target; use it only after its typed
+owner implementation and acceptance actually exist, not because this proposal
+is written.
+
+### Proposed v5 admission and exact format selection
+
+ALL genuinely NEW Roots admitted after the approved implementation may seal
+`repository.checkpoint_inventory.v5`, using the complete66-field current model.
+The existing C6 owner, admission, session, approval, mapping, lease, fence, boot,
+cutoff and budget predicates remain mandatory for every Root; v5 grants none.
+
+A non-composed Root binds its actual composition_binding_json=null in every
+applicable full/static projection. Null is an exact JSON null, not an omitted
+field, default epoch, synthesized owner or permission. It needs no composition
+owner because it obtains no composition authority; it still requires all
+original current C6 authority and proof.
+
+A non-null composition_binding_json must have exact string type and retain
+the server-issued immutable binding JSON bytes. Its actual current typed
+composition owner must independently validate it, once that owner implementation
+is accepted and available. Caller JSON, copied Source, default epoch,
+normalization or reserialization cannot supply the binding. Without that
+independent owner, deny the composed Root before effects/recovery. The original
+parent/native invocation bind their actual null or string values by the same
+rule and retain all current original authority predicates.
+
+The v5 inventory retains the exact v4 six-key grammar, server-derived ordered
+identity vector10+13n (n1–3), checkpoint key repository:inventory:v1, identity
+names,50-record ceiling and16384-byte record bound. Only its schema literal
+changes. Select by this originally sealed discriminator before effects, never
+by available files or a supplied format. Unknown/mixed versions deny. No old
+Root is upgraded or re-admitted as v5.
+
+V5 reuses the unchanged original_producer.v2 registration,
+original_producer_completion.v2 completion, original_producer_durable_v2
+transport, original durability.v1 proof and their existing signature domains,
+key sources, exact field grammars, material barriers and cutoffs. Extend only
+the existing version-dispatch owners to accept their v5 inventory association.
+No changed attestation, checkpoint slot, registration body or execution occurs
+in recovery. The sealed inventory and actual original mappings independently
+bind those existing producer records; v4/v5 recovery evidence cannot be mixed.
+
+| Evidence | V5 discriminator/domain | Exact grammar |
+| --- | --- | --- |
+| Inventory | repository.checkpoint_inventory.v5 | Existing v4 six keys/vector |
+| Stop intent | repository.stop_intent.v3 | Existing v4 seven keys, or nine for automatic-limit reasons |
+| Stop snapshot | repository.stop_snapshot.v3 | Existing v4 four keys |
+| Unknown successor | repository.stop_uncertainty_successor.v3 | Existing v4 twelve keys, exact P/Q seven-field proof |
+| Static hash | repository.stop_static.v3 followed by one NUL byte | Canonical exact projection specified below |
+| Cleanup artifact | repository.original_cleanup_artifact.v3 | Existing v4 five outer keys |
+| Recovery commitment schema | repository.recovery_commitment.v2 | Existing v4 fourteen keys |
+| Recovery commitment domain/derived hash prefix | repository.source_recovery_immutable.v2 followed by one NUL byte for derived hash | Existing exact commitment object, no stored digest field |
+
+The cleanup artifact keys remain exactly schema,physical_projection,
+source_completion_cas,source_append_metadata,recovery_commitment. Existing
+physical projection, eight-key CAS and cleanup-then-readback constructor
+metadata remain exact. The commitment's14 keys remain exactly schema,domain,
+root_key,before_revision,root_static_digest,root_updated_at,journal_prefix_count,
+journal_prefix_digest,owner_identity,non_root_static,producer_registration_digest,
+producer_completion_digest,stop_digest,unknown_projection_digest. Change only
+the two stated commitment discriminator values and the applicable static hashes.
+Whole-artifact SHA256 and literal physical readback remain the anchor.
+
+Keep rows_digest's existing repository.source_completion_rows.v1 full original
+first-stage audit unchanged; it includes the new current field because it is
+the actual full row, never an invented preimage. Keep the journal-prefix hash
+repository.source_recovery_journal.v1 and its complete ordered record array.
+Keep whole-object canonical Stop/Unknown hashes; their new schema literals
+distinguish new objects. All canonical JSON uses the existing sorted-key compact
+UTF-8 serializer; a composition field is a string value with its exact stored
+bytes, not parsed/substituted normalized JSON.
+
+### Exact v5 projections
+
+WorkflowRunState's declared set is exactly the existing C6 baseline65 fields
+plus composition_binding_json,66 total. Its full explicit roster is:
+
+```text
+id, run_identity, root_run_identity, parent_run_identity, workflow_name, tool_name, session_id, conversation_id, operator_session_id, status, branch_kind, branch_depth, run_fingerprint, arguments_json, approval_context_json, checkpoint_context_json, artifact_paths_json, continued_error_steps_json, last_completed_step_id, error, heartbeat_at, started_at, updated_at, finished_at, metadata_json, record_schema_version, parent_job_id, parent_fencing_token, job_kind, owner_kind, owner_principal_id, service_id, goal_id, goal_revision, plan_revision, candidate_id, source_task_id, composition_binding_json, selected_context_reserved_bytes, capability_version, input_digest, authority_digest, budget_digest, idempotency_scope, idempotency_key, idempotency_binding, priority, dependencies_json, resource_claims_json, declared_authority_json, deadline_at, lease_owner, lease_expires_at, fencing_token, revision, attempt_count, max_attempts, failure_reason, checkpoint_receipts_json, artifact_receipts_json, effect_receipts_json, github_read_revision_json, github_read_observation_history_json, github_capacity_closure_json, result_digest, result_summary
+```
+
+For Root exclude only updated_at,revision,checkpoint_receipts_json,heartbeat_at
+(62 included fields). For original_parent exclude only updated_at,revision,
+checkpoint_receipts_json (63 included fields). For native_invocation exclude
+only updated_at,revision,status,failure_reason,heartbeat_at (61 included fields).
+Never exclude composition_binding_json, even null. Independently bind excluded
+Root timestamp/revision/journal exactly as v4 requires.
+
+WorkBoardTask's exact46 declared fields retain priority_explicit and
+admitted_method_json, including their original strict values. Its roster is:
+
+```text
+creation_sequence, task_id, owner_principal_id, owner_session_id, origin_session_id, origin_thread_id, goal_id, goal_revision, title, body, capability_id, input_artifact_id, pipeline_operation_id, pipeline_slot, typed_input_ref, typed_input_digest, executor_id, assignee_id, priority, priority_explicit, admitted_method_json, idempotency_scope, idempotency_key, idempotency_payload_digest, idempotency_binding, scheduled_at, status, block_kind, block_reason, block_source_status, requires_review, reviewer_id, review_expires_at, review_request_attempt_id, review_request_fence, review_request_revision, review_request_digest, review_request_evidence_json, review_requested_at, task_revision, result_refs_json, artifact_refs_json, created_at, updated_at, completed_at, archived_at
+```
+
+Its static projection excludes only updated_at (45 included fields). All other
+v5 model rosters and projections are exactly v4's unchanged sets: WorkBoardAttempt19,
+WorkBoardInputArtifact21,Goal22,OperatorSession12; OperatorSession commitment
+projection remains exactly id,principal_id,created_at,absolute_expires_at. No
+extra field is accepted, no current field is silently removed, and no runtime
+ORM introspection substitutes for these explicit sets.
+
+Compute every v5 static row digest as SHA256(repository.stop_static.v3 + NUL +
+canonical projection); root_static_digest and every corresponding P/Q/current
+reconstruction and non_root_static entry must use this same v5 hash. Slots and
+order remain the original ten entries. Current full staged-to-writer rows,
+proposal/approval/reservations and typed owner checks remain independent.
+
+### Exact owner dispatch, history and authority
+
+The existing original Source/producer issuance and completion-publication owner
+seals v5 once; existing Stop/context/static helpers produce its v5 projections;
+existing Unknown-projection and cleanup-artifact/known-post readers dispatch
+from the sealed inventory and compare only the exact v5 schemas/hashes above.
+Startup protection extends the existing positive v3/v4 mode protection to v5
+with the same at-most-three mapped IDs, original guard/fence and no absence
+inference. No new endpoint, store, queue, ledger, inventory identity or service.
+
+Historical v1–v4 records, grammar, hash/signature semantics and old readers are
+literal and unchanged. Do not insert this field into old evidence, strip it
+from current rows under a historical format, default-fill, rehash, retro-register,
+retroconstruct, migrate or reinterpret any old operation. An old operation whose
+current model/field set no longer matches its exact historical reader stays held
+with all debt/guards/liability preserved; no legacy-null compatibility exception
+is approved by this proposal. Existing unsupported old-reader downgrade remains
+blocked. V5 enables all genuinely new admissions after approval and actual acceptance;
+none is relabeled from an existing Root.
+
+First-stage epoch identity, no self-hash cycle, actual Unknown reconstruction,
+R+1 exact wrapper subtraction, changed-prefix/R+3 denial, current authentication
+including revocation/replacement/tombstone, and current full IMMEDIATE-writer
+comparison retain v4 semantics. Every typed composition owner epoch/revocation
+and operation binding is rechecked currently; an immutable composition digest
+is evidence, never permission. No Source, session, lease, grant, approval,
+cutoff, budget, retry, learning or execution authority is renewed.
+
+All existing16KiB records,1MiB artifacts,2MiB envelopes, inventory/history limits,
+128-reference/1MiB composition frame and original execution/producer limits remain.
+Public recovery and combined activation remain blocked until the approved
+implementation passes provider-free same-database managed crash/restart plus
+authenticated output/readback and all original negative controls.
+
+### Proposed ordinary and composed coverage in the merged model
+
+After approval and implementation, every genuinely NEW recovery-enabled C6
+admission in the66-field model uses v5, whether the actual composition field
+is null or a valid independently issued string. Do not issue a new v4 Root in
+that model and do not strip the field to fit the old65-field grammar. This
+versioned rule binds null explicitly for ordinary new work and the exact
+immutable string for composed new work; neither choice changes historical
+v1–v4 dispatch or authorizes a legacy-null adapter.
+
+Ordinary v5 recovery must preserve the original operator feature: bounded job,
+crash, same-database restart, current authenticated recovery and durable
+physical output/readback under existing C6 ownership. Composed v5 recovery
+must prove that same journey plus the independent typed composition owner,
+current epoch/revocation and exact operation binding. Both actual journeys and
+the original negative acceptance are required before combined completion.
+When either required implementation/authority/proof is absent, expose existing
+operator-visible blocked/held503 recovery; never invent successful recovery or
+a default composition grant. This proposal does not itself prove either path.
+
+## Adoption of the exact v5 exception
+
+The operator approved this exact reviewed v5 amendment on 2026-10-13. Its
+proposal-only labels above are retained as the literal reviewed draft history;
+this adoption supersedes those labels only. The exact v5 rules are now the
+accepted target for #1007/#1009. Implementation, public activation, ordinary-v5
+and composed-v5 recovery acceptance, and shipped status are not claimed here.
+Historical v1-v4 and all other original constraints remain unchanged.

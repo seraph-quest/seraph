@@ -389,7 +389,7 @@ async def test_startup_protects_actual_v4_without_registration_before_any_mutati
     async with factory() as db:
         root = await jobs._fetch(db, job_id)
         original, _, _, _, binding, _ = source.read_repository_original(root)
-        assert source.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory.v4"
+        assert source.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory.v5"
         history = json.loads(root.checkpoint_receipts_json)
         registrations = [item for item in history if item["checkpoint_id"].startswith("repository:producer:")]
         assert bool(registrations) is dispatched
@@ -440,7 +440,7 @@ async def test_startup_missing_or_corrupt_mode_holds_actual_undispatched_mapped_
         elif corruption == "missing_mode":
             inventory["payload"].pop("schema")
         elif corruption == "unknown_mode":
-            inventory["payload"]["schema"] = "repository.checkpoint_inventory.v5"
+            inventory["payload"]["schema"] = "repository.checkpoint_inventory.v6"
         elif corruption == "ordinary_mode_with_producer_vector":
             inventory["payload"]["schema"] = "repository.checkpoint_inventory.v2"
         elif corruption == "foreign_identity":

@@ -5277,7 +5277,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     "readback_scope", "physical_cleanup_digest", "operator_visible", "recorded_at"}
                 if (run.status != "unknown_external_effect" or registration is None
                         or source.read_repository_inventory(run)["schema"] not in {
-                            "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4"}
+                            "repository.checkpoint_inventory.v3", "repository.checkpoint_inventory.v4", "repository.checkpoint_inventory.v5"}
                         or physical is None or set(physical) != keys or set(payload) != release_keys
                         or payload.get("operator_visible") is not True
                         or physical["cleanup_proven"] is not True or physical["readback_verified"] is not False

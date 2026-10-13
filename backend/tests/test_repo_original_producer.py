@@ -194,7 +194,7 @@ async def _assert_actual_protected_cleanup_artifact_bindings(flow, *, count):
         root = await flow["jobs"]._fetch(db, flow["root_id"])
         before = root.model_dump_json()
         history = json.loads(root.checkpoint_receipts_json)
-        assert source.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory.v4"
+        assert source.read_repository_inventory(root)["schema"] == "repository.checkpoint_inventory.v5"
         for index in range(1, count + 1):
             registration = recovery.read_registered_repository_producer(root, iteration_index=index)
             identity = registration["iteration_id"]
@@ -205,7 +205,7 @@ async def _assert_actual_protected_cleanup_artifact_bindings(flow, *, count):
             assert set(envelope) == {"schema", "recovery_commitment", "physical_projection",
                 "source_completion_cas", "source_append_metadata"}
             recovery._validate_cleanup_artifact_version(root, envelope)
-            assert envelope["schema"] == "repository.original_cleanup_artifact.v2"
+            assert envelope["schema"] == "repository.original_cleanup_artifact.v3"
             assert _canonical(envelope).encode() == raw
             assert hashlib.sha256(raw).hexdigest() == cleanup["artifact_digest"]
             assert envelope["source_completion_cas"] == cleanup["source_completion_cas"] == readback["source_completion_cas"]

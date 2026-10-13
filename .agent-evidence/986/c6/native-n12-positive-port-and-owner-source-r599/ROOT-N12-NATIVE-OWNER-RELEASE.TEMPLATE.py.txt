@@ -1,0 +1,59 @@
+import hashlib,json,os,stat,sys
+from pathlib import Path
+C6=Path('/home/pawel/repos/seraph/.agent-evidence/986/c6')
+PACKET=Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599')
+STABLE=('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+def read(path):
+    path=Path(path)
+    assert path.is_absolute() and path.resolve(strict=True)==path
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        before=os.fstat(fd)
+        assert stat.S_ISREG(before.st_mode) and before.st_uid==before.st_gid==1000 and before.st_nlink==1 and stat.S_IMODE(before.st_mode)==0o600
+        with os.fdopen(fd,'rb',closefd=False) as stream:raw=stream.read()
+        assert len(raw)==before.st_size and all(getattr(before,key)==getattr(os.fstat(fd),key)==getattr(path.lstat(),key) for key in STABLE)
+        return raw
+    finally:os.close(fd)
+def bound(record,path=None):
+    assert type(record) is dict and set(record)=={'path','sha256','size'}
+    if path is not None:assert record['path']==str(path)
+    raw=read(record['path']);assert hashlib.sha256(raw).hexdigest()==record['sha256'] and len(raw)==record['size']
+    return raw
+LATE_RECORD={'path': '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/ROOT-N12-NATIVE-OWNER-LATE-READBACK.BOUND.py.txt', 'sha256': 'ROOT_FUTURE_ACTUAL_N12_LATE_SOURCE_SHA256', 'size': 'ROOT_FUTURE_ACTUAL_N12_LATE_SOURCE_SIZE'}
+POST_RECORD={'path': '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/POST-PREPARED-COMMANDS.POSITIVE-PORT.SOURCE.json', 'sha256': 'fca1fc60f12549e881b9ed5fb3976de70ecc323fda4c29c4f9e09e1c385d0c75', 'size': 8836}
+PREPARED_RECORD={'path': '/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/root-prepared-readback.json', 'sha256': 'ROOT_FUTURE_ACTUAL_N12_PREPARED_SHA256', 'size': 'ROOT_FUTURE_ACTUAL_N12_PREPARED_SIZE'}
+assert os.getuid()==os.getgid()==1000
+assert dict(os.environ)=={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','TZ':'UTC'}
+assert len(sys.argv)==2 and Path(sys.argv[1])==C6/'ROOT-N12-NATIVE-OWNER-RELEASE-CONFIGURATION-r598.json'
+cfg=json.loads(read(sys.argv[1]))
+assert set(cfg)=={'late_source','post_commands','actual_prepared','actual_prepared_review_report','actual_prepared_review_pins','actual_late_readback','owner_release','managed_journey_release','same_epoch_retry'}
+assert cfg['owner_release'] is None and cfg['managed_journey_release'] is None and cfg['same_epoch_retry'] is False
+late_raw=bound(cfg['late_source'],PACKET/'ROOT-N12-NATIVE-OWNER-LATE-READBACK.BOUND.py.txt')
+assert cfg['late_source']==LATE_RECORD
+post_raw=bound(cfg['post_commands'],Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/POST-PREPARED-COMMANDS.POSITIVE-PORT.SOURCE.json'))
+assert cfg['post_commands']==POST_RECORD
+prepared_raw=bound(cfg['actual_prepared'],C6/'n12/root-prepared-readback.json')
+assert cfg['actual_prepared']==PREPARED_RECORD
+report=bound(cfg['actual_prepared_review_report'])
+pins=bound(cfg['actual_prepared_review_pins'])
+assert cfg['actual_prepared_review_report']['path']!=cfg['actual_prepared_review_pins']['path']
+actual=json.loads(bound(cfg['actual_late_readback'],C6/'ROOT-N12-NATIVE-OWNER-LATE-READBACK-r598.json'))
+assert actual['state']=='ACTUAL_HOST_NATIVE_OWNER_LATE_READBACK_PASS' and actual['native_owner_authorized'] is False and actual['runtime_authorized'] is False
+# Exact reviewed original R450 verifier, excluding only its output-emission tail.
+# All original current closure predicates run again before the release write.
+text=late_raw.decode();delimiter="out = C6 / 'ROOT-N12-NATIVE-OWNER-LATE-READBACK-r598.json'"
+assert text.count(delimiter)==1
+scope={'__name__':'_original_n12_owner_release_readback','__file__':cfg['late_source']['path']}
+exec(compile(text.split(delimiter)[0],cfg['late_source']['path'],'exec'),scope)
+assert scope['context_sha']==actual['context_sha256'] and len(scope['absences'])==actual['owner_outputs_absent']==18
+assert len(scope['manifest']['files'])==actual['files']==16908 and len(scope['manifest']['links'])==actual['links']==8 and len(scope['manifest']['readonly_cache_metadata'])==actual['cache_metadata']==27842 and len(scope['helpers'])==actual['helper_pins']==37
+argv=json.loads(post_raw)['native_owner']
+assert len(argv)==20 and argv[-1]=='ROOT_FUTURE_ACTUAL_PREPARED_CONTEXT_SHA256' and argv[-2]=='--prepared-context-sha256'
+argv[-1]=scope['context_sha']
+release={'state':'ROOT_RELEASE_N12_NEGATIVE_FD_OWNER_ONCE','review_report_sha256':cfg['actual_prepared_review_report']['sha256'],'review_pins_sha256':cfg['actual_prepared_review_pins']['sha256'],'actual_prepared_sha256':cfg['actual_prepared']['sha256'],'actual_late_readback_sha256':cfg['actual_late_readback']['sha256'],'context_sha256':argv[-1],'argv':argv,'post_commands_sha256':cfg['post_commands']['sha256'],'actual_HOST_late_readback':actual,'same_epoch_retry':False,'role_seconds':20,'owner_seconds':180,'Root_outer_seconds':210,'managed_journey_authorized':False,'original_unknown_post_spawn_failure_is_HOLD':True}
+path=C6/'ROOT-N12-NATIVE-OWNER-RELEASE-r598.json'
+encoded=(json.dumps(release,sort_keys=True,indent=2)+'\n').encode()
+fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+with os.fdopen(fd,'wb') as stream:stream.write(encoded);stream.flush();os.fsync(stream.fileno())
+assert read(path)==encoded
+print(json.dumps({'state':release['state'],'target55':55,'paired10':10,'prepared_files':actual['files'],'managed_journey_authorized':False},sort_keys=True))

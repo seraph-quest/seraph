@@ -1,0 +1,101 @@
+"""Read-only current n12 prepared closure; no launch or owner release."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+
+C6 = Path('/home/pawel/repos/seraph/.agent-evidence/986/c6')
+SOURCE = Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/ROOT-PHASES-GATE.PORT-OUTPUT.CLOSED-SOURCE.PROPOSED.py.txt')
+SOURCE_SHA = '6492d6e8c938b3f781742ee6fd8af079b37a6f7386757afcbfafb5ecd3328387'
+STABLE = ('st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+          'st_size', 'st_mtime_ns', 'st_ctime_ns')
+
+def require(condition):
+    if not condition:
+        raise RuntimeError('native_owner_late_readback_denied')
+
+def private_read(path):
+    require(path.resolve(strict=True) == path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == before.st_gid == 1000
+            and before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o600)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1048576)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b''.join(chunks)
+        require(len(raw) == before.st_size and all(getattr(before, field)
+            == getattr(os.fstat(fd), field) == getattr(path.lstat(), field) for field in STABLE))
+        return raw
+    finally:
+        os.close(fd)
+
+require(os.getuid() == os.getgid() == 1000)
+require(dict(os.environ) == {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'TZ': 'UTC'})
+raw = private_read(SOURCE)
+require(hashlib.sha256(raw).hexdigest() == SOURCE_SHA and len(raw) == 19464)
+# Load only the independently reviewed standard-library verifier definitions.
+# Its main/release function is not invoked.
+scope = {'__name__': '_reviewed_n12_readback', '__file__': str(SOURCE)}
+exec(compile(raw, str(SOURCE), 'exec'), scope)
+scope['source_closure']()
+scope['hash_input']('/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/compile_positive.TYPED-PORT.PROPOSED.py.txt','6ef406f9fe751b157041e4bb70994afff0cec6b42da333d752acfcd77d1e1f98')
+for path, digest in {'/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-phase04-typed-port-diagnosis-source-r589/compile_inputs.TYPED-PORT.PROPOSED.py.txt': 'fcfcb8067d2107d9509bb1ba69954d2d9205929f1b0c1df8988eb052d66c1035', '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/prepare_inputs.PORT-OUTPUT.PROPOSED.py.txt': 'f2d816a54c29909b956cb87b89ca79bec162f03242215d94eb7625c50280aeba', '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/readback_inputs.PORT-OUTPUT.PROPOSED.py.txt': '7fcbc596db6cc1e19f592de676f4ff3f4d7fd1ad5c13dcc0d3a5373515504388', '/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/root-verify-prepared.PORT-OUTPUT.PROPOSED.py.txt': 'a6b873f1760b7e296afe20d67c7c4ea431592806fb5617b2f48c649a6dfe6921'}.items():
+    scope['hash_input'](path, digest)
+values, pins = scope['private_values']()
+manifest = scope['compiled'](values, pins)
+scope['prepared'](manifest)
+scope['fixture'](scope['DISPOSABLE'] / 'workspace/example')
+scope['destination_readback'](manifest)
+
+base = C6 / 'n12'
+physical = base / 'managed-execution'
+context_raw = private_read(physical / 'context.json')
+context_sha = hashlib.sha256(context_raw).hexdigest()
+require(context_sha == 'ROOT_FUTURE_ACTUAL_PREPARED_CONTEXT_SHA256')
+context = json.loads(context_raw)
+require(context == manifest['context'] and len(context) == 32)
+helper_raw = private_read(base / 'HELPER-PINS.json')
+require(hashlib.sha256(helper_raw).hexdigest() == '3a8618a672950156cffeeafcad2ea99cf0db9daafe3cf4501f25cd49a1769dfd')
+helpers = json.loads(helper_raw)
+for name, expected in helpers.items():
+    require(hashlib.sha256(private_read(Path(name))).hexdigest() == expected)
+prepared = json.loads(private_read(base / 'root-prepared-readback.json'))
+require(prepared['status'] == 'PASS' and prepared['context_sha256'] == context_sha
+    and prepared['helper_pins_sha256'] == 'ROOT_FUTURE_ACTUAL_N12_BOOTSTRAP_PINS_SHA256'
+    and prepared['prepared_regular_files'] == 16908 and prepared['prepared_links'] == 8
+    and prepared['ports_clear'] is True and prepared['private_values_emitted'] is False)
+
+roles = ('schema_guard', 'workspace_helper', 'backend')
+absences = [base / name for name in ('owner-once.json', 'owner-result.json', 'owner-HOLD.json',
+    'negative-context-readback.json', 'schema_guard-context.json', 'workspace_helper-context.json',
+    'backend-context.json')]
+absences += [physical / ('negative-' + role + suffix) for role in roles
+    for suffix in ('-outcome.json', '-custody-HOLD.json')]
+absences += [physical / 'journey' / ('negative-startup-' + role + '.json') for role in roles]
+absences += [physical / 'adapter-launch-once.json', base / 'preparation-inputs/startup-census.json']
+require(len(absences) == 18 and all(not os.path.lexists(path) for path in absences))
+for path in (physical / 'receipts', physical / 'journey/startup-failures'):
+    scope['private_directory'](path)
+    require(not any(path.iterdir()))
+out = C6 / 'ROOT-N12-NATIVE-OWNER-LATE-READBACK-r598.json'
+require(not os.path.lexists(out))
+result = {'state': 'ACTUAL_HOST_NATIVE_OWNER_LATE_READBACK_PASS',
+    'context_sha256': context_sha, 'readback_source_sha256': SOURCE_SHA,
+    'files': len(manifest['files']), 'links': len(manifest['links']),
+    'cache_metadata': len(manifest['readonly_cache_metadata']), 'helper_pins': len(helpers),
+    'owner_outputs_absent': len(absences), 'receipt_and_failure_directories_empty': True,
+    'ports_clear': True, 'native_owner_authorized': False, 'runtime_authorized': False}
+encoded = (json.dumps(result, sort_keys=True) + '\n').encode()
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+with os.fdopen(fd, 'wb') as stream:
+    stream.write(encoded)
+    stream.flush()
+    os.fsync(stream.fileno())
+require(private_read(out) == encoded)
+print(json.dumps(result, sort_keys=True))

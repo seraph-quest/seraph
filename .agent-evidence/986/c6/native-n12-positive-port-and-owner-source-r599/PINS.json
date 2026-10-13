@@ -1,0 +1,63 @@
+{
+  "Root_release": null,
+  "actual_context": null,
+  "actual_late": null,
+  "actual_prepared": null,
+  "actual_prepared_review": null,
+  "commands": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/COMMANDS.SOURCE.json",
+    "sha256": "3249f6a37b52a289ec5e6fe09216fed58b9978619178e882ffbcfdb8952c0fa3",
+    "size": 4591
+  },
+  "configuration": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/ROOT-N12-NATIVE-OWNER-RELEASE-CONFIGURATION.SOURCE.json",
+    "sha256": "1ebc7ecdb12663a9fe3b6b6808c784834636621590be76e60c3a8f74d5c2e188",
+    "size": 538
+  },
+  "corrected_positive_source": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/compile_positive.TYPED-PORT.PROPOSED.py.txt",
+    "sha256": "6ef406f9fe751b157041e4bb70994afff0cec6b42da333d752acfcd77d1e1f98",
+    "size": 20153
+  },
+  "current_post_commands": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/POST-PREPARED-COMMANDS.POSITIVE-PORT.SOURCE.json",
+    "sha256": "fca1fc60f12549e881b9ed5fb3976de70ecc323fda4c29c4f9e09e1c385d0c75",
+    "size": 8836
+  },
+  "diff": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/POSITIVE-COMPILER.patch",
+    "sha256": "f905fae40254bba82a051032b87fb4cec6a9ddbb3d1735393e74c2c54c239cca",
+    "size": 2224
+  },
+  "late_template": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/ROOT-N12-NATIVE-OWNER-LATE-READBACK.TEMPLATE.py.txt",
+    "sha256": "f46bfb2c7172eb0c90e5d15b278ba43f9d2fddaa757c86606fa7ca708f96360d",
+    "size": 6182
+  },
+  "original_owner_argv_unchanged": true,
+  "original_positive_source": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/compile_positive.py",
+    "sha256": "91a32a3695ea2630126b3babcb17d12071e93ff3e1ba88232d11c114a30be014",
+    "size": 18495
+  },
+  "original_post_commands": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-managed-running-case-successor-source-r575/POST-PREPARED-COMMANDS.PROPOSED.json",
+    "sha256": "486779903ceeef0daec1a44e67be001cb0858bf6b738f4edfed826ad72e29f20",
+    "size": 8788
+  },
+  "parent_packet": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-postprepared-owner-handoff-source-r598/PINS.json",
+    "sha256": "4582c774ca5ab4ee9a8ea019117c73d9e15600b1c0579a15c640cc6d1fea2bdb",
+    "size": 2449
+  },
+  "positive_OUT_unchanged": true,
+  "release_template": {
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/ROOT-N12-NATIVE-OWNER-RELEASE.TEMPLATE.py.txt",
+    "sha256": "b624e6f55453b4f5d2d0519b1dfdfc87a6d4c9d04768280f8faaacc68aef3586",
+    "size": 5635
+  },
+  "retained_37_helper_map_unchanged": true,
+  "runtime_authority": false,
+  "state": "SOURCE_ONLY_SIBLING_PORT_CORRECTION_AND_ORIGINAL_OWNER_TEMPLATES",
+  "typed_block_exact_shared_with_reviewed_negative": true
+}

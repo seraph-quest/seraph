@@ -1,0 +1,225 @@
+{
+  "actual_prepared": null,
+  "native_derive_positive_commands": null,
+  "phases": [
+    {
+      "actual_outcome": null,
+      "argv": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "TZ=UTC",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "210s",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/accounting-r31-source/run-offline-command-r3.py",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/repository_fixture.py",
+        "stage"
+      ],
+      "expected_outputs": [
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/staged-example",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/repository-receipt.json"
+      ],
+      "gate_before_next": "Root must verify original fixture HEAD and complete named files/tree against receipt, exact private/source modes, original calculator fixture only; no DB seeded. Preserve partial failure/no retry.",
+      "phase": "01_repository_stage"
+    },
+    {
+      "actual_outcome": null,
+      "argv": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "TZ=UTC",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "210s",
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/accounting-r31-source/run-offline-command-r3.py",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/root-seal-late-inputs.py"
+      ],
+      "expected_outputs": [
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/private-values.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/final-helper-pins.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/bootstrap/PINS.txt"
+      ],
+      "gate_before_next": "Root independently verifies private four-key schema/source_commit=e43/base_commit=genuine staged HEAD; disclose no values;37map equals reviewed map; PINS.txt exact sorted deterministic37 serialization. Exclusive leaves must be fresh; do not copy old nonce/session/credential.",
+      "phase": "02_fresh_private_values"
+    },
+    {
+      "actual_outcome": null,
+      "argv": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "TZ=UTC",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "210s",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/accounting-r31-source/run-offline-command-r3.py",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-phase04-typed-port-diagnosis-source-r589/compile_inputs.TYPED-PORT.PROPOSED.py.txt",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/private-values.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/UNUSED-CENSUS.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/final-helper-pins.json",
+        "--negative-only"
+      ],
+      "expected_outputs": [
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs-port-corrected-r589/compiled-case-r2.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs-port-corrected-r589/compiled-manifest-r2.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs-port-corrected-r589/compiled-binding-r2.json"
+      ],
+      "gate_before_next": "Root verifies canonical manifest binding, exact source/helper/cache/template closure, diagnostic_only=true/census_sha256NULL and all3startup_pathNULL/FDsNULL. UNUSED-CENSUS.json is an unused positional argument, never read/created in negative-only. Read source-derived fields/metadata only; no fake vector.",
+      "phase": "03_negative_compile"
+    },
+    {
+      "actual_outcome": null,
+      "argv": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "TZ=UTC",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "210s",
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/accounting-r31-source/run-offline-command-r3.py",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/prepare_inputs.PORT-OUTPUT.PROPOSED.py.txt",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/private-values.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/final-helper-pins.json"
+      ],
+      "expected_outputs": [
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/managed-execution",
+        "/tmp/seraph-1009-n12-runtime",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/managed-execution/context.json",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/managed-execution/controller.log",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/managed-execution/source/logs/seraph-local-backend.log",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/managed-execution/journey/startup-failures"
+      ],
+      "gate_before_next": "Root checks prepared:true/execution_authorized:false, full current copied byte/link/mode/cache/context closure, exact private roots and empty generated0600logs/0700failure dir. Existing prepare validates inputs before writes; failed partial assets remain held. Do not call internal historical preparation wrapper.",
+      "phase": "04_original_external_prepare"
+    },
+    {
+      "actual_outcome": null,
+      "argv": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "TZ=UTC",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "210s",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/accounting-r31-source/run-offline-command-r3.py",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/repository_fixture.py",
+        "copy-after-prepare"
+      ],
+      "expected_outputs": [
+        "/tmp/seraph-1009-n12-runtime/workspace/example"
+      ],
+      "gate_before_next": "Root verifies copied genuine staged Git HEAD and complete fixture map equals original receipt; parent private and destination fresh. Only source fixture copy, no tests/job execution.",
+      "phase": "05_repository_copy"
+    },
+    {
+      "actual_outcome": null,
+      "argv": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "TZ=UTC",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "210s",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/accounting-r31-source/run-offline-command-r3.py",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/readback_inputs.PORT-OUTPUT.PROPOSED.py.txt"
+      ],
+      "expected_outputs": [
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs-port-corrected-r589/destination-readback-r2.json"
+      ],
+      "gate_before_next": "Root verifies complete augmented backend regular/link frontier, every manifest member hash/mode/stable identity, both generated logs empty/private and failure dir empty/private; execution_authorized=false. Keep actual observed counts, never copy expected historical counts as proof.",
+      "phase": "06_full_destination_readback"
+    },
+    {
+      "actual_outcome": null,
+      "argv": [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "TZ=UTC",
+        "/usr/bin/timeout",
+        "--signal=TERM",
+        "--kill-after=2s",
+        "210s",
+        "/usr/bin/python3",
+        "-I",
+        "-S",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/accounting-r31-source/run-offline-command-r3.py",
+        "/home/pawel/repos/seraph/.agent-worktrees/986-a1-descriptor-projection/.agent-evidence/986/accepted-cache-r174/.venv/bin/python",
+        "-I",
+        "-B",
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/root-verify-prepared.PORT-OUTPUT.PROPOSED.py.txt"
+      ],
+      "expected_outputs": [
+        "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/root-prepared-readback.json"
+      ],
+      "gate_before_next": "Root verifies context==compiledmanifest, complete file/link/cache/startup/tool metadata and original four-key source input, actual context SHA/PINS.txt SHA and all four original ports clear. This is pre-FDseal context with all3pathsNULL/FDsNULL; no launch marker. Separate late prepared SOURCE review/Rootrelease mandatory before native owner.",
+      "phase": "07_independent_prepared_readback"
+    }
+  ],
+  "required_execution_scope": "Root-authoritative actual HOST with distinct perphase releases; original210s caps preserved"
+}

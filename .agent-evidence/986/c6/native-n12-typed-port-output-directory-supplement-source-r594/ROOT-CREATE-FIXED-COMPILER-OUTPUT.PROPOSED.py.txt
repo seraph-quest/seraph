@@ -1,0 +1,49 @@
+"""Root-only fixed fresh compiler-output directory creation; no runtime or old output mutation."""
+import os
+from pathlib import Path
+import stat
+import sys
+
+PARENT = Path('/home/pawel/repos/seraph/.agent-evidence/986/c6/n12')
+OUT = PARENT / 'preparation-inputs-port-corrected-r589'
+STABLE = ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+
+def main():
+    if len(sys.argv) != 1 or os.geteuid() != 1000 or os.getegid() != 1000:
+        raise RuntimeError('fixed_Root_owner_required')
+    if PARENT.resolve(strict=True) != PARENT:
+        raise RuntimeError('canonical_private_parent_required')
+    before = PARENT.lstat()
+    if not stat.S_ISDIR(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o700 or (before.st_uid,before.st_gid) != (1000,1000):
+        raise RuntimeError('private_parent_required')
+    fd = os.open(PARENT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        held = os.fstat(fd)
+        if any(getattr(before,k) != getattr(held,k) or getattr(held,k) != getattr(PARENT.lstat(),k) for k in STABLE):
+            raise RuntimeError('private_parent_changed')
+        try:
+            os.stat(OUT.name,dir_fd=fd,follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError('fresh_fixed_output_required')
+        os.mkdir(OUT.name, mode=0o700, dir_fd=fd)
+        child = os.open(OUT.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        try:
+            created = os.fstat(child)
+            current = OUT.lstat()
+            if (not stat.S_ISDIR(created.st_mode) or stat.S_IMODE(created.st_mode) != 0o700
+                    or (created.st_uid,created.st_gid) != (1000,1000)
+                    or any(getattr(created,k) != getattr(current,k) for k in STABLE)
+                    or OUT.resolve(strict=True) != OUT or os.listdir(child)):
+                raise RuntimeError('created_private_output_not_exact')
+            os.fsync(child)
+            os.fsync(fd)
+        finally:
+            os.close(child)
+    finally:
+        os.close(fd)
+    print('FIXED_PRIVATE_COMPILER_OUTPUT_CREATED_RUNTIME_FALSE')
+
+if __name__ == '__main__':
+    main()

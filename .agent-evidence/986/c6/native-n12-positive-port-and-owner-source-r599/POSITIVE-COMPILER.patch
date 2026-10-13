@@ -1,0 +1,33 @@
+--- /home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/compile_positive.py
++++ /home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-positive-port-and-owner-source-r599/compile_positive.TYPED-PORT.PROPOSED.py.txt
+@@ -163,6 +163,30 @@
+             return {relocate(k): relocate(v) for k, v in value.items()}
+         return value
+     manifest = relocate(manifest)
++    # Use only the already reviewed typed n12 port operands, never string-substitute hashes.
++    context = manifest['context']
++    if context['client_ports'] != [18240, 13240]:
++        raise ValueError('original_compiler_port_source_changed')
++    context['client_ports'] = [18241, 13241]
++    for key, old, new in (('LOCAL_BACKEND_PORT', '18240', '18241'),
++                          ('LOCAL_FRONTEND_PORT', '13240', '13241')):
++        if context['fixture_paths'][key] != old or manifest['dotenv_assignments'][key] != old:
++            raise ValueError('original_compiler_port_field_changed')
++        context['fixture_paths'][key] = new
++        manifest['dotenv_assignments'][key] = new
++    if manifest['dotenv_assignments']['OPERATOR_AUTH_ALLOWED_ORIGINS'] != 'http://127.0.0.1:13240':
++        raise ValueError('original_compiler_origin_changed')
++    manifest['dotenv_assignments']['OPERATOR_AUTH_ALLOWED_ORIGINS'] = 'http://127.0.0.1:13241'
++    backend = [role for role in context['python_roles'] if role['name'] == 'backend']
++    if len(backend) != 1 or backend[0]['argv'][8:10] != ['--port', '18240']:
++        raise ValueError('original_compiler_backend_port_operand_changed')
++    backend[0]['argv'][9] = '18241'
++    if len(context['node_roles']) != 1 or context['node_roles'][0]['argv'][4:6] != ['--port', '13240']:
++        raise ValueError('original_compiler_frontend_port_operand_changed')
++    context['node_roles'][0]['argv'][5] = '13241'
++    if context['reviewed_frontend_process_argv'][4:6] != ['--port', '13240']:
++        raise ValueError('original_compiler_reviewed_frontend_port_changed')
++    context['reviewed_frontend_process_argv'][5] = '13241'
+     manifest['bootstrap_pins'] = helpers
+     manifest['context']['launcher_env']['UV_NO_SYNC'] = '1'
+     manifest['case_id'] = 'auth-refresh-running'

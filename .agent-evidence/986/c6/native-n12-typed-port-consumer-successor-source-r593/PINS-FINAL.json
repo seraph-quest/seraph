@@ -1,0 +1,205 @@
+{
+  "Root_release": null,
+  "added_command_source_checks": [
+    {
+      "gid": 1000,
+      "mode": 33152,
+      "nlink": 1,
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-phase04-typed-port-diagnosis-source-r589/compile_inputs.TYPED-PORT.PROPOSED.py.txt",
+      "sha256": "fcfcb8067d2107d9509bb1ba69954d2d9205929f1b0c1df8988eb052d66c1035",
+      "size": 20176,
+      "uid": 1000
+    },
+    {
+      "gid": 1000,
+      "mode": 33152,
+      "nlink": 1,
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/prepare_inputs.PORT-OUTPUT.PROPOSED.py.txt",
+      "sha256": "f2d816a54c29909b956cb87b89ca79bec162f03242215d94eb7625c50280aeba",
+      "size": 3353,
+      "uid": 1000
+    },
+    {
+      "gid": 1000,
+      "mode": 33152,
+      "nlink": 1,
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/readback_inputs.PORT-OUTPUT.PROPOSED.py.txt",
+      "sha256": "7fcbc596db6cc1e19f592de676f4ff3f4d7fd1ad5c13dcc0d3a5373515504388",
+      "size": 4348,
+      "uid": 1000
+    },
+    {
+      "gid": 1000,
+      "mode": 33152,
+      "nlink": 1,
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/root-verify-prepared.PORT-OUTPUT.PROPOSED.py.txt",
+      "sha256": "a6b873f1760b7e296afe20d67c7c4ea431592806fb5617b2f48c649a6dfe6921",
+      "size": 3205,
+      "uid": 1000
+    }
+  ],
+  "commands": {
+    "gid": 1000,
+    "mode": 33152,
+    "nlink": 1,
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/PREPARATION-COMMANDS.PORT-OUTPUT.SOURCE.json",
+    "sha256": "00362d157e08a873ad2fe9df6a78d266effcc051599f1b556a39a80dd010bd62",
+    "size": 10883,
+    "uid": 1000
+  },
+  "compiler": {
+    "gid": 1000,
+    "mode": 33152,
+    "nlink": 1,
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-phase04-typed-port-diagnosis-source-r589/compile_inputs.TYPED-PORT.PROPOSED.py.txt",
+    "sha256": "fcfcb8067d2107d9509bb1ba69954d2d9205929f1b0c1df8988eb052d66c1035",
+    "size": 20176,
+    "uid": 1000
+  },
+  "fresh_disposition_review": null,
+  "new_compiled_directory": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs-port-corrected-r589",
+  "new_compiled_directory_exists": false,
+  "records": [
+    {
+      "candidate": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/prepare_inputs.PORT-OUTPUT.PROPOSED.py.txt",
+        "sha256": "f2d816a54c29909b956cb87b89ca79bec162f03242215d94eb7625c50280aeba",
+        "size": 3353,
+        "uid": 1000
+      },
+      "preimage": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/external-prepare/prepare_inputs_r2.py",
+        "sha256": "bb9bc62748c8d42fe3268322fa3cf041850251c21c15c6267f4ed74a39a8782a",
+        "size": 3333,
+        "uid": 1000
+      }
+    },
+    {
+      "candidate": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/readback_inputs.PORT-OUTPUT.PROPOSED.py.txt",
+        "sha256": "7fcbc596db6cc1e19f592de676f4ff3f4d7fd1ad5c13dcc0d3a5373515504388",
+        "size": 4348,
+        "uid": 1000
+      },
+      "preimage": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/readback_inputs_r2.py",
+        "sha256": "ea5b4e74a001096bfb5f7bca0886ef7fa16fbfbd39ee16319711bffdd576d11b",
+        "size": 4281,
+        "uid": 1000
+      }
+    },
+    {
+      "candidate": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/root-verify-prepared.PORT-OUTPUT.PROPOSED.py.txt",
+        "sha256": "a6b873f1760b7e296afe20d67c7c4ea431592806fb5617b2f48c649a6dfe6921",
+        "size": 3205,
+        "uid": 1000
+      },
+      "preimage": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/root-verify-prepared.py",
+        "sha256": "764771924ff76c3589cf9055cd1ac83c88109513f416bf736a966be51d9c40f2",
+        "size": 3185,
+        "uid": 1000
+      }
+    },
+    {
+      "candidate": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/ROOT-PHASES-GATE.PORT-OUTPUT.CLOSED-SOURCE.PROPOSED.py.txt",
+        "sha256": "6492d6e8c938b3f781742ee6fd8af079b37a6f7386757afcbfafb5ecd3328387",
+        "size": 19464,
+        "uid": 1000
+      },
+      "preimage": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/ROOT-N12-PHASES02-07-GATE.R558-CURRENT.CURRENT-SEAL.ACTUAL-R584.py.txt",
+        "sha256": "89fdee37ccfacbc7aca5763803ff74d65e8a61243fdaf639c44ac3ac93225e5d",
+        "size": 17245,
+        "uid": 1000
+      }
+    },
+    {
+      "candidate": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/ROOT-PHASES-READBACK.PORT-OUTPUT.PROPOSED.py.txt",
+        "sha256": "851a2a13f3a57b1254102f5c328bb090df32dce424bc702ea2ee325304567f6e",
+        "size": 17814,
+        "uid": 1000
+      },
+      "preimage": {
+        "gid": 1000,
+        "mode": 33152,
+        "nlink": 1,
+        "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-original-stage-actual-binding-source-r584/ROOT-N12-PHASES03-07-READBACK.R558-CURRENT.CURRENT-SEAL.ACTUAL-R584.py.txt",
+        "sha256": "847d56896f3a45f69c8f8f6af0bb3f441aea4a7bc7016ca1bf0c3d73263976a8",
+        "size": 16826,
+        "uid": 1000
+      }
+    }
+  ],
+  "repository_fixture_OUT_unchanged": true,
+  "runtime_authority": false,
+  "state": "SOURCE_ONLY_FINITE_CONSUMER_AMENDMENT",
+  "superseded_gate": {
+    "gid": 1000,
+    "mode": 33152,
+    "nlink": 1,
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/ROOT-PHASES-GATE.PORT-OUTPUT.PROPOSED.py.txt",
+    "sha256": "8f6c0368299db5e77978897efa2a7241d75451da1c5cdb25b50a44c4def94163",
+    "size": 18532,
+    "uid": 1000
+  },
+  "wrong_three_outputs_preserved": [
+    {
+      "gid": 1000,
+      "mode": 33152,
+      "nlink": 1,
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/compiled-case-r2.json",
+      "sha256": "268e4df3306d075ccbf40059410992adc046408d2b6168ec2d267f518716fd27",
+      "size": 2144,
+      "uid": 1000
+    },
+    {
+      "gid": 1000,
+      "mode": 33152,
+      "nlink": 1,
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/compiled-manifest-r2.json",
+      "sha256": "46d93e80ccd7d129017d9922f87d8d3e8c0e82c8a2a4a66895c6222c5a0b4f2f",
+      "size": 40267649,
+      "uid": 1000
+    },
+    {
+      "gid": 1000,
+      "mode": 33152,
+      "nlink": 1,
+      "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs/compiled-binding-r2.json",
+      "sha256": "a7f8ff200551bf1f9479bfe56f24b12e1f3aa59d17afd6a1768633e11a0ef86a",
+      "size": 630,
+      "uid": 1000
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "Root_release": null,
+  "argv": [
+    "/usr/bin/env",
+    "-i",
+    "PATH=/usr/bin:/bin",
+    "LANG=C.UTF-8",
+    "TZ=UTC",
+    "/usr/bin/python3",
+    "-I",
+    "-S",
+    "-B",
+    "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-output-directory-supplement-source-r594/ROOT-CREATE-FIXED-COMPILER-OUTPUT.PROPOSED.py.txt"
+  ],
+  "cwd": "/home/pawel/repos/seraph",
+  "execution": null,
+  "failure_after_mkdir": "HOLD_preserve_partial_no_automatic_retry_or_cleanup",
+  "must_run_before": "R593 corrected phase03 gate and compiler",
+  "runtime_authority": false,
+  "state": "SOURCE_ONLY_ROOT_INVOCATION"
+}

@@ -1,0 +1,35 @@
+{
+  "Root_release": null,
+  "commands": {
+    "gid": 1000,
+    "mode": 33152,
+    "nlink": 1,
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-output-directory-supplement-source-r594/COMMANDS.SOURCE.json",
+    "sha256": "9700c0b5f25645e4a2975a6147fe4934e4822baff8f05f0e24f34f307256abdc",
+    "size": 629,
+    "uid": 1000
+  },
+  "original_consumer_packet": {
+    "gid": 1000,
+    "mode": 33152,
+    "nlink": 1,
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-consumer-successor-source-r593/PINS-FINAL.json",
+    "sha256": "7412e80a5534ecd61a7e58998009c913517e6bad0b2b446fa333ea602fd8443b",
+    "size": 7674,
+    "uid": 1000
+  },
+  "out": "/home/pawel/repos/seraph/.agent-evidence/986/c6/n12/preparation-inputs-port-corrected-r589",
+  "out_absent_now": true,
+  "review": null,
+  "runtime_authority": false,
+  "source": {
+    "gid": 1000,
+    "mode": 33152,
+    "nlink": 1,
+    "path": "/home/pawel/repos/seraph/.agent-evidence/986/c6/native-n12-typed-port-output-directory-supplement-source-r594/ROOT-CREATE-FIXED-COMPILER-OUTPUT.PROPOSED.py.txt",
+    "sha256": "d11f91096b187ae653528c83d75c5f08448de86c6ead83625848cccbcef5d1e7",
+    "size": 2228,
+    "uid": 1000
+  },
+  "state": "SOURCE_ONLY_MINIMAL_OUTPUT_DIRECTORY_SUPPLEMENT"
+}

@@ -34,6 +34,8 @@ def original_effects(connection, *, on_compile=None):
             compiles.append(frame.f_locals["self"])
             if on_compile is not None:
                 on_compile()
+        if original_profile is not None:
+            original_profile(frame, action, _arg)
     event.listen(connection.sync_connection, "before_cursor_execute", before)
     sys.setprofile(profile)
     try:

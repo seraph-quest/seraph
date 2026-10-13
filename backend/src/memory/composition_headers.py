@@ -783,7 +783,34 @@ def _validate_locator(connection, table, column, model=None, *, budget=None, _he
     name = source[0].name
     index_width = (_original_locator_schema_width(connection, table, model, _header_budget)
         if _header_budget is not None else None)
-    rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770 if index_width is None else index_width,20,14 if index_width is None else 4,20)), appearance=('locator-indexes',), bounded_query=('SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?' if index_width is None else 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN origin IN (\'pk\',\'u\',\'c\') THEN origin END,partial FROM pragma_index_list(?) LIMIT ?'))
+    targeted_index = False
+    if index_width is not None:
+        # The original same-frame schema proof authenticates this mapped name.
+        # Pay sizing arithmetic, membership/type predicates and parameter work
+        # before sizing or constructing the new three-parameter tuple.
+        _metadata_precharge(connection, _header_budget, 256,
+            ("locator-indexes", "target-planning"))
+        targeted_index = (type(name) is str and name in _NAMED_INDEXES
+                and name.isascii() and len(name) <= 128)
+    if targeted_index:
+        index_limit = len(model.__table__.indexes)+len(model.__table__.constraints)+1
+        target_width = max(4, len(name)+2)
+        table_width = len(table)+2
+        parameter_width = target_width+table_width+24
+        _metadata_precharge(connection, _header_budget, 3*parameter_width,
+            ("locator-indexes", "target-parameters"))
+        # Exact closed ASCII SQL: 182 bytes, JSON quoted width186.
+        # Three independent input copies remain separately paid.
+        _metadata_precharge(connection, _header_budget, 558,
+            ("locator-indexes", "target-sql-input"))
+        parameters = (name, table, index_limit)
+        rows = _metadata_rows(connection,
+            'SELECT CASE WHEN name COLLATE BINARY=? AND octet_length(name)<=128 THEN name END,"unique",CASE WHEN origin IN (\'pk\',\'u\',\'c\') THEN origin END,partial FROM pragma_index_list(?) LIMIT ?',
+            parameters, _header_budget=_header_budget,
+            upper=_metadata_upper(index_limit, (target_width,20,4,20)),
+            appearance=('locator-indexes',))
+    else:
+        rows = _metadata_rows(connection, 'SELECT name,"unique",origin,partial FROM pragma_index_list(?) LIMIT ?', (table, len(model.__table__.indexes)+len(model.__table__.constraints)+1), _header_budget=_header_budget, upper=_metadata_upper((len(model.__table__.indexes)+len(model.__table__.constraints)+1), (770 if index_width is None else index_width,20,14 if index_width is None else 4,20)), appearance=('locator-indexes',), bounded_query=('SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN octet_length(origin)<=2 THEN origin END,partial FROM pragma_index_list(?) LIMIT ?' if index_width is None else 'SELECT CASE WHEN octet_length(name)<=128 THEN name END,"unique",CASE WHEN origin IN (\'pk\',\'u\',\'c\') THEN origin END,partial FROM pragma_index_list(?) LIMIT ?'))
     if budget is not None:
         if _header_budget is None:
             budget.debit(_metadata_cost([list(r) for r in rows]), appearance=("operator-token-index-list",))
@@ -945,7 +972,7 @@ def _original_programme_identity_key_upper(connection, descriptor, budget, key, 
         octets = size
     else:
         # Pay character, ord and counter scalar appearances before the
-        # original Unicode width traversal; no encoder/generator is created.
+        # original Unicode width traversal; no UTF-8 buffer or generator is created.
         _metadata_precharge(connection, budget, 24 * size,
             ("identity-key-width", "unicode-scratch"))
         octets = 0

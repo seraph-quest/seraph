@@ -851,11 +851,25 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
     result={}
     for key in identities:
         if _header_budget is not None:
+            # Pay scalar sizing/source inspection before inspecting this key.
+            _metadata_precharge(connection, _header_budget, 102,
+                ("row-header", "skeleton-scalar-source-check"))
             if type(key) not in {str, int}:
                 raise HeaderBoundsError("header_request_bound")
             if type(key) is str:
-                key_octets = sum(1 if ord(char)<128 else 2 if ord(char)<2048
-                    else 3 if ord(char)<=65535 else 4 for char in key)
+                key_characters = len(key)
+                if key_characters > 512:
+                    raise HeaderBoundsError("header_request_bound")
+                if key.isascii():
+                    key_octets = key_characters
+                else:
+                    # Generator41 plus conservative yielded-character, ord,
+                    # comparison, scalar-result and sum-state widths per char.
+                    _metadata_precharge(connection, _header_budget,
+                        41 + 64 * key_characters,
+                        ("row-header", "unicode-key-octet-sizing"))
+                    key_octets = sum(1 if ord(char)<128 else 2 if ord(char)<2048
+                        else 3 if ord(char)<=65535 else 4 for char in key)
                 if key_octets > 512:
                     raise HeaderBoundsError("header_request_bound")
                 key_copy_upper = 6*key_octets + 2
@@ -871,12 +885,31 @@ def _headers(connection, descriptor, identities, *, _header_budget=None):
         if len(rows)!=1: raise HeaderBoundsError("header_row_unavailable")
         row=rows[0]
         if _header_budget is not None:
-            copy_upper = key_copy_upper + 6*len(descriptor.table) + sum(6*len(name)+12 for name in descriptor.columns) + 256
-            _metadata_precharge(connection, _header_budget, copy_upper, ("row-header", "skeleton-copy"))
             fact_upper = key_copy_upper + 6*len(descriptor.table) + 256
             _metadata_precharge(connection, _header_budget, fact_upper, ("row-header", "header-fact-copy"))
-        skeleton=["native-composition-memory.v1",descriptor.table,key,[[n,None] for n in descriptor.columns]]
-        cost=len(json.dumps(skeleton,ensure_ascii=True,separators=(",",":")).encode())+128
+        source_scalar = False
+        if _header_budget is not None:
+            source_scalar = (COMPOSITION_DESCRIPTORS.get(descriptor.table) is descriptor
+                and type(key) is str)
+            if source_scalar:
+                column_count = len(descriptor.columns)
+                _metadata_precharge(connection, _header_budget, 192 + 12 * column_count,
+                    ("row-header", "skeleton-scalar-sizing"))
+                source_scalar = key.isascii() and key.isprintable()
+        if source_scalar:
+            # These table/column names are immutable closed Source identifiers.
+            # Q(key) is exact for printable ASCII, including quotes/backslashes.
+            key_width = len(key) + 2 + key.count('"') + key.count("\\")
+            cost = 38 + len(descriptor.table) + key_width
+            for name in descriptor.columns:
+                cost += len(name) + 10
+            cost += 128
+        else:
+            if _header_budget is not None:
+                copy_upper = key_copy_upper + 6*len(descriptor.table) + sum(6*len(name)+12 for name in descriptor.columns) + 256
+                _metadata_precharge(connection, _header_budget, copy_upper, ("row-header", "skeleton-copy"))
+            skeleton=["native-composition-memory.v1",descriptor.table,key,[[n,None] for n in descriptor.columns]]
+            cost=len(json.dumps(skeleton,ensure_ascii=True,separators=(",",":")).encode())+128
         for i,(kind,nullable) in enumerate(zip(descriptor.kinds,descriptor.nullable)):
             storage,size,number=row[1+i*3:4+i*3]
             if storage=="null":
@@ -1519,12 +1552,14 @@ async def read_current_method_pointer(db, *, original_selection):
         # upper uses uniqueness under the identical current transaction.
         scope_rows_upper = (1 if connection is common33.connection
             and connection.get_transaction() is common33.transaction else 2)
+        # New HEX temporary and both driver query-input copies are paid first.
+        budget.debit(1556, appearance=("task-method-pointer", "hex-query-input"))
         selected = _metadata_rows(connection,
             'SELECT CASE WHEN typeof(id)=\'text\' AND octet_length(id) BETWEEN 1 AND 512 '
-            'THEN id END,_rowid_ FROM task_method_active '
+            'THEN hex(id) END,_rowid_ FROM task_method_active '
             'WHERE owner_identity_id COLLATE BINARY=? AND goal_id COLLATE BINARY=? '
             'AND goal_revision COLLATE BINARY=? AND family COLLATE BINARY=? LIMIT 2',
-            scope, _header_budget=budget, upper=_metadata_upper(scope_rows_upper, (3074, 20)),
+            scope, _header_budget=budget, upper=_metadata_upper(scope_rows_upper, (1026, 20)),
             appearance=("task-method-pointer-scope",))
         if len(selected) > 1:
             raise HeaderBoundsError("task_method_pointer_ambiguous")
@@ -1545,9 +1580,32 @@ async def read_current_method_pointer(db, *, original_selection):
             # output appearances, paid before either constructor.
             budget.debit(5 + 12, appearance=("task-method-pointer", "absent-output"))
             return None, bool(foreign)
-        identifier, rowid = selected[0]
-        if type(identifier) is not str or not identifier:
+        # 128 prepaid state covers codec method/call refs, len/modulo/division,
+        # type/boolean outputs and scalar planning before decode work.
+        budget.debit(128, appearance=("task-method-pointer", "hex-size-state"))
+        encoded_identifier, rowid = selected[0]
+        if type(encoded_identifier) is not str or not encoded_identifier:
             raise HeaderBoundsError("task_method_pointer_locator_changed")
+        encoded_size = len(encoded_identifier)
+        if encoded_size > 1024 or encoded_size % 2:
+            raise HeaderBoundsError("task_method_pointer_locator_changed")
+        octets = encoded_size // 2
+        budget.debit(octets + 2, appearance=("task-method-pointer", "id-bytes"))
+        raw_identifier = bytes.fromhex(encoded_identifier)
+        # Every byte/result of the ASCII-width walk is prepaid. Unicode uses
+        # the original safe six-times UTF bound and original strict UTF8 decode.
+        budget.debit(37 * octets, appearance=("task-method-pointer", "id-quote-walk"))
+        if raw_identifier.isascii():
+            identifier_upper = octets + 2
+            for byte in raw_identifier:
+                if byte == 34 or byte == 92:
+                    identifier_upper += 1
+                elif byte < 32 or byte == 127:
+                    identifier_upper += 5
+        else:
+            identifier_upper = 6 * octets + 2
+        budget.debit(identifier_upper, appearance=("task-method-pointer", "id-decode"))
+        identifier = raw_identifier.decode("utf-8")
         _descriptor_integer_size(rowid)
         budget.enroll({("task_method_active", rowid)})
         headers = _headers(connection, descriptor, (identifier,), _header_budget=budget)

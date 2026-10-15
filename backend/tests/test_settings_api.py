@@ -1316,3 +1316,25 @@ async def test_test_email_endpoint_returns_safe_status(client):
     assert data["status"] == "blocked"
     assert data["recipient_hash"] == "hash123"
     assert "user@example" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_background_inference_toggles_round_trip_through_settings(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+
+    initial = await client.get("/api/settings/background-inference")
+    assert initial.status_code == 200
+    jobs = {job["job_id"]: job for job in initial.json()["jobs"]}
+    assert jobs["strategist_tick"]["enabled"] is True
+    assert jobs["strategist_tick"]["approx_calls_per_day"] > 0
+
+    saved = await client.put("/api/settings/background-inference", json={"jobs": {"strategist_tick": False}})
+    assert saved.status_code == 200
+    jobs = {job["job_id"]: job for job in saved.json()["jobs"]}
+    assert jobs["strategist_tick"]["enabled"] is False
+    assert jobs["daily_briefing"]["enabled"] is True
+
+    rejected = await client.put("/api/settings/background-inference", json={"jobs": {"unknown_job": False}})
+    assert rejected.status_code == 422
+    not_bool = await client.put("/api/settings/background-inference", json={"jobs": {"daily_briefing": "no"}})
+    assert not_bool.status_code == 422

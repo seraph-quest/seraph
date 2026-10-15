@@ -771,7 +771,10 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
     decision = await screen_derived_llm_decision("end_of_day_goal_report")
     if not decision.allowed:
         body = (
-            "End-of-day report LLM generation was blocked by Seraph's screen-data privacy policy. "
+            "End-of-day report analysis was skipped: disabled by operator in Settings → Models & OpenRouter "
+            "(background inference). No model call was made."
+            if decision.reason == "disabled_by_operator"
+            else "End-of-day report LLM generation was blocked by Seraph's screen-data privacy policy. "
             f"Reason: {decision.reason}. Configure the governed OpenRouter model, cloud consent, "
             "approved upstreams, and budget."
         )

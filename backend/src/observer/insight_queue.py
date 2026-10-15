@@ -191,17 +191,20 @@ class InsightQueue:
         """
         cutoff = _cutoff_time()
         async with get_session() as db:
-            result = await db.execute(
-                select(QueuedInsight)
-                .where(QueuedInsight.created_at > cutoff)
-                .order_by(QueuedInsight.urgency.desc())
-                .limit(PEEK_ALL_LIMIT)
-            )
-            items = await _remove_invalid_goal_rows(db, list(result.scalars().all()))
-            expired_result = await db.execute(select(QueuedInsight).where(QueuedInsight.created_at <= cutoff))
-            expired_rows = list(expired_result.scalars().all())
-            for row in expired_rows:
-                await db.delete(row)
+            # Deletions stay pending until commit_or_defer: an autoflush from
+            # the next query would take the writer lock at the full timeout.
+            with db.no_autoflush:
+                result = await db.execute(
+                    select(QueuedInsight)
+                    .where(QueuedInsight.created_at > cutoff)
+                    .order_by(QueuedInsight.urgency.desc())
+                    .limit(PEEK_ALL_LIMIT)
+                )
+                items = await _remove_invalid_goal_rows(db, list(result.scalars().all()))
+                expired_result = await db.execute(select(QueuedInsight).where(QueuedInsight.created_at <= cutoff))
+                expired_rows = list(expired_result.scalars().all())
+                for row in expired_rows:
+                    await db.delete(row)
             if db.deleted:
                 for item in items:
                     db.expunge(item)

@@ -1,3 +1,4 @@
+import importlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -132,6 +133,13 @@ async def async_db(request, tmp_path_factory):
     import src.db.engine as canonical_engine
 
     canonical_get_session = canonical_engine.get_session
+    # Import every patched module before patching any of them. Otherwise a
+    # module first imported here binds ``from src.db.engine import
+    # get_session`` to this fixture's patched function, and that stale binding
+    # is what its own patcher later "restores". The teardown sweep below also
+    # repairs captures by modules first imported during the test body.
+    for target in _PATCH_TARGETS:
+        importlib.import_module(target.rsplit(".", 1)[0])
     patches = []
     for target in _PATCH_TARGETS:
         p = patch(target, _get_session)

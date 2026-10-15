@@ -254,3 +254,113 @@ async def test_long_writer_lock_hold_is_logged_with_its_call_site(async_db, monk
             event.remove(engine, name, listener)
     held = [record.getMessage() for record in caplog.records if "writer lock held" in record.getMessage()]
     assert len(held) == 1 and "slow_writer" in held[0], held
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_snapshot_fallback_never_serves_content_a_concurrent_forget_removed(async_db, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+    from src.memory.snapshots import get_or_create_bounded_guardian_snapshot
+
+    await _seed_memories()
+    assert "Review the Atlas brief" in await get_or_create_bounded_guardian_snapshot()
+    forgotten = await memory_repository.create_memory(
+        content="Forget me: brief the private launch codename.",
+        kind=MemoryKind.commitment,
+        summary="Private launch codename",
+        importance=0.99,
+    )
+    real_save = memory_repository.save_snapshot
+
+    async def busy_writer(**kwargs):
+        raise OperationalError("BEGIN IMMEDIATE", {}, Exception("database is locked"))
+
+    # Control: an unrelated busy writer still lets the turn use fresh content.
+    monkeypatch.setattr(memory_repository, "save_snapshot", busy_writer)
+    assert "Private launch codename" in await get_or_create_bounded_guardian_snapshot()
+
+    async def forget_holds_the_writer(**kwargs):
+        # The writer that defeats the bounded save is a forget that commits.
+        await memory_repository.mark_memory_tombstoned(forgotten.memory_id, actor="operator", reason="forget")
+        raise OperationalError("BEGIN IMMEDIATE", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(memory_repository, "save_snapshot", forget_holds_the_writer)
+    assert "Private launch codename" not in await get_or_create_bounded_guardian_snapshot()
+    monkeypatch.setattr(memory_repository, "save_snapshot", real_save)
+    assert "Private launch codename" not in await get_or_create_bounded_guardian_snapshot()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_orphaned_goal_insights_are_hidden_without_waiting_for_a_writer(async_db):
+    from src.db.models import QueuedInsight
+    from src.observer.insight_queue import insight_queue
+
+    kept = await insight_queue.enqueue("Ambient insight", urgency=3)
+    async with async_db() as db:
+        db.add(QueuedInsight(id="orphan-insight", content="Goal was deleted", goal_id="deleted-goal",
+                             goal_revision=1, owner_principal_id="operator:a", operator_session_id="session:a"))
+    async with _database(async_db) as (path, _statements):
+        with _foreign_writer(path):
+            started = time.monotonic()
+            assert [item.id for item in await insight_queue.peek_all()] == [kept.id]
+            assert time.monotonic() - started < _READ_BOUND_SECONDS
+        async with async_db() as db:
+            assert await db.get(QueuedInsight, "orphan-insight") is not None
+        assert [item.id for item in await insight_queue.peek_all()] == [kept.id]
+    async with async_db() as db:
+        assert await db.get(QueuedInsight, "orphan-insight") is None
+
+
+def test_write_path_and_policy_refusal_audits_keep_the_normal_wait(monkeypatch, tmp_path):
+    from src.audit import runtime as audit_runtime
+    from src.memory import embedder, soul
+
+    waits: list[tuple[str, str | None, int | None]] = []
+
+    def capture(*, integration_type, name, outcome, details=None, lock_wait_ms=None):
+        waits.append((integration_type, (details or {}).get("stage") or outcome, lock_wait_ms))
+
+    monkeypatch.setattr(soul, "log_integration_event_sync", capture)
+    monkeypatch.setattr(embedder, "log_integration_event_sync", capture)
+    monkeypatch.setattr(soul, "_soul_path", str(tmp_path / "soul.md"))
+    soul.write_soul("# Soul\n")
+    soul.read_soul()
+    with audit_runtime.read_path_audits():
+        embedder._log_embedding_event("failed", {"stage": "admission"})
+        embedder._log_embedding_event("failed", {"stage": "receipt"})
+        embedder._log_embedding_event("failed", {"stage": "configuration"})
+    embedder._log_embedding_event("failed", {"stage": "configuration"})
+
+    bounded = audit_runtime.READ_PATH_AUDIT_WAIT_MS
+    assert waits == [
+        ("soul_file", "succeeded", None),
+        ("soul_file", "succeeded", bounded),
+        ("embedding_model", "admission", None),
+        ("embedding_model", "receipt", None),
+        ("embedding_model", "configuration", bounded),
+        ("embedding_model", "configuration", None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_bounded_read_path_audit_is_deferred_not_dropped(async_db):
+    from sqlmodel import select
+    from src.audit.runtime import READ_PATH_AUDIT_WAIT_MS, log_integration_event
+    from src.db.models import AuditEvent
+    from src.utils.background import drain_tracked_tasks
+
+    async with _database(async_db) as (path, _statements):
+        with _foreign_writer(path):
+            started = time.monotonic()
+            persisted_now = await log_integration_event(
+                integration_type="screen_repository", name="daily_summary", outcome="empty_result",
+                lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
+            )
+            assert time.monotonic() - started < _READ_BOUND_SECONDS
+            assert persisted_now is False
+        await drain_tracked_tasks(timeout_seconds=10)
+    async with async_db() as db:
+        rows = (await db.execute(select(AuditEvent).where(AuditEvent.tool_name == "screen_repository:daily_summary"))).scalars().all()
+    assert len(rows) == 1

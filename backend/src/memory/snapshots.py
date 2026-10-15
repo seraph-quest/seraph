@@ -234,10 +234,13 @@ async def get_or_create_bounded_guardian_snapshot(
             _SESSION_BOUNDED_SNAPSHOT_CACHE.pop(session_id, None)
 
     try:
-        content, source_hash = await render_bounded_guardian_snapshot(soul_context=soul_context)
+        # Pin the tombstone revision before rendering: a forget committing
+        # during the render must invalidate this content, not be masked by a
+        # revision read afterwards.
         revision = await _snapshot_tombstone_revision()
         if revision is None:
             return ""
+        content, source_hash = await render_bounded_guardian_snapshot(soul_context=soul_context)
         current = await memory_repository.get_snapshot(MemorySnapshotKind.bounded_guardian_context)
         if current is None or current.source_hash != source_hash or current.content != content:
             try:
@@ -251,8 +254,11 @@ async def get_or_create_bounded_guardian_snapshot(
             except OperationalError as exc:
                 if not is_database_locked(exc):
                     raise
-                # The persisted snapshot is only a cache: serve the content
-                # just rendered from reconciled memory and persist it later.
+                # The persisted snapshot is only a cache. Serve the rendered
+                # content only if no forget has committed since it was pinned;
+                # the writer holding the lock may be that forget (#1074).
+                if await _snapshot_tombstone_revision() != revision:
+                    return ""
                 return content
     except (SQLAlchemyError, RuntimeError):
         if session_id is not None:

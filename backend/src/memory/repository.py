@@ -247,7 +247,7 @@ def _memory_record_bounded_text(
 
 
 # One guardian-state build reconciles tombstones at most once (#1074).
-_TOMBSTONE_RECONCILIATION_SCOPE: ContextVar[dict[str, dict[str, int | str]] | None] = ContextVar(
+_TOMBSTONE_RECONCILIATION_SCOPE: ContextVar[tuple[object, dict[str, dict[str, int | str]]] | None] = ContextVar(
     "seraph_tombstone_reconciliation_scope", default=None,
 )
 
@@ -256,10 +256,11 @@ _TOMBSTONE_RECONCILIATION_SCOPE: ContextVar[dict[str, dict[str, int | str]] | No
 def tombstone_reconciliation_scope() -> Iterator[None]:
     """Reuse one tombstone reconciliation receipt for the enclosed work.
 
-    Only a receipt computed inside the scope is reused; the scope is task
-    local, so concurrent requests each reconcile for themselves.
+    Only a receipt computed inside the scope is reused, and only by the task
+    that opened it: tasks it spawns inherit the context but reconcile for
+    themselves, so concurrent work never trusts another task's receipt.
     """
-    token = _TOMBSTONE_RECONCILIATION_SCOPE.set({})
+    token = _TOMBSTONE_RECONCILIATION_SCOPE.set((asyncio.current_task(), {}))
     try:
         yield
     finally:
@@ -7085,7 +7086,8 @@ class MemoryRepository:
         normalized_owner = str(owner_session_id or "").strip()
         if not _acquire_lock:
             return await self._reconcile_memory_tombstones_pass(normalized_owner, apply=True)
-        scope = _TOMBSTONE_RECONCILIATION_SCOPE.get()
+        owned_scope = _TOMBSTONE_RECONCILIATION_SCOPE.get()
+        scope = owned_scope[1] if owned_scope is not None and owned_scope[0] is asyncio.current_task() else None
         if scope is not None and normalized_owner in scope:
             return dict(scope[normalized_owner])
         receipt = await self._reconcile_memory_tombstones_pass(normalized_owner, apply=False)

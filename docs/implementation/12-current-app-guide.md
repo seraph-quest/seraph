@@ -1163,9 +1163,11 @@ read-only snapshot and take the writer lock only to re-apply one after a stale
 restore (#1074); one guardian-state build checks once, and its snapshot cache
 write waits at most 250 ms. Expired queued insights and pending approvals are
 never shown as active; their cleanup is best-effort on read. Diagnostic audits
-emitted by reads and idle daemon polls wait at most 250 ms (empty polls are
-audited once per worker per 5 minutes), and write transactions that hold the
-lock for 1 s or more are logged with their call site.
+emitted by reads and idle daemon polls wait at most 250 ms and are otherwise
+retried in the background, not dropped (empty polls are audited once per worker
+per 5 minutes); write-path and inference-policy refusal audits keep the normal
+wait. Write transactions that hold the lock for 1 s or more are logged with
+their call site.
 
 ## Current Capability Summary
 

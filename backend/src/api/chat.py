@@ -25,7 +25,9 @@ from src.approval.runtime import (
 from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
 from src.agent.direct_chat import (
-    OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+    openrouter_route_block_reason,
+    openrouter_route_block_recovery,
+    route_error_from,
     run_direct_local_chat,
     should_use_direct_local_chat,
 )
@@ -73,6 +75,12 @@ from src.model_fabric import NoCompliantModelRouteError
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _route_block_detail(error: BaseException) -> dict[str, str]:
+    reason = openrouter_route_block_reason(error)
+    message, recovery_action = openrouter_route_block_recovery(reason)
+    return {"message": message, "route_reason": reason, "recovery_action": recovery_action}
 
 
 def _approval_transport_metadata(exc: ApprovalRequired, approval: object | None = None) -> dict[str, object]:
@@ -738,7 +746,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 status_code=503,
                 detail={
                     "code": NoCompliantModelRouteError.code,
-                    "message": OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+                    **_route_block_detail(exc),
                     "remote_outcome": "not_contacted",
                     "retry_required": False,
                 },
@@ -849,10 +857,15 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)
         reset_current_llm_request_id(llm_request_token)
-        result = await asyncio.wait_for(
-            asyncio.to_thread(run_ctx.run, agent.run, request.message),
-            timeout=settings.agent_chat_timeout,
-        )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(run_ctx.run, agent.run, request.message),
+                timeout=settings.agent_chat_timeout,
+            )
+        except Exception as exc:
+            if (route_error := route_error_from(exc)) is not None and route_error is not exc:
+                raise route_error from exc
+            raise
         response_text = str(result.output) if hasattr(result, "output") else str(result)
         response_text = await redact_secrets_in_text(response_text)
         assert_runtime_not_revoked()
@@ -968,7 +981,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=503,
             detail={
                 "code": NoCompliantModelRouteError.code,
-                "message": OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+                **_route_block_detail(exc),
                 "remote_outcome": "not_contacted",
                 "retry_required": False,
             },

@@ -4064,7 +4064,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 denied_decision,
                 tuple(denial_reasons or ("no_compliant_route",)),
             )
-            last_error = NoCompliantModelRouteError()
+            last_error = NoCompliantModelRouteError(tuple(denial_reasons))
         if receipt_session is not None and governed_attempted:
             _finalize_route_receipt_sync(
                 receipt_session,
@@ -4578,7 +4578,7 @@ def completion_with_fallback_sync(
                 denied_decision,
                 tuple(denial_reasons or ("no_compliant_route",)),
             )
-            last_error = NoCompliantModelRouteError()
+            last_error = NoCompliantModelRouteError(tuple(denial_reasons))
         if receipt_session is not None and governed_attempted:
             _finalize_route_receipt_sync(
                 receipt_session,

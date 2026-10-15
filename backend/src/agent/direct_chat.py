@@ -15,13 +15,96 @@ from src.llm_runtime import (
     stream_completion_with_fallback,
 )
 from src.model_fabric.caller_context import build_canonical_inference_context
+from src.model_fabric.contracts import NoCompliantModelRouteError
 
 
 OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE = (
     "OpenRouter chat is blocked before any provider request. "
-    "Open Settings → OpenRouter setup and save an allowed model, upstream, "
+    "Open Settings → Models & OpenRouter and save an allowed model, upstream, "
     "cloud-egress consent, and a finite spend ceiling. No model call was made."
 )
+
+_SETTINGS = "Settings → Models & OpenRouter"
+_NO_CALL = "No model call was made."
+
+
+def openrouter_route_block_reason(error: BaseException) -> str:
+    """Return the first specific selector rejection carried by a route error."""
+    for code in getattr(error, "reason_codes", ()) or ():
+        if code and code != "no_compliant_route":
+            return code
+    return "no_compliant_route"
+
+
+def openrouter_route_block_recovery(reason: str) -> tuple[str, str]:
+    """Map one selector rejection code to an operator message and recovery action.
+
+    The codes come from the canonical selector; only the bounded code and the
+    capability name are echoed, never provider or credential detail.
+    """
+    code, _, detail = reason.partition(":")
+    capability = detail.replace("_", " ") if detail else ""
+    if code == "proof_expired":
+        return (
+            f"OpenRouter chat is blocked: the {capability} capability proof for the text route expired. "
+            f"Open {_SETTINGS} and press Prove route (each canary is one real, billed provider call), "
+            f"or choose a longer proof lifetime. {_NO_CALL}",
+            "prove_route",
+        )
+    if code == "proof_missing":
+        return (
+            f"OpenRouter chat is blocked: the text route has no {capability} capability proof yet. "
+            f"Open {_SETTINGS} and press Prove route (each canary is one real, billed provider call). {_NO_CALL}",
+            "prove_route",
+        )
+    if code == "capability_not_declared":
+        return (
+            "OpenRouter chat is blocked: this turn needs a capability the text route does not declare "
+            f"(chat needs streaming; agent turns need tool use). Enable it in {_SETTINGS}, save, "
+            f"then Prove route. {_NO_CALL}",
+            "declare_capability",
+        )
+    if code == "profile_limit_unknown_or_insufficient" and detail == "context_tokens":
+        return (
+            "OpenRouter chat is blocked: this conversation is larger than the text route's context window. "
+            f"Raise the context window in {_SETTINGS} (then Prove route) or start a new session. {_NO_CALL}",
+            "raise_context_window",
+        )
+    if code == "profile_limit_unknown_or_insufficient":
+        return (
+            f"OpenRouter chat is blocked: the text route's {capability} limit is too low for this turn. "
+            f"Adjust it in {_SETTINGS}, save, then Prove route. {_NO_CALL}",
+            "adjust_route_limits",
+        )
+    if code == "requirement_noncompliant":
+        return (
+            f"OpenRouter chat is blocked: the last {capability} proof did not meet this route's requirement. "
+            f"Prove route again in {_SETTINGS}, or raise the timeout. {_NO_CALL}",
+            "prove_route",
+        )
+    if code.startswith("profile_cost"):
+        return (
+            "OpenRouter chat is blocked: the text route's spend metadata is missing, stale, or above the ceiling. "
+            f"Review the ceiling and request bound in {_SETTINGS} and save. {_NO_CALL}",
+            "review_spend_ceiling",
+        )
+    return OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE, "configure_openrouter"
+
+
+def openrouter_route_blocked_message(error: BaseException) -> str:
+    return openrouter_route_block_recovery(openrouter_route_block_reason(error))[0]
+
+
+def route_error_from(error: BaseException) -> NoCompliantModelRouteError | None:
+    """Find a route denial wrapped by the agent framework's generation error."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        if isinstance(current, NoCompliantModelRouteError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 _LIGHTWEIGHT_PREFIXES = (

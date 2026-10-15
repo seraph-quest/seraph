@@ -484,6 +484,7 @@ def _proof_reason(
     if not require_proofs:
         return None
     exact: dict[str, ModelRouteProof] = {}
+    expired: set[str] = set()
     from .proofs import proof_is_fresh, validate_model_route_proof
 
     for proof in proofs:
@@ -499,10 +500,16 @@ def _proof_reason(
             and proof.endpoint == candidate.endpoint
             and proof.endpoint_class is candidate.endpoint_class
             and proof.adapter == candidate.adapter
-            and proof_is_fresh(proof, now=now)
         ):
-            exact[proof.capability] = proof
+            if proof_is_fresh(proof, now=now):
+                exact[proof.capability] = proof
+            elif proof.outcome == "passed" and proof.expires_at <= now:
+                expired.add(proof.capability)
     if missing := sorted(required - exact.keys()):
+        # An exactly bound proof that passed but aged out needs a re-run of
+        # the same canary, not new configuration; name it distinctly.
+        if missing[0] in expired:
+            return f"proof_expired:{missing[0]}"
         return f"proof_missing:{missing[0]}"
     values = {
         "latency_ms": (context.requirements.max_latency_ms, lambda actual, limit: actual <= limit),

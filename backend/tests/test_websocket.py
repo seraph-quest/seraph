@@ -455,6 +455,71 @@ class TestWebSocket:
             for p in patches:
                 p.stop()
 
+    def test_websocket_direct_chat_expired_proof_names_prove_route_recovery(self):
+        client, patches, stack = _make_sync_client_with_db()
+
+        async def _blocked_stream(*args, **kwargs):
+            raise NoCompliantModelRouteError(("proof_expired:health",))
+            yield "unreachable"
+
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=True),
+                patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)),
+                patch("src.api.ws.stream_direct_local_chat", _blocked_stream),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Hello"}))
+                received = [json.loads(ws.receive_text()) for _ in range(3)]
+
+            assert received[2]["type"] == "error"
+            assert received[2]["reason"] == "no_compliant_route"
+            assert "health capability proof for the text route expired" in received[2]["content"]
+            assert "Prove route" in received[2]["content"]
+            assert "No model call was made" in received[2]["content"]
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
+    def test_websocket_agent_wrapped_route_block_names_specific_reason(self):
+        from smolagents.utils import AgentGenerationError
+
+        client, patches, stack = _make_sync_client_with_db()
+        mock_agent = MagicMock()
+
+        def _run(*args, **kwargs):
+            try:
+                raise NoCompliantModelRouteError(("capability_not_declared",))
+            except NoCompliantModelRouteError as exc:
+                raise AgentGenerationError("Error in generating model output", MagicMock()) from exc
+
+        mock_agent.run.side_effect = _run
+        try:
+            with (
+                patch("src.api.ws.should_use_direct_local_chat", return_value=False),
+                patch("src.api.ws.create_onboarding_agent", return_value=mock_agent),
+                client.websocket_connect("/ws/chat") as ws,
+            ):
+                _ = ws.receive_text()
+                ws.send_text(json.dumps({"type": "message", "message": "Inspect my priorities"}))
+                received = []
+                for _ in range(4):
+                    message = json.loads(ws.receive_text())
+                    received.append(message)
+                    if message["type"] == "error":
+                        break
+
+            error = received[-1]
+            assert error["reason"] == "no_compliant_route"
+            assert "agent turns need tool use" in error["content"]
+            assert "Agent error" not in error["content"]
+        finally:
+            stack.close()
+            for p in patches:
+                p.stop()
+
     def test_websocket_agent_route_block_is_not_reported_as_generic_failure(self):
         client, patches, stack = _make_sync_client_with_db()
         mock_agent = MagicMock()

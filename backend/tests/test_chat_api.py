@@ -231,7 +231,7 @@ class TestChatAPI:
         client,
     ):
         mock_agent = MagicMock()
-        mock_agent.run.side_effect = NoCompliantModelRouteError()
+        mock_agent.run.side_effect = NoCompliantModelRouteError(("proof_expired:tool_use",))
         mock_onboarding.return_value = mock_agent
 
         response = await client.post("/api/chat", json={"message": "Inspect my priorities"})
@@ -239,6 +239,9 @@ class TestChatAPI:
         assert response.status_code == 503
         detail = response.json()["detail"]
         assert detail["code"] == "no_compliant_route"
+        assert detail["route_reason"] == "proof_expired:tool_use"
+        assert detail["recovery_action"] == "prove_route"
+        assert "tool use capability proof for the text route expired" in detail["message"]
         assert detail["remote_outcome"] == "not_contacted"
         assert detail["retry_required"] is False
         assert "No model call was made" in detail["message"]

@@ -97,6 +97,8 @@ router = APIRouter()
 _CANARY_VERSION = "seraph.manual-canary.v1"
 _MANUAL_CANARY_LOCK = threading.Lock()
 _MAX_CANARY_TIMEOUT_SECONDS = 180
+_DEFAULT_PROOF_TTL_SECONDS = 3600
+_MAX_PROOF_TTL_SECONDS = 86400
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROBE_CAPABILITIES = {
     *(capability.value for capability in ModelCapability),
@@ -168,6 +170,9 @@ class OpenRouterRouteInput(BaseModel):
     timeout_seconds: float = Field(ge=1, le=120, allow_inf_nan=False)
     zero_data_retention: bool
     request_cost_bound_microusd: int = Field(ge=1, le=1_000_000_000)
+    # Optional for older clients; an unset window uses the documented default
+    # instead of being derived from the output cap.
+    context_window_tokens: int | None = Field(default=None, ge=1_024, le=2_097_152)
 
 
 class OpenRouterRouteSlotsInput(BaseModel):
@@ -297,7 +302,7 @@ class CapabilityCanaryRequest(BaseModel):
     profile_id: str
     capability: str
     timeout_seconds: float = Field(default=10.0, ge=1.0, le=_MAX_CANARY_TIMEOUT_SECONDS)
-    proof_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    proof_ttl_seconds: int = Field(default=_DEFAULT_PROOF_TTL_SECONDS, ge=60, le=_MAX_PROOF_TTL_SECONDS)
     transformation_digest: str = DigestSentinel.NO_TRANSFORMATION
     redaction_applied: bool = False
 
@@ -1176,6 +1181,7 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
         "defaults": {"egress_class": EgressClass.LOCAL_ONLY.value, "fallback_allowed": False},
         "canary_endpoint": "/api/settings/model-fabric/canary",
+        "canary_proof_ttl": {"default_seconds": _DEFAULT_PROOF_TTL_SECONDS, "max_seconds": _MAX_PROOF_TTL_SECONDS},
         "openrouter_setup": openrouter_setup_status,
         "near_text": near_status,
         "inference_accounting": accounting,
@@ -1283,12 +1289,16 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
                     candidate = candidate_from_profile(profile)
                     proofs = []
                     try:
-                        for capability in {*route.capabilities, "health", "latency_ms"}:
+                        for capability in sorted({*route.capabilities, "health", "latency_ms"}):
                             proof = await model_fabric_repository.latest_capability_proof(
                                 profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
                                 profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
                                 endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
                             if proof is None or not proof_is_fresh(proof):
+                                # Name the first capability to re-prove so the
+                                # operator sees expiry rather than a generic gap.
+                                expired = proof is not None and proof.outcome == "passed" and proof.expires_at <= time.time()
+                                state["proof_reason"] = f"{'proof_expired' if expired else 'proof_missing'}:{capability}"
                                 break
                             proofs.append(proof)
                         else:

@@ -22,7 +22,8 @@ interface Source { source_slot: number; artifact_ref: string; acquisition_receip
 function request(content: string): { job_ref: string; sources: Source[] } | undefined {
   try {
     const value = JSON.parse(content) as Record<string, unknown>;
-    if (!value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'job_ref,schema_version,sources'
+    // ``pins`` records Python's per-job provider/config digests; the consumer never relies on it.
+    if (!value || typeof value !== 'object' || Object.keys(value).sort().join(',') !== 'job_ref,pins,schema_version,sources'
         || value.schema_version !== 1 || typeof value.job_ref !== 'string' || !Array.isArray(value.sources) || value.sources.length > 4) return undefined;
     for (const item of value.sources as Record<string, unknown>[]) {
       if (!item || Object.keys(item).sort().join(',') !== 'acquisition_receipt_ref,artifact_ref,source_slot'

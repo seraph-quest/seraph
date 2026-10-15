@@ -155,7 +155,9 @@ from src.guardian.research_plan_contracts import ArtifactRef
 
 DISCOVERY_ARTIFACT_LIMITS = {"public_brief": 8000, "plan": 65536, "queries": 16384,
     "manifest": 65536, "selection": 8192, "snapshot": 65536, "snapshots": 65536,
-    "coverage": 16384, "brief": 65536, "draft": 16384, "prompt": 8192, "child": 16384}
+    "coverage": 16384, "brief": 65536, "draft": 16384, "prompt": 8192, "child": 16384,
+    # Cordis research (#1008): planning request, staged public sources, extraction request.
+    "planning_request": 65536, "raw_source": 65536, "extraction": 16384}
 
 
 @dataclass(frozen=True)

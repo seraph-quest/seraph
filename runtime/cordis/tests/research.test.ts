@@ -26,7 +26,7 @@ function nativeOwner(raw: Record<string, { media_type: string; body: string }>) 
   const calls: [string, unknown][] = [];
   const staged = new Map<string, string>();
   const sources = Object.keys(raw).map((artifact_ref, source_slot) => ({ source_slot, artifact_ref, acquisition_receipt_ref: `receipt-${source_slot}` }));
-  const extraction = JSON.stringify({ schema_version: 1, job_ref: 'goal-discovery:job', sources });
+  const extraction = JSON.stringify({ schema_version: 1, job_ref: 'goal-discovery:job', pins: {}, sources });
   const client: ScopedRequestClient = { isActive: () => true, request: async (method, input) => {
     calls.push([method, input]);
     const value = input as Record<string, string>;

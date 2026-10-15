@@ -33,12 +33,15 @@ class Pending:
 
 
 class CordisHost:
-    def __init__(self, *, node_path: Path | None = None, service_dispatch: Any = None, native_services: bool = False):
+    def __init__(self, *, node_path: Path | None = None, service_dispatch: Any = None, native_services: bool = False,
+                 package_root: Path | None = None):
         # Only the fixed native owner may resolve/dispatch canonical invocations.
         self.service_dispatch = service_dispatch
         self._native_services = native_services
         self._native_inflight: set[str] = set()
         self.node_path = node_path
+        # A separately reviewed package copy (e.g. an alternative profile); None is the checked-in package.
+        self.package_root = package_root
         self.state = "stopped"
         self.reason: str | None = "not_started"
         self.reviewed: ReviewedComposition | None = None
@@ -138,7 +141,8 @@ class CordisHost:
                 if self._cleanup_state != "clean":
                     return False
             try:
-                self.reviewed = reviewed_composition(node_path=self.node_path)
+                self.reviewed = (reviewed_composition(node_path=self.node_path) if self.package_root is None
+                                 else reviewed_composition(node_path=self.node_path, root=self.package_root))
             except CompositionBlocked as exc:
                 self.state, self.reason = "blocked", exc.reason
                 self._plugins = []

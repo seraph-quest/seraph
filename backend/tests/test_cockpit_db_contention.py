@@ -41,13 +41,16 @@ COCKPIT_BASELINE = (
     "/api/observer/continuity",
     "/api/work-board/tasks",
 )
-# Before #702 these reads queued for the 5s busy timeout. Some endpoints are
-# CPU-bound (catalog scans), so the writer's cost is measured against the same
+# Before #702 these reads queued for the 5s busy timeout (the cockpit's own
+# fetch timeout is also 5s). Some endpoints are CPU-bound (catalog scans) and
+# host-load sensitive, so the writer's cost is measured against the same
 # fan-out without a writer: a deferred bookkeeping write may add its short lock
-# wait plus scheduling jitter, never the busy timeout.
-_COCKPIT_FETCH_TIMEOUT_SECONDS = 5.0
-_WRITER_ADDED_LATENCY_BOUND_SECONDS = 2.0
-_WRITER_HOLD_SECONDS = 8.0
+# wait plus scheduling jitter (about 1s on an idle host, more on a saturated
+# one), never the busy timeout. The writer also outlives every fan-out, so no
+# answer can come from the lock being released.
+_SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
+_WRITER_ADDED_LATENCY_BOUND_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS - 1.0
+_WRITER_HOLD_SECONDS = 60.0
 
 
 @asynccontextmanager
@@ -100,13 +103,14 @@ async def _fan_out(client: AsyncClient) -> dict[str, tuple[int, float, object]]:
 @contextmanager
 def _foreign_writer(path):
     release, held = threading.Event(), threading.Event()
+    released_early = []
 
     def hold() -> None:
         connection = sqlite3.connect(path, isolation_level=None, timeout=30)
         try:
             connection.execute("BEGIN IMMEDIATE")
             held.set()
-            release.wait(_WRITER_HOLD_SECONDS)
+            released_early.append(not release.wait(_WRITER_HOLD_SECONDS))
             connection.execute("COMMIT")
         finally:
             connection.close()
@@ -120,6 +124,7 @@ def _foreign_writer(path):
         release.set()
         writer.join(10)
     assert not writer.is_alive()
+    assert released_early == [False], "the writer timed out before the reads finished"
 
 
 def _sql(path, statement: str, *params):
@@ -137,7 +142,6 @@ def _last_seen(path) -> str:
 def _assert_cockpit_answered(results, baseline, label: str) -> None:
     for path, (status, elapsed, body) in results.items():
         assert status == 200, f"{label}: {path} answered {status}: {body}"
-        assert elapsed < _COCKPIT_FETCH_TIMEOUT_SECONDS, f"{label}: {path} took {elapsed:.2f}s"
         added = elapsed - baseline[path][1]
         assert added < _WRITER_ADDED_LATENCY_BOUND_SECONDS, (
             f"{label}: {path} took {elapsed:.2f}s ({added:.2f}s over the writer-free fan-out)"

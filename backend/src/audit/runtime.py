@@ -99,7 +99,13 @@ def _note_deferred_audit(kind: str, integration_type: str, name: str, level: int
     logger.log(level, "Runtime audit %s %s:%s (database busy)", kind, integration_type, name)
 
 
-def _run_coro_on_dedicated_loop(coro, *, label: str, wait_seconds: float = _SYNC_AUDIT_WAIT_SECONDS) -> None:
+def _run_coro_on_dedicated_loop(
+    coro,
+    *,
+    label: str,
+    wait_seconds: float = _SYNC_AUDIT_WAIT_SECONDS,
+    settled: threading.Event | None = None,
+) -> None:
     error: Exception | None = None
 
     def _runner() -> None:
@@ -111,6 +117,11 @@ def _run_coro_on_dedicated_loop(coro, *, label: str, wait_seconds: float = _SYNC
 
     worker = threading.Thread(target=_runner, name=label, daemon=True)
     worker.start()
+    if settled is not None:
+        # The caller needs only the bounded attempt; a deferred retry keeps
+        # running on the worker thread.
+        settled.wait(timeout=wait_seconds)
+        return
     worker.join(timeout=wait_seconds)
     if worker.is_alive():
         logger.debug(
@@ -212,6 +223,7 @@ async def log_integration_event(
     principal_id: str | None = None,
     lock_wait_ms: int | None = None,
     _retry_inline: bool = False,
+    _attempted: threading.Event | None = None,
 ) -> bool:
     """Record an integration lifecycle event and report persistence state.
 
@@ -256,6 +268,8 @@ async def log_integration_event(
         if lock_wait_ms is None or not is_database_locked(exc):
             logger.debug("Failed to record integration runtime audit event", exc_info=True)
             return False
+        if _attempted is not None:
+            _attempted.set()
         _note_deferred_audit("deferred", integration_type, name, logging.INFO)
         retry = _retry_deferred_integration_event(
             integration_type=integration_type, name=name, outcome=outcome, details=details,
@@ -269,6 +283,9 @@ async def log_integration_event(
     except Exception:
         logger.debug("Failed to record integration runtime audit event", exc_info=True)
         return False
+    finally:
+        if _attempted is not None:
+            _attempted.set()
 
 
 async def _retry_deferred_integration_event(*, integration_type: str, name: str, **kwargs: Any) -> None:
@@ -322,6 +339,7 @@ def log_integration_event_sync(
     except RuntimeError:
         # A bounded read-path audit retries a busy write on its own thread,
         # so the caller waits only for the bounded attempt.
+        attempted = threading.Event() if lock_wait_ms is not None else None
         _run_coro_on_dedicated_loop(
             log_integration_event(
                 integration_type=integration_type,
@@ -330,12 +348,14 @@ def log_integration_event_sync(
                 details=details,
                 lock_wait_ms=lock_wait_ms,
                 _retry_inline=True,
+                _attempted=attempted,
             ),
             label=f"runtime_audit:integration:{integration_type}:{name}",
             wait_seconds=(
                 _SYNC_AUDIT_WAIT_SECONDS if lock_wait_ms is None
                 else min(_SYNC_AUDIT_WAIT_SECONDS, lock_wait_ms / 1000 + 0.5)
             ),
+            settled=attempted,
         )
         return
 

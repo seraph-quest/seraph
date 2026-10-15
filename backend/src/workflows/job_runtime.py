@@ -1369,6 +1369,9 @@ def _append_parent_fence_condition(
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
     _append_goal_fence_condition(conditions, run)
+    # A Cordis-bound job also repeats its exact ready composition owners.
+    from src.runtime_plugins.ownership import composition_fence_predicates
+    conditions.extend(composition_fence_predicates(getattr(run, "composition_binding_json", None)))
     if getattr(run, "job_kind", None) == "agent.task.v1":
         from src.workflows.general_task_guard import append_general_task_root_gate
         append_general_task_root_gate(conditions, run, now=now)
@@ -2142,6 +2145,10 @@ class DurableJobSpec:
     # supplied, the repository validates this binding in the same transaction
     # that inserts the M3 row.  Standalone M3 jobs leave it unset.
     routine_publication_admission_guard: DurableJobRoutinePublicationAdmissionGuard | None = None
+    # Server-derived Cordis composition vector (RuntimeCompositionBinding).
+    # Rechecked in the insert transaction and persisted immutably; every
+    # later lease/effect CAS repeats it through ``_append_parent_fence_condition``.
+    composition_binding: Any = None
 
 
 class DurableJobRepository(InferenceAccountingRepositoryMixin):
@@ -2963,7 +2970,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     now=now,
                     dialect_name=dialect_name,
                 )
-            if (admission_authority_check is not None or identity.job_kind == "memory.opportunity-preference.v1") and dialect_name == "sqlite" and not transaction_started:
+            if (admission_authority_check is not None or identity.job_kind == "memory.opportunity-preference.v1"
+                    or spec.composition_binding is not None) and dialect_name == "sqlite" and not transaction_started:
                 await db.execute(text("BEGIN IMMEDIATE"))
                 transaction_started = True
             await ensure_sessions_exist(db, [spec.session_id])
@@ -3108,6 +3116,16 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     enter_native_policy_scope(near_text_policy_scope, db=db,
                         run_or_identity=identity, phase="admit")
                 await admission_authority_check(db, run)
+            if spec.composition_binding is not None:
+                from src.runtime_plugins.ownership import (
+                    CompositionBindingError, RuntimeCompositionBinding, validate_invocation)
+                if type(spec.composition_binding) is not RuntimeCompositionBinding:
+                    raise DurableJobAdmissionDenied("composition_binding_required")
+                try:
+                    await validate_invocation(db, spec.composition_binding)
+                except CompositionBindingError as exc:
+                    raise DurableJobAdmissionDenied(exc.reason_code) from exc
+                run.composition_binding_json = spec.composition_binding.to_json()
             db.add(run)
             try:
                 await db.flush()

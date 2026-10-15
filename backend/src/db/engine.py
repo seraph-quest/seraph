@@ -688,6 +688,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "plan_revision": "INTEGER",
             "candidate_id": "VARCHAR",
             "source_task_id": "VARCHAR",
+            "composition_binding_json": "VARCHAR",
             "selected_context_reserved_bytes": "INTEGER",
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",
@@ -1948,6 +1949,11 @@ async def init_db() -> None:
         )
         await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)
+        # Seed the fixed Cordis composition inventory only into an empty table
+        # (fresh or pre-feature workspace). A partial inventory stays partial
+        # so missing mandatory owners keep denying service invocations.
+        from src.runtime_plugins.ownership import seed_legacy_inventory_sync
+        await conn.run_sync(seed_legacy_inventory_sync)
 
     # Reconcile legacy Done-parent links once the additive board schema exists.
     # The helper only materializes proof-backed handoffs; rows without an

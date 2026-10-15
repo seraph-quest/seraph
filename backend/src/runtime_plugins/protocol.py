@@ -1,4 +1,4 @@
-"""Closed A1.1 owned-pipe protocol. No service dispatch or ownership epoch yet."""
+"""Closed owned-pipe lifecycle controls and finite canonical service calls."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,9 @@ MAX_FRAME = 1_048_576
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MAX_PENDING = 32
 CONTROL_TIMEOUT = 5.0
-METHODS = frozenset({"bootstrap.hello", "runtime.ready", "runtime.status", "runtime.quiesce", "runtime.shutdown", "invocation.cancel"})
+ORDINARY_TIMEOUT = 30.0
+CONTROL_METHODS = frozenset({"bootstrap.hello", "runtime.ready", "runtime.status", "runtime.quiesce", "runtime.shutdown", "invocation.cancel"})
+METHODS = CONTROL_METHODS
 FIELDS = frozenset({"protocol", "boot_nonce", "request_id", "seq", "kind", "method", "invocation_ref", "composition_epoch", "composition_digest", "package_digest", "deadline_at", "payload"})
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -20,6 +22,23 @@ TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 class ProtocolError(ValueError):
     """A boot must be fenced; malformed input must never dispatch."""
+
+
+def rpc_deadline(method: str, *, now: int, original_deadline: int | None = None) -> int:
+    """Finite timing arithmetic; the host separately validates private authority.
+
+    Service calls never renew their original invocation cutoff."""
+    from .contracts import SERVICE_METHODS
+    integer(now, 1)
+    if original_deadline is not None:
+        integer(original_deadline, 1)
+        if original_deadline <= now:
+            raise ProtocolError("deadline expired")
+    if method in CONTROL_METHODS:
+        return min(now + int(CONTROL_TIMEOUT * 1000), original_deadline or now + int(CONTROL_TIMEOUT * 1000))
+    if method not in SERVICE_METHODS or original_deadline is None:
+        raise ProtocolError("original service deadline required")
+    return min(now + int(ORDINARY_TIMEOUT * 1000), original_deadline)
 
 
 def integer(value: Any, minimum: int = 0, maximum: int = MAX_SAFE_INTEGER) -> int:
@@ -98,10 +117,17 @@ def validate_frame(value: Any) -> dict[str, Any]:
     if type(frame["request_id"]) is not str or not TOKEN.fullmatch(frame["request_id"]):
         raise ProtocolError("invalid request identity")
     method, kind = frame["method"], frame["kind"]
-    if type(method) is not str or method not in METHODS or type(kind) is not str or kind not in {"request", "response"}:
+    from .contracts import SERVICE_METHODS, validate_request, validate_result
+    if type(method) is not str or method not in CONTROL_METHODS | SERVICE_METHODS or type(kind) is not str or kind not in {"request", "response"}:
         raise ProtocolError("unknown method or kind")
+    if method in SERVICE_METHODS:
+        integer(frame["composition_epoch"], 1)
+        if type(frame["invocation_ref"]) is not str or not TOKEN.fullmatch(frame["invocation_ref"]):
+            raise ProtocolError("service requires canonical invocation")
+        (validate_request if kind == "request" else validate_result)(method, frame["payload"])
+        return frame
     if frame["composition_epoch"] is not None:
-        raise ProtocolError("A1.1 controls have no ownership epoch")
+        raise ProtocolError("lifecycle controls have no ownership epoch")
     if method == "invocation.cancel":
         if type(frame["invocation_ref"]) is not str or not TOKEN.fullmatch(frame["invocation_ref"]):
             raise ProtocolError("invalid invocation reference")

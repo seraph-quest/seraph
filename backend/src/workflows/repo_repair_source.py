@@ -2538,6 +2538,14 @@ async def _recover_repository_wait_witness_held(service, jobs, *, job_id, owner,
     return replace(witness, _source_binding=recovered)
 
 
+async def _repository_stop_terminal(jobs, job_id):
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        return (run.status in {"cancelled", "failed"}
+            and _repository_record(run, "repository:stop-intent:v1") is not None
+            and _repository_record(run, "repository:terminal:v1") is not None)
+
+
 async def execute_repository_iteration(service, jobs, *, job_id, owner, request, principal):
     """Consume an exact manual patch approval and run the fixed CPU owner."""
     import asyncio
@@ -2712,8 +2720,16 @@ async def execute_repository_iteration(service, jobs, *, job_id, owner, request,
             stopping = _repository_record(await jobs._fetch(db, job_id), "repository:stop-intent:v1")
         if stopping is not None:
             from src.workflows.repo_repair_stop import stop_repository_root
-            stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
-                general_task_service=None, reason=stopping["stop_reason"])
+            try:
+                stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
+                    general_task_service=None, reason=stopping["stop_reason"])
+            except DurableJobLeaseError:
+                # The concurrent operator Stop may complete first, once this
+                # completion is published. Only its committed terminal closure
+                # counts as stopped; any other refusal propagates.
+                if not await _repository_stop_terminal(jobs, job_id):
+                    raise
+                stopped = {"pending": False}
             outcome["stop_pending"] = stopped["pending"]
             outcome["recovery_action"] = "repository_stop_pending" if stopped["pending"] else "repository_stopped"
         elif outcome["status"] == "succeeded":

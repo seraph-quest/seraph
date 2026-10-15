@@ -819,8 +819,11 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
         registration = read_registered_repository_producer(run, iteration_index=index)
         cleanup = source._repository_record(run, "repository:cleanup:" + identity)
         readback = source._repository_record(run, "repository:readback:" + identity)
+        # A held_partial iteration is a signed, cleanup-proven interrupted
+        # prefix (Stop, timeout, truncated output). Stop may close it with
+        # its partial logs retained; it never becomes a requested-check result.
         if (cleanup is None or readback is None or cleanup.get("cleanup_proven") is not True
-                or cleanup.get("status") not in {"succeeded", "failed"}
+                or cleanup.get("status") not in {"succeeded", "failed", "held_partial"}
                 or readback.get("status") != cleanup["status"]
                 or cleanup.get("source_completion_cas") != readback.get("source_completion_cas")):
             raise RepositorySourceRecoveryError("original_repository_stop_completion_pending")
@@ -912,8 +915,12 @@ async def stage_repository_original_stop_completion(service, jobs, *, context, o
                 _validate_cleanup_artifact_version(run, cleanup_body)
                 _assert_source_completion_append_metadata(run, identity, cleanup_body["source_append_metadata"])
                 cleanup_body = cleanup_body["physical_projection"]
-            if (body["outcome"] not in {"completed_requested_checks", "completed_requested_check_failure"}
-                    or result["status"] != cleanup["status"] or manifest_raw != outputs["readback.json"]
+            partial = cleanup["status"] == "held_partial"
+            if ((partial and (body["outcome"] not in {"interrupted_prefix", "zero_command_prefix"}
+                        or result["status"] in {"succeeded", "failed"}))
+                    or (not partial and (body["outcome"] not in {"completed_requested_checks", "completed_requested_check_failure"}
+                        or result["status"] != cleanup["status"]))
+                    or manifest_raw != outputs["readback.json"]
                     or json.loads(manifest_raw) != manifest or source._source_digest(manifest) != readback["manifest_digest"]
                     or _canonical(cleanup_body) != _canonical(_original_repository_cleanup_projection(registration, result))
                     or cleanup_body.get("iteration_binding") != registration["process_binding"]

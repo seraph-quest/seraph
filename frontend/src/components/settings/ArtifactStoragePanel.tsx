@@ -204,6 +204,7 @@ const MODEL_FABRIC_EMPIRICAL_CANARY_CAPABILITIES = new Set([
   "streaming",
   "structured_output",
   "tool_use",
+  "embedding",
 ]);
 
 interface ReportActionResult {

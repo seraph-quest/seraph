@@ -49,9 +49,8 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
     (repository / 'calculator.py').write_text('def add(a, b):\n    return a - b\n')
     (repository / 'tests/test_calculator.py').write_text('from calculator import add\ndef test_add():\n    assert add(1, 2) == 3\n')
     if language == 'test_node':
-        from pathlib import Path
-        node = Path('/home/pawel/repos/seraph/.agent-worktrees/986-a1-host/.agent-evidence/986/a1-upstream/node-v24.13.1-linux-x64/bin/node')
-        assert node.is_file(), 'Required cached fixed Node24 runtime must exist; no ambient fallback or download'
+        from tests.repo_node_runtime import required_node24_runtime
+        node = required_node24_runtime()
         monkeypatch.setattr(settings, 'repo_sandbox', RepoSandboxSettings(enabled=True,
             executor_kind='local', profile='repo-node24-npm-v1', node_runtime_path=str(node)))
         persist_repo_sandbox_settings(settings.repo_sandbox)
@@ -64,8 +63,8 @@ async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, 
         (repository / 'package-lock.json').write_text(json.dumps({'name': 'actual-source', 'lockfileVersion': 3, 'packages': {}}))
         if node_build:
             import shutil
-            typescript = Path('/home/pawel/repos/seraph/frontend/node_modules/typescript')
-            assert (typescript / 'package.json').is_file(), 'Existing cached TypeScript is required; no installation'
+            from tests.repo_node_runtime import required_typescript_root
+            typescript = required_typescript_root()
             shutil.copytree(typescript, repository / 'node_modules/typescript')
             version = json.loads((typescript / 'package.json').read_text())['version']
             (repository / '.gitignore').write_text('node_modules/\ndist/\n')

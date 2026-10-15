@@ -22,8 +22,8 @@ from tests.test_repo_source_recovered_finalizer import _signed_ownerless_fixture
 
 def _retain_original_node_runtime(monkeypatch, language):
     if language == "test_node":
-        node = Path("/home/pawel/repos/seraph/.agent-worktrees/986-a1-host/.agent-evidence/986/a1-upstream/node-v24.13.1-linux-x64/bin/node")
-        assert node.is_file(), "Required cached fixed Node24 runtime; no ambient fallback or download"
+        from tests.repo_node_runtime import required_node24_runtime
+        node = required_node24_runtime()
         monkeypatch.setattr(settings, "repo_sandbox", settings.repo_sandbox.model_copy(
             update={"node_runtime_path": str(node)}))
 

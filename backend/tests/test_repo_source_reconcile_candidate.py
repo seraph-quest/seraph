@@ -1,5 +1,4 @@
 """Original same-boot dispatch; different-boot settlement remains blocked."""
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -20,8 +19,8 @@ async def test_genuine_sameboot_candidate_selects_original_and_preserves_public_
     if language == "test_node":
         # Keep the original publication fixture's server-selected runtime alive
         # after its inner patch exits and the cold recovery service is created.
-        node = Path("/home/pawel/repos/seraph/.agent-worktrees/986-a1-host/.agent-evidence/986/a1-upstream/node-v24.13.1-linux-x64/bin/node")
-        assert node.is_file(), "Required cached fixed Node24 runtime must exist; no ambient fallback or download"
+        from tests.repo_node_runtime import required_node24_runtime
+        node = required_node24_runtime()
         monkeypatch.setattr(settings, "repo_sandbox", settings.repo_sandbox.model_copy(
             update={"node_runtime_path": str(node)}))
     flow = await _signed_ownerless_fixture(accounting_db, monkeypatch, language, failed=failed)

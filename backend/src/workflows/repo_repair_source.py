@@ -433,10 +433,17 @@ def _checked_uncertainty_columns(value):
                 raise DurableJobLeaseError("original uncertainty timestamp projection changed")
 
 
+def _null_stripped_row(values):
+    """A WorkflowRunState dump with NULL-only post-freeze columns checked and removed."""
+    from src.workflows.repo_repair_stop import _without_null_only_fields
+    return _without_null_only_fields(values, "WorkflowRunState")
+
+
 def _repository_root_static_digest(run, values):
     if read_repository_inventory(run)["schema"] == "repository.checkpoint_inventory.v4":
         from src.workflows.repo_repair_stop import _static_digest_v4
         return _static_digest_v4(values, "WorkflowRunState", "root")
+    values = _null_stripped_row(values)
     return _source_digest({key: value for key, value in values.items() if key not in _ROOT_BOOKKEEPING})
 
 
@@ -2359,9 +2366,9 @@ async def certify_repository_callback_return(ticket, result, *, service, jobs):
                 "canonical_source_artifact_digest": canonical_digest,
                 "original_parent_revision": canonical.parent_revision,
                 "original_child_revision": canonical.child_revision,
-                "parent_static_digest": _source_digest({k: v for k, v in json.loads(canonical.parent_row_json).items()
+                "parent_static_digest": _source_digest({k: v for k, v in _null_stripped_row(json.loads(canonical.parent_row_json)).items()
                     if k not in {"revision", "updated_at", "checkpoint_receipts_json"}}),
-                "child_static_digest": _source_digest({k: v for k, v in json.loads(canonical.child_row_json).items()
+                "child_static_digest": _source_digest({k: v for k, v in _null_stripped_row(json.loads(canonical.child_row_json)).items()
                     if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}}),
                 "returned_at": _utc_now().isoformat()}
             _append_repository_record(run, "repository:proposal:" + ticket.iteration_id, closure,
@@ -2501,9 +2508,9 @@ async def _recover_repository_wait_witness_held(service, jobs, *, job_id, owner,
             raise DurableJobLeaseError("original contacted-wait recovery phase required")
         if (child.revision != closure["original_child_revision"] + revision_delta
                 or parent.revision != closure["original_parent_revision"] + 1
-                or _source_digest({k: v for k, v in parent.model_dump(mode="json").items()
+                or _source_digest({k: v for k, v in _null_stripped_row(parent.model_dump(mode="json")).items()
                     if k not in {"revision", "updated_at", "checkpoint_receipts_json"}}) != closure["parent_static_digest"]
-                or _source_digest({k: v for k, v in child.model_dump(mode="json").items()
+                or _source_digest({k: v for k, v in _null_stripped_row(child.model_dump(mode="json")).items()
                     if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}}) != closure["child_static_digest"]):
             raise DurableJobLeaseError("original contacted-wait metadata changed before private read")
         # Existing current native authority/Root/Goal checks precede any

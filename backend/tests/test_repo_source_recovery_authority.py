@@ -908,14 +908,59 @@ async def test_actual_unknown_cleanup_dispatch_preserves_original_stop_and_liabi
 @pytest.mark.parametrize("name", ["WorkflowRunState", "WorkBoardTask", "WorkBoardAttempt", "WorkBoardInputArtifact", "Goal", "OperatorSession"])
 def test_v4_static_projection_rejects_unknown_declared_fields(name):
     from src.db import models
-    from src.workflows.repo_repair_stop import _V4_STATIC_FIELDS, _static_projection_v4
+    from src.workflows.repo_repair_stop import _NULL_ONLY_FIELDS, _V4_STATIC_FIELDS, _static_projection_v4
     from src.workflows.job_runtime import DurableJobLeaseError
     model = getattr(models, name)
-    assert set(model.model_fields) == _V4_STATIC_FIELDS[name]
+    # Every current column is either frozen or explicitly NULL-only.
+    assert set(model.model_fields) == _V4_STATIC_FIELDS[name] | _NULL_ONLY_FIELDS.get(name, frozenset())
     values = {key: None for key in model.model_fields}
     values["unreviewed_column"] = "new"
     with pytest.raises(DurableJobLeaseError, match="field inventory changed"):
         _static_projection_v4(values, name, "root" if name == "WorkflowRunState" else "row")
+
+
+@pytest.mark.parametrize("role", ["root", "original_parent", "native_invocation"])
+def test_v4_static_digest_accepts_only_a_null_composition_binding(role):
+    """#1067 added WorkflowRunState.composition_binding_json after the v4 freeze."""
+    from src.db.models import WorkflowRunState
+    from src.workflows.repo_repair_stop import _V4_STATIC_FIELDS, _static_digest_v4
+    from src.workflows.job_runtime import DurableJobLeaseError
+    stored = {key: None for key in _V4_STATIC_FIELDS["WorkflowRunState"]}  # A pre-column row dump.
+    stored.update(run_identity="repository:fixture", revision=3)
+    current = {**stored, "composition_binding_json": None}
+    assert set(current) == set(WorkflowRunState.model_fields)
+    # A NULL binding is the pre-column state: stored Stop digests are unchanged.
+    assert _static_digest_v4(current, "WorkflowRunState", role) == _static_digest_v4(stored, "WorkflowRunState", role)
+    # Any composition binding on an original repository row fails closed.
+    with pytest.raises(DurableJobLeaseError, match="composition-bound"):
+        _static_digest_v4({**current, "composition_binding_json": "{}"}, "WorkflowRunState", role)
+
+
+def test_legacy_static_digest_accepts_only_a_null_composition_binding():
+    from types import SimpleNamespace
+    from src.db.models import WorkflowRunState
+    from src.workflows import repo_repair_stop as stop
+    from src.workflows.job_runtime import DurableJobLeaseError
+    row = WorkflowRunState(run_identity="repository:legacy", workflow_name="legacy")
+    context = {"run": SimpleNamespace(run_identity="repository:legacy"),
+        "binding": SimpleNamespace(parent_job_id="parent", invocation_id="child")}
+    original = stop._source
+    class LegacySource:
+        @staticmethod
+        def read_repository_inventory(_run):
+            return {"schema": "repository.checkpoint_inventory.v3"}
+        _source_digest = staticmethod(original()._source_digest)
+    stop._source = lambda: LegacySource
+    try:
+        digest = stop._static(row, context)
+        values = {key: value for key, value in row.model_dump(mode="json").items()
+            if key not in {"updated_at", "revision", "checkpoint_receipts_json", "heartbeat_at", "composition_binding_json"}}
+        assert digest == original()._source_digest(values)
+        row.composition_binding_json = "{}"
+        with pytest.raises(DurableJobLeaseError, match="composition-bound"):
+            stop._static(row, context)
+    finally:
+        stop._source = original
 
 
 @pytest.mark.parametrize("kind", ["bool_revision", "bool_count", "extra", "owner_extra", "missing_slot", "duplicate_slot", "foreign_table"])

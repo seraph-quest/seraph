@@ -140,8 +140,27 @@ _V4_STATIC_FIELDS = {
 }
 
 
+# Columns added after the frozen inventory whose only accepted value on an
+# original repository row is NULL. A repository Root, parent or native child
+# is never Cordis composition-bound (#1067), so NULL is identical to the
+# pre-column state: it is checked, then left out of every static digest so
+# stored v1-v4 Stop snapshots keep their exact meaning. Any non-NULL value,
+# and any other new column, still fails closed as a changed inventory.
+_NULL_ONLY_FIELDS = {"WorkflowRunState": frozenset(("composition_binding_json",))}
+
+
+def _without_null_only_fields(values, model_name):
+    null_only = _NULL_ONLY_FIELDS.get(model_name, frozenset())
+    if type(values) is not dict or any(values.get(key) is not None for key in null_only):
+        raise DurableJobLeaseError("original repository row is composition-bound")
+    return {key: value for key, value in values.items() if key not in null_only}
+
+
 def _static_projection_v4(values, model_name, role):
-    if type(values) is not dict or model_name not in _V4_STATIC_FIELDS or set(values) != _V4_STATIC_FIELDS[model_name]:
+    if type(values) is not dict or model_name not in _V4_STATIC_FIELDS:
+        raise DurableJobLeaseError("original v4 static field inventory changed")
+    values = _without_null_only_fields(values, model_name)
+    if set(values) != _V4_STATIC_FIELDS[model_name]:
         raise DurableJobLeaseError("original v4 static field inventory changed")
     if model_name == "OperatorSession":
         projection = {key: values[key] for key in ("id", "principal_id", "created_at", "absolute_expires_at")}
@@ -193,6 +212,7 @@ def _static(row, context):
             mutable |= {"revision", "status", "failure_reason", "heartbeat_at"}
     if isinstance(row, OperatorSession):
         mutable |= {"last_seen_at", "idle_expires_at"}
+    values = _without_null_only_fields(values, type(row).__name__)
     return source._source_digest({key: value for key, value in values.items() if key not in mutable})
 
 
@@ -317,9 +337,9 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
             if callback is not None:
                 if (callback.get("native_invocation_id") != child.run_identity
                         or callback.get("child_fence") != child.fencing_token
-                        or callback.get("parent_static_digest") != source._source_digest({k: v for k, v in parent.model_dump(mode="json").items()
+                        or callback.get("parent_static_digest") != source._source_digest({k: v for k, v in _without_null_only_fields(parent.model_dump(mode="json"), "WorkflowRunState").items()
                             if k not in {"revision", "updated_at", "checkpoint_receipts_json"}})
-                        or callback.get("child_static_digest") != source._source_digest({k: v for k, v in child.model_dump(mode="json").items()
+                        or callback.get("child_static_digest") != source._source_digest({k: v for k, v in _without_null_only_fields(child.model_dump(mode="json"), "WorkflowRunState").items()
                             if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}})):
                     raise DurableJobLeaseError("original callback stop scope changed before private read")
         expired_cleanup = limit_reason in AUTOMATIC_REASONS and _utc_now() >= _original_cutoff(run, group)

@@ -17,7 +17,7 @@ from src.db.models import Goal, WorkflowRunState, InferenceCostReservation
 from src.guardian.goal_programmes import goal_programme_service, _load
 from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
 from src.guardian.research_plan_contracts import (
-    GoalResearchPlanSpecV1, SearchManifestV1, SourceSelectionV1, PublicSnapshotV1, Closed)
+    GoalResearchPlanSpecV1, SearchManifestV1, SourceSelectionV1, Closed)
 from src.work_board.contracts import TaskStrategyBinding, WorkBoardOwner
 from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_CAPABILITY, DISCOVERY_SERVICE, GoalDiscoveryAuthority
 from src.work_board.research_artifacts import json_bytes, sha, stage_discovery_artifact

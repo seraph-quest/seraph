@@ -26,9 +26,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -54,6 +55,7 @@ from src.conversation.identity import (
     validate_attachment_refs,
 )
 
+logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = frozenset({"queued", "claimed", "display_attempted"})
 CLAIMED_STATUSES = frozenset({"claimed", "display_attempted"})
@@ -68,6 +70,8 @@ MAX_BODY_CHARS = 8_000
 MAX_RESUME_MESSAGE_CHARS = 4_000
 MAX_REASON_CHARS = 200
 _TEST_BYPASS_OPERATOR_SESSION = "test-auth-bypass"
+# Reads persist due reconciliation only when the writer lock frees quickly (#702).
+_READ_RECONCILE_WAIT_MS = 250
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SECRET_VALUE = re.compile(
     r"(?i)(api[_-]?key|authorization|bearer|password|passphrase|secret|token)"
@@ -930,13 +934,44 @@ class NativeNotificationQueue:
         attempt.error_code = _safe_reason(error_code) if error_code else None
         attempt.finished_at = now
 
+    async def _reconcile_for_read(
+        self, db, now: datetime, *, opportunity_scope: ColumnElement[bool] | None = None,
+    ) -> dict[str, tuple[str, str]]:
+        """Reconcile before a read without taking the writer lock when idle.
+
+        Reads only write when a transition is actually due. If a foreign
+        writer holds the lock, the due transitions are returned instead of
+        persisted (the next interaction persists them) so the read can present
+        them virtually rather than wait out the busy timeout.
+        """
+        due = await self._reconcile_expired(db, now, opportunity_scope=opportunity_scope, apply=False)
+        if not due:
+            return {}
+        await db_engine.bound_lock_wait(db, _READ_RECONCILE_WAIT_MS)
+        try:
+            await self._reconcile_expired(db, now, opportunity_scope=opportunity_scope)
+            await db.commit()
+        except OperationalError as exc:
+            if not db_engine.is_database_locked(exc):
+                raise
+            await db.rollback()
+            logger.info("native notification reconciliation deferred: database busy")
+            return due
+        return {}
+
     async def _reconcile_expired(
         self, db, now: datetime, *, opportunity_scope: ColumnElement[bool] | None = None,
-    ) -> None:
-        """Recover leases and expire queued work before every read/transition."""
+        apply: bool = True,
+    ) -> dict[str, tuple[str, str]]:
+        """Recover leases and expire queued work before every read/transition.
+
+        With ``apply=False`` nothing is written; the result maps each row id
+        that is due a terminal transition to its ``(status, degraded_state)``.
+        """
         # Daemon interactions cannot clean up another Root's opportunity.
         # Separate trusted maintenance callers retain global reconciliation.
         scope = opportunity_scope if opportunity_scope is not None else True
+        due: dict[str, tuple[str, str]] = {}
         result = await db.execute(
             select(NativeNotificationOutbox).where(scope, NativeNotificationOutbox.status.in_(CLAIMED_STATUSES))
         )
@@ -945,6 +980,9 @@ class NativeNotificationQueue:
             if lease_expires_at is not None and lease_expires_at > now:
                 continue
             reason = "claimed_lease_missing" if lease_expires_at is None else "lease_expired_reconciliation_required"
+            if not apply:
+                due.setdefault(row.id, ("unknown", "delivery_unknown"))
+                continue
             predicates = [
                 scope,
                 NativeNotificationOutbox.id == row.id,
@@ -993,6 +1031,9 @@ class NativeNotificationQueue:
                 )
             except ConversationIdentityError as exc:
                 reason = exc.code if exc.code == "attachment_receipt_expired" else "attachment_reference_invalid"
+                if not apply:
+                    due.setdefault(row.id, ("cancelled", reason))
+                    continue
                 transition = await db.execute(
                     update(NativeNotificationOutbox)
                     .execution_options(synchronize_session=False)
@@ -1044,6 +1085,9 @@ class NativeNotificationQueue:
             if reason is None:
                 continue
             terminal = "unknown" if row.intervention_type == "opportunity" and row.status in CLAIMED_STATUSES else "cancelled"
+            if not apply:
+                due.setdefault(row.id, (terminal, reason))
+                continue
             transition = await db.execute(
                 update(NativeNotificationOutbox)
                 .execution_options(synchronize_session=False)
@@ -1126,6 +1170,9 @@ class NativeNotificationQueue:
             if reason is None:
                 continue
             terminal = "unknown" if row.intervention_type == "opportunity" and row.status in CLAIMED_STATUSES else "cancelled"
+            if not apply:
+                due.setdefault(row.id, (terminal, reason))
+                continue
             transition = await db.execute(
                 update(NativeNotificationOutbox)
                 .execution_options(synchronize_session=False)
@@ -1150,42 +1197,45 @@ class NativeNotificationQueue:
             await db.refresh(row)
             await self._finish_attempt(db, row, status=terminal, now=now, error_code=reason)
 
-        await db.execute(
-            update(NativeNotificationOutbox)
-            .execution_options(synchronize_session=False)
-            .where(
-                scope,
-                NativeNotificationOutbox.status == "queued",
-                NativeNotificationOutbox.deadline_at <= now,
-            )
-            .values(
-                status="failed",
-                last_error="deadline_expired",
-                degraded_state="delivery_deadline_expired",
-                updated_at=now,
-            )
-        )
-
-        await db.execute(
-            update(NativeNotificationOutbox)
-            .execution_options(synchronize_session=False)
-            .where(
-                scope,
-                NativeNotificationOutbox.status == "queued",
+        bulk_failures = (
+            (
+                (NativeNotificationOutbox.deadline_at <= now),
+                "deadline_expired",
+                "delivery_deadline_expired",
+            ),
+            (
                 (
                     (NativeNotificationOutbox.deadline_at.is_(None))
                     | (NativeNotificationOutbox.max_attempts < 1)
                     | (NativeNotificationOutbox.attempt_count < 0)
                     | (NativeNotificationOutbox.fencing_token < 0)
                 ),
-            )
-            .values(
-                status="failed",
-                last_error="malformed_outbox_state",
-                degraded_state="delivery_state_invalid",
-                updated_at=now,
-            )
+                "malformed_outbox_state",
+                "delivery_state_invalid",
+            ),
         )
+        for predicate, reason, degraded_state in bulk_failures:
+            if not apply:
+                ids = await db.execute(
+                    select(NativeNotificationOutbox.id).where(
+                        scope, NativeNotificationOutbox.status == "queued", predicate,
+                    )
+                )
+                for row_id in ids.scalars().all():
+                    due.setdefault(row_id, ("failed", degraded_state))
+                continue
+            await db.execute(
+                update(NativeNotificationOutbox)
+                .execution_options(synchronize_session=False)
+                .where(scope, NativeNotificationOutbox.status == "queued", predicate)
+                .values(
+                    status="failed",
+                    last_error=reason,
+                    degraded_state=degraded_state,
+                    updated_at=now,
+                )
+            )
+        return due
 
     async def claim_next(
         self,
@@ -1360,7 +1410,7 @@ class NativeNotificationQueue:
         )
         async with self._lock:
             async with self._session() as db:
-                await self._reconcile_expired(db, _utc_now(), opportunity_scope=scope)
+                deferred = await self._reconcile_for_read(db, _utc_now(), opportunity_scope=scope)
                 stmt = select(NativeNotificationOutbox).where(
                     scope,
                     NativeNotificationOutbox.id == notification_id
@@ -1374,7 +1424,13 @@ class NativeNotificationQueue:
                     )
                 result = await db.execute(stmt)
                 row = result.scalar_one_or_none()
-                return _row_to_notification(row) if row is not None else None
+                if row is None:
+                    return None
+                notification = _row_to_notification(row)
+                if row.id in deferred:
+                    status, degraded_state = deferred[row.id]
+                    notification = replace(notification, delivery_status=status, degraded_state=degraded_state)
+                return notification
 
     async def list(
         self,
@@ -1385,11 +1441,15 @@ class NativeNotificationQueue:
         async with self._lock:
             async with self._session() as db:
                 now = _utc_now()
-                await self._reconcile_expired(db, now)
+                deferred = await self._reconcile_for_read(db, now)
                 stmt = (
                     select(NativeNotificationOutbox)
                     .where(NativeNotificationOutbox.status.in_(ACTIVE_STATUSES))
                 )
+                if deferred:
+                    # Every reconciliation outcome is terminal, so a due
+                    # transition that could not be persisted is simply hidden.
+                    stmt = stmt.where(NativeNotificationOutbox.id.not_in(deferred))
                 # Opportunity intents carry private Goal/root lineage. They
                 # require both exact bindings even for otherwise ambient reads.
                 legacy = or_(
@@ -2100,7 +2160,8 @@ class NativeNotificationQueue:
             raise ValueError("recovery limit must be between 1 and 100")
         async with self._lock:
             async with self._session() as db:
-                await self._reconcile_expired(db, _utc_now())
+                # A deferred transition surfaces here once it is persisted.
+                await self._reconcile_for_read(db, _utc_now())
                 stmt = select(NativeNotificationOutbox).where(
                     NativeNotificationOutbox.status.in_({"failed", "unknown", "cancelled"}),
                     (
@@ -2160,10 +2221,12 @@ class NativeNotificationQueue:
                 scope = _opportunity_caller_scope_predicate(
                     owner_principal_id=owner_principal_id, operator_session_id=operator_session_id,
                 ) if owner_principal_id is not None else None
-                await self._reconcile_expired(db, now, opportunity_scope=scope)
+                deferred = await self._reconcile_for_read(db, now, opportunity_scope=scope)
                 stmt = select(NativeNotificationOutbox).where(
                     NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)
                 )
+                if deferred:
+                    stmt = stmt.where(NativeNotificationOutbox.id.not_in(deferred))
                 if owner_principal_id is not None:
                     stmt = stmt.where(
                         _owner_scope_predicate(

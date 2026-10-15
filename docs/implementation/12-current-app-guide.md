@@ -1069,6 +1069,18 @@ operator receipts. They expose the effective OpenRouter route, consent,
 allow-list, budget, admission state, and disabled local-runtime reason. A
 configured key or model is not evidence that a live provider route is healthy.
 
+Cockpit reads do not queue behind another SQLite writer (#702). Every
+authenticated request still checks revocation and both session expiries; the
+sliding idle-expiry touch and the expiry-revocation write wait at most 250 ms
+and are otherwise deferred (touches then pause for 2 s), so the session is not
+extended that time and an expired session still fails closed. Other storage
+contention during authentication answers a retryable 503 `auth_storage_busy`
+(a WebSocket handshake closes with 1013), not a 500 or a login-forcing 401. `/api/runtime/status` reads the accounting ledger without
+the writer lock and takes it only to persist a newly observed accounting
+period; admission still re-checks the ledger under that lock. Native
+notification reads write only when an expiry or binding transition is due and,
+while the lock is held, present that transition as terminal until it persists.
+
 ## Current Capability Summary
 
 **Shipped foundations:** the browser cockpit, FastAPI backend, conversation,

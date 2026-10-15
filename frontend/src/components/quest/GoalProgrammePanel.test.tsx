@@ -63,6 +63,28 @@ describe("Goal programme cockpit journey", () => {
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
     expect(fetchMock.mock.calls.filter(([url]) => url.endsWith("/discovery"))).toHaveLength(1);
   });
+  it("shows blocked Cordis research runtime, planning and run reasons with recovery and no replay", async () => {
+    const base = fetchMock.getMockImplementation()!;
+    const recovery = "Restore the reviewed Cordis research runtime and its planning/source providers.";
+    fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,
+      current_day_only: true, no_learning: true,
+      research_runtime: { state: "blocked", reason: "research_plan_provider_unavailable", recovery },
+      planning: [{ job_id: `goal-discovery-plan:${"c".repeat(32)}`, discovery_job_id: `goal-discovery:${"c".repeat(32)}`,
+        programme_id: "b".repeat(32), occurrence_day: "2026-10-15", status: "blocked",
+        blocked_reason: "research_plan_provider_unavailable", recovery, no_learning: true }],
+      runs: [{ job_id: `goal-discovery:${"a".repeat(32)}`,
+        programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3, occurrence_day: "2026-10-14",
+        status: "blocked", deadline_at: "2026-10-14T12:05:00Z", external_effect_state: "settled",
+        outstanding_held: true, accounting_liability: false, research_blocked_reason: "source_format_provider_unavailable",
+        outcome: null, no_learning: true, recovery: "Inspect the original occurrence; provider replay is forbidden." }] }) : base(url, init));
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    expect(await screen.findByText(/Research runtime blocked: research_plan_provider_unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Research planning 2026-10-15 blocked: research_plan_provider_unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Research blocked: source_format_provider_unavailable/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
+  });
   it("shows the canonical untouched cancellation cause without offering replay or private read", async () => {
     const base = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,

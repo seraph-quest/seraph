@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { GoalInfo } from "../../types";
-import { isGoalProgramme, isDiscoveryRun, ProgrammeError, programmeApi } from "./goalProgrammeApi";
-import type { GoalProgramme, ProgrammePreview, ProgrammeRequest, DiscoveryRun } from "./goalProgrammeApi";
+import { isGoalProgramme, isDiscoveryRun, isResearchPlanning, isResearchRuntime, ProgrammeError, programmeApi } from "./goalProgrammeApi";
+import type { GoalProgramme, ProgrammePreview, ProgrammeRequest, DiscoveryRun, ResearchPlanning, ResearchRuntime } from "./goalProgrammeApi";
 
 export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgrammeId }: { goal: GoalInfo; goalDraftChanged?: boolean; focusProgrammeId?: string | null }) {
   const [brief, setBrief] = useState("");
@@ -17,6 +17,7 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
   const [recovery, setRecovery] = useState<{ programme: GoalProgramme; action: "pause" | "revoke" } | null>(null);
   const [recoverAck, setRecoverAck] = useState(false);
   const [runs, setRuns] = useState<DiscoveryRun[]>([]);
+  const [research, setResearch] = useState<{ runtime: ResearchRuntime | null; planning: ResearchPlanning[] }>({ runtime: null, planning: [] });
   const [discoveryBrief, setDiscoveryBrief] = useState<string | null>(null);
   const mounted = useRef(false);
   const currentDraft = useRef("");
@@ -92,10 +93,18 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
   const inspectDiscovery = async () => {
     setBusy(true); setError(""); setDiscoveryBrief(null);
     try {
-      const result = await programmeApi<{ goal_id: string; runs: unknown[]; no_learning: true; current_day_only: true }>(goal.id, "/discovery");
+      const result = await programmeApi<{ goal_id: string; runs: unknown[]; no_learning: true; current_day_only: true;
+        research_runtime?: unknown; planning?: unknown[] }>(goal.id, "/discovery");
       if (result.goal_id !== goal.id || result.no_learning !== true || result.current_day_only !== true
-        || !Array.isArray(result.runs) || !result.runs.every(isDiscoveryRun)) throw new Error("Discovery history incomplete. Review retained receipts before new work.");
-      if (mounted.current) setRuns(result.runs);
+        || !Array.isArray(result.runs) || !result.runs.every(isDiscoveryRun)
+        || (result.research_runtime !== undefined && !isResearchRuntime(result.research_runtime))
+        || (result.planning !== undefined && (!Array.isArray(result.planning) || !result.planning.every(isResearchPlanning))))
+        throw new Error("Discovery history incomplete. Review retained receipts before new work.");
+      if (mounted.current) {
+        setRuns(result.runs);
+        setResearch({ runtime: (result.research_runtime as ResearchRuntime | undefined) ?? null,
+          planning: (result.planning as ResearchPlanning[] | undefined) ?? [] });
+      }
     } catch (err) { if (mounted.current) setError(err instanceof Error ? err.message : "Discovery history unavailable."); }
     finally { if (mounted.current) setBusy(false); }
   };
@@ -142,12 +151,16 @@ export function GoalProgrammePanel({ goal, goalDraftChanged = false, focusProgra
       <button type="button" disabled={goal.ownership_access === "recovered_read_only" || busy || programme.state === "revoked"} onClick={() => void control(programme, "revoke")} className="cockpit-action">Revoke programme {programme.grant_revision}</button>
     </article>)}
     <button type="button" disabled={busy} onClick={() => void inspectDiscovery()} className="cockpit-action">Inspect discovery runs</button>
+    {research.runtime?.state === "blocked" && <div role="status">Research runtime blocked: {research.runtime.reason}. {research.runtime.recovery}</div>}
+    {research.planning.filter((plan) => plan.status !== "succeeded").map((plan) => <div role="status" key={plan.job_id}>
+      Research planning {plan.occurrence_day} {plan.status}{plan.blocked_reason ? `: ${plan.blocked_reason}` : ""}. {plan.recovery}</div>)}
     {runs.map((run) => <article key={run.job_id} aria-label={`Discovery ${run.job_id}`}>
       <div>{run.occurrence_day} · {run.status} · grant revision {run.grant_revision} · original deadline {run.deadline_at}</div>
       <div>External effect: {run.external_effect_state} · {run.outstanding_held ? "Outstanding occurrence held" : "Occurrence closed"} · no_learning</div>
       {run.accounting_liability && <div>Original accounting liability is unresolved.</div>}
       {run.denial_cause && <div>Untouched occurrence cancelled: {run.denial_cause}. No contact or replay was admitted.</div>}
       {run.search_blocked_reason && <div role="status">Public search blocked: {run.search_blocked_reason}. Inspect the original occurrence; provider replay is forbidden.</div>}
+      {run.research_blocked_reason && <div role="status">Research blocked: {run.research_blocked_reason}. Inspect the original occurrence; provider replay is forbidden.</div>}
       {run.outcome && <div>{run.outcome.state} · coverage {run.outcome.coverage} · freshness {run.outcome.freshness}</div>}
       {run.recovery && <p>{run.recovery}</p>}
       <button type="button" disabled={busy || !run.outcome || !["succeeded", "degraded"].includes(run.status) || run.external_effect_state === "unknown"}

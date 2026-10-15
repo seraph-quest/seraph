@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from starlette.middleware.base import BaseHTTPMiddleware
 from urllib.parse import urlsplit
 
 from config.settings import settings
+from src.db.engine import is_database_locked
 from src.auth.service import (
     AuthFailure,
     AuthenticatedOperator,
@@ -178,5 +181,12 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
                 operator = await authenticate_token(request.cookies.get(settings.operator_auth_cookie_name))
         except AuthFailure as exc:
             return _auth_failure_response(request.url.path, exc.code, status_code=401)
+        except (OperationalError, SQLAlchemyTimeoutError) as exc:
+            # Storage contention is not an authentication verdict: answer an
+            # explicit retryable 503 (the session cookie stays valid), never a
+            # bare 500 and never a 401 that would send the operator to login.
+            if isinstance(exc, OperationalError) and not is_database_locked(exc):
+                raise
+            return _auth_failure_response(request.url.path, "auth_storage_busy", status_code=503)
         request.state.operator = operator
         return await call_next(request)

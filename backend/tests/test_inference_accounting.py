@@ -613,3 +613,40 @@ async def test_status_snapshot_never_takes_the_writer_lock_but_persists_the_peri
     diverged = await repository.inference_accounting_snapshot()
     assert diverged["status"] == "blocked" and diverged["reason_code"] == "accounting_continuity_unavailable"
     assert "BEGIN IMMEDIATE" in statements
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ahead_on_read", [1, 2])
+async def test_status_snapshot_falls_back_to_serialized_read_when_witness_moves(accounting_db, monkeypatch, ahead_on_read):
+    """#702 review: an unserialized read can see a witness persisted ahead of its commit.
+
+    Whichever receipt read observes the moved witness, the snapshot must not
+    report broken continuity without the serialized read confirming it.
+    """
+    from sqlalchemy import event
+    from src.workflows import inference_accounting
+    root, engine, _factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.configure_inference_accounting(1000)
+    ready = await repository.inference_accounting_snapshot()
+    statements = []
+    event.listen(engine.sync_engine, "before_cursor_execute",
+        lambda _conn, _cursor, statement, *_args: statements.append(" ".join(statement.split()[:2]).upper()))
+    real_read = inference_accounting.read_lifecycle_receipt
+    reads = []
+
+    def witness_ahead_once(workspace):
+        receipt = real_read(workspace)
+        reads.append(receipt)
+        if len(reads) == ahead_on_read:
+            # The unserialized read observes a writer between witness and commit.
+            return {**receipt, "inference_accounting": {**receipt["inference_accounting"],
+                "revision": receipt["inference_accounting"]["revision"] + 1}}
+        return receipt
+
+    monkeypatch.setattr(inference_accounting, "read_lifecycle_receipt", witness_ahead_once)
+    settled = await repository.inference_accounting_snapshot()
+    assert settled["status"] == "ready" and settled["revision"] == ready["revision"]
+    # Read 1 is the unserialized verification; a moved witness there escalates.
+    assert ("BEGIN IMMEDIATE" in statements) is (ahead_on_read == 1)

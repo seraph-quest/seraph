@@ -1090,7 +1090,24 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
                 raise
 
     monkeypatch.setattr("src.auth.service.get_session", _get_session)
+    from src.auth import service as auth_service
     from src.auth.service import authenticate_session
+
+    touches_in_flight = 0
+    max_touches_in_flight = 0
+    real_touch_record = auth_service._touch_record
+
+    async def _observed_touch_record(*args, **kwargs):
+        nonlocal touches_in_flight, max_touches_in_flight
+        touches_in_flight += 1
+        max_touches_in_flight = max(max_touches_in_flight, touches_in_flight)
+        try:
+            return await real_touch_record(*args, **kwargs)
+        finally:
+            touches_in_flight -= 1
+
+    monkeypatch.setattr(auth_service, "_touch_record", _observed_touch_record)
+    monkeypatch.setattr(auth_service, "_auth_touch_retry_after", 0.0)
 
     async def _release_lock():
         nonlocal lock_released
@@ -1162,7 +1179,10 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
             observed_updates = updates_entered
         # Requests that find a touch in flight skip it; only a request whose
         # read finished after a deferred attempt may try again.
-        assert 1 <= observed_updates < 40, "stale touch writes must remain coalesced under contention"
+        # One bounded attempt: requests skip a touch in flight and then back
+        # off after its deferral instead of each paying the lock wait.
+        assert observed_updates == 1, "stale touch writes must remain coalesced under contention"
+        assert max_touches_in_flight == 1
         assert max_checked_out == 20
         assert max_checked_out <= 20
         async with setup_factory() as session:
@@ -1174,6 +1194,7 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
         assert deferred_last_seen == now, "a deferred touch must not extend the session"
         await _release_lock()
 
+        monkeypatch.setattr(auth_service, "_auth_touch_retry_after", 0.0)
         await authenticate_session("auth-contention-session")
         async with setup_factory() as session:
             record = await session.get(OperatorSession, "auth-contention-session")

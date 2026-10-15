@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import secrets
 import asyncio
+import time
 import logging
 import threading
 import weakref
@@ -115,6 +116,10 @@ _AUTH_TOUCH_INTERVAL = timedelta(seconds=30)
 # validated read. Under a foreign SQLite writer they wait this long and then
 # defer instead of holding every authenticated request for the busy timeout.
 _AUTH_BOOKKEEPING_WAIT_MS = 250
+# After a deferral, skip touches briefly so sustained contention costs one
+# bounded wait per interval rather than one per poll. Validation is unaffected.
+_AUTH_TOUCH_BACKOFF_SECONDS = 2.0
+_auth_touch_retry_after = 0.0
 _AUTH_TOUCH_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _AUTH_TOUCH_LOCKS_GUARD = threading.Lock()
 
@@ -498,6 +503,7 @@ async def _commit_auth_bookkeeping(db) -> bool:
     stored idle expiry unchanged (the session is not extended this time) and a
     deferred expiry revocation still fails the request closed.
     """
+    global _auth_touch_retry_after
     await bound_lock_wait(db, _AUTH_BOOKKEEPING_WAIT_MS)
     try:
         await db.commit()
@@ -505,9 +511,15 @@ async def _commit_auth_bookkeeping(db) -> bool:
         if not is_database_locked(exc):
             raise
         await db.rollback()
+        _auth_touch_retry_after = time.monotonic() + _AUTH_TOUCH_BACKOFF_SECONDS
         logger.info("operator session bookkeeping deferred: database busy")
         return False
     return True
+
+
+def _touch_admitted() -> bool:
+    """A touch is neither in flight nor backing off after a deferral."""
+    return not _auth_touch_lock().locked() and time.monotonic() >= _auth_touch_retry_after
 
 
 async def _touch_record(
@@ -596,10 +608,10 @@ async def authenticate_token(token: str | None, *, touch: bool = True) -> Authen
     if error:
         raise AuthFailure(error)
     assert operator is not None
-    if touch_due and not _auth_touch_lock().locked():
+    if touch_due and _touch_admitted():
         return await _touch_token(token_hash)
-    # A touch already in flight covers this validated request; queueing every
-    # request behind one stalled bookkeeping write is the #702 wedge.
+    # A touch in flight (or just deferred) covers this validated request;
+    # queueing every request behind one stalled bookkeeping write is #702.
     return operator
 
 
@@ -655,7 +667,7 @@ async def _authenticate_session(
     if error:
         raise AuthFailure(error)
     assert operator is not None
-    if touch_due and not _auth_touch_lock().locked():
+    if touch_due and _touch_admitted():
         return await _touch_session(session_id, follow_replacements=follow_replacements)
     return operator
 

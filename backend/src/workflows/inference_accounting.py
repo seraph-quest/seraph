@@ -828,8 +828,8 @@ class InferenceAccountingRepositoryMixin:
 
         Reads use a deferred snapshot. They escalate to the original writer
         transaction only when the period high-water mark must be persisted or
-        the witness disagrees with the snapshot (a writer persists the witness
-        before its commit), so either outcome matches the serialized read.
+        continuity does not verify (a writer persists the witness before its
+        commit), so either outcome matches the serialized read.
         """
         period = period_id(now or datetime.now(timezone.utc))
         try:
@@ -851,11 +851,15 @@ class InferenceAccountingRepositoryMixin:
             account, rows = await self._accounting_rows(db)
             with _continuity_lock(Path(settings.workspace_dir).resolve(), held_workspace=continuity_workspace,
                                   exclusive=not read_only) as workspace:
-                if read_only and account is not None:
-                    receipt = read_lifecycle_receipt(workspace)
-                    if (receipt or {}).get("inference_accounting") != _witness(account):
+                try:
+                    self._assert_accounting_continuity(workspace, account, rows)
+                except Exception:
+                    # Unserialized, a concurrent writer may have persisted the
+                    # witness ahead of its commit; only the serialized read may
+                    # conclude continuity is broken.
+                    if read_only and account is not None:
                         return None
-                self._assert_accounting_continuity(workspace, account, rows)
+                    raise
                 from src.workspace.accounting_witness import period_state, unreviewed_overruns
                 owner_data, operations = account.model_dump(mode="json"), [_operation_payload(row) for row in rows]
                 period_status = period_state(owner_data, operations, period)

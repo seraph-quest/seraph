@@ -100,11 +100,22 @@ def _calendar_auth_failure(path: str, code: str) -> bool:
     return path.startswith("/api/calendar") or path.startswith("/api/governed-schedules")
 
 
+def is_auth_storage_busy(exc: BaseException) -> bool:
+    """Auth-store contention: retryable, never an authentication verdict (#702)."""
+    return isinstance(exc, SQLAlchemyTimeoutError) or (
+        isinstance(exc, OperationalError) and is_database_locked(exc)
+    )
+
+
 def _auth_failure_response(path: str, code: str, *, status_code: int) -> JSONResponse:
     if _calendar_auth_failure(path, code):
         if code in {"auth_not_configured", "authentication_required", "invalid_token", "session_unavailable"}:
             message = "Authentication is required"
             recovery = "login"
+        elif code == "auth_storage_busy":
+            # Contention is not a session verdict; the cookie remains valid.
+            message = "The operator session could not be checked; retry shortly"
+            recovery = "retry_existing_request"
         else:
             message = "The operator session is unavailable"
             recovery = "login"
@@ -185,7 +196,7 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             # Storage contention is not an authentication verdict: answer an
             # explicit retryable 503 (the session cookie stays valid), never a
             # bare 500 and never a 401 that would send the operator to login.
-            if isinstance(exc, OperationalError) and not is_database_locked(exc):
+            if not is_auth_storage_busy(exc):
                 raise
             return _auth_failure_response(request.url.path, "auth_storage_busy", status_code=503)
         request.state.operator = operator

@@ -25,6 +25,7 @@ from sqlmodel import SQLModel
 
 from config.settings import settings
 from src.app import create_app
+from src.auth import service as auth_service
 from src.db.engine import _configure_sqlite_connection, _ensure_search_indexes, override_session_factory
 
 COCKPIT_BASELINE = (
@@ -135,6 +136,10 @@ def _sql(path, statement: str, *params):
         connection.close()
 
 
+def _sqlite_now(offset: timedelta = timedelta()) -> str:
+    return (datetime.now(timezone.utc) + offset).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
 def _last_seen(path) -> str:
     return _sql(path, "SELECT last_seen_at FROM operator_sessions")[0][0]
 
@@ -164,6 +169,9 @@ async def _writer_free_baseline(client):
 async def test_cockpit_reads_do_not_queue_behind_a_foreign_writer(tmp_path, monkeypatch):
     async with _cockpit(tmp_path, monkeypatch) as (client, path):
         baseline = await _writer_free_baseline(client)
+        # A loaded host can make the baseline outlast the 30s touch interval;
+        # pin the session as just seen so this case really has no touch due.
+        _sql(path, "UPDATE operator_sessions SET last_seen_at = ?", _sqlite_now())
         with _foreign_writer(path):
             # Two polls: nothing deferred by the first may stall the second.
             _assert_cockpit_answered(await _fan_out(client), baseline, "touch not due")
@@ -174,7 +182,7 @@ async def test_cockpit_reads_do_not_queue_behind_a_foreign_writer(tmp_path, monk
 async def test_due_session_touch_defers_under_a_foreign_writer(tmp_path, monkeypatch):
     async with _cockpit(tmp_path, monkeypatch) as (client, path):
         baseline = await _writer_free_baseline(client)
-        stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S.%f")
+        stale = _sqlite_now(timedelta(minutes=-10))
         _sql(path, "UPDATE operator_sessions SET last_seen_at = ?", stale)
         with _foreign_writer(path):
             _assert_cockpit_answered(await _fan_out(client), baseline, "touch due")
@@ -182,7 +190,9 @@ async def test_due_session_touch_defers_under_a_foreign_writer(tmp_path, monkeyp
             # and the session was not extended.
             assert _last_seen(path) == stale
 
-        # Without the writer the next due touch persists normally.
+        # Without the writer the next due touch persists normally (once the
+        # short post-deferral backoff has passed).
+        monkeypatch.setattr(auth_service, "_auth_touch_retry_after", 0.0)
         response = await client.get("/api/auth/session")
         assert response.status_code == 200
         assert _last_seen(path) != stale
@@ -192,7 +202,7 @@ async def test_due_session_touch_defers_under_a_foreign_writer(tmp_path, monkeyp
 async def test_expired_session_fails_closed_under_a_foreign_writer(tmp_path, monkeypatch):
     async with _cockpit(tmp_path, monkeypatch) as (client, path):
         assert (await client.get("/api/auth/session")).status_code == 200
-        expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S.%f")
+        expired = _sqlite_now(timedelta(seconds=-1))
         _sql(path, "UPDATE operator_sessions SET idle_expires_at = ?", expired)
         with _foreign_writer(path):
             started = time.monotonic()

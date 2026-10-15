@@ -879,7 +879,11 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             return raw
         monkeypatch.setattr(producer, 'read_file', changed_result)
         from src.execution.repo_sandbox import RepoSandboxError
-        with pytest.raises(RepoSandboxError):
+        # The parent rejects altered signed completion bytes by signature and
+        # an altered exported diff by its signed output digest.
+        rejection = ('original_producer_output_changed' if node_readback_drift == 'body_hash'
+            else 'original_producer_signature_invalid')
+        with pytest.raises(RepoSandboxError, match=rejection):
             await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,
                 owner=owner, request=execution_request, principal=operator.principal)
         assert (await jobs.get_job(root_id))['status'] == 'unknown_external_effect'

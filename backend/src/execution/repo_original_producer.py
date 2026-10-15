@@ -777,11 +777,15 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
             _COMMANDS[command] = owner
             try:
                 authorized = owner.authorize_command(command) is True
-            except Exception:
+            except Exception as exc:
                 # A committed stop, cutoff or changed authority refuses this
                 # command. The live producer is not abandoned: it spawns
                 # nothing further and still publishes its signed interrupted
                 # prefix, which is verified below before any lane release.
+                import logging
+                logging.getLogger(__name__).warning(
+                    "original producer command %d refused: %s %s", command.ordinal,
+                    type(exc).__name__, str(exc)[:128])
                 authorized = False
             if not authorized:
                 denied = True

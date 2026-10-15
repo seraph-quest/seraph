@@ -3,7 +3,7 @@ import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type { WorkBoardTask } from "../../types";
 
-const recovery = "Notice delivery is uncertain. Inspect Telegram outbox recovery in Settings, or send a fresh notice to retire its old controls.";
+const recovery = "Notice delivery is uncertain. Send a fresh notice to retire its old controls; outbox recovery is available through the Telegram outbox API.";
 
 export function TelegramTaskNotice({ task, ownerSessionId }: {
   task: WorkBoardTask; ownerSessionId?: string | null;
@@ -29,7 +29,7 @@ export function TelegramTaskNotice({ task, ownerSessionId }: {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ expected_revision: task.task_revision, idempotency_key: request.key }),
         });
-        if (!queued.ok) throw new Error("Pair Telegram and grant transit consent in Settings, then refresh the current task.");
+        if (!queued.ok) throw new Error("Pair Telegram and grant transit consent in Settings → Telegram, then refresh the current task.");
         const value = await queued.json();
         if (captured !== current.current) return;
         if (typeof value.id !== "string" || value.id.length > 128) throw new Error(recovery);

@@ -16,7 +16,9 @@ from src.approval.runtime import get_current_approval_mode, reset_runtime_contex
 from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import (
-    OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+    openrouter_route_blocked_message,
+    route_block_overrun_minimum,
+    route_error_from,
     run_direct_local_chat,
     should_use_direct_local_chat,
     stream_direct_local_chat,
@@ -68,6 +70,7 @@ from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
     _register_request,
+    request_provider_contacted,
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
@@ -228,7 +231,9 @@ def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio
         for step in agent.run(message, stream=True):
             loop.call_soon_threadsafe(queue.put_nowait, step)
     except Exception as exc:
-        loop.call_soon_threadsafe(queue.put_nowait, exc)
+        # Surface a wrapped route denial as itself so the operator sees the
+        # specific blocked reason instead of a generic generation failure.
+        loop.call_soon_threadsafe(queue.put_nowait, route_error_from(exc) or exc)
     finally:
         loop.call_soon_threadsafe(queue.put_nowait, _DONE)
 
@@ -995,7 +1000,9 @@ async def websocket_chat(websocket: WebSocket):
                     continue
                 except NoCompliantModelRouteError as exc:
                     safe_error = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
-                    blocked_message = OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE
+                    blocked_message = openrouter_route_blocked_message(
+                        exc, minimum_bound_microusd=await route_block_overrun_minimum(exc),
+                    )
                     logger.info("Direct OpenRouter websocket chat blocked before provider contact", extra={"reason": safe_error})
                     await log_agent_run_event(
                         session_id=session.id,
@@ -1267,8 +1274,12 @@ async def websocket_chat(websocket: WebSocket):
                 raise
             except NoCompliantModelRouteError as exc:
                 safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+                # Earlier steps of this turn may already have called the
+                # provider; then the denial is a mid-turn block, not preflight.
+                contacted = request_provider_contacted(llm_request_id)
                 logger.info(
-                    "WebSocket OpenRouter agent chat blocked before provider contact",
+                    "WebSocket OpenRouter agent chat blocked mid-turn after provider contact"
+                    if contacted else "WebSocket OpenRouter agent chat blocked before provider contact",
                     extra={"reason": safe_reason},
                 )
                 await log_agent_run_event(
@@ -1283,8 +1294,9 @@ async def websocket_chat(websocket: WebSocket):
                         "error": safe_reason,
                         "request_id": llm_request_id,
                         "runtime": "openrouter-agent",
-                        "failure_stage": "route_preflight",
-                        "remote_outcome": "not_contacted",
+                        "step_count": step_num,
+                        "failure_stage": "mid_turn_route" if contacted else "route_preflight",
+                        "remote_outcome": "contacted_before_block" if contacted else "not_contacted",
                         "retry_required": False,
                     },
                 )
@@ -1292,7 +1304,11 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_text(
                     WSResponse(
                         type="error",
-                        content=OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+                        content=openrouter_route_blocked_message(
+                            exc,
+                            provider_contacted=contacted,
+                            minimum_bound_microusd=await route_block_overrun_minimum(exc),
+                        ),
                         reason=NoCompliantModelRouteError.code,
                         session_id=session.id,
                         seq=_next_seq(),

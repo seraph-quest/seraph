@@ -31,6 +31,8 @@ def _async_job_wrapper(
     coroutine lifetime without blocking the app loop.
     """
     async def _run_with_authority():
+        if allow_model_inference and await _skip_disabled_inference_job(job_id):
+            return
         execution_job_id = f"scheduler:{job_id}:{uuid4().hex}"
         principal = TrustPrincipal(
             principal_id=f"service:scheduler:{job_id}",
@@ -55,6 +57,29 @@ def _async_job_wrapper(
             logger.exception("Scheduled job %s failed", getattr(coro_func, "__name__", repr(coro_func)))
             raise
     return wrapper
+
+
+async def _skip_disabled_inference_job(job_id: str) -> bool:
+    """Skip a whole governed job the operator switched off; no model call runs."""
+    from src.scheduler.background_inference import (
+        DISABLED_BY_OPERATOR,
+        SETTINGS_UNREADABLE,
+        background_inference_job_enabled,
+        is_whole_job_toggle,
+        read_background_inference_settings,
+        record_background_inference_skip,
+    )
+
+    if not is_whole_job_toggle(job_id) or background_inference_job_enabled(job_id):
+        return False
+    _enabled, error = read_background_inference_settings()
+    reason = SETTINGS_UNREADABLE if error else DISABLED_BY_OPERATOR
+    record_background_inference_skip(job_id, reason)
+    from src.audit.runtime import log_scheduler_job_event
+
+    await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})
+    logger.info("Scheduled job %s skipped: %s", job_id, reason)
+    return True
 
 
 def _validate_timezone(tz_name: str) -> str:

@@ -12,6 +12,10 @@ from sqlmodel import select
 from src.approval.runtime import get_current_session_id
 from src.db.engine import get_session
 from src.db.models import Message, Session
+from src.scheduler.background_inference import (
+    background_inference_job_enabled,
+    record_background_inference_skip,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +80,13 @@ async def flush_session_memory(
     workflow_name: str | None = None,
     manager: SessionManager | None = None,
 ) -> bool:
+    # Every trigger (post-response, workflow completion, compaction, session
+    # end, scheduled catch-up) reaches the same consolidation model call, so
+    # the operator's memory_consolidation toggle gates them all here. The
+    # fingerprint stays uncached, so a later catch-up can still consolidate.
+    if not background_inference_job_enabled("memory_consolidation"):
+        record_background_inference_skip("memory_consolidation")
+        return False
     fingerprint = await _build_session_flush_fingerprint(session_id)
     if fingerprint is None:
         return False

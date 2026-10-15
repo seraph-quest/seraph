@@ -564,6 +564,24 @@ screenshot, and vector execution with one active transport and retained charge
 readback; actual provider availability, model quality, costs, and embedding
 usefulness remain externally unverified. See the [setup guide](./12-current-app-guide.md#configure-the-openrouter-route-epic-736775).
 
+Daily-use readiness ([#1068](https://github.com/seraph-quest/seraph/issues/1068))
+is **Partial** on this branch: Settings → Models & OpenRouter proposes chat-ready
+text capabilities (`streaming`, `tool_use`), an explicit context window
+decoupled from the output cap, dollar-denominated ceiling/request bound, a
+selectable proof lifetime up to 24h, and one Prove route action whose canaries
+are labelled as billed calls. Chat names the specific blocked reason (for
+example `proof_expired:health` → Prove route) and the composer shows proof
+expiry. Scheduled jobs that may call the text route stay ON by default with
+per-job toggles and call estimates; a disabled job makes no model call and
+reports `disabled_by_operator`. The request bound defaults to $0.50 with a
+worst-case-per-call preview, because a charge above it latches every further
+OpenRouter call until the overrun is reviewed; chat names that latch and
+distinguishes a mid-turn agent block (earlier calls reached the provider) from
+a preflight block. Settings → Telegram pairs and grants transit
+consent over the existing API. Offline tests intercept all inference; a real
+OpenRouter session remains externally unverified. See the
+[current app guide](./12-current-app-guide.md#daily-use-readiness-1068).
+
 Deployment inference accounting remains **Partial**. The canonical durable job
 repository owns finite reservations, immutable UTC-month attribution, account
 usage settlement, and unknown liabilities that carry across rollover and

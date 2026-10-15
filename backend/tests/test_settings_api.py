@@ -1316,3 +1316,52 @@ async def test_test_email_endpoint_returns_safe_status(client):
     assert data["status"] == "blocked"
     assert data["recipient_hash"] == "hash123"
     assert "user@example" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_background_inference_toggles_round_trip_through_settings(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+
+    initial = await client.get("/api/settings/background-inference")
+    assert initial.status_code == 200
+    jobs = {job["job_id"]: job for job in initial.json()["jobs"]}
+    assert jobs["strategist_tick"]["enabled"] is True
+    assert jobs["strategist_tick"]["approx_calls_per_day"] > 0
+
+    saved = await client.put("/api/settings/background-inference", json={"jobs": {"strategist_tick": False}})
+    assert saved.status_code == 200
+    jobs = {job["job_id"]: job for job in saved.json()["jobs"]}
+    assert jobs["strategist_tick"]["enabled"] is False
+    assert jobs["daily_briefing"]["enabled"] is True
+
+    rejected = await client.put("/api/settings/background-inference", json={"jobs": {"unknown_job": False}})
+    assert rejected.status_code == 422
+    not_bool = await client.put("/api/settings/background-inference", json={"jobs": {"daily_briefing": "no"}})
+    assert not_bool.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_unreadable_background_toggles_require_confirmed_full_replacement(client, tmp_path, monkeypatch):
+    from src.scheduler.background_inference import BACKGROUND_INFERENCE_JOBS, background_inference_settings_path
+
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    background_inference_settings_path().write_text("{broken", encoding="utf-8")
+    status = (await client.get("/api/settings/background-inference")).json()
+    assert status["error_code"] == "background_inference_settings_unreadable"
+    assert not any(job["enabled"] for job in status["jobs"])
+
+    # One toggle must not silently rebuild the other jobs from defaults.
+    partial = await client.put("/api/settings/background-inference", json={"jobs": {"strategist_tick": False}})
+    assert partial.status_code == 409
+    assert partial.json()["detail"]["code"] == "background_inference_settings_unreadable"
+    assert background_inference_settings_path().read_text(encoding="utf-8") == "{broken"
+    incomplete = await client.put("/api/settings/background-inference",
+        json={"jobs": {"strategist_tick": False}, "replace_unreadable": True})
+    assert incomplete.status_code == 422
+
+    choice = {job.job_id: job.job_id == "daily_briefing" for job in BACKGROUND_INFERENCE_JOBS}
+    replaced = await client.put("/api/settings/background-inference", json={"jobs": choice, "replace_unreadable": True})
+    assert replaced.status_code == 200
+    body = replaced.json()
+    assert body["error_code"] is None
+    assert {job["job_id"]: job["enabled"] for job in body["jobs"]} == choice

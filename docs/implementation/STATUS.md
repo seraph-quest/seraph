@@ -68,6 +68,17 @@ scheduler and bound adapters, return typed `blocked` results. Memory
 composition-snapshot accounting is not shipped. See the
 [guide section](./12-current-app-guide.md#cordis-typed-service-bridge-1007).
 
+**Cordis guardian research** from
+[#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal
+discovery planning and public source extraction run only through the composed
+Cordis research service, goal-plan provider, guardian consumer and
+HTML/text/RSS/Atom format providers, with Python-side plan validation,
+pinned provider/config digests (`stale_output` on mismatch), visible blocks
+for missing providers and no Python fallback. Its real-child acceptance and the
+discovery verticals need the built Cordis package and Node, which CI does not
+provide, so they skip there. See the
+[guide section](./12-current-app-guide.md#cordis-guardian-research-1008).
+
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.

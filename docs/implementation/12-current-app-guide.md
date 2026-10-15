@@ -197,7 +197,8 @@ Native owners in this slice: `authority.resolve`, `goals.read`, `tasks.admit`
 `tasks.cancel`, `capabilities.list`/`describe`, `connections.inspect`,
 `memory.retrieve` (owner list-safe redacted summaries only), and
 `artifacts.stage`/`adopt`/`read` plus `audit.append` for the temporary read
-journey. That journey admits one `runtime_service_read_v1` job, performs the
+journey (and, for guardian research, the bounded callbacks described in
+[Cordis guardian research (#1008)](#cordis-guardian-research-1008)). That journey admits one `runtime_service_read_v1` job, performs the
 read, stages the sealed result as a private 0600 workspace file (intent before
 effect), adopts and reads it back, appends one `runtime_service_observed` audit
 event and settles the job with explicit `no_learning`. The child's answer to
@@ -210,7 +211,9 @@ stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle
 `capabilities.invoke`, `inference.request`, `memory.propose`,
 `memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
 `agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
-`source-extraction.extract`) return a typed `blocked` reason, also listed in
+`source-extraction.extract`) return a typed `blocked` reason as Python callbacks
+(`research.*` and `source-extraction.extract` are Cordis-owned since #1008 and
+only originated by Python), also listed in
 the runtime status `native_services` block. No HTTP route yet exposes the bridge
 to the browser, and the Memory composition-snapshot accounting amendments
 recorded on #1007 are not implemented. The acceptance tests deny every Python
@@ -316,7 +319,11 @@ Narrower accepted plan limits apply to the actual query, result, source and
 inference counts and declared output bytes. Search uses each plan's per-request
 time and response-byte cap within the original deadline. The fixed four-stage
 graph consumes whole original physical outputs; alternate graphs and JSON
-pointers are unsupported rather than silently ignored.
+pointers are unsupported rather than silently ignored. Planning and source
+extraction run only through the composed Cordis research roles described in
+[Cordis guardian research (#1008)](#cordis-guardian-research-1008); without a
+running reviewed host or provider, discovery is blocked and visible rather than
+falling back to Python.
 
 Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
 held effects and cost liability. Selecting a completed brief performs an explicit
@@ -577,6 +584,57 @@ document attempt or bypass its retry and positive cleanup requirements.
 **Status:** Partial
 **Scope:** current `develop` baseline and its named partial proof boundaries;
 new target architecture is owned by the Constitution and ADRs
+
+
+### Cordis guardian research (#1008)
+
+[#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2
+goal-research pipeline through three composed Cordis roles in the reviewed
+profile: the research service (`seraph.research.v1`), the planning provider
+`seraph.goal-plan.v1` (`runtime/cordis/src/providers/goal-plan.ts`) and the
+guardian consumer `seraph.guardian-research.v1`
+(`runtime/cordis/src/plugins/research/guardian.ts`). `seraph.source-extraction.v1`
+selects a format provider per media type from its closed profile config:
+`plain-text` and `html-text` (a port of `normalize_source_text`, including the
+WHATWG entity table, with a parity test) and `rss-atom`, a hand-written bounded
+reader (61,440 input bytes, depth 32, 4,096 elements, 64 items, 4 KiB per field)
+that rejects DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
+declarations; feed links stay inert text. An absent planner, consumer, source
+extraction plugin or format mapping returns a typed block
+(`research_plan_provider_unavailable`, `research_consumer_unavailable`,
+`source_extraction_provider_unavailable`, `source_format_provider_unavailable`);
+there is no Python planning or extraction fallback. Changing the profile config
+is the only way to replace a provider; consumer code is unchanged.
+
+Admission stages a bounded planning request (identities, revisions, public
+brief reference/digest, route epoch, strategy binding, issue time, original
+deadline and the limit/output ceilings) and admits one goal-less
+`goal_discovery_planning_v1` service job per occurrence. Its single
+`research.buildPlan` invocation may only read that request and stage one plan;
+Python checks every binding field against the request, every limit and output
+cap against the ceiling, then `validate_goal_research_plan`, and writes its own
+canonical bytes as the plan artifact before the existing discovery admission.
+A planning job that did not succeed is never re-run for that occurrence
+(`programme_planning_requires_recovery`). Both jobs bind the reviewed package
+and profile digests (and so every provider implementation and its config);
+a later replacement only affects new admissions and an older job fails with
+`stale_output` before any inference or contact.
+
+Python keeps pinned HTTPS, site policy/SSRF checks, consent and readback
+receipts. Each fetched public source is adopted as a bounded `raw_source`
+artifact (media type and UTF-8 body only, no URL, path or credential), then one
+`research.executeAccepted` call lets the consumer read the adopted extraction
+request and raw sources, extract them, stage each normalized snapshot and read
+it back. A snapshot is adopted through the existing discovery artifact owner
+only when it binds the raw digest and the job's pinned source provider and
+config digests; feed/size rejections are recorded per source slot and appear as
+unavailable coverage. The canonical `DiscoveryBriefV1`, Inbox digest and Work
+Board projection are unchanged, the first run still returns findings, and every
+result records `no_learning`. **Inspect discovery runs** adds `research_runtime`
+(live role readiness and recovery), `planning` jobs and per-run
+`research_blocked_reason`. Real-child acceptance tests deny Python sockets/DNS
+and use fixed in-memory transports; they need the built package and
+`SERAPH_CORDIS_TEST_NODE`, so discovery verticals skip where that is absent.
 
 ### Bounded general document reading
 

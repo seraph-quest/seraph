@@ -101,7 +101,10 @@ class CordisHost:
             supported = sorted(SUPPORTED_METHODS)
         return {"state": "partial" if supported and self.admitting else "blocked",
                 "supported_methods": supported,
-                "blocked_methods": sorted(SERVICE_METHODS - set(supported))}
+                "blocked_methods": sorted(SERVICE_METHODS - set(supported)),
+                # Typed per-call storage contention; these never fence the boot.
+                "transient_failures": getattr(self.service_dispatch, "transient_failures", 0),
+                "last_transient_reason": getattr(self.service_dispatch, "last_transient_reason", None)}
 
     def _task(self, name: str, coroutine: Any) -> asyncio.Task[Any]:
         if name in self._tasks:

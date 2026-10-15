@@ -285,3 +285,24 @@ async def test_service_request_cannot_refresh_scope_from_job_locator_or_change_m
     assert calls == []
     assert host._pending == {}
     assert host._unresolved == 0
+
+
+@pytest.mark.asyncio
+async def test_non_transient_storage_fault_in_a_callback_still_fences_the_boot():
+    from sqlalchemy.exc import OperationalError
+
+    class Native:
+        async def dispatch(self, request, *, called_scope):
+            raise OperationalError("SELECT", {}, Exception("disk I/O error"))
+    host = CordisHost(service_dispatch=Native())
+    host.boot_nonce = "a" * 64
+    host._unresolved = 1
+    host._fence = lambda reason: setattr(host, "reason", reason)
+    request = {"method": "goals.read", "invocation_ref": "job:original", "deadline_at": int(time.time()*1000) + 1000}
+    scope = CalledServiceInvocation(OriginalServiceInvocation({}, None, host.boot_nonce),
+        request["method"], 1, request["deadline_at"], "r-1", host.boot_nonce)
+    future = asyncio.get_running_loop().create_future()
+    host._pending["r-1"] = Pending({"request_id": "r-1"}, future, scope)
+    await host._serve_native(request, "service-1", scope)
+    future.cancel()
+    assert host.reason == "native_service_failed_or_ack_lost"

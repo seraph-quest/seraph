@@ -335,7 +335,7 @@ def _payload(method):
         "inference.request": {"request_ref": "r"}, "memory.retrieve": {"query_ref": "r", "limit": 1},
         "memory.propose": {"request_ref": "r"}, "memory.applyReviewed": {"review_ref": "r"},
         "memory.forget": {"request_ref": "r"}, "artifacts.read": {"artifact_ref": "r", "max_bytes": 1},
-        "artifacts.stage": {"request_ref": "r"}, "artifacts.adopt": {"request_ref": "r"}, "audit.append": {"event_ref": "r"},
+        "artifacts.stage": {"request_ref": "r", "content": None, "content_digest": None}, "artifacts.adopt": {"request_ref": "r"}, "audit.append": {"event_ref": "r"},
         "research.buildPlan": {"task_ref": "r"}, "research.executeAccepted": {"plan_ref": "r"},
         "conversation.accept": {"turn_ref": "r"}, "conversation.append": {"message_ref": "r"},
         "conversation.read": {"conversation_ref": "r", "limit": 1, "before_message_ref": None},

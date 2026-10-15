@@ -16,7 +16,7 @@ const input: Record<ServiceMethod, unknown> = {
   'tasks.admit': {request_ref:'native-1'}, 'tasks.inspect':{job_ref:'native-1'}, 'tasks.cancel':{job_ref:'native-1',expected_revision:1}, 'tasks.checkpoint':{checkpoint_ref:'native-1'}, 'tasks.settle':{outcome_ref:'native-1'},
   'capabilities.list':{cursor:null,limit:10}, 'capabilities.describe':{capability_id:'work.json-format.v1'}, 'capabilities.invoke':{request_ref:'native-1'}, 'inference.request':{request_ref:'native-1'},
   'memory.retrieve':{query_ref:'native-1',limit:10}, 'memory.propose':{request_ref:'native-1'}, 'memory.applyReviewed':{review_ref:'native-1'}, 'memory.forget':{request_ref:'native-1'},
-  'artifacts.read':{artifact_ref:'native-1',max_bytes:4096}, 'artifacts.stage':{request_ref:'native-1'}, 'artifacts.adopt':{request_ref:'native-1'}, 'audit.append':{event_ref:'native-1'},
+  'artifacts.read':{artifact_ref:'native-1',max_bytes:4096}, 'artifacts.stage':{request_ref:'native-1',content:null,content_digest:null}, 'artifacts.adopt':{request_ref:'native-1'}, 'audit.append':{event_ref:'native-1'},
   'research.buildPlan':{task_ref:'native-1'}, 'research.executeAccepted':{plan_ref:'native-1'},
   'conversation.accept':{turn_ref:'native-1'}, 'conversation.append':{message_ref:'native-1'}, 'conversation.read':{conversation_ref:'native-1',limit:10,before_message_ref:null}, 'conversation.cancel':{turn_ref:'native-1',expected_revision:1},
   'scheduler.register':{request_ref:'native-1'}, 'scheduler.disable':{schedule_ref:'native-1',expected_revision:1}, 'scheduler.dispatchDue':{limit:10},
@@ -70,6 +70,8 @@ test('real scoped proxies reject terminal reference separators before IPC and pr
     assert.deepEqual(await composition.dispose(), {resources_remaining:0, cordis_disposal:'confirmed'});
   }
 });
+// Composed in Cordis (#1008): these read their staged input first and never forward themselves.
+const COMPOSED = new Set<ServiceMethod>(['research.buildPlan', 'research.executeAccepted', 'source-extraction.extract']);
 for (const method of SERVICE_METHODS) test(`real scoped Cordis provider forwards ${method} once and preserves native block`, async () => {
   const calls: unknown[] = [];
   const client: ScopedRequestClient = {isActive: () => true, request: async (name, value) => {calls.push([name,value]); return blocked;}};
@@ -79,7 +81,7 @@ for (const method of SERVICE_METHODS) test(`real scoped Cordis provider forwards
   assert.ok(fibers.every(fiber => fiber.state === FiberState.ACTIVE));
   assert.ok(SERVICE_KEYS.every(key => context.get(key)));
   assert.deepEqual(await invokeService(context, method, input[method] as Input<typeof method>), blocked);
-  assert.deepEqual(calls, [[method,input[method]]]);
+  assert.deepEqual(calls, COMPOSED.has(method) ? [['artifacts.read',{artifact_ref:'native-1',max_bytes:65536}]] : [[method,input[method]]]);
   await Promise.all(fibers.map(fiber => fiber.dispose()));
   assert.equal(context.registry.size,0);
   assert.ok(SERVICE_KEYS.every(key => !context.get(key)));
@@ -116,7 +118,7 @@ test('scope disposal and expiry fence retained providers and late native respons
   await new Promise(resolve=>setImmediate(resolve));
   active = false; release?.(blocked);
   await assert.rejects(waiting,/unavailable/);
-  assert.equal(composition.resources.remaining,16); // host14 services + logger/lifecycle.
+  assert.equal(composition.resources.remaining,18); // host16 plugins + logger/lifecycle.
   await composition.dispose(); assert.equal(composition.resources.remaining,0);
 });
 test('concurrent scopes retain independent original request clients and register no ambient authority', async () => {

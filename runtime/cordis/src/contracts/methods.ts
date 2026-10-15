@@ -46,7 +46,7 @@ export const serviceSchemas = {
   'memory.applyReviewed': {input: object({review_ref: ref}), output: outputs.record},
   'memory.forget': {input: object({request_ref: ref}), output: outputs.record},
   'artifacts.read': {input: object({artifact_ref: ref, max_bytes: number(1, 65536)}), output: outputs.artifactRead},
-  'artifacts.stage': {input: object({request_ref: ref}), output: outputs.artifact},
+  'artifacts.stage': {input: object({request_ref: ref, content: nullable(text(65536)), content_digest: nullable(digest)}), output: outputs.artifact},
   'artifacts.adopt': {input: object({request_ref: ref}), output: outputs.adoption},
   'audit.append': {input: object({event_ref: ref}), output: outputs.receipt},
   'research.buildPlan': {input: object({task_ref: ref}), output: outputs.plan},
@@ -77,6 +77,11 @@ export type Result<M extends ServiceMethod> = {status: 'blocked'; reason_code: s
 export function validateInput<M extends ServiceMethod>(method: M, value: unknown): Input<M> {
   if (!isServiceMethod(method)) throw new ProtocolError('unknown service method');
   const input = serviceSchemas[method].input.parse(bounded(value));
+  if (method === 'artifacts.stage') {
+    // Child-produced bytes are staged only together with their exact digest.
+    const staged = input as Input<'artifacts.stage'>;
+    if ((staged.content === null) !== (staged.content_digest === null)) throw new ProtocolError('invalid staged content');
+  }
   if (method === 'source-extraction.extract') {
     const span = input as Input<'source-extraction.extract'>;
     if (span.last_line < span.first_line) throw new ProtocolError('invalid source span');

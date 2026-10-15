@@ -74,7 +74,10 @@ def audit_details(run, context: dict) -> dict:
 
 def expected_wire(run, context: dict, method: str) -> dict:
     """The only acceptable plugin request for the next operation."""
-    if method in {"artifacts.stage", "artifacts.adopt"}:
+    if method == "artifacts.stage":
+        # The read journey stages only Python's sealed bytes; the child sends none.
+        return {"request_ref": operation_ref(run.run_identity, method), "content": None, "content_digest": None}
+    if method == "artifacts.adopt":
         return {"request_ref": operation_ref(run.run_identity, method)}
     if method == "artifacts.read":
         return {"artifact_ref": context["operations"][1]["artifact_ref"], "max_bytes": MAX_ARTIFACT_BYTES}

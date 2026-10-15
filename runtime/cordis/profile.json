@@ -90,6 +90,25 @@
       "id": "seraph.source-extraction.v1",
       "required": true,
       "dependencies": [],
+      "config": {
+        "formats": {
+          "text/plain": "plain-text",
+          "text/html": "html-text",
+          "application/rss+xml": "rss-atom",
+          "application/atom+xml": "rss-atom"
+        }
+      }
+    },
+    {
+      "id": "seraph.goal-plan.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.guardian-research.v1",
+      "required": true,
+      "dependencies": [],
       "config": {}
     }
   ]

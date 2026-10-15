@@ -46,6 +46,11 @@ const paths = [
   'src/plugins/connections/index.ts',
   'src/plugins/agent_loop/index.ts',
   'src/plugins/source_extraction/index.ts',
+  'src/plugins/source_extraction/html.ts',
+  'src/plugins/source_extraction/html-entities.ts',
+  'src/plugins/source_extraction/rss-atom.ts',
+  'src/plugins/research/guardian.ts',
+  'src/providers/goal-plan.ts',
   'dist/src/bootstrap.js',
   'dist/src/composition.js',
   'dist/src/protocol.js',
@@ -83,6 +88,11 @@ const paths = [
   'dist/src/plugins/connections/index.js',
   'dist/src/plugins/agent_loop/index.js',
   'dist/src/plugins/source_extraction/index.js',
+  'dist/src/plugins/source_extraction/html.js',
+  'dist/src/plugins/source_extraction/html-entities.js',
+  'dist/src/plugins/source_extraction/rss-atom.js',
+  'dist/src/plugins/research/guardian.js',
+  'dist/src/providers/goal-plan.js',
 ];
 // Discovery can only reject extras; the trusted hash inventory above is literal.
 for (const root of ['src', 'dist/src']) {

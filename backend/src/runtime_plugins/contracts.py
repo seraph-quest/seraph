@@ -93,7 +93,8 @@ REQUESTS = {
     "memory.retrieve": {"query_ref": R, "limit": lambda v: integer(v, 1, 20)},
     "memory.propose": {"request_ref": R}, "memory.applyReviewed": {"review_ref": R}, "memory.forget": {"request_ref": R},
     "artifacts.read": {"artifact_ref": R, "max_bytes": lambda v: integer(v, 1, 65536)},
-    "artifacts.stage": {"request_ref": R}, "artifacts.adopt": {"request_ref": R},
+    "artifacts.stage": {"request_ref": R, "content": lambda v: v is None or text(v, 65536),
+                        "content_digest": lambda v: v is None or sha(v)}, "artifacts.adopt": {"request_ref": R},
     "audit.append": {"event_ref": R}, "research.buildPlan": {"task_ref": R}, "research.executeAccepted": {"plan_ref": R},
     "conversation.accept": {"turn_ref": R}, "conversation.append": {"message_ref": R},
     "conversation.read": {"conversation_ref": R, "limit": lambda v: integer(v, 1, 100), "before_message_ref": nullable_ref},
@@ -150,6 +151,9 @@ def validate_request(method: str, payload: Any) -> dict:
     if method not in REQUESTS:
         raise ProtocolError("unknown service method")
     object_fields(payload, REQUESTS[method])
+    if method == "artifacts.stage" and (payload["content"] is None) != (payload["content_digest"] is None):
+        # Child-produced bytes are staged only together with their exact digest.
+        raise ProtocolError("invalid staged content")
     if method == "source-extraction.extract" and payload["last_line"] < payload["first_line"]:
         raise ProtocolError("invalid source span")
     return payload

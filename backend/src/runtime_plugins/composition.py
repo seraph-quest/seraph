@@ -62,6 +62,11 @@ BUILD_FILES = (
     'src/plugins/connections/index.ts',
     'src/plugins/agent_loop/index.ts',
     'src/plugins/source_extraction/index.ts',
+    'src/plugins/source_extraction/html.ts',
+    'src/plugins/source_extraction/html-entities.ts',
+    'src/plugins/source_extraction/rss-atom.ts',
+    'src/plugins/research/guardian.ts',
+    'src/providers/goal-plan.ts',
     'dist/src/bootstrap.js',
     'dist/src/composition.js',
     'dist/src/protocol.js',
@@ -99,16 +104,32 @@ BUILD_FILES = (
     'dist/src/plugins/connections/index.js',
     'dist/src/plugins/agent_loop/index.js',
     'dist/src/plugins/source_extraction/index.js',
+    'dist/src/plugins/source_extraction/html.js',
+    'dist/src/plugins/source_extraction/html-entities.js',
+    'dist/src/plugins/source_extraction/rss-atom.js',
+    'dist/src/plugins/research/guardian.js',
+    'dist/src/providers/goal-plan.js',
 )
 PACKAGE_FILES = (*BUILD_FILES, "dist/build-manifest.json")
 # Child gets no PATH/HOME/config or credentials. Absolute argv needs no lookup.
 CHILD_ENV = {"LANG": "C.UTF-8", "TZ": "UTC"}
 KNOWN_PLUGIN = "seraph.host-lifecycle@1.0.0"
-KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-loop.v1', 'seraph.source-extraction.v1')
+KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-loop.v1', 'seraph.source-extraction.v1', 'seraph.goal-plan.v1', 'seraph.guardian-research.v1')
 
 
-# Closed per-plugin configuration fields (all currently empty).
+# Closed per-plugin configuration fields; only source extraction is configurable.
 PLUGIN_CONFIG_FIELDS: dict[str, frozenset[str]] = {identifier: frozenset() for identifier in KNOWN_PLUGINS}
+PLUGIN_CONFIG_FIELDS["seraph.source-extraction.v1"] = frozenset({"formats"})
+# Mirror of runtime/cordis/src/plugins/source_extraction/index.ts.
+SOURCE_MEDIA_TYPES = ("text/plain", "text/html", "application/rss+xml", "application/atom+xml")
+SOURCE_FORMAT_PROVIDERS = frozenset({"plain-text", "html-text", "rss-atom"})
+# Provider implementations beyond each domain's own index/contract files.
+EXTRA_PLUGIN_FILES = {
+    "seraph.source-extraction.v1": ("src/plugins/source_extraction/html.ts", "src/plugins/source_extraction/html-entities.ts",
+                                    "src/plugins/source_extraction/rss-atom.ts"),
+    "seraph.goal-plan.v1": ("src/providers/goal-plan.ts", "src/contracts/research.ts"),
+    "seraph.guardian-research.v1": ("src/plugins/research/guardian.ts", "src/contracts/research.ts"),
+}
 
 
 class CompositionBlocked(ValueError):
@@ -154,6 +175,12 @@ def validate_profile(value: Any) -> dict[str, Any]:
             raise ProtocolError("unknown or invalid plugin")
         cursor = position + 1
         closed(spec["config"], set(PLUGIN_CONFIG_FIELDS[spec["id"]]))
+        if spec["id"] == "seraph.source-extraction.v1":
+            formats = spec["config"]["formats"]
+            if (type(formats) is not dict or len(formats) > len(SOURCE_MEDIA_TYPES)
+                    or any(key not in SOURCE_MEDIA_TYPES or value not in SOURCE_FORMAT_PROVIDERS
+                           for key, value in formats.items())):
+                raise ProtocolError("invalid source formats")
     if plugins[0]["id"] != KNOWN_PLUGIN or plugins[0]["required"] is not True:
         raise ProtocolError("required host plugin missing")
     return profile
@@ -170,11 +197,21 @@ def plugin_files(identifier: str) -> tuple[str, ...]:
     match = re.fullmatch(r"seraph\.([a-z-]+)\.v1", identifier)
     if match is None or identifier not in KNOWN_PLUGINS:
         raise ProtocolError("unknown plugin")
+    common = ("src/plugins/proxy.ts", "dist/src/plugins/proxy.js", "src/contracts/methods.ts",
+              "dist/src/contracts/methods.js", "src/contracts/schema.ts", "dist/src/contracts/schema.js")
+    extra = tuple(item for path in EXTRA_PLUGIN_FILES.get(identifier, ())
+                  for item in (path, "dist/" + path[:-3] + ".js"))
+    if identifier in {"seraph.goal-plan.v1", "seraph.guardian-research.v1"}:
+        return (*extra, *common)
     name = match[1].replace("-", "_", 1)
     return (f"src/plugins/{name}/index.ts", f"dist/src/plugins/{name}/index.js", f"src/contracts/{name}.ts",
-            f"dist/src/contracts/{name}.js", "src/plugins/proxy.ts", "dist/src/plugins/proxy.js",
-            "src/contracts/methods.ts", "dist/src/contracts/methods.js", "src/contracts/schema.ts",
-            "dist/src/contracts/schema.js")
+            f"dist/src/contracts/{name}.js", *common, *extra)
+
+
+def plugin_config_digest(identifier: str, profile: dict[str, Any]) -> str:
+    """Digest of one plugin's reviewed config, as the Cordis provider reports it."""
+    spec = next(item for item in profile["plugins"] if item["id"] == identifier)
+    return hashlib.sha256(_canonical(spec["config"]).encode()).hexdigest()
 
 
 def plugin_digest(spec: dict[str, Any], files: dict[str, str]) -> str:

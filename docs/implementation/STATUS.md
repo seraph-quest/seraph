@@ -59,7 +59,10 @@ Approve only repositories you trust; host isolation is tracked in
 sections on allowed paths: binary, rename, copy, mode, symlink and header-less
 sections are rejected by the parent, the worker and git's own numstat and summary.
 Publication of an iterative result must equal the base plus the approved input
-patch.
+patch. Each exported diff must name exactly the paths that differ between the
+server-captured base and the tested tree. It must also reproduce the tested bytes
+when applied to a fresh base copy outside the workspace, so a test that commits or
+configures Git textconv cannot misreport its change.
 
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate

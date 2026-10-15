@@ -330,7 +330,7 @@ def main(request_file: Path) -> int:
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
     from src.execution.repo_node import PROFILE, execution_plan, hash_file, immutable, read_regular, worker_sources_digest, NodeRepoRepairExecutor
     from src.execution.repo_sandbox import _patch_paths_from_diff, _digest_entries, SnapshotEntry
-    from src.execution.repo_worker import _write_private_output
+    from src.execution.repo_worker import _write_private_output, verify_exported_diff
     descriptor=os.open(request_file,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
     try:
         metadata=os.fstat(descriptor)
@@ -389,6 +389,12 @@ def main(request_file: Path) -> int:
             raise ValueError("node_command_cancelled_or_timeout_or_descendant")
         return result
     try:
+        # Server-captured base, before the patch or any repository command:
+        # the exported diff is later proven against it, never against Git
+        # state that the repository's own scripts can rewrite.
+        from config.settings import RepoSandboxSettings
+        base_snapshot=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE,node_runtime_path=runtime["node_path"]),
+            workspace_dir=stage).snapshot_repository(workspace,stage/"diff-base")
         for args in (["init","--initial-branch=main"],["config","user.email","seraph-worker@localhost"],["config","user.name","Seraph worker"],["add","--all"],["commit","--allow-empty","-m","seraph snapshot"],["apply","--check",str(stage/"patch.diff")],["apply","--whitespace=nowarn",str(stage/"patch.diff")]):
             # Temporary bootstrap Git must not spawn detached maintenance;
             # every descendant remains subject to the strict cleanup oracle.
@@ -432,6 +438,17 @@ def main(request_file: Path) -> int:
             command(["/usr/bin/git","reset","--",*generated])
         diff=command(["/usr/bin/git","diff","--cached","--binary","--no-ext-diff","--no-color"])["stdout"]
         if len(diff)>job["limits"]["max_output_bytes"]:raise ValueError("node_diff_output_limit")
+        def apply_exported(tree,patch_file,git_environment):
+            applied=run_command(["/usr/bin/git","-c","core.hooksPath=/dev/null","apply","--whitespace=nowarn",str(patch_file)],
+                tree,git_environment,deadline,stream_limit=job["limits"]["max_stream_bytes"])
+            if applied["cancelled"] or applied["timed_out"] or applied["leftover_descendant"] or applied["exit_code"]!=0:
+                raise ValueError("node_exported_diff_apply_failed")
+        verify_exported_diff(diff,allowed_paths=job["allowed_paths"],
+            base_files={entry.relative_path:(entry.sha256,None) for entry in base_snapshot.entries},
+            post_files={entry.relative_path:(entry.sha256,None) for entry in snapshot.entries},
+            read_base=lambda path:read_regular(stage/"diff-base",path,job["limits"]["max_file_bytes"]),
+            apply_patch=apply_exported,
+            ignore=lambda path:path.startswith("node_modules/") or bool(output_dir and path.startswith(output_dir+"/")))
         _write_private_output(output,"diff.patch",diff)
     except (ValueError,OSError) as exc:
         reason=str(exc)[:512]

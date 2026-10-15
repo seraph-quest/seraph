@@ -574,6 +574,69 @@ def _validate_patch_paths(patch: bytes, allowed_paths: set[str]) -> list[str]:
     return sorted(changed)
 
 
+def verify_exported_diff(
+    diff: bytes,
+    *,
+    allowed_paths: Iterable[str],
+    base_files: Mapping[str, tuple[str, str | None]],
+    post_files: Mapping[str, tuple[str, str | None]],
+    read_base: Callable[[str], bytes],
+    apply_patch: Callable[[Path, Path, dict[str, str]], None],
+    ignore: Callable[[str], bool] = lambda path: False,
+) -> None:
+    """Prove the exported diff is exactly the change in the tested tree.
+
+    The diff comes from Git state inside the test-writable workspace, where a
+    test can commit changes or configure textconv/attributes. Its paths must
+    equal every base-or-allowed path whose bytes (and mode, when recorded)
+    differ between the server-captured base and the post-test tree. Applying
+    it to a fresh copy of those base files, outside the workspace and any
+    repository, must reproduce the post-test bytes exactly.
+    """
+    allowed = set(allowed_paths)
+    scope = (set(base_files) | allowed)
+    actual = sorted(path for path in scope if not ignore(path) and base_files.get(path) != post_files.get(path))
+    exported = _validate_patch_paths(diff, allowed) if diff else []
+    if exported != actual:
+        raise WorkerInputError("exported diff does not match the tested tree paths")
+    if not exported:
+        return
+    import tempfile
+    scratch = Path(tempfile.mkdtemp(prefix="seraph-diff-verify-"))
+    try:
+        tree = scratch / "tree"
+        tree.mkdir(mode=0o700)
+        for path in exported:
+            if path not in base_files:
+                continue
+            raw = read_base(path)
+            sha, mode = base_files[path]
+            if hashlib.sha256(raw).hexdigest() != sha:
+                raise WorkerInputError("base copy changed before diff verification")
+            target = tree / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            target.chmod(0o755 if mode == "100755" else 0o644)
+        patch_file = scratch / "exported.diff"
+        patch_file.write_bytes(diff)
+        apply_patch(tree, patch_file, {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(scratch),
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CEILING_DIRECTORIES": str(scratch)})
+        for path in exported:
+            target = tree / path
+            if target.is_symlink():
+                raise WorkerInputError("exported diff content does not match the tested tree")
+            state = None
+            if target.exists():
+                raw = target.read_bytes()
+                recorded_mode = (post_files.get(path) or base_files.get(path) or (None, None))[1]
+                state = (hashlib.sha256(raw).hexdigest(),
+                    None if recorded_mode is None else ("100755" if target.stat().st_mode & 0o111 else "100644"))
+            if state != post_files.get(path):
+                raise WorkerInputError("exported diff content does not match the tested tree")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def _validate_changed_paths(
     payload: bytes,
     allowed_paths: set[str],
@@ -1074,6 +1137,24 @@ def run_job(
             raise WorkerInputError("diff export failed or exceeded limit")
         if patch_paths and not diff:
             raise WorkerInputError("diff export is missing approved patch paths")
+
+        def _apply_exported(tree: Path, patch_file: Path, git_environment: dict[str, str]) -> None:
+            code, _, _, timed_out = _git(tree, "-c", "core.hooksPath=/dev/null", "apply", "--whitespace=nowarn",
+                str(patch_file), timeout=max(0.01, deadline_at - time.monotonic()), environment=git_environment,
+                deadline_at=deadline_at, apply_cpu_limit=backend_kind != "local",
+                process_observer=process_observer, before_spawn=before_spawn)
+            if code != 0 or timed_out:
+                raise WorkerInputError("exported diff does not apply to the base")
+
+        def _read_base(relative: str) -> bytes:
+            descriptor, _ = _open_source_regular_file(snapshot_root, relative)
+            with os.fdopen(descriptor, "rb") as handle:
+                return handle.read(MAX_FILE_BYTES + 1)
+
+        verify_exported_diff(diff, allowed_paths=allowed_paths,
+            base_files={item["path"]: (item["sha256"], item["mode"]) for item in publication_base_files},
+            post_files={item["path"]: (item["sha256"], item["mode"]) for item in _publication_files(workspace)},
+            read_base=_read_base, apply_patch=_apply_exported)
         if backend_kind == "local":
             _write_private_output(output, "diff.patch", diff)
         else:

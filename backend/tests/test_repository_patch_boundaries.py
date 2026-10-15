@@ -5,6 +5,8 @@ section kind must be rejected by both the trusted parent validator and the
 worker validator, and an iterative publication must equal the base plus the
 operator-approved input patch rather than worker-exported test-writable bytes.
 """
+import json
+
 import pytest
 
 from src.execution.repo_publication import PublicationError, _produce_direct, file_manifest
@@ -239,3 +241,73 @@ def test_supervised_publication_refuses_consistently_forged_stage_outputs(tmp_pa
         with pytest.raises(ValueError, match="tested_tree_differs_from_approved_input"):
             run(admission, lambda: None)
     assert not (stage / ".git/refs/heads/feat/tested-patch").exists()
+
+
+def _hostile_calculator(action):
+    """An approved patch whose module, imported by the test, rewrites workspace Git state."""
+    lines = ["import pathlib, subprocess", "def add(a, b):", "    return a + b",
+             "_git = lambda *args: subprocess.run(['/usr/bin/git', *args], capture_output=True)"]
+    if action == "commit":
+        lines += ["_test = pathlib.Path('tests/test_calculator.py')",
+                  "_test.write_text(_test.read_text() + '# hidden after the approved patch\\n')",
+                  "_git('add', 'tests/test_calculator.py')", "_git('commit', '-qm', 'hide')"]
+    else:
+        lines += ["pathlib.Path('.git/info').mkdir(exist_ok=True)",
+                  "pathlib.Path('.git/info/attributes').write_text('calculator.py diff=hide\\n')",
+                  "_git('config', 'diff.hide.textconv', 'sed s/subprocess/innocent/')"]
+    body = "".join("+" + line + "\n" for line in lines)
+    return ("--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,%d @@\n-def add(a, b):\n-    return a - b\n%s"
+            % (len(lines), body))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["commit", "textconv"])
+async def test_exported_diff_must_match_the_tested_tree(accounting_db, monkeypatch, repository_admission_signer, action):
+    """A test that commits or configures textconv cannot misreport the tested change."""
+    from src.workflows.repo_repair_source import _repository_record
+    from tests.test_repository_work_lane_release import _execute, _original
+    flow = await _original(accounting_db, monkeypatch)
+    executed = await _execute(flow, _hostile_calculator(action))
+    assert executed["cleanup_proven"] is True and executed["status"] != "succeeded"
+    async with flow["factory"]() as db:
+        root = await flow["jobs"]._fetch(db, flow["root_id"])
+        readback = _repository_record(root, "repository:readback:" + executed["iteration_id"])
+        # No requested-check result and no misrepresenting diff are recorded.
+        assert readback["status"] == "held_partial" and readback["command_results"] == []
+    diagnostics = json.loads(flow["service"].repository_source_service._read_private_artifact(
+        readback["diagnostics_artifact_ref"], expected_digest=readback["diagnostics_artifact_digest"]))
+    assert diagnostics["cumulative_diff"] == ""
+
+
+def _verify(diff, base, post):
+    import hashlib
+    import subprocess
+    from src.execution.repo_worker import verify_exported_diff
+    def apply(tree, patch_file, environment):
+        result = subprocess.run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "apply", "--whitespace=nowarn",
+            str(patch_file)], cwd=tree, env=environment, capture_output=True)
+        if result.returncode:
+            raise WorkerInputError("exported diff does not apply to the base")
+    state = lambda files: {path: (hashlib.sha256(raw).hexdigest(), "100644") for path, raw in files.items()}
+    verify_exported_diff(diff.encode(), allowed_paths={"calc.py", "test_calc.py"}, base_files=state(base),
+        post_files=state(post), read_base=lambda path: base[path], apply_patch=apply)
+
+
+_BASE = {"calc.py": b"x = 1\n", "test_calc.py": b"t = 1\n"}
+_HONEST = "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+
+
+def test_exported_diff_verification_accepts_the_exact_tested_change():
+    _verify(_HONEST, _BASE, {**_BASE, "calc.py": b"x = 2\n"})
+
+
+def test_exported_diff_cannot_hide_a_committed_tested_change():
+    # A test committed its change to test_calc.py, so git omits it.
+    with pytest.raises(WorkerInputError, match="paths"):
+        _verify(_HONEST, _BASE, {"calc.py": b"x = 2\n", "test_calc.py": b"t = 2\n"})
+
+
+def test_exported_diff_cannot_misreport_tested_content():
+    # textconv/attributes made git print content other than the tested bytes.
+    with pytest.raises(WorkerInputError, match="content"):
+        _verify(_HONEST, _BASE, {**_BASE, "calc.py": b"x = 3\n"})

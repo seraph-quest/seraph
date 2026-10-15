@@ -11,6 +11,7 @@ import { AuditLogPanel } from "./settings/AuditLogPanel";
 import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
+import { BackgroundInferencePanel } from "./settings/BackgroundInferencePanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
 import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfiles";
 import { SelectedContextPairing } from "./settings/SelectedContextPairing";
@@ -146,7 +147,7 @@ interface McpServer {
 type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
-  { id: "artifacts", label: "Screenshot/VLM" },
+  { id: "artifacts", label: "Models & OpenRouter" },
   { id: "general", label: "General" },
   { id: "native", label: "Native" },
   { id: "repo-sandbox", label: "Repo Sandbox" },
@@ -743,7 +744,12 @@ export function SettingsPanel() {
 
           {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
 
-          {activeSection === "artifacts" && <ArtifactStoragePanel />}
+          {activeSection === "artifacts" && (
+            <>
+              <ArtifactStoragePanel />
+              <BackgroundInferencePanel />
+            </>
+          )}
 
           {activeSection === "policies" && <ToolPolicyModeToggle />}
 

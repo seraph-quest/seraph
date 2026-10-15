@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   normalizeModelFabricSettings,
@@ -49,7 +49,7 @@ function enable(slot: "vision" | "embedding") {
   fireEvent.click(screen.getByLabelText("Enable OpenRouter " + slot + " route"));
   change("OpenRouter " + slot + " model ID", "fixture/" + slot);
   change("OpenRouter " + slot + " upstream allow-list", "fixture-upstream");
-  change("OpenRouter " + slot + " request cost bound", "500");
+  change("OpenRouter " + slot + " request cost bound (USD)", "0.0005");
   fireEvent.click(screen.getByLabelText("Enable OpenRouter " + slot + " zero data retention"));
 }
 function save() {
@@ -100,6 +100,44 @@ describe("OpenRouterSetupPanel", () => {
     expect(payload.openrouter_setup).not.toHaveProperty("embedding_egress_acknowledged");
   });
 
+  it("proposes chat-ready text capabilities and a prefilled dollar request bound for a new route", async () => {
+    const onSave = vi.fn(async () => savedSettings());
+    render(<OpenRouterSetupPanel setup={null} stale={false} policyRevision={7} onSave={onSave} />);
+    for (const capability of ["text", "tool_use", "structured_output", "streaming"]) {
+      expect(screen.getByLabelText("OpenRouter text " + capability + " capability")).toBeChecked();
+    }
+    expect(screen.getByLabelText("OpenRouter text request cost bound (USD)")).toHaveValue("0.05");
+    expect(within(screen.getByRole("group", { name: "OpenRouter text route" })).getByText("= 50,000 µUSD reserved per call")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Enable OpenRouter text route"));
+    change("OpenRouter text model ID", "fixture/text");
+    change("OpenRouter text upstream allow-list", "fixture-upstream");
+    change("OpenRouter spend ceiling (USD)", "5");
+    change("OpenRouter text context window tokens", "200000");
+    fireEvent.click(screen.getByLabelText("Acknowledge OpenRouter cloud egress"));
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const value = request(onSave).openrouter_setup;
+    expect(value.spend_ceiling_microusd).toBe(5_000_000);
+    expect(value.routes.text).toMatchObject({
+      capabilities: ["text", "tool_use", "structured_output", "streaming"],
+      request_cost_bound_microusd: 50_000,
+      context_window_tokens: 200_000,
+    });
+  });
+
+  it("round-trips stored micro-USD values through the dollar inputs unchanged", async () => {
+    const stored = { ...setup, spend_ceiling_microusd: 12_345_678, routes: { ...setup.routes, text: { ...route("text"), request_cost_bound_microusd: 1_234 } } };
+    const onSave = vi.fn(async () => savedSettings(stored));
+    render(<OpenRouterSetupPanel setup={stored} stale={false} policyRevision={7} onSave={onSave} />);
+    expect(screen.getByLabelText("OpenRouter spend ceiling (USD)")).toHaveValue("12.345678");
+    expect(screen.getByLabelText("OpenRouter text request cost bound (USD)")).toHaveValue("0.001234");
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(request(onSave).openrouter_setup.spend_ceiling_microusd).toBe(12_345_678);
+    expect(request(onSave).openrouter_setup.routes.text!.request_cost_bound_microusd).toBe(1_234);
+    expect(request(onSave).openrouter_setup.routes.text).not.toHaveProperty("context_window_tokens");
+  });
+
   it("accepts the outer revision when an initially empty setup finishes loading", async () => {
     const onSave = vi.fn(async () => savedSettings());
     const view = render(<OpenRouterSetupPanel setup={undefined} stale={false} onSave={onSave} />);
@@ -107,8 +145,8 @@ describe("OpenRouterSetupPanel", () => {
     fireEvent.click(screen.getByLabelText("Enable OpenRouter text route"));
     change("OpenRouter text model ID", "fixture/text");
     change("OpenRouter text upstream allow-list", "fixture-upstream");
-    change("OpenRouter text request cost bound", "500");
-    change("OpenRouter spend ceiling", "10000");
+    change("OpenRouter text request cost bound (USD)", "0.0005");
+    change("OpenRouter spend ceiling (USD)", "0.01");
     fireEvent.click(screen.getByLabelText("Acknowledge OpenRouter cloud egress"));
     save();
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
@@ -166,7 +204,7 @@ describe("OpenRouterSetupPanel", () => {
     view.rerender(<OpenRouterSetupPanel setup={null} stale={true} onSave={onSave} />);
     expect(screen.getByLabelText("OpenRouter text model ID")).toHaveValue("fixture/edited");
     expect(screen.getByLabelText("OpenRouter vision model ID")).toBeEnabled();
-    expect(screen.getByLabelText("OpenRouter spend ceiling")).toHaveValue(10000);
+    expect(screen.getByLabelText("OpenRouter spend ceiling (USD)")).toHaveValue("0.01");
     expect(screen.getByTestId("openrouter-text-status")).toHaveTextContent("capability_proof_missing");
     expect(screen.getByText("stale retained")).toBeInTheDocument();
     save();
@@ -231,7 +269,10 @@ describe("OpenRouterSetupPanel", () => {
   it.each([
     ["OpenRouter text model ID", "", "select one qualified"],
     ["OpenRouter text upstream allow-list", "", "explicit upstream"],
-    ["OpenRouter text request cost bound", "10001", "request cost bound"],
+    ["OpenRouter text request cost bound (USD)", "0.010001", "request cost bound"],
+    ["OpenRouter text request cost bound (USD)", "five", "request cost bound"],
+    ["OpenRouter spend ceiling (USD)", "1000.01", "Spend ceiling"],
+    ["OpenRouter text context window tokens", "100", "context window"],
     ["OpenRouter text temperature", "", "temperature"],
     ["OpenRouter max queued", "65", "Max queued"],
     ["OpenRouter max retries", "3", "Max retries"],

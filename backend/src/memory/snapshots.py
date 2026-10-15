@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
+from src.db.engine import is_database_locked
 from src.db.models import MemoryKind, MemorySnapshot, MemorySnapshotKind
 from src.memory.repository import memory_repository
 from src.memory.soul import read_soul
 
 _SESSION_BOUNDED_SNAPSHOT_CACHE: dict[str, tuple[str, str]] = {}
+# A chat turn waits at most this long to persist the snapshot cache (#1074).
+_SNAPSHOT_SAVE_WAIT_MS = 250
 
 
 def _extract_soul_section_lines(soul_context: str, section: str, *, limit: int) -> tuple[str, ...]:
@@ -237,12 +240,20 @@ async def get_or_create_bounded_guardian_snapshot(
             return ""
         current = await memory_repository.get_snapshot(MemorySnapshotKind.bounded_guardian_context)
         if current is None or current.source_hash != source_hash or current.content != content:
-            current = await memory_repository.save_snapshot(
-                kind=MemorySnapshotKind.bounded_guardian_context,
-                content=content,
-                source_hash=source_hash,
-                canonical_tombstone_revision=revision,
-            )
+            try:
+                current = await memory_repository.save_snapshot(
+                    kind=MemorySnapshotKind.bounded_guardian_context,
+                    content=content,
+                    source_hash=source_hash,
+                    canonical_tombstone_revision=revision,
+                    lock_wait_ms=_SNAPSHOT_SAVE_WAIT_MS,
+                )
+            except OperationalError as exc:
+                if not is_database_locked(exc):
+                    raise
+                # The persisted snapshot is only a cache: serve the content
+                # just rendered from reconciled memory and persist it later.
+                return content
     except (SQLAlchemyError, RuntimeError):
         if session_id is not None:
             _SESSION_BOUNDED_SNAPSHOT_CACHE.pop(session_id, None)

@@ -898,7 +898,20 @@ def _user_model_benchmark_diagnostics(
     return tuple(diagnostics)
 
 
-async def build_guardian_state(
+async def build_guardian_state(**kwargs) -> GuardianState:
+    """Build one explicit guardian-state object from current repo surfaces.
+
+    The whole build shares one tombstone reconciliation receipt: the memory
+    planner and snapshot helpers would otherwise reconcile about five times
+    per chat turn (#1074).
+    """
+    from src.memory.repository import tombstone_reconciliation_scope
+
+    with tombstone_reconciliation_scope():
+        return await _build_guardian_state(**kwargs)
+
+
+async def _build_guardian_state(
     *,
     session_id: str | None = None,
     user_message: str | None = None,

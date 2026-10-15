@@ -107,9 +107,9 @@ Only `bootstrap.hello`, `runtime.ready`, `runtime.status`, `runtime.quiesce`,
 `runtime.shutdown` and `invocation.cancel` are admitted here. Lifecycle controls
 have null invocation reference and null composition epoch. Cancellation requires
 a bounded nonempty invocation reference and returns false for an unknown
-invocation. Service methods and streams are absent until their separately owned
-typed-service contract is implemented; no ownership epoch, second authority,
-job queue, inference lane or agent loop is created by the host.
+invocation. Typed service frames are described in the
+[service bridge section](#cordis-typed-service-bridge-1007); the host itself
+creates no second authority, job queue, inference lane or agent loop.
 
 Admission closes before shutdown. The parent drains/cancels within 10 seconds or
 the original earlier deadline, then uses TERM, a 2-second wait, KILL and positive
@@ -137,6 +137,62 @@ IPv4/IPv6 socket creation denied. This is Linux-host lifecycle/security proof,
 not a native macOS receipt or inference/provider proof. macOS remains a peer
 core-host target; unsupported optional native proofs do not block independent
 core operation.
+
+### Cordis typed service bridge (#1007)
+
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) adds fourteen typed
+service plugins to the reviewed profile: `seraph.authority.v1`, `goals`,
+`tasks`, `capabilities`, `inference`, `memory`, `artifacts`, `audit`,
+`research`, `conversation`, `scheduler`, `connections`, `agent-loop` and
+`source-extraction` (Context keys `seraphAuthority` through
+`seraphSourceExtraction`). Contracts live in `runtime/cordis/src/contracts/` and
+providers in `runtime/cordis/src/plugins/`. Providers carry no state or policy:
+each forwards only the same method of the one original invocation Python sent,
+with that invocation's reference, composition epoch and original deadline
+(ordinary calls are capped at 30 seconds and never renewed).
+
+Service frames carry a positive `composition_epoch` and canonical
+`invocation_ref`; payloads use closed schemas of canonical references, never
+paths, SQL, URLs or plugin-asserted authority. Python's
+`runtime_plugins/dispatch.py` admits a call only for a job it admitted itself
+with a server-derived composition binding, after writing a protected invocation
+witness under that job's live lease. Every call re-resolves, in one immediate
+SQLite writer: the witness, attempt, lease owner, fencing token, deadline, the
+bound composition owners and authority. `operator-root` requires the original
+live, unrevoked Root session and unchanged grants; `goal-programme` validates the
+current programme/grant/goal binding through the existing programme owner and
+ignores issuing-browser expiry. A failed check returns a typed `blocked` result
+before private bytes or effects.
+
+`runtime_composition_states` holds one row per runtime domain (owner
+`legacy`/`cordis`, monotonic epoch, digest, `ready`/`draining`/`blocked`,
+recovery audit receipt). Startup seeds `legacy` epoch 1 only into an empty
+table; a partial inventory stays partial so missing owners keep denying calls.
+Cordis-bound jobs persist `composition_binding_json`, and the canonical job CAS
+repeats it, so a draining, changed or missing owner fences checkpoints,
+artifacts, effects and terminal transitions. Owner transitions require the
+workspace maintenance fence: `ready -> draining` stops admission, a strictly
+higher-epoch `blocked` state follows only when no leased attempt is bound to the
+old owner, and `ready` requires a verified boot. Rollback is a new epoch.
+
+Native owners in this slice: `authority.resolve`, `goals.read`, `tasks.admit`
+(reports the idempotent admission and whether it was replayed),
+`tasks.inspect`, `tasks.checkpoint` (only admission-sealed checkpoint refs),
+`tasks.cancel`, `capabilities.list`/`describe`, `connections.inspect`,
+`memory.retrieve` (owner list-safe redacted summaries only), and
+`artifacts.stage`/`adopt`/`read` plus `audit.append` for the temporary read
+journey. That journey admits one `runtime_service_read_v1` job, performs the
+read, stages the sealed result as a private 0600 workspace file (intent before
+effect), adopts and reads it back, appends one `runtime_service_observed` audit
+event and settles the job with explicit `no_learning`. An exact retry reuses the
+same job and never re-executes. All other methods (`tasks.settle`,
+`capabilities.invoke`, `inference.request`, `memory.propose`,
+`memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
+`agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
+`source-extraction.extract`) return a typed `blocked` reason, also listed in
+the runtime status `native_services` block. No HTTP route yet exposes the bridge
+to the browser, and the Memory composition-snapshot accounting amendments
+recorded on #1007 are not implemented.
 
 ## Task conversation continuity
 

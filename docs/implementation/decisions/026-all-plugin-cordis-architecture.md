@@ -154,6 +154,31 @@ These are implementation choices within the selected all-plugin target, not an
 invitation to revisit policy, portability or canonical ownership. Execution
 sequencing and review status belong in issues/PRs/Project, not this document.
 
+### Typed service bridge core (#1007)
+
+The [#1007](https://github.com/seraph-quest/seraph/issues/1007) core slice
+implements the fourteen typed service identities (`seraph.<noun>.v1`, Context
+keys `seraphAuthority` ... `seraphSourceExtraction`) and the fixed 34-method
+inventory as forwarding-only Cordis providers. A provider can only forward the
+same method of the one original Python-issued invocation back over the owned
+pipe; Python's finite dispatcher re-resolves the job, lease, fence, deadline,
+composition owners and authority before any private bytes or effect.
+
+One `RuntimeCompositionState` row per runtime domain records the owner
+(`legacy`/`cordis`), a monotonic epoch, the composition digest, `ready`,
+`draining` or `blocked` state and an audit recovery receipt. A Cordis-bound job
+stores its immutable dependency vector; the canonical job CAS repeats it as an
+SQL predicate, so a changed, draining or missing owner fences admission, effect,
+checkpoint, private read and adoption. Cutover is a fenced compare-and-set that
+only increases the epoch (rollback is another higher epoch) and refuses an epoch
+change while a leased attempt is bound to the prior owner.
+
+Methods without a native owner in this slice return a typed, operator-visible
+`blocked` result (the runtime status lists them). The deferred Memory
+composition-snapshot/census/frame-accounting amendments recorded on #1007 are
+not implemented by this slice. Current app details are in the
+[current app guide](../12-current-app-guide.md#cordis-typed-service-bridge-1007).
+
 ## Verification And Consequences
 
 This decision requires source/path/link and contradiction checks, both docs

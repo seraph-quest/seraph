@@ -685,3 +685,106 @@ async def test_cancel_before_and_after_contact_retains_unknown_without_replay(ac
     with pytest.raises((ValueError, InferenceAccountingError)):
         await recreated.execute(request("cancel-contacted"), forbidden)
     assert calls == ["contacted"]
+
+
+@pytest.mark.asyncio
+async def test_status_snapshot_never_takes_the_writer_lock_but_persists_the_period_fence(accounting_db, monkeypatch):
+    """#702: status polls ran BEGIN IMMEDIATE and queued behind any writer."""
+    import sqlite3
+    import threading
+    from sqlalchemy import event
+    from src.workspace import accounting_witness
+    from src.workspace.production import read_lifecycle_receipt, write_lifecycle_receipt
+    root, engine, _factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.configure_inference_accounting(1000)
+    statements = []
+    event.listen(engine.sync_engine, "before_cursor_execute",
+        lambda _conn, _cursor, statement, *_args: statements.append(" ".join(statement.split()[:2]).upper()))
+
+    ready = await repository.inference_accounting_snapshot()
+    assert ready["status"] == "ready" and ready["accounting_continuity_verified"] is True
+    assert "BEGIN IMMEDIATE" not in statements
+    assert not [item for item in statements if item.split()[0] in {"INSERT", "UPDATE", "DELETE"}]
+
+    held, release = threading.Event(), threading.Event()
+    def foreign_writer():
+        connection = sqlite3.connect(root / "seraph.db", isolation_level=None, timeout=30)
+        connection.execute("BEGIN IMMEDIATE")
+        held.set()
+        release.wait(10)
+        connection.execute("COMMIT")
+        connection.close()
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    writer.start()
+    assert held.wait(5)
+    try:
+        started = time.monotonic()
+        contended = await repository.inference_accounting_snapshot()
+        assert time.monotonic() - started < 1.0
+        assert contended["status"] == "ready" and contended["revision"] == ready["revision"]
+    finally:
+        release.set()
+        writer.join(10)
+
+    # A new period is a clock-rollback fence: it is still persisted, under the
+    # writer transaction, exactly once.
+    following = f"{int(ready['period_id'][:4]) + 1}{ready['period_id'][4:]}"
+    monkeypatch.setattr(accounting_witness, "utc_period", lambda now=None: following)
+    statements.clear()
+    rolled = await repository.inference_accounting_snapshot()
+    assert rolled["reason_code"] == "accounting_period_review_required"
+    assert rolled["period_high_water"] == following and rolled["revision"] == ready["revision"] + 1
+    assert "BEGIN IMMEDIATE" in statements
+    statements.clear()
+    assert (await repository.inference_accounting_snapshot())["revision"] == rolled["revision"]
+    assert "BEGIN IMMEDIATE" not in statements
+
+    # A witness ahead of the snapshot (a writer between witness and commit)
+    # is settled by the serialized path, which keeps failing closed if real.
+    workspace = ProductionWorkspace(host_root=root)
+    receipt = read_lifecycle_receipt(workspace)
+    receipt["inference_accounting"] = {**receipt["inference_accounting"], "revision": rolled["revision"] + 1}
+    write_lifecycle_receipt(workspace, receipt)
+    statements.clear()
+    diverged = await repository.inference_accounting_snapshot()
+    assert diverged["status"] == "blocked" and diverged["reason_code"] == "accounting_continuity_unavailable"
+    assert "BEGIN IMMEDIATE" in statements
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ahead_on_read", [1, 2])
+async def test_status_snapshot_falls_back_to_serialized_read_when_witness_moves(accounting_db, monkeypatch, ahead_on_read):
+    """#702 review: an unserialized read can see a witness persisted ahead of its commit.
+
+    Whichever receipt read observes the moved witness, the snapshot must not
+    report broken continuity without the serialized read confirming it.
+    """
+    from sqlalchemy import event
+    from src.workflows import inference_accounting
+    root, engine, _factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.configure_inference_accounting(1000)
+    ready = await repository.inference_accounting_snapshot()
+    statements = []
+    event.listen(engine.sync_engine, "before_cursor_execute",
+        lambda _conn, _cursor, statement, *_args: statements.append(" ".join(statement.split()[:2]).upper()))
+    real_read = inference_accounting.read_lifecycle_receipt
+    reads = []
+
+    def witness_ahead_once(workspace):
+        receipt = real_read(workspace)
+        reads.append(receipt)
+        if len(reads) == ahead_on_read:
+            # The unserialized read observes a writer between witness and commit.
+            return {**receipt, "inference_accounting": {**receipt["inference_accounting"],
+                "revision": receipt["inference_accounting"]["revision"] + 1}}
+        return receipt
+
+    monkeypatch.setattr(inference_accounting, "read_lifecycle_receipt", witness_ahead_once)
+    settled = await repository.inference_accounting_snapshot()
+    assert settled["status"] == "ready" and settled["revision"] == ready["revision"]
+    # Read 1 is the unserialized verification; a moved witness there escalates.
+    assert ("BEGIN IMMEDIATE" in statements) is (ahead_on_read == 1)

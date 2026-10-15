@@ -215,9 +215,18 @@ the runtime status `native_services` block. No HTTP route yet exposes the bridge
 to the browser, and the Memory composition-snapshot accounting amendments
 recorded on #1007 are not implemented. The acceptance tests deny every Python
 socket connection/DNS lookup and give the child no network configuration, but
-they do not OS-sandbox the Node child's own network access. A database error
-inside one callback currently fences the whole host boot rather than returning
-a typed block.
+they do not OS-sandbox the Node child's own network access. Transient SQLite
+contention inside one callback (`database is locked`/busy, connection-pool
+timeout) is a typed per-call `blocked` result, `native_owner_storage_busy`: the
+owner writer rolled back with no partial effect, the read journey blocks only
+that job with that reason, the boot keeps admitting, and the runtime status
+`native_services` block counts `transient_failures` (cumulative for the backend
+process, across host boots). Contention after `artifacts.stage` wrote its file
+is not reported as busy: the stage stays an unresolved intent with
+`native_artifact_owner_operation_unproven` and is never re-executed. If the job
+cannot even be marked blocked under persistent contention, it is left for
+stale-lease recovery. Other storage faults and
+any protocol, digest or authority violation still fence the whole host boot.
 
 ## Task conversation continuity
 
@@ -1137,6 +1146,18 @@ provider usefulness remains externally unverified.
 operator receipts. They expose the effective OpenRouter route, consent,
 allow-list, budget, admission state, and disabled local-runtime reason. A
 configured key or model is not evidence that a live provider route is healthy.
+
+Cockpit reads do not queue behind another SQLite writer (#702). Every
+authenticated request still checks revocation and both session expiries; the
+sliding idle-expiry touch and the expiry-revocation write wait at most 250 ms
+and are otherwise deferred (touches then pause for 2 s), so the session is not
+extended that time and an expired session still fails closed. Other storage
+contention during authentication answers a retryable 503 `auth_storage_busy`
+(a WebSocket handshake closes with 1013), not a 500 or a login-forcing 401. `/api/runtime/status` reads the accounting ledger without
+the writer lock and takes it only to persist a newly observed accounting
+period; admission still re-checks the ledger under that lock. Native
+notification reads write only when an expiry or binding transition is due and,
+while the lock is held, present that transition as terminal until it persists.
 
 ## Current Capability Summary
 

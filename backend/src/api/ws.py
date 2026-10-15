@@ -49,7 +49,7 @@ from src.api.chat import (
     validate_chat_message,
 )
 from src.conversation.identity import ConversationIdentityError
-from src.auth.middleware import authenticate_websocket
+from src.auth.middleware import authenticate_websocket, is_auth_storage_busy
 from src.auth.service import (
     AuthFailure,
     auth_enabled,
@@ -293,6 +293,12 @@ async def websocket_work_board_events(websocket: WebSocket):
     except AuthFailure as exc:
         await websocket.close(code=4401, reason=exc.code)
         return
+    except Exception as exc:
+        if not is_auth_storage_busy(exc):
+            raise
+        # 1013 "try again later": clients reconnect instead of signing out.
+        await websocket.close(code=1013, reason="auth_storage_busy")
+        return
     try:
         after = int(websocket.query_params.get("after", "0") or "0")
     except (TypeError, ValueError):
@@ -523,6 +529,12 @@ async def websocket_chat(websocket: WebSocket):
         operator = await authenticate_websocket(websocket)
     except AuthFailure as exc:
         await websocket.close(code=4401, reason=exc.code)
+        return
+    except Exception as exc:
+        if not is_auth_storage_busy(exc):
+            raise
+        # 1013 "try again later": clients reconnect instead of signing out.
+        await websocket.close(code=1013, reason="auth_storage_busy")
         return
     await websocket.accept()
     ws_manager.connect(

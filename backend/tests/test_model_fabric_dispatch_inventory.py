@@ -416,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1508,
+        1519,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -425,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1521,
+        1532,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -434,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1536,
+        1547,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

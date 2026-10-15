@@ -15,10 +15,11 @@ import re
 from types import MappingProxyType
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 
 from .dispatch import (CONTEXT_TAG, READ_JOB_KIND, TASK_JOB_KIND, WITNESS_PREFIX, NativeServiceBlocked,
                        NativeServiceDispatcher, OriginalServiceInvocation, _canonical, _checked_witness, _digest,
-                       _ms, _stored_witness, _writer, cas_run, checkpoint_receipt)
+                       _ms, _stored_witness, _writer, cas_run, checkpoint_receipt, transient_storage_error)
 from .ownership import RuntimeCompositionBinding, bind_invocation
 from .read_admission import validate_read_candidate, wire_inputs
 
@@ -206,6 +207,11 @@ async def _block(jobs, scope, reason: str) -> None:
         # Lost original authority leaves canonical recovery state; never
         # renew it merely to report a block.
         pass
+    except (OperationalError, PoolTimeoutError) as exc:
+        # Persistent contention: leave the job for stale-lease recovery rather
+        # than escaping with a raw storage error.
+        if not transient_storage_error(exc):
+            raise
 
 
 async def execute_native_read(*, operator, candidate: dict, idempotency_key: str, host=None, jobs=None) -> dict:

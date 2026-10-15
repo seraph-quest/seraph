@@ -663,6 +663,13 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
                 policies=body.workload_policies,
             )
             validate_active_model_fabric_configuration(configuration)
+            # The legacy v1 save reviews overruns up to its explicit bound too;
+            # refuse a too-low bound before the credential is touched.
+            await _require_review_covers_overrun(
+                (setup.request_cost_bound_microusd or setup.spend_ceiling_microusd)
+                if "request_cost_bound_microusd" in setup_input.model_fields_set else None,
+                review_required=False,
+            )
             raw_key = (
                 setup_input.api_key.get_secret_value()
                 if setup_input.api_key is not None
@@ -722,18 +729,22 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
     return await model_fabric_settings_payload()
 
 
-async def _require_review_covers_overrun(review: int | None) -> None:
+async def _require_review_covers_overrun(review: int | None, *, review_required: bool = True) -> None:
     """Refuse, before any mutation, a save whose bound cannot review the overrun.
 
     Saving reviews unreviewed overruns only up to the largest enabled request
     bound; a lower bound would otherwise fail late with a generic accounting
-    error after the policy was already revoked for the save.
+    error after the policy was already revoked for the save. A legacy v1 save
+    that does not set a bound (``review_required=False``) records no review
+    and leaves the latch in place, so it is not refused.
     """
     from src.agent.direct_chat import microusd_dollars
     from src.workflows.job_runtime import durable_job_repository
 
     snapshot = await durable_job_repository.inference_accounting_snapshot()
     minimum = snapshot.get("overrun_max_cost_microusd")
+    if review is None and not review_required:
+        return
     if type(minimum) is int and minimum > 0 and (review is None or review < minimum):
         raise HTTPException(status_code=409, detail={
             "code": "request_bound_below_overrun",

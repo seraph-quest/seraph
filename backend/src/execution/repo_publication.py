@@ -245,7 +245,7 @@ def _bounded_git(command, *, stage, env, data, deadline, guard_fd=None, process_
                 stream.close()
 
 
-def _produce_direct(stage: Path, source: SourceGit, preview: dict, patch: bytes, before_command, *, deadline_at=None, guard_fd=None, process_observer=None) -> dict:
+def _produce_direct(stage: Path, source: SourceGit, preview: dict, patch: bytes, before_command, *, deadline_at=None, guard_fd=None, process_observer=None, approved_patch: bytes | None = None) -> dict:
     """Only called after a current exact local_host_execution approval."""
     if stage.exists():
         raise PublicationError("local_producer_reconciliation_required")
@@ -267,6 +267,14 @@ def _produce_direct(stage: Path, source: SourceGit, preview: dict, patch: bytes,
         destination.parent.mkdir(exist_ok=True)
         destination.write_bytes(zlib.compress(f"{kind} {len(raw)}\0".encode() + raw))
     git("read-tree", preview["base_commit"])
+    approved_tree = None
+    if approved_patch is not None:
+        # The operator-approved input patch, applied by this producer to the
+        # pinned base index only, defines the one publishable tree.
+        git("apply", "--cached", "--check", "--", "-", data=approved_patch)
+        git("apply", "--cached", "--whitespace=nowarn", "--", "-", data=approved_patch)
+        approved_tree = git("write-tree").decode().strip()
+        git("read-tree", preview["base_commit"])
     for path, raw in contents.items():
         target = stage / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -285,6 +293,8 @@ def _produce_direct(stage: Path, source: SourceGit, preview: dict, patch: bytes,
     git("read-tree", "--empty")
     git("update-index", "-z", "--index-info", data=b"".join(entries))
     output_tree = git("write-tree").decode().strip()
+    if approved_tree is not None and output_tree != approved_tree:
+        raise PublicationError("tested_tree_differs_from_approved_input")
     commit = git("commit-tree", output_tree, "-p", preview["base_commit"], data=(preview["commit_message"] + "\n").encode()).decode().strip()
     git("update-ref", "refs/heads/" + preview["branch_name"], commit)
     changed = sorted(path for path in set(contents) | {item["path"] for item in output_files} if next((item for item in base_files if item["path"] == path), None) != next((item for item in output_files if item["path"] == path), None))

@@ -559,13 +559,19 @@ class RepoPublicationService:
                         datetime.fromisoformat(current["lease"]["expires_at"]).replace(tzinfo=timezone.utc),
                         datetime.fromisoformat(current["deadline_at"]).replace(tzinfo=timezone.utc),
                     ) - now()).total_seconds())
+                    approved_patch = None
+                    if "approved_input_patch_artifact_id" in preview["repair_binding"]:
+                        # Iterative Source: the published tree must equal the
+                        # base plus the operator-approved input patch, never
+                        # only the worker-exported (test-writable) diff.
+                        approved_patch = read_file(preview["repair_binding"]["approved_input_patch_artifact_id"])
                     admission = admit(stage, source, preview, patch, {
                         "job_id": job_id, "root": session, "principal": principal,
                         "attempt": current["attempt_count"], "authority_digest": current["authority_digest"],
                         "input_digest": current["input_digest"], "run_fingerprint": current["run_fingerprint"],
                         "fence": current["lease"]["fencing_token"], "goal_id": current["goal_id"],
                         "goal_revision": current["goal_revision"], "preview_digest": digest(preview),
-                    }, directory=directory, guard_fd=guard_fd, seconds_limit=remaining)
+                    }, directory=directory, guard_fd=guard_fd, seconds_limit=remaining, approved_patch=approved_patch)
                     supervisor_binding = admission.checkpoint()
                     current = await jobs.record_checkpoint(job_id, checkpoint_id="publication_supervisor_admission", state={"admission_sha256": admission.digest}, checkpoint_payload=supervisor_binding, **self.fence(current))
                     await self.check(current, preview, full_runtime=True)

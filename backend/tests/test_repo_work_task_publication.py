@@ -214,16 +214,21 @@ async def test_settings_failed_persist_preserves_original_selectors(accounting_d
     assert load_persisted_repo_sandbox_settings()[0].model_dump(mode='json') == original
 
 
-async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False, task_limits=None, work_limits=None, goal_limits=None):
+async def actual_native_source(accounting_db, monkeypatch, *, goal_capacity=None, claim_child=True, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False, task_limits=None, work_limits=None, goal_limits=None, create=None):
     factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch,
         goal_capacity=goal_capacity, language=language, node_build=node_build, ordinary_prior=ordinary_prior,
         publication_profile=publication_profile, task_limits=task_limits, work_limits=work_limits, goal_limits=goal_limits)
+    created = await create(factory, owner, service, request) if create is not None else None
     return await admit_existing_source_request(factory, owner, service, request,
-        claim_child=claim_child, ordinary_prior=ordinary_prior)
+        claim_child=claim_child, ordinary_prior=ordinary_prior, created=created)
 
 
-async def admit_existing_source_request(factory, owner, service, request, *, claim_child=True, ordinary_prior=False):
-    """Admit another distinct original Task through the unchanged real owners."""
+async def admit_existing_source_request(factory, owner, service, request, *, claim_child=True, ordinary_prior=False, created=None):
+    """Admit another distinct original Task through the unchanged real owners.
+
+    ``created`` is an already accepted Todo publication (for example a
+    reviewed planner proposal); otherwise the literal request is accepted.
+    """
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.contracts import GeneralTaskEnvelope
     from src.work_board.general_task_native import (
@@ -232,8 +237,9 @@ async def admit_existing_source_request(factory, owner, service, request, *, cla
     from src.workflows.job_runtime import _digest
     dispatcher = WorkBoardDispatcher(session_provider=factory.accounting_sessions, general_tasks=service)
     jobs = dispatcher.jobs
-    async with factory.accounting_sessions() as db:
-        created = await service.create(db, owner, request.model_copy(update={'accept': True}))
+    if created is None:
+        async with factory.accounting_sessions() as db:
+            created = await service.create(db, owner, request.model_copy(update={'accept': True}))
     async with factory.accounting_sessions() as db:
         ready = await service.repository.promote_task_ready(db, created.task.task_id,
             expected_revision=created.task.task_revision,
@@ -636,7 +642,7 @@ async def test_actual_source_unknown_model_cost_retains_original_capacity(accoun
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
         node_readback_drift=None, node_build=False, stop_at=None, publication_profile=False,
         unknown_model_cost=False, task_limits=None, work_limits=None, actual_model_cost_microusd=0,
-        goal_capacity=2):
+        goal_capacity=2, create=None):
     import httpx
     from src.auth.service import authenticate_session
     from src.api.workflows import RepoRepairEgressConsentRequest
@@ -644,7 +650,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         repository_source_preview, grant_repository_iteration_consent)
     factory, owner, service, jobs, binding, creation_request = await actual_native_source(
         accounting_db, monkeypatch, goal_capacity=goal_capacity, claim_child=False, language=language, node_build=node_build,
-        publication_profile=publication_profile, task_limits=task_limits, work_limits=work_limits)
+        publication_profile=publication_profile, task_limits=task_limits, work_limits=work_limits, create=create)
     operator = await authenticate_session(owner.session_id, touch=False)
     prepared = await prepare_repository_native_source(service, jobs, binding,
         child_owner='actual-consent-callback-worker', principal=operator.principal)

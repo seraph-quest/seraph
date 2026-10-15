@@ -230,6 +230,27 @@ def reset_bounded_snapshot_cache():
 
 
 @pytest.fixture(autouse=True)
+def reset_process_singletons(monkeypatch):
+    """Give each test the fresh per-process state a real app boot has.
+
+    The observer ``context_manager`` singleton carries operator modes (tool,
+    MCP, approval, interruption) and a wall-clock-derived user state; a prior
+    test's refresh or mode change otherwise leaks into later tests (e.g. an
+    evening refresh makes delivery "quiet", a safe tool mode hides workflow
+    tools). Module-level asyncio locks bind to the first loop that contends
+    them; pytest-asyncio gives each test a new loop, the app runs one.
+    """
+    import asyncio
+    from src.model_fabric import effective_policy
+    from src.observer.manager import ContextManager, context_manager
+    fresh = ContextManager()
+    # Reset in place: many modules hold a reference to this exact object.
+    context_manager.__dict__.update(fresh.__dict__)
+    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", asyncio.Lock())
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_memory_flush_cache():
     _reset_memory_flush_state()
     yield

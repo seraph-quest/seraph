@@ -154,6 +154,8 @@ beforeEach(() => {
   vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([]);
 });
 
+const LOAD_TIMEOUT = 5000;
+
 describe("ProcedureV2Review", () => {
   it("requires an explicit preview and never renders a private source body", async () => {
     vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
@@ -1093,11 +1095,13 @@ describe("ProcedureV2Review", () => {
 
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
     fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: activeRoutine.id } });
-    await screen.findByRole("button", { name: "Pause future invocations" });
+    // Selecting loads and renders the full routine review (~0.5s idle, more on
+    // shared CI runners); the default 1s findBy budget made this flaky.
+    await screen.findByRole("button", { name: "Pause future invocations" }, { timeout: LOAD_TIMEOUT });
     expect(screen.getByRole("button", { name: "Invoke for this goal" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Pause future invocations" }));
-    await screen.findByText(/pause outcome could not be verified/i);
+    await screen.findByText(/pause outcome could not be verified/i, {}, { timeout: LOAD_TIMEOUT });
     expect(lifecycle).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Pause future invocations" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Invoke for this goal" })).toBeDisabled();
@@ -1105,7 +1109,7 @@ describe("ProcedureV2Review", () => {
     getRoutine.mockResolvedValueOnce(pausedReadback);
     fireEvent.click(screen.getByRole("button", { name: "Refresh authority" }));
     await waitFor(() => expect(getRoutine).toHaveBeenCalledTimes(2));
-    expect(await screen.findByRole("button", { name: "Resume procedure" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Resume procedure" }, { timeout: LOAD_TIMEOUT })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText(/last lifecycle request may have reached/i)).not.toBeInTheDocument());
     expect(lifecycle).toHaveBeenCalledTimes(1);
   });

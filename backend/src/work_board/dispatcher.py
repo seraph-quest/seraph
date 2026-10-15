@@ -2896,6 +2896,15 @@ class WorkBoardDispatcher:
             await self._recover_linked_pipelines()
         except Exception:
             logger.warning("bounded linked pipeline recovery unavailable")
+        source = getattr(self.general_tasks, "repository_source_service", None)
+        if source is not None and getattr(source, "jobs", None) is self.jobs:
+            # Expired repository originals release their workspace lane on the
+            # managed tick, including after restart, without an operator session.
+            try:
+                from src.workflows.repo_repair_stop import close_expired_repository_roots
+                await close_expired_repository_roots(source, self.jobs)
+            except Exception:
+                logger.warning("expired repository original closure unavailable")
         async with self.session_provider() as db:
             candidates = await self.repository.list_dispatch_candidates(
                 db,

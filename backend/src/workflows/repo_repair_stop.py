@@ -195,6 +195,11 @@ def _static(row, context):
     return source._source_digest({key: value for key, value in values.items() if key not in mutable})
 
 
+def _original_cutoff(run, group):
+    """The original's own cutoff: its Root deadline, never later than its group."""
+    return min(group.original_deadline_at, _as_utc(run.deadline_at)) if run.deadline_at else group.original_deadline_at
+
+
 async def _context(service, jobs, *, job_id, owner, limit_reason=None, completion_witness=None,
         _knownpost_stage=None):
     """Cleanup-only metadata first, then current original physical source."""
@@ -234,13 +239,19 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
         repo_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == original["repository_task_id"]))
         repo_attempt = await db.get(WorkBoardAttempt, original["repository_attempt_id"])
         repo_artifact = await db.get(WorkBoardInputArtifact, repo_task.input_artifact_id) if repo_task else None
+        # Automatic cleanup of an expired original needs no live operator
+        # session: it grants nothing and only closes the original's own hold.
+        # Every identity binding (same principal and session row) still holds.
+        expiry_owner = limit_reason in AUTOMATIC_REASONS and _utc_now() >= _original_cutoff(run, group)
+        session_live = (root is not None and not root.revoked_at and not root.replaced_by_id
+            and not root.is_bearer_tombstone and _as_utc(root.idle_expires_at) > _utc_now()
+            and _as_utc(root.absolute_expires_at) > _utc_now())
         if (child is None or child_binding(child) != binding
                 or json.loads(child.arguments_json).get("tool_id") != "repository_work"
                 or child.attempt_count != 1 or child.fencing_token <= 0
                 or attempt.cancel_requested_at is not None or attempt.ended_at is not None
-                or root is None or root.principal_id != owner.principal_id or root.revoked_at
-                or root.replaced_by_id or root.is_bearer_tombstone
-                or _as_utc(root.idle_expires_at) <= _utc_now() or _as_utc(root.absolute_expires_at) <= _utc_now()
+                or root is None or root.principal_id != owner.principal_id
+                or not (session_live or expiry_owner)
                 or goal is None or goal.revision != binding.goal_revision
                 or repo_task is None or repo_attempt is None or repo_artifact is None
                 or repo_attempt.task_id != repo_task.task_id or repo_attempt.workflow_run_id != job_id
@@ -260,9 +271,8 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
                 "repository_attempt_root": repo_attempt is not None and repo_attempt.workflow_run_id == job_id,
                 "input": run.input_digest == original["repository_input_artifact_digest"],
                 "goal": goal is not None and goal.revision == binding.goal_revision,
-                "session": root is not None and root.principal_id == owner.principal_id and not root.revoked_at
-                    and not root.replaced_by_id and not root.is_bearer_tombstone
-                    and _as_utc(root.idle_expires_at) > _utc_now() and _as_utc(root.absolute_expires_at) > _utc_now()}
+                "session": root is not None and root.principal_id == owner.principal_id
+                    and (session_live or expiry_owner)}
             raise DurableJobLeaseError("original repository stop metadata changed:" + ",".join(key for key, okay in facts.items() if not okay))
         await _assert_canonical_goal_fence(db, goal_id=binding.goal_id, goal_revision=binding.goal_revision,
             owner_kind="user", owner_principal_id=owner.principal_id, session_id=owner.session_id)
@@ -311,7 +321,7 @@ async def _context(service, jobs, *, job_id, owner, limit_reason=None, completio
                         or callback.get("child_static_digest") != source._source_digest({k: v for k, v in child.model_dump(mode="json").items()
                             if k not in {"revision", "status", "failure_reason", "updated_at", "heartbeat_at"}})):
                     raise DurableJobLeaseError("original callback stop scope changed before private read")
-        expired_cleanup = limit_reason in AUTOMATIC_REASONS and _utc_now() >= group.original_deadline_at
+        expired_cleanup = limit_reason in AUTOMATIC_REASONS and _utc_now() >= _original_cutoff(run, group)
         context["expired_cleanup"] = expired_cleanup
         if not expired_cleanup:
             await _validate_repository_stop_input_sql(db, context)
@@ -407,7 +417,7 @@ async def _validate_repository_stop_context_rows_sql(db, service, jobs, *, conte
         actual = await db.get(model, key, populate_existing=True)
         if actual is None or _canonical(actual.model_dump(mode="json")) != expected:
             raise DurableJobLeaseError("original repository stop staging rows changed")
-        if isinstance(actual, OperatorSession) and (actual.revoked_at or actual.replaced_by_id
+        if isinstance(actual, OperatorSession) and not expired_cleanup and (actual.revoked_at or actual.replaced_by_id
                 or actual.is_bearer_tombstone or _as_utc(actual.idle_expires_at) <= _utc_now()
                 or _as_utc(actual.absolute_expires_at) <= _utc_now()):
             raise DurableJobLeaseError("original repository stop session expired")
@@ -916,6 +926,30 @@ async def _complete_repository_stop_held(service, jobs, *, context, stop, origin
         _ISSUED.pop(witness, None)
 
 
+async def _expired_automatic_reason_held(service, jobs, *, job_id, owner):
+    """The original's own automatic cause once its cutoff has passed.
+
+    The caller holds the configuration mutation lock (directly or through the
+    recovery fence), as repository_automatic_limit_reason requires.
+    """
+    async with jobs._session() as db:
+        run = await jobs._fetch(db, job_id)
+        if run.deadline_at is None or _utc_now() < _as_utc(run.deadline_at):
+            return None
+        existing = _source()._repository_record(run, STOP_ID)
+    if existing is not None:
+        # A committed Stop intent keeps its own recorded cause.
+        reason = existing.get("stop_reason")
+        return reason if reason in AUTOMATIC_REASONS else None
+    return await repository_automatic_limit_reason(service, jobs, job_id=job_id, owner=owner)
+
+
+async def _expired_automatic_reason(service, jobs, *, job_id, owner):
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    async with configuration_mutation_lock:
+        return await _expired_automatic_reason_held(service, jobs, job_id=job_id, owner=owner)
+
+
 async def stop_repository_root(service, jobs, *, job_id, owner, general_task_service, reason="operator_cancelled"):
     from src.work_board.repository import BoardAttemptProjection
     source = _source()
@@ -923,6 +957,15 @@ async def stop_repository_root(service, jobs, *, job_id, owner, general_task_ser
         raise DurableJobLeaseError("closed original repository stop reason required")
     from src.workflows.repo_repair_source_recovery import _repository_recovery_fence
     async with _repository_recovery_fence(service, jobs, job_id=job_id, owner=owner) as fence:
+        if reason == "operator_cancelled":
+            # After its original cutoff an operator Stop closes through the
+            # same automatic limit cleanup: the expired group can no longer
+            # authorize an ordinary Stop.
+            try:
+                reason = await _expired_automatic_reason_held(service, jobs,
+                    job_id=job_id, owner=owner) or reason
+            except DurableJobLeaseError:
+                pass  # Changed original limits keep the ordinary fail-closed Stop.
         source._assert_task_publication_configuration(service)
         context = await _context(service, jobs, job_id=job_id, owner=owner,
             limit_reason=reason if reason in AUTOMATIC_REASONS else None)
@@ -996,3 +1039,47 @@ async def repository_stop_for_parent(service, jobs, *, parent_id, general_task_s
             session_id=binding.original_root_id)
     return await stop_repository_root(service, jobs, job_id=job_id, owner=actual_owner,
         general_task_service=general_task_service)
+
+
+async def close_expired_repository_roots(service, jobs):
+    """Backend-owned closure of original Roots whose own cutoff has passed.
+
+    Each candidate is closed by the existing automatic-limit Stop path using
+    the Root's persisted owner, so no live operator session is required, no
+    authority is granted and no private Source is read. Anything that cannot
+    prove its closure (pending producer, Unknown liability) stays held and
+    operator-visible; one failure never blocks the remaining candidates.
+    """
+    import logging
+    from src.workflows.repo_repair import RepoRepairService
+    if type(service) is not RepoRepairService or service.jobs is not jobs:
+        return []
+    now = _utc_now()
+    async with jobs._session() as db:
+        rows = list((await db.scalars(select(WorkflowRunState).where(
+            WorkflowRunState.job_kind == "engineering.repo-repair.v1",
+            WorkflowRunState.idempotency_scope == "original-repository-child",
+            WorkflowRunState.status == "running"))).all())
+        candidates = []
+        for row in rows:
+            try:
+                held = jobs._repo_repair_reservation_state(row).get("status") == "held"
+            except Exception:
+                held = False
+            if held and row.deadline_at is not None and _as_utc(row.deadline_at) <= now:
+                candidates.append((row.run_identity, WorkBoardOwner(
+                    principal_id=row.owner_principal_id, session_id=row.operator_session_id)))
+    closed = []
+    for job_id, owner in candidates:
+        try:
+            reason = await _expired_automatic_reason(service, jobs, job_id=job_id, owner=owner)
+            if reason is None:
+                continue
+            stopped = await stop_repository_root(service, jobs, job_id=job_id, owner=owner,
+                general_task_service=None, reason=reason)
+            if not stopped["pending"]:
+                closed.append(job_id)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("expired original repository %s remains held: %s",
+                job_id, type(exc).__name__)
+    return closed

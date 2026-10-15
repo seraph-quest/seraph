@@ -984,6 +984,25 @@ async def repository_source_root(db, *, job_id, owner):
     return True
 
 
+def _repository_lane_busy():
+    from src.work_board.repository import BoardError
+    return BoardError("repository_execution_busy",
+        "Another repository task holds the repository lane; stop it or wait for its original limit",
+        status_code=409)
+
+
+async def _assert_repository_lane_available(*, db_factory):
+    from sqlalchemy import func, select
+    from src.db.models import WorkBoardTask
+    from src.work_board.contracts import WorkBoardStatus
+    async with db_factory() as db:
+        active = await db.scalar(select(func.count()).select_from(WorkBoardTask).where(
+            WorkBoardTask.capability_id == "engineering.repo-repair.v1",
+            WorkBoardTask.status == WorkBoardStatus.running))
+    if active:
+        raise _repository_lane_busy()
+
+
 async def prepare_repository_native_source(general_task_service, jobs, binding, *, child_owner, principal):
     """Prepare the one actual original root, before invoking any adapter."""
     from math import ceil
@@ -1018,6 +1037,12 @@ async def prepare_repository_native_source(general_task_service, jobs, binding, 
             root_id = mapped.run_identity
             return await _prepared_repository_projection(db, mapped, owner=WorkBoardOwner(
                 principal_id=binding.owner_principal_id, session_id=binding.original_root_id))
+    # The repository lane admits one original at a time. Close any original
+    # whose own cutoff has passed first, then deny before claiming this child
+    # while another original still holds the lane.
+    from src.workflows.repo_repair_stop import close_expired_repository_roots
+    await close_expired_repository_roots(source, jobs)
+    await _assert_repository_lane_available(db_factory=jobs._session)
     pending = await jobs.get_job(binding.invocation_id)
     if (pending is None or pending["status"] not in {"accepted", "queued"}
             or pending["attempt_count"] or pending["lease"]["fencing_token"]
@@ -1066,6 +1091,8 @@ async def prepare_repository_native_source(general_task_service, jobs, binding, 
         claimed = await repository.claim_ready_task(db, created.task.task_id,
             expected_revision=ready.task.task_revision, lease_owner=child_owner, lease_seconds=max(1, ceil(remaining)))
         await db.commit()
+    if claimed is None:
+        raise _repository_lane_busy()
     async with source.session_factory() as db:
         check, scope = await prepare_repository_original_admission(source, db,
             native_invocation_id=binding.invocation_id, repository_task_id=created.task.task_id,
@@ -1495,6 +1522,10 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
                 or (reason == "goal_limit_exhausted" and evidence_model.original_deadline_at != evidence_model.goal_cutoff_at)):
             raise DurableJobLeaseError("original repository recorded limit binding changed")
     terminal = _repository_record(run, "repository:terminal:v1")
+    # An automatic Stop of an expired original is backend-owned cleanup; its
+    # readback keeps every identity binding but needs no live session.
+    expired_automatic = bool(automatic and run.deadline_at is not None
+        and _utc_now() >= _as_utc(run.deadline_at))
     hold = DurableJobRepository._repo_repair_reservation_state(run)
     # The repository terminal CAS retains its admitted fence. The original
     # C1 child cancellation invalidates that separate child's fence.
@@ -1518,9 +1549,10 @@ async def _repository_discovery_metadata(db, run, *, owner, service=None, _known
     if (any(row is None for row in (parent, child, task, attempt, repo_task, repo_attempt, session, goal))
             or mapped is None or mapped.run_identity != run.run_identity or child_binding(child) != binding
             or json.loads(child.arguments_json).get("tool_id") != "repository_work"
-            or session.principal_id != owner.principal_id or session.revoked_at is not None
-            or session.replaced_by_id or session.is_bearer_tombstone
-            or _as_utc(session.idle_expires_at) <= _utc_now() or _as_utc(session.absolute_expires_at) <= _utc_now()
+            or session.principal_id != owner.principal_id
+            or not (expired_automatic or (session.revoked_at is None and not session.replaced_by_id
+                and not session.is_bearer_tombstone and _as_utc(session.idle_expires_at) > _utc_now()
+                and _as_utc(session.absolute_expires_at) > _utc_now()))
             or _source_digest(goal.model_dump(mode="json")) != inventory["original_limits"]["original_goal_row_digest"]
             or (task.owner_principal_id, task.owner_session_id) != (owner.principal_id, owner.session_id)
             or (repo_task.owner_principal_id, repo_task.owner_session_id) != (owner.principal_id, owner.session_id)

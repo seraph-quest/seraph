@@ -2344,9 +2344,15 @@ async def cancel_native_parent(jobs, parent_id, *, operator_owner, expected_task
         if attempt.cancel_requested_at:
             return await _cancel_result(jobs, db, parent_id, task.task_id, attempt.attempt_id)
         root = await db.get(OperatorSession, task.owner_session_id)
-        if (root is None or root.principal_id != task.owner_principal_id or root.revoked_at or root.replaced_by_id
-            or root.is_bearer_tombstone or _as_utc(root.idle_expires_at) <= _utc_now()
-            or _as_utc(root.absolute_expires_at) <= _utc_now() or attempt.ended_at
+        session_live = (root is not None and not root.revoked_at and not root.replaced_by_id
+            and not root.is_bearer_tombstone and _as_utc(root.idle_expires_at) > _utc_now()
+            and _as_utc(root.absolute_expires_at) > _utc_now())
+        # Only the source-validated automatic cleanup of an expired original
+        # may close without a live session; it grants nothing new.
+        expiry_cleanup = (repository_stop_witness is not None
+            and repository_stop_witness.context["expired_cleanup"] is True)
+        if (root is None or root.principal_id != task.owner_principal_id
+            or not (session_live or expiry_cleanup) or attempt.ended_at
             or previous.phase not in {"native_ready", "assembly", "native_wait", "approval_wait", "operator_paused", "unknown_recovery"}
             or task.status not in {WorkBoardStatus.running, WorkBoardStatus.blocked}):
             raise DurableJobLeaseError("original authenticated native cancellation scope unavailable")

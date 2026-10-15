@@ -320,13 +320,25 @@ async def test_actual_expired_cleanup_does_not_grant_from_changed_artifact(accou
                 payload["input"]["repository_source"]["original_input_digest"] = "0" * 64
             path.write_bytes(json.dumps(payload).encode())
         await db.commit()
+    if drift == "no_automatic_cause":
+        # An unchanged expired original: the default operator Stop closes it
+        # through its own deadline cleanup, never an ordinary grant.
+        stopped = await stop_repository_root(service.repository_source_service, jobs,
+            job_id=root_id, owner=owner, general_task_service=service, reason="operator_cancelled")
+        assert stopped["pending"] is False
+        from src.workflows.repo_repair_source import _repository_record
+        async with factory() as db:
+            root = await jobs._fetch(db, root_id)
+            assert root.status == "failed" and jobs._repo_repair_reservation_state(root)["status"] == "released"
+            assert _repository_record(root, "repository:terminal:v1")["closure"]["stop_reason"] == "deadline_exhausted"
+        return
     reads = []
     def private_read(*args, **kwargs):
         reads.append(args)
         raise AssertionError("Changed expired cleanup cannot reopen selected Source")
     monkeypatch.setattr(service.repository_source_service, "_read_private_artifact", private_read)
     actual_owner = WorkBoardOwner(principal_id="operator:wrong", session_id=owner.session_id) if drift == "wrong_actor" else owner
-    reason = "operator_cancelled" if drift == "no_automatic_cause" else "deadline_exhausted"
+    reason = "deadline_exhausted"
     with pytest.raises((DurableJobLeaseError, BoardError, InferenceAccountingError)):
         await stop_repository_root(service.repository_source_service, jobs,
             job_id=root_id, owner=actual_owner, general_task_service=service, reason=reason)

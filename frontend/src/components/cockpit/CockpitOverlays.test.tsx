@@ -123,7 +123,7 @@ describe("cockpit overlays", () => {
     });
   });
 
-  it("opens settings on Screenshot/VLM without eager-loading heavy sections", async () => {
+  it("opens settings on Models & OpenRouter without eager-loading heavy sections", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStoragePayload));
@@ -138,6 +138,8 @@ describe("cockpit overlays", () => {
     render(<SettingsPanel />);
 
     expect(await screen.findByText("Settings")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Models & OpenRouter" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Screenshot/VLM" })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/settings/artifact-storage"),
@@ -155,7 +157,7 @@ describe("cockpit overlays", () => {
     expect(requestedUrls.some((url) => url.includes("/api/workflows"))).toBe(false);
   });
 
-  it("reopens settings on Screenshot/VLM after a heavy section was active", async () => {
+  it("reopens settings on Models & OpenRouter after a heavy section was active", async () => {
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStoragePayload));

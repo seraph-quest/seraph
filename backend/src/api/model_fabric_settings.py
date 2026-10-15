@@ -97,6 +97,8 @@ router = APIRouter()
 _CANARY_VERSION = "seraph.manual-canary.v1"
 _MANUAL_CANARY_LOCK = threading.Lock()
 _MAX_CANARY_TIMEOUT_SECONDS = 180
+_DEFAULT_PROOF_TTL_SECONDS = 3600
+_MAX_PROOF_TTL_SECONDS = 86400
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PROBE_CAPABILITIES = {
     *(capability.value for capability in ModelCapability),
@@ -168,6 +170,9 @@ class OpenRouterRouteInput(BaseModel):
     timeout_seconds: float = Field(ge=1, le=120, allow_inf_nan=False)
     zero_data_retention: bool
     request_cost_bound_microusd: int = Field(ge=1, le=1_000_000_000)
+    # Optional for older clients; an unset window uses the documented default
+    # instead of being derived from the output cap.
+    context_window_tokens: int | None = Field(default=None, ge=1_024, le=2_097_152)
 
 
 class OpenRouterRouteSlotsInput(BaseModel):
@@ -297,7 +302,7 @@ class CapabilityCanaryRequest(BaseModel):
     profile_id: str
     capability: str
     timeout_seconds: float = Field(default=10.0, ge=1.0, le=_MAX_CANARY_TIMEOUT_SECONDS)
-    proof_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+    proof_ttl_seconds: int = Field(default=_DEFAULT_PROOF_TTL_SECONDS, ge=60, le=_MAX_PROOF_TTL_SECONDS)
     transformation_digest: str = DigestSentinel.NO_TRANSFORMATION
     redaction_applied: bool = False
 
@@ -556,6 +561,12 @@ async def _put_near_text(body, persisted):
         egress_revision=final_revision, egress_revoked=persisted.egress_revoked and not setup.enabled,
         egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
     validate_active_model_fabric_configuration(target)
+    planned_bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
+    if old_or is not None:
+        planned_bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
+        if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
+            planned_bounds.append(old_or.request_cost_bound_microusd)
+    await _require_review_covers_overrun(max(planned_bounds, default=None))
     previous_key = await vault_repository.get("near_text_api_key") if raw_key.strip() else None
     mutated = False
     root = Path(settings.workspace_dir).resolve()
@@ -652,6 +663,13 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
                 policies=body.workload_policies,
             )
             validate_active_model_fabric_configuration(configuration)
+            # The legacy v1 save reviews overruns up to its explicit bound too;
+            # refuse a too-low bound before the credential is touched.
+            await _require_review_covers_overrun(
+                (setup.request_cost_bound_microusd or setup.spend_ceiling_microusd)
+                if "request_cost_bound_microusd" in setup_input.model_fields_set else None,
+                review_required=False,
+            )
             raw_key = (
                 setup_input.api_key.get_secret_value()
                 if setup_input.api_key is not None
@@ -711,6 +729,32 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
     return await model_fabric_settings_payload()
 
 
+async def _require_review_covers_overrun(review: int | None, *, review_required: bool = True) -> None:
+    """Refuse, before any mutation, a save whose bound cannot review the overrun.
+
+    Saving reviews unreviewed overruns only up to the largest enabled request
+    bound; a lower bound would otherwise fail late with a generic accounting
+    error after the policy was already revoked for the save. A legacy v1 save
+    that does not set a bound (``review_required=False``) records no review
+    and leaves the latch in place, so it is not refused.
+    """
+    from src.agent.direct_chat import microusd_dollars
+    from src.workflows.job_runtime import durable_job_repository
+
+    snapshot = await durable_job_repository.inference_accounting_snapshot()
+    minimum = snapshot.get("overrun_max_cost_microusd")
+    if review is None and not review_required:
+        return
+    if type(minimum) is int and minimum > 0 and (review is None or review < minimum):
+        raise HTTPException(status_code=409, detail={
+            "code": "request_bound_below_overrun",
+            "minimum_request_bound_microusd": minimum,
+            "message": (f"The request cost bound must be at least ${microusd_dollars(minimum)} "
+                f"({minimum:,} µUSD) to review the unreviewed overrun. Raise it and save again, "
+                "then press Prove route (billed canaries)."),
+        })
+
+
 async def _put_openrouter_v2(body, setup_input, persisted):
     """Witnessed revoke→credential/accounting→activate, never cross-store atomic."""
     from src.workspace.accounting_witness import maintenance_accounting_lock, PolicyRevisionConflict, policy_continuity
@@ -757,6 +801,12 @@ async def _put_openrouter_v2(body, setup_input, persisted):
         near = replace(persisted.near_text, spend_ceiling_microusd=setup.spend_ceiling_microusd)
         target = replace(target, near_text=_carry_near_consent(near, persisted, final_revision))
     validate_active_model_fabric_configuration(target)
+    planned_review = max((route.request_cost_bound_microusd for route in (setup.routes or {}).values() if route is not None and route.enabled), default=None)
+    if setup.routes is None:
+        planned_review = setup.request_cost_bound_microusd
+    if target.near_text is not None and target.near_text.enabled:
+        planned_review = max(planned_review or 0, target.near_text.request_cost_bound_microusd)
+    await _require_review_covers_overrun(planned_review)
     previous_process_value = str(settings.openrouter_api_key or "")
     previous_vault_value = await _snapshot_setup_credential() if raw_key.strip() else None
     credential_mutated = False
@@ -1176,6 +1226,7 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
         "defaults": {"egress_class": EgressClass.LOCAL_ONLY.value, "fallback_allowed": False},
         "canary_endpoint": "/api/settings/model-fabric/canary",
+        "canary_proof_ttl": {"default_seconds": _DEFAULT_PROOF_TTL_SECONDS, "max_seconds": _MAX_PROOF_TTL_SECONDS},
         "openrouter_setup": openrouter_setup_status,
         "near_text": near_status,
         "inference_accounting": accounting,
@@ -1283,12 +1334,16 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
                     candidate = candidate_from_profile(profile)
                     proofs = []
                     try:
-                        for capability in {*route.capabilities, "health", "latency_ms"}:
+                        for capability in sorted({*route.capabilities, "health", "latency_ms"}):
                             proof = await model_fabric_repository.latest_capability_proof(
                                 profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
                                 profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
                                 endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
                             if proof is None or not proof_is_fresh(proof):
+                                # Name the first capability to re-prove so the
+                                # operator sees expiry rather than a generic gap.
+                                expired = proof is not None and proof.outcome == "passed" and proof.expires_at <= time.time()
+                                state["proof_reason"] = f"{'proof_expired' if expired else 'proof_missing'}:{capability}"
                                 break
                             proofs.append(proof)
                         else:

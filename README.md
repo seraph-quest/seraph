@@ -73,7 +73,7 @@ cp env.dev.example .env.dev
 
 Open the **[cockpit](http://127.0.0.1:3001)** or
 [API documentation](http://127.0.0.1:8004/docs). The core starts without a provider
-key. To enable model work, open **Settings → OpenRouter setup** and configure
+key. To enable model work, open **Settings → Models & OpenRouter** and configure
 your key, models, allowed upstreams, explicit cloud consent, and a finite budget.
 Text, vision, and embedding have separate controls.
 

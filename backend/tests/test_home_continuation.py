@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from tests.test_inference_accounting import accounting_db
 from tests.test_general_task_planner import forbid_external_inference
+from tests.test_general_task_methods import method_admission_lifecycle
 from config.settings import settings
 from src.auth.service import create_session, authenticate_home_token_readonly
 from src.auth.ownership import enroll
@@ -354,7 +355,7 @@ async def test_genuine_selected_task_only_recovery_never_selects_goal_and_rollba
         home_projection.stop()
 
 
-async def test_genuine_admitted_method_task_only_recovery_has_no_navigation(accounting_db,monkeypatch,tmp_path,forbid_external_inference):
+async def test_genuine_admitted_method_task_only_recovery_has_no_navigation(accounting_db,monkeypatch,tmp_path,forbid_external_inference,method_admission_lifecycle):
     from tests import test_home_method_vertical as method_fixture
     from src.auth import service as auth
     from src.auth.ownership import RecoveryRequest,RecoveryConfirmRequest,preview,confirm,rollback
@@ -431,5 +432,5 @@ async def test_genuine_admitted_method_task_only_recovery_has_no_navigation(acco
     monkeypatch.setattr(method_fixture,'home_setup',capture_setup)
     monkeypatch.setattr(WorkBoardDispatcher,'run_pass',verify_before_pass)
     await method_fixture.test_genuine_native_method_history_read_without_body_or_file_access(
-        accounting_db,monkeypatch,tmp_path,forbid_external_inference)
+        accounting_db,monkeypatch,tmp_path,forbid_external_inference,method_admission_lifecycle)
     assert observed['checked'] and observed['diagnostic_checked']

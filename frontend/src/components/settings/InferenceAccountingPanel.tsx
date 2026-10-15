@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import { normalizeInferenceAccounting, type InferenceAccountingStatus } from "../../lib/modelFabric";
+import { microusdToDollars, normalizeInferenceAccounting, type InferenceAccountingStatus } from "../../lib/modelFabric";
 
 interface Props {
   accounting: InferenceAccountingStatus | null | undefined;
@@ -21,6 +21,7 @@ export function InferenceAccountingPanel({ accounting, stale, onRefresh }: Props
   const view = latest && latest.source === accounting ? latest.value : accounting;
   const operation = view?.operations.find((row) => row.operation_id === selected);
   const control = operation?.controls?.find((entry) => entry.action === "settle");
+  const overrunMinimum = view?.overrun_max_cost_microusd ?? 0;
 
   async function acknowledgePeriod() {
     const review = view?.period_review;
@@ -77,6 +78,14 @@ export function InferenceAccountingPanel({ accounting, stale, onRefresh }: Props
     <div className="text-retro-text/50">UTC month {view?.period_id ?? "unavailable"} · settings revision {view?.settings_revision ?? "unavailable"}{stale ? " · retained, stale" : ""}</div>
     <div className="mt-1">Committed {view?.committed_microusd ?? "unknown"} · reserved {view?.reserved_microusd ?? "unknown"} · unknown {view?.unknown_microusd ?? "unknown"} · remaining {view?.remaining_microusd ?? "unavailable"} micro USD</div>
     {view?.status !== "ready" && <div role="status" className="text-yellow-400">Paid inference blocked: {view?.reason_code ?? "accounting continuity unavailable"}. {view?.accounting_continuity_verified ? "Review the exact owning recovery control; settled and unresolved cost stays retained." : "Restore the retained ledger and lifecycle witness; creating a fresh budget cannot recover it."}</div>}
+    {overrunMinimum > 0 && <div className="mt-2 border border-yellow-400/30 p-2" data-testid="unreviewed-overruns">
+      <div className="text-yellow-400">Unreviewed provider overrun: every OpenRouter call is blocked until it is reviewed.</div>
+      {view?.unreviewed_overruns?.map((row) => <div key={row.operation_id} className="mt-1">
+        <div>{row.runtime_path} · month {row.period_id} · charged ${microusdToDollars(row.actual_cost_microusd)} ({row.actual_cost_microusd.toLocaleString("en-US")} µUSD) against a ${microusdToDollars(row.bound_microusd)} bound</div>
+        <div className="break-all text-retro-text/40">Operation {row.operation_id} · job {row.job_id}</div>
+      </div>)}
+      <p>To review: in OpenRouter setup raise the request cost bound to at least <strong>${microusdToDollars(overrunMinimum)}</strong> ({overrunMinimum.toLocaleString("en-US")} µUSD) and save. The charge stays recorded. The new bound changes the route, so press Prove route again afterwards (billed canaries).</p>
+    </div>}
     {view?.period_review && <div className="mt-2 border border-yellow-400/30 p-2">
       <div>Review observed UTC month {view.period_review.period_id} · accounting revision {view.period_review.expected_revision}</div>
       <p>Every month change needs an exact review. Clock correction keeps the high-water month {view.period_high_water} and conservatively counts future-attributed charges. This cannot resume work or re-grant provider access.</p>

@@ -11,6 +11,8 @@ import { AuditLogPanel } from "./settings/AuditLogPanel";
 import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
+import { BackgroundInferencePanel } from "./settings/BackgroundInferencePanel";
+import { TelegramPairingPanel } from "./settings/TelegramPairingPanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
 import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfiles";
 import { SelectedContextPairing } from "./settings/SelectedContextPairing";
@@ -143,12 +145,13 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "telegram" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
-  { id: "artifacts", label: "Screenshot/VLM" },
+  { id: "artifacts", label: "Models & OpenRouter" },
   { id: "general", label: "General" },
   { id: "native", label: "Native" },
+  { id: "telegram", label: "Telegram" },
   { id: "repo-sandbox", label: "Repo Sandbox" },
   { id: "policies", label: "Policies" },
   { id: "audit", label: "Audit" },
@@ -741,9 +744,16 @@ export function SettingsPanel() {
           {activeSection === "native" && <DaemonStatus />}
           {activeSection === "native" && <SelectedContextPairing ownerPrincipalId={operatorAuth?.session.principal_id} ownerSessionId={operatorAuth?.session.session_id}/>}
 
+          {activeSection === "telegram" && <TelegramPairingPanel />}
+
           {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
 
-          {activeSection === "artifacts" && <ArtifactStoragePanel />}
+          {activeSection === "artifacts" && (
+            <>
+              <ArtifactStoragePanel />
+              <BackgroundInferencePanel />
+            </>
+          )}
 
           {activeSection === "policies" && <ToolPolicyModeToggle />}
 

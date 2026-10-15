@@ -3,6 +3,7 @@ import { InferenceAccountingPanel } from "./InferenceAccountingPanel";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import {
+  DEFAULT_PROOF_TTL_SECONDS,
   loadRetainedModelFabricSettings,
   isGreenModelFabricCanary,
   isSuccessfulModelFabricOutcome,
@@ -18,6 +19,12 @@ import {
 import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
 import { NearTextPanel } from "./NearTextPanel";
 import { CordisRuntimePanel } from "./CordisRuntimePanel";
+
+const PROOF_TTL_CHOICES = [
+  { seconds: 3600, label: "1 hour" },
+  { seconds: 8 * 3600, label: "8 hours" },
+  { seconds: 24 * 3600, label: "24 hours" },
+] as const;
 
 interface VlmRuntimeStatus {
   mode: string;
@@ -197,6 +204,7 @@ const MODEL_FABRIC_EMPIRICAL_CANARY_CAPABILITIES = new Set([
   "streaming",
   "structured_output",
   "tool_use",
+  "embedding",
 ]);
 
 interface ReportActionResult {
@@ -621,6 +629,9 @@ export function ArtifactStoragePanel() {
   const [canaryRunning, setCanaryRunning] = useState(false);
   const [canaryResult, setCanaryResult] = useState<ModelFabricCanaryResult | null>(null);
   const [canaryError, setCanaryError] = useState<string | null>(null);
+  const [proofTtlSeconds, setProofTtlSeconds] = useState<number>(DEFAULT_PROOF_TTL_SECONDS);
+  const [proveProgress, setProveProgress] = useState<{ done: number; total: number; current: string } | null>(null);
+  const [proveResults, setProveResults] = useState<ModelFabricCanaryResult[]>([]);
 
   async function fetchSettings(isCancelled: () => boolean = () => !mountedRef.current) {
     const generation = fetchGenerationRef.current + 1;
@@ -697,6 +708,7 @@ export function ArtifactStoragePanel() {
       setModelFabric(nextSettings);
       setModelFabricRuntime(nextRuntime);
       setModelFabricStale(false);
+      setProofTtlSeconds((current) => Math.min(current, nextSettings.canary_proof_ttl.max_seconds));
       setModelFabricError(nextRuntime ? null : "Runtime route receipts are unavailable; configuration remains usable.");
       setCanaryProfile((current) => current && current !== NEAR_TEXT_PROFILE ? current : nextSettings.profiles.find((profile) => profile.enabled && profile.id !== NEAR_TEXT_PROFILE)?.id || "");
     } catch {
@@ -706,21 +718,26 @@ export function ArtifactStoragePanel() {
     }
   }
 
+  async function postCanary(settingsStatus: ModelFabricSettingsStatus, capability: string): Promise<ModelFabricCanaryResult> {
+    const selectedProfile = settingsStatus.profiles.find((profile) => profile.id === canaryProfile);
+    const payload = await postModelFabricCanary(settingsStatus.canary_endpoint, {
+      profile_id: canaryProfile,
+      capability,
+      timeout_seconds: selectedProfile?.canary_timeout_seconds ?? 10,
+      proof_ttl_seconds: Math.min(proofTtlSeconds, settingsStatus.canary_proof_ttl.max_seconds),
+    });
+    const result = normalizeModelFabricCanary(payload);
+    if (!result) throw new Error("Canary response is invalid.");
+    return result;
+  }
+
   async function runModelFabricCanary() {
     if (!modelFabric || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || canaryRunning) return;
     setCanaryRunning(true);
     setCanaryResult(null);
     setCanaryError(null);
     try {
-      const selectedProfile = modelFabric.profiles.find((profile) => profile.id === canaryProfile);
-      const payload = await postModelFabricCanary(modelFabric.canary_endpoint, {
-        profile_id: canaryProfile,
-        capability: selectedCanaryCapability,
-        timeout_seconds: selectedProfile?.canary_timeout_seconds ?? 10,
-        proof_ttl_seconds: 3600,
-      });
-      const result = normalizeModelFabricCanary(payload);
-      if (!result) throw new Error("Canary response is invalid.");
+      const result = await postCanary(modelFabric, selectedCanaryCapability);
       if (!mountedRef.current) return;
       setCanaryResult(result);
       await fetchModelFabric();
@@ -730,6 +747,40 @@ export function ArtifactStoragePanel() {
       }
     } finally {
       if (mountedRef.current) setCanaryRunning(false);
+    }
+  }
+
+  // Runs every capability the selected route needs, one billed canary at a
+  // time on the shared single-flight lane, and stops at the first failure so
+  // a broken route does not keep spending.
+  async function proveRoute() {
+    if (!modelFabric || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || canaryRunning) return;
+    const capabilities = [...availableCanaryCapabilities];
+    setCanaryRunning(true);
+    setCanaryResult(null);
+    setCanaryError(null);
+    setProveResults([]);
+    try {
+      for (const [index, capability] of capabilities.entries()) {
+        setProveProgress({ done: index, total: capabilities.length, current: capability });
+        const result = await postCanary(modelFabric, capability);
+        if (!mountedRef.current) return;
+        setProveResults((current) => [...current, result]);
+        if (!isGreenModelFabricCanary(result)) {
+          setCanaryError(`Prove route stopped at ${capability.replace(/_/g, " ")}: ${result.error_code ?? result.outcome}. Remaining canaries were not run.`);
+          break;
+        }
+      }
+      await fetchModelFabric();
+    } catch (error) {
+      if (mountedRef.current) {
+        setCanaryError(error instanceof Error ? error.message : "Prove route failed.");
+      }
+    } finally {
+      if (mountedRef.current) {
+        setCanaryRunning(false);
+        setProveProgress(null);
+      }
     }
   }
 
@@ -1320,7 +1371,8 @@ export function ArtifactStoragePanel() {
               <InferenceAccountingPanel accounting={modelFabric?.inference_accounting} stale={modelFabricStale} onRefresh={fetchModelFabric} />
               <div className="mt-2 border border-retro-text/10 px-2 py-2">
                 <div className="text-[9px] text-retro-text/50 mb-1">
-                  Manual exact-route canary. This runs inference only when you press Run; status refreshes never probe.
+                  Manual exact-route canaries. Each canary is one real, billed OpenRouter call and runs only when you press a button; status refreshes never probe.
+                  Prove route runs every capability the selected route needs ({availableCanaryCapabilities.length} calls).
                 </div>
                 <div className="flex flex-wrap items-center gap-1">
                   <label className="text-[9px] text-retro-text/40" htmlFor="model-fabric-canary-profile">Profile</label>
@@ -1352,15 +1404,52 @@ export function ArtifactStoragePanel() {
                       <option key={capability} value={capability}>{capability.replace(/_/g, " ")}</option>
                     ))}
                   </select>
+                  <label className="text-[9px] text-retro-text/40" htmlFor="model-fabric-proof-ttl">Proof lifetime</label>
+                  <select
+                    id="model-fabric-proof-ttl"
+                    aria-label="Proof lifetime"
+                    value={proofTtlSeconds}
+                    disabled={canaryRunning}
+                    onChange={(event) => setProofTtlSeconds(Number(event.target.value))}
+                    className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-[9px] text-retro-text disabled:opacity-40"
+                  >
+                    {PROOF_TTL_CHOICES.filter((choice) => choice.seconds <= (modelFabric?.canary_proof_ttl.max_seconds ?? DEFAULT_PROOF_TTL_SECONDS)).map((choice) => (
+                      <option key={choice.seconds} value={choice.seconds}>{choice.label}</option>
+                    ))}
+                  </select>
                   <button
                     type="button"
                     disabled={canaryRunning || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || modelFabricStale}
                     onClick={() => void runModelFabricCanary()}
                     className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
                   >
-                    {canaryRunning ? "Running" : "Run canary"}
+                    {canaryRunning && !proveProgress ? "Running" : "Run canary"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={canaryRunning || !canaryProfile || canaryProfile === NEAR_TEXT_PROFILE || modelFabricStale}
+                    onClick={() => void proveRoute()}
+                    className="border border-retro-text/20 px-2 py-1 text-[9px] uppercase tracking-wider text-retro-text/70 hover:text-retro-text disabled:opacity-40"
+                  >
+                    {proveProgress ? `Proving ${proveProgress.done + 1}/${proveProgress.total}` : "Prove route"}
                   </button>
                 </div>
+                {proveProgress && (
+                  <div role="status" className="mt-1 text-[9px] text-retro-text/60">
+                    Running billed canary {proveProgress.done + 1} of {proveProgress.total}: {proveProgress.current.replace(/_/g, " ")}
+                  </div>
+                )}
+                {proveResults.length > 0 && (
+                  <div className="mt-1 text-[9px]" data-testid="prove-route-results">
+                    {proveResults.map((result) => (
+                      <div key={result.capability} className={isGreenModelFabricCanary(result) ? "text-green-400" : "text-yellow-400"}>
+                        {result.capability.replace(/_/g, " ")} · {result.outcome}
+                        {result.proof?.expires_at ? ` · expires ${result.proof.expires_at}` : ""}
+                        {result.error_code ? ` · ${result.error_code}` : ""}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {canaryError && <div className="mt-1 text-[9px] text-red-400">{canaryError}</div>}
                 {canaryResult && (
                   <div className={`mt-1 text-[9px] ${isGreenModelFabricCanary(canaryResult) ? "text-green-400" : "text-yellow-400"}`}>

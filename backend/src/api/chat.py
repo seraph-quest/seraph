@@ -25,7 +25,10 @@ from src.approval.runtime import (
 from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
 from src.agent.direct_chat import (
-    OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
+    openrouter_route_block_reason,
+    openrouter_route_block_recovery,
+    route_block_overrun_minimum,
+    route_error_from,
     run_direct_local_chat,
     should_use_direct_local_chat,
 )
@@ -65,6 +68,7 @@ from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
     _register_request,
+    request_provider_contacted,
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
@@ -73,6 +77,24 @@ from src.model_fabric import NoCompliantModelRouteError
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _route_block_detail(error: BaseException, *, provider_contacted: bool = False) -> dict[str, object]:
+    reason = openrouter_route_block_reason(error)
+    minimum = await route_block_overrun_minimum(error)
+    message, recovery_action = openrouter_route_block_recovery(
+        reason, provider_contacted=provider_contacted, minimum_bound_microusd=minimum,
+    )
+    return {
+        "message": message,
+        "route_reason": reason,
+        "recovery_action": recovery_action,
+        **({"minimum_request_bound_microusd": minimum} if minimum is not None else {}),
+        # A denial after earlier calls of the same agent turn is not a
+        # preflight refusal: those calls reached the provider.
+        "remote_outcome": "contacted_before_block" if provider_contacted else "not_contacted",
+        "retry_required": False,
+    }
 
 
 def _approval_transport_metadata(exc: ApprovalRequired, approval: object | None = None) -> dict[str, object]:
@@ -738,9 +760,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 status_code=503,
                 detail={
                     "code": NoCompliantModelRouteError.code,
-                    "message": OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
-                    "remote_outcome": "not_contacted",
-                    "retry_required": False,
+                    **(await _route_block_detail(exc)),
                 },
             ) from exc
         except Exception as e:
@@ -849,10 +869,15 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         run_ctx = contextvars.copy_context()
         reset_runtime_context(tokens)
         reset_current_llm_request_id(llm_request_token)
-        result = await asyncio.wait_for(
-            asyncio.to_thread(run_ctx.run, agent.run, request.message),
-            timeout=settings.agent_chat_timeout,
-        )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(run_ctx.run, agent.run, request.message),
+                timeout=settings.agent_chat_timeout,
+            )
+        except Exception as exc:
+            if (route_error := route_error_from(exc)) is not None and route_error is not exc:
+                raise route_error from exc
+            raise
         response_text = str(result.output) if hasattr(result, "output") else str(result)
         response_text = await redact_secrets_in_text(response_text)
         assert_runtime_not_revoked()
@@ -943,10 +968,13 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         )
     except NoCompliantModelRouteError as exc:
         safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+        contacted = request_provider_contacted(llm_request_id)
         logger.info(
-            "REST OpenRouter agent chat blocked before provider contact",
+            "REST OpenRouter agent chat blocked mid-turn after provider contact"
+            if contacted else "REST OpenRouter agent chat blocked before provider contact",
             extra={"reason": safe_reason},
         )
+        detail = await _route_block_detail(exc, provider_contacted=contacted)
         await log_agent_run_event(
             session_id=session.id,
             transport="rest",
@@ -959,19 +987,14 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 "error": safe_reason,
                 "request_id": llm_request_id,
                 "runtime": "openrouter-agent",
-                "failure_stage": "route_preflight",
-                "remote_outcome": "not_contacted",
+                "failure_stage": "mid_turn_route" if contacted else "route_preflight",
+                "remote_outcome": detail["remote_outcome"],
                 "retry_required": False,
             },
         )
         raise HTTPException(
             status_code=503,
-            detail={
-                "code": NoCompliantModelRouteError.code,
-                "message": OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE,
-                "remote_outcome": "not_contacted",
-                "retry_required": False,
-            },
+            detail={"code": NoCompliantModelRouteError.code, **detail},
         ) from exc
     except asyncio.TimeoutError:
         _mark_request_timed_out(llm_request_id)

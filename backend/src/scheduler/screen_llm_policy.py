@@ -100,6 +100,21 @@ async def screen_derived_llm_decision(runtime_path: str) -> ScreenDerivedLlmDeci
             runtime_path=runtime_path,
             runtime_profile="",
         )
+    from src.scheduler.background_inference import (
+        DISABLED_BY_OPERATOR,
+        background_inference_job_enabled,
+        record_background_inference_skip,
+    )
+
+    if runtime_path == "end_of_day_goal_report" and not background_inference_job_enabled(runtime_path):
+        # The deterministic report still runs; only its model analysis is off.
+        record_background_inference_skip(runtime_path)
+        return ScreenDerivedLlmDecision(
+            allowed=False,
+            reason=DISABLED_BY_OPERATOR,
+            runtime_path=runtime_path,
+            runtime_profile="",
+        )
 
     runtime_profile = resolve_runtime_profile(runtime_path=runtime_path)
     # Screen-derived prompts have one active route in this phase. A stale

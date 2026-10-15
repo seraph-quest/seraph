@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, Mapping
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import func, update
 from sqlmodel import col, select
 
@@ -55,6 +55,14 @@ from src.observer.screen_analysis_settings import (
 from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
 from src.observer.user_state import InterruptionMode
 from src.tools.policy import MCP_POLICY_MODES, TOOL_POLICY_MODES
+from src.scheduler.background_inference import (
+    BACKGROUND_INFERENCE_JOBS,
+    SETTINGS_UNREADABLE,
+    BackgroundInferenceSettingsUnreadable,
+    background_inference_job_enabled,
+    background_inference_status,
+    write_background_inference_settings,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -62,6 +70,14 @@ router = APIRouter()
 
 class InterruptionModeRequest(BaseModel):
     mode: str
+
+
+class BackgroundInferenceSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobs: dict[str, StrictBool] = Field(min_length=1, max_length=len(BACKGROUND_INFERENCE_JOBS))
+    # Required (with every job listed) to overwrite an unreadable toggle file.
+    replace_unreadable: StrictBool = False
 
 
 class ScreenAnalysisSettingsRequest(BaseModel):
@@ -1349,7 +1365,12 @@ async def get_artifact_storage_settings():
         "reports": {
             "enabled": settings.end_of_day_report_enabled,
             "hour": settings.end_of_day_report_hour,
-            "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "llm_disabled",
+            "analysis_provider": (
+                "llm"
+                if settings.end_of_day_report_llm_enabled
+                and background_inference_job_enabled("end_of_day_goal_report")
+                else "llm_disabled"
+            ),
             "archive_dir": str(report_archive_dir),
             "archive_dir_source": report_archive_source,
             **report_dir_status,
@@ -1470,6 +1491,35 @@ async def send_end_of_day_report_test_email():
     from src.scheduler.jobs.end_of_day_goal_report import send_end_of_day_report_test_email
 
     return await send_end_of_day_report_test_email()
+
+
+@router.get("/settings/background-inference")
+async def get_background_inference_settings():
+    """Return per-job background inference toggles with call estimates."""
+    return background_inference_status()
+
+
+@router.put("/settings/background-inference")
+async def set_background_inference_settings(body: BackgroundInferenceSettingsRequest):
+    """Persist per-job toggles; changes apply at each job's next run."""
+    try:
+        write_background_inference_settings(dict(body.jobs), replace_unreadable=body.replace_unreadable)
+    except BackgroundInferenceSettingsUnreadable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": SETTINGS_UNREADABLE,
+                "message": "Stored toggles are unreadable. Review every job and confirm replacing them.",
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "background_inference_job_invalid", "message": str(exc)}) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "background_inference_settings_persist_failed", "message": "Toggles were not saved."},
+        ) from exc
+    return background_inference_status()
 
 
 @router.get("/settings/tool-policy-mode")

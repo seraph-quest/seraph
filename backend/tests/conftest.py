@@ -128,6 +128,10 @@ async def async_db(request, tmp_path_factory):
                 await session.rollback()
                 raise
 
+    import sys
+    import src.db.engine as canonical_engine
+
+    canonical_get_session = canonical_engine.get_session
     patches = []
     for target in _PATCH_TARGETS:
         p = patch(target, _get_session)
@@ -144,6 +148,16 @@ async def async_db(request, tmp_path_factory):
     finally:
         for p in patches:
             p.stop()
+        # A module first imported during this test ran
+        # ``from src.db.engine import get_session`` while the patch above was
+        # active and captured this fixture's private session function. Point
+        # every such capture back at the canonical function, or later tests
+        # (and their session-factory overrides) reach this disposed database.
+        for module in list(sys.modules.values()):
+            if getattr(module, "__name__", "").startswith("src."):
+                for name, value in list(vars(module).items()):
+                    if value is _get_session:
+                        setattr(module, name, canonical_get_session)
         await engine.dispose()
     if teardown_error is not None:
         raise teardown_error

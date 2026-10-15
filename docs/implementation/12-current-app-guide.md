@@ -1785,19 +1785,16 @@ validation.
 
 ### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
 
-Bounded iterative repository work and original-producer recovery are **Planned**
-branch-local targets under [ADR-030](./decisions/030-bounded-iterative-repository-work.md)
-and its [ADR-032 recovery amendment](./decisions/032-repository-crash-recovery-evidence.md).
-New v4 admissions require proof that the saved work was flushed before the
-original deadline and a stable task identity independent of login refresh.
-Missing producer registration keeps uncertain v3/v4 work on hold; it never
-authorizes a retry. Older records cannot acquire the new proof retrospectively.
-Same-boot producer loss retains visible held debt. Separately gated actual
-same-host boot settlement changes only the physical hold, preserving Unknown
-task/result and contacted costs. This accepted target does not enable recovery
-or establish implementation receipts. The public recovery action stays unavailable
-until implementation and actual crash/restart acceptance; ordinary repair behavior
-below is unchanged.
+Bounded iterative repository work is **Partial** under
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md). An accepted
+`repository_work` Task runs up to three manually approved patch iterations within
+its original limits. The plan can be literal or a reviewed planner proposal. Each
+iteration returns a local patch and the actual pytest or npm output. Failed checks
+feed the next iteration, and base drift or a dirty tree blocks execution. Crash
+recovery under [ADR-032](./decisions/032-repository-crash-recovery-evidence.md)
+remains **Planned**. `POST /api/workflows/repo-repair/{id}/source-recovery`
+returns 503. An interrupted or lost original producer stays held until the
+managed-recovery follow-up ships. Ordinary repair behavior below is unchanged.
 
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)

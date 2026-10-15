@@ -22,19 +22,21 @@ cockpit remain the implementation described here. The architecture documentation
 adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
-**Bounded iterative repository work and original-producer recovery: Planned.**
-[ADR-030](./decisions/030-bounded-iterative-repository-work.md), amended by
-[ADR-032](./decisions/032-repository-crash-recovery-evidence.md), defines the
-branch-local target. New v4 admissions require original producer registration,
-proof recorded after material-bundle fsync, a separate immutable recovery
-commitment and fresh Source/current-row CAS. Startup protects uncertain v3/v4
-lineage even when registration is missing. These are target rules, with no
-implementation or recovery activation proof. Same-boot producer loss without
-authentic closure remains held Unknown; a separately
-gated actual same-host boot can settle only physical cleanup, preserving
-task/result uncertainty and contacted cost debt under `isolation_claim=none`.
-Historical v1/v2 authority and ordinary executor/publication behavior remain;
-v3 records cannot be retroactively upgraded to v4 proof.
+**Bounded iterative repository work: Partial; original-producer crash recovery: Planned.**
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md) (#1009) ships one
+`repository_work` Task per bug or change request, whether the operator supplies the
+plan or accepts a reviewed planner proposal. After selected-source consent, up to
+three manually approved patch iterations run under the original deadline, cost and
+iteration limits with Python pytest or Node 24 npm test/build checks. Each run
+records a local patch artifact and the actual requested command output. A failed check
+continues into the next bounded iteration without renewing those limits. Base drift or
+a dirty live tree blocks before execution; the live tree is never overwritten.
+Missing boundary: crash/restart recovery. The public Source recovery action stays
+fail-closed (HTTP 503). A Stop that interrupts a running command, or a lost
+original producer, keeps the original held (stop pending or Unknown) until the
+tracked managed-recovery follow-up ships. New admissions record the
+[ADR-032](./decisions/032-repository-crash-recovery-evidence.md) v4 evidence,
+but that evidence authorizes no recovery yet.
 
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate

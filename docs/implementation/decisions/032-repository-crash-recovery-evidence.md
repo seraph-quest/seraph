@@ -4,7 +4,9 @@ title: "ADR-032: Repository crash-recovery evidence"
 
 # ADR-032: Repository Crash-Recovery Evidence
 
-**Status:** Accepted branch-local target for #1009; capability Planned, not Shipped on `develop`
+**Status:** Accepted target for #1009; recovery capability Planned. New admissions record
+v4 evidence, but the public recovery action remains fail-closed (HTTP 503) pending the
+tracked managed-recovery follow-up.
 
 **Decision class:** Target architecture
 

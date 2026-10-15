@@ -4,7 +4,9 @@ title: "ADR-030: Bounded iterative repository work and original-producer recover
 
 # ADR-030: Bounded Iterative Repository Work And Original-Producer Recovery
 
-**Status:** Accepted branch-local target for #1009; capability Planned, not Shipped on `develop`
+**Status:** Accepted for #1009. Bounded iterative repository work is Partial: the core
+iterative journey ships, and original-producer crash recovery stays Planned. The public
+Source recovery action is held fail-closed (HTTP 503) pending the tracked follow-up.
 
 **Decision class:** Target architecture
 
@@ -15,7 +17,7 @@ supersedes startup classification by registration absence, ownerless deadline
 evidence, and mutable-row retry identity. Its v4 protocol governs new admissions;
 the v1/v2/v3 grammars below remain versioned historical contracts, not upgrade
 instructions. All other bounded-work, authority, accounting, publication and
-physical-closure requirements remain in force. Capability status stays Planned.
+physical-closure requirements remain in force. Recovery status stays Planned.
 
 ## Context
 
@@ -369,7 +371,8 @@ remain held indefinitely. Durable transport can survive lost parent notification
 without manufacturing process ownership. Exact read-only Unknown metadata
 preserves immutable Stop linkage but cannot substitute for physical proof.
 New v4 admission under ADR-032 cannot improve old historical authority. Status and Guide
-describe this capability as Planned until its implementation and receipts land.
+describe the iterative work as Partial and its crash recovery as Planned until that
+implementation and its receipts land.
 The adopted same-receipt rollback retry must survive a legitimate auth touch
 with all fresh current checks. ADR-032 defines the separate immutable commitment
 for new v4 Running and Unknown retries; the old mixed audit digest cannot supply

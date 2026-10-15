@@ -15,14 +15,16 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from tests.test_document_build_native_capacity import build_admission_lifecycle
-from tests.test_goal_discovery_vertical import public_http_fixture
+from tests.cordis_research import needs_cordis
+from tests.test_goal_discovery_vertical import public_http_fixture, research_cordis  # noqa: F401
 from tests.test_inference_accounting import accounting_db, setup_configuration
 from tests.test_research_native_vertical import real_auth, ResponseBytes
 
 
+@needs_cordis
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expire_during_publication", [False, True], ids=["complete", "publication-freshness-race"])
-async def test_authenticated_digest_finding_native_task_physical_output(accounting_db, real_auth, public_http_fixture, monkeypatch, expire_during_publication, build_admission_lifecycle):
+async def test_authenticated_digest_finding_native_task_physical_output(accounting_db, real_auth, public_http_fixture, research_cordis, monkeypatch, expire_during_publication, build_admission_lifecycle):
     from config.settings import settings
     from src.api import auth, goals, guardian_inbox, model_fabric_settings, work_board
     from src.auth.middleware import OperatorAuthMiddleware
@@ -95,7 +97,7 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
         return ["93.184.216.34"]
 
     transport = PublicBoundary()
-    discovery = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=resolver, transport=transport), resolver=resolver, transport=transport)
+    discovery = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=resolver, transport=transport), resolver=resolver, transport=transport, cordis=research_cordis)
     registry = ToolRegistry(); registry.start()
     tasks = GeneralTaskService(registry); tasks.start()
     dispatcher = WorkBoardDispatcher(session_provider=factory.accounting_sessions, general_tasks=tasks)
@@ -299,10 +301,11 @@ def cited_deadline_http_fixture():
             Path(socket_path).unlink()
 
 
+@needs_cordis
 @pytest.mark.asyncio
 @pytest.mark.parametrize("physical_failure", [None, "unlink", "tamper", "truncate"],
     ids=["complete", "missing-source", "changed-source", "truncated-source"])
-async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(accounting_db, real_auth, cited_deadline_http_fixture, monkeypatch, physical_failure):
+async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(accounting_db, real_auth, cited_deadline_http_fixture, research_cordis, monkeypatch, physical_failure):
     from config.settings import settings
     from src.api import auth, goals, guardian_inbox, model_fabric_settings, observer
     from src.auth.middleware import OperatorAuthMiddleware
@@ -369,7 +372,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
         assert host in {"html.duckduckgo.com", "example.com"} and port == 443
         return ["93.184.216.34"]
     transport = PublicBoundary()
-    discovery = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=resolver, transport=transport), resolver=resolver, transport=transport)
+    discovery = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=resolver, transport=transport), resolver=resolver, transport=transport, cordis=research_cordis)
     monkeypatch.setattr("src.guardian.goal_discovery.goal_discovery_service", discovery)
     app = FastAPI(); app.add_middleware(OperatorAuthMiddleware)
     app.include_router(auth.router, prefix="/api/auth")

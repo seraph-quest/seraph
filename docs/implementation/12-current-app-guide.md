@@ -632,9 +632,19 @@ unavailable coverage. The canonical `DiscoveryBriefV1`, Inbox digest and Work
 Board projection are unchanged, the first run still returns findings, and every
 result records `no_learning`. **Inspect discovery runs** adds `research_runtime`
 (live role readiness and recovery), `planning` jobs and per-run
-`research_blocked_reason`. Real-child acceptance tests deny Python sockets/DNS
-and use fixed in-memory transports; they need the built package and
-`SERAPH_CORDIS_TEST_NODE`, so discovery verticals skip where that is absent.
+`research_blocked_reason`, each with its recovery text.
+
+Discovery therefore requires the Cordis host. The backend lifespan starts it with
+the `node` on its PATH (Node 22.12+ or 24.x). `./manage.sh -e dev local up|run`
+first runs a keyless preflight: it builds the reviewed package when
+`runtime/cordis` dependencies are already installed (`npm ci` with the
+lockfile and npm 11.8.0; the preflight never installs them) and otherwise prints
+the blocked reason and remediation while core startup continues. The backend
+container image does not yet contain Node or `runtime/cordis`, so containerized
+deployments show discovery as blocked. Real-child acceptance tests deny Python
+sockets/DNS and use fixed in-memory transports; CI builds the package with Node
+24.13.1 and sets `SERAPH_CORDIS_TEST_NODE`, and the suites skip elsewhere
+without it.
 
 ### Bounded general document reading
 

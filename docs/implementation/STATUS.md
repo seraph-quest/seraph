@@ -74,9 +74,12 @@ discovery planning and public source extraction run only through the composed
 Cordis research service, goal-plan provider, guardian consumer and
 HTML/text/RSS/Atom format providers, with Python-side plan validation,
 pinned provider/config digests (`stale_output` on mismatch), visible blocks
-for missing providers and no Python fallback. Its real-child acceptance and the
-discovery verticals need the built Cordis package and Node, which CI does not
-provide, so they skip there. See the
+for missing providers and no Python fallback. Discovery now requires the Cordis
+host: the managed local run builds the reviewed package when its locked
+dependencies are installed, and otherwise reports the block; the backend
+container image has no Node or Cordis package yet, so containerized discovery is
+blocked. CI builds the package for its real-child acceptance and discovery
+verticals. See the
 [guide section](./12-current-app-guide.md#cordis-guardian-research-1008).
 
 For a shorter reader-facing overview of the current app, start with

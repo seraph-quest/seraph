@@ -752,11 +752,43 @@ function start_local_frontend() {
     return 1
 }
 
+function cordis_cli() {
+    # Same keyless path as `./manage.sh cordis`: no operator env, credentials or workspace.
+    env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
+        python3 -m src.runtime_plugins.cli "$@"
+}
+
+# Goal discovery plans and extracts only through the reviewed Cordis host (#1008).
+# The backend starts that host itself with the `node` on PATH; this preflight
+# builds the reviewed package when its locked dependencies are already installed
+# and never installs them. Core startup continues either way: an unavailable
+# runtime stays an operator-visible block, never a Python fallback.
+function prepare_local_cordis() {
+    local status
+    if status="$(cordis_cli status 2>/dev/null)"; then
+        echo "Cordis research runtime: package available (live readiness: Settings runtime status)"
+        return 0
+    fi
+    if [ -f "$SCRIPT_DIR/runtime/cordis/node_modules/typescript/bin/tsc" ]; then
+        echo "Building the reviewed Cordis research runtime ..."
+        if cordis_cli build >/dev/null 2>&1 && status="$(cordis_cli status 2>/dev/null)"; then
+            echo "Cordis research runtime: package built and available"
+            return 0
+        fi
+        status="$(cordis_cli status 2>/dev/null)"
+    fi
+    echo "Cordis research runtime unavailable: $status" >&2
+    echo "  Goal discovery is blocked (shown in the cockpit) until a reviewed Node 22.12+/24 with npm 11.8.0 is on PATH," >&2
+    echo "  'npm ci' has installed runtime/cordis from its lockfile, and './manage.sh -e $ENV cordis build' succeeds." >&2
+    return 0
+}
+
 function local_up() {
     if ! reject_prod_local_stack; then
         return 1
     fi
     ensure_runtime_dirs
+    prepare_local_cordis
     if ! start_local_backend; then
         echo "Local stack failed: backend did not start cleanly." >&2
         return 1

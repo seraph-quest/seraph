@@ -30,8 +30,10 @@ from src.guardian.discovery_search import DiscoverySearch, DiscoverySearchBlocke
 
 # Media types Python admits for Cordis source extraction (#1008).
 SOURCE_MEDIA_TYPES = ("text/plain", "text/html", "application/rss+xml", "application/atom+xml")
-RESEARCH_RECOVERY = ("Restore the reviewed Cordis research runtime and its planning/source providers; "
-    "the original occurrence is never replayed and a new occurrence is admitted on the next eligible day.")
+RESEARCH_RECOVERY = ("Restore the reviewed Cordis research runtime and its planning/source providers "
+    "(reviewed Node 22.12+/24 on PATH, runtime/cordis installed with npm ci and built with "
+    "'./manage.sh -e dev cordis build', then restart the backend); the original occurrence is never "
+    "replayed and a new occurrence is admitted on the next eligible day.")
 
 
 class ResearchRuntimeBlocked(ValueError):

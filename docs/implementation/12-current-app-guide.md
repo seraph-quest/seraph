@@ -215,9 +215,13 @@ the runtime status `native_services` block. No HTTP route yet exposes the bridge
 to the browser, and the Memory composition-snapshot accounting amendments
 recorded on #1007 are not implemented. The acceptance tests deny every Python
 socket connection/DNS lookup and give the child no network configuration, but
-they do not OS-sandbox the Node child's own network access. A database error
-inside one callback currently fences the whole host boot rather than returning
-a typed block.
+they do not OS-sandbox the Node child's own network access. Transient SQLite
+contention inside one callback (`database is locked`/busy, connection-pool
+timeout) is a typed per-call `blocked` result, `native_owner_storage_busy`: the
+owner writer rolled back with no partial effect, the read journey blocks only
+that job with that reason, the boot keeps admitting, and the runtime status
+`native_services` block counts `transient_failures`. Other storage faults and
+any protocol, digest or authority violation still fence the whole host boot.
 
 ## Task conversation continuity
 

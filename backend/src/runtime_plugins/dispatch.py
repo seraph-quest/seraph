@@ -17,6 +17,7 @@ from types import MappingProxyType
 from collections.abc import Mapping
 
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 
 from .contracts import METHOD_DOMAINS, blocked, ref, sha, succeeded, validate_request
 from .protocol import ProtocolError, closed, integer
@@ -61,6 +62,18 @@ BLOCKED_METHODS = MappingProxyType({
 })
 assert SUPPORTED_METHODS | set(BLOCKED_METHODS) == set(METHOD_DOMAINS)
 assert not SUPPORTED_METHODS & set(BLOCKED_METHODS)
+
+
+STORAGE_BUSY = "native_owner_storage_busy"
+
+
+def transient_storage_error(exc: BaseException) -> bool:
+    """SQLite write contention or connection-pool exhaustion, nothing else."""
+    if isinstance(exc, PoolTimeoutError):
+        return True
+    message = str(getattr(exc, "orig", exc)).lower()
+    return isinstance(exc, OperationalError) and ("database is locked" in message or "database is busy" in message
+                                                  or "database table is locked" in message)
 
 
 class NativeServiceBlocked(ValueError):
@@ -231,6 +244,9 @@ class NativeServiceDispatcher:
     def __init__(self, *, jobs=None):
         from src.workflows.job_runtime import durable_job_repository
         self.jobs = jobs or durable_job_repository
+        # Operator-visible host status; counts only typed per-call failures.
+        self.transient_failures = 0
+        self.last_transient_reason: str | None = None
 
     async def current(self, db, scope: OriginalServiceInvocation, method: str):
         """Re-resolve the original attempt, owners and authority. Returns (run, binding, mode)."""
@@ -361,6 +377,15 @@ class NativeServiceDispatcher:
             return blocked("native_original_job_authority_changed")
         except (ValueError, PermissionError, KeyError, TypeError):
             return blocked("native_original_binding_unavailable")
+        except (OperationalError, PoolTimeoutError) as exc:
+            # Transient SQLite contention is a per-call failure: every owner
+            # writer above runs in one transaction that rolled back, so no
+            # partial effect exists. Other storage faults still fence the boot.
+            if not transient_storage_error(exc):
+                raise
+            self.transient_failures += 1
+            self.last_transient_reason = STORAGE_BUSY
+            return blocked(STORAGE_BUSY)
 
     async def _native(self, db, run, binding, mode, method, payload, scope):
         if method == "authority.resolve":

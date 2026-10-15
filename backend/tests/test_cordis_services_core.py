@@ -1010,3 +1010,101 @@ async def test_boot_proof_requires_the_domain_provider_running_in_the_live_child
                                        owner_kind="cordis", epoch=2, composition_digest=digest, state="ready",
                                        boot_host=host)
     assert await _row(domain) == (target, "ready")
+
+
+# ------------------------------------------------------------------ #1066 transient storage contention
+
+def _hold_writer_lock(db_path):
+    import sqlite3
+    holder = sqlite3.connect(db_path, isolation_level=None, timeout=0)
+    holder.execute("BEGIN IMMEDIATE")
+    return holder
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_locked_database_in_one_callback_fails_only_that_call(live_host, service_db):
+    """A real SQLite writer lock held by another connection during one callback
+    yields a typed per-call block; the boot keeps admitting and later calls work."""
+    host, jobs, calls = live_host
+    operator = await _operator()
+    goal_id = await _goal(operator)
+    job, scope = await _task_scope(host, jobs, operator, key="locked", goal_id=goal_id)
+    dispatcher = host.service_dispatch
+    observed = dispatcher.dispatch
+    lock_for = {"tasks.checkpoint"}
+
+    async def contended(frame, **kwargs):
+        if frame["method"] not in lock_for:
+            return await observed(frame, **kwargs)
+        lock_for.discard(frame["method"])
+        holder = _hold_writer_lock(service_db)
+        try:
+            return await observed(frame, **kwargs)
+        finally:
+            holder.rollback()
+            holder.close()
+    dispatcher.dispatch = contended
+    boot = host.boot_nonce
+    before = await jobs.get_job(job["job_id"])
+    busy = await host.request_service("tasks.checkpoint", {"checkpoint_ref": "step-1"}, original_scope=scope)
+    assert busy == {"status": "blocked", "reason_code": "native_owner_storage_busy", "memory_status": "no_learning"}
+    # No partial effect, and the same boot keeps admitting.
+    after = await jobs.get_job(job["job_id"])
+    assert after["checkpoints"] == before["checkpoints"] and after["revision"] == before["revision"]
+    assert host.admitting and host.boot_nonce == boot
+    status = host.snapshot()["native_services"]
+    assert status["transient_failures"] == 1 and status["last_transient_reason"] == "native_owner_storage_busy"
+    # The same invocation's later calls succeed once contention clears.
+    retried = await verified_task_call(host, jobs, scope, "tasks.checkpoint", {"checkpoint_ref": "step-1"})
+    assert retried["status"] == "succeeded"
+    assert (await host.request_service("goals.read", {}, original_scope=scope))["status"] == "succeeded"
+    assert (await host.refresh_status())["readiness"]["state"] == "verified"
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_locked_database_during_a_read_journey_blocks_only_that_job(live_host, service_db):
+    host, jobs, calls = live_host
+    operator = await _operator()
+    dispatcher = host.service_dispatch
+    observed = dispatcher.dispatch
+    locked = {"capabilities.list"}
+
+    async def contended(frame, **kwargs):
+        if frame["method"] not in locked:
+            return await observed(frame, **kwargs)
+        locked.discard(frame["method"])
+        holder = _hold_writer_lock(service_db)
+        try:
+            return await observed(frame, **kwargs)
+        finally:
+            holder.rollback()
+            holder.close()
+    dispatcher.dispatch = contended
+    _, digest = native_capability_inventory()
+    candidate = {"schema_version": 1, "method": "capabilities.list", "cursor": None, "limit": 2,
+                 "native_inventory_digest": digest}
+    with pytest.raises(NativeServiceBlocked) as busy:
+        await execute_native_read(operator=operator, candidate=candidate, idempotency_key="busy-1", host=host, jobs=jobs)
+    assert busy.value.reason_code == "native_owner_storage_busy"
+    async with get_session() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.idempotency_key == "busy-1"))).scalar_one()
+    assert run.status == "blocked" and run.failure_reason == "native_owner_storage_busy"
+    assert json.loads(run.effect_receipts_json or "[]") == [] and run.artifact_receipts_json in (None, "[]")
+    assert host.admitting
+    fresh = await execute_native_read(operator=operator, candidate=candidate, idempotency_key="busy-2",
+                                      host=host, jobs=jobs)
+    assert fresh["job"]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_non_transient_storage_faults_still_escape_to_the_host_fence(service_db):
+    """Only lock/busy contention is per-call; other storage faults are not masked."""
+    from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
+    from src.runtime_plugins.dispatch import transient_storage_error
+    assert transient_storage_error(OperationalError("BEGIN IMMEDIATE", {}, Exception("database is locked")))
+    assert transient_storage_error(PoolTimeoutError("QueuePool limit reached"))
+    assert not transient_storage_error(OperationalError("SELECT", {}, Exception("no such table: goals")))
+    assert not transient_storage_error(OperationalError("SELECT", {}, Exception("disk I/O error")))

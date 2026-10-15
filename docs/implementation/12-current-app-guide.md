@@ -771,7 +771,8 @@ is missing.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 
-Open the Settings panel's **OpenRouter setup** section to save the fixed
+Open **Settings → Models & OpenRouter** (formerly the Screenshot/VLM tab) and
+use its **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
 one qualified `provider/model` ID and explicit upstream allow-list for each
 enabled purpose: text, vision, and embedding. Each purpose has its own
@@ -820,6 +821,45 @@ or manufacturing proofs. A projection incompatible with a v2 slot is visibly
 blocked until explicit reviewed save; stored v2 rejects legacy writes with
 HTTP409. Local tests intercept provider transport; real availability, quality,
 costs, and embedding usefulness remain externally unverified.
+
+#### Daily-use readiness (#1068)
+
+- **Text-route defaults.** A new text route proposes `text`, `tool_use`,
+  `structured_output` and `streaming`: direct chat adds `streaming`, agent
+  turns with tools add `tool_use`, and planners use `structured_output`.
+  Routes saved earlier keep their declared capabilities until re-saved.
+- **Context window.** Each route has an optional `context_window_tokens`
+  (1,024–2,097,152). When unset, the generated profile declares 65,536 tokens
+  instead of `max(max_output_tokens, 4096)`. Stored routes without the field
+  keep their exact serialized form; the new default applies when the setup is
+  next saved, which also requires proving the route again.
+- **Dollar inputs.** The monthly ceiling and per-call request bound are entered
+  in dollars with a micro-USD preview; the request bound is prefilled at $0.05.
+- **Proof lifetime and Prove route.** The canary section offers a 1-, 8- or
+  24-hour proof lifetime (the backend maximum, published as
+  `canary_proof_ttl.max_seconds`). **Prove route** runs one canary per required
+  capability plus `health` and `latency_ms`, in order, and stops at the first
+  failure. Each canary is a real, billed provider call. The chat composer meta
+  line shows `PROOFS nH LEFT`, `PROOF EXPIRED: <capability>` or
+  `PROOF MISSING: <capability>` from `/api/runtime/status`.
+- **Specific blocked reasons.** A route denial carries the selector code, and an
+  exactly bound proof that aged out is reported as `proof_expired:<capability>`
+  rather than `proof_missing:<capability>`. WebSocket and REST chat (including
+  agent turns wrapped by the agent framework) name the capability and the
+  recovery, e.g. Prove route, declare a capability, or raise the context window.
+  REST responses add `route_reason` and `recovery_action` beside the stable
+  `no_compliant_route` code. Slot status adds `proof_reason`.
+- **Background inference.** `GET/PUT /api/settings/background-inference` and
+  the **Background inference** panel list the scheduled jobs that may call the
+  text route (strategist tick, memory consolidation, daily briefing, evening
+  review, activity digest, weekly review, end-of-day report analysis,
+  screenshot observation digest) with approximate calls/day. All default ON.
+  A switched-off job makes no model call and records `skipped` with reason
+  `disabled_by_operator` in the scheduler audit and the panel; end-of-day
+  reports still run deterministically without analysis. Toggles persist in
+  `background-inference-settings.json` in the workspace. An unreadable file
+  pauses scheduled model calls and reports
+  `background_inference_settings_unreadable` until a toggle is saved.
 
 ### Local cockpit interaction boundaries
 
@@ -979,8 +1019,9 @@ those omissions never become a superiority claim.
 
 The bounded #920 profile adds **Send neutral Telegram notice** in the current
 task's inspector, available with the installed reviewed program revision.
-Pair the operator/chat and grant Telegram transit consent in Settings
-first. Explicit status review sends enum metadata; exact denial and cancellation
+Pair the operator/chat and grant Telegram transit consent in
+**Settings → Telegram** first (numeric user and chat IDs, write-only bot token,
+grant/revoke transit consent, unpair over the existing `/api/telegram` API). Explicit status review sends enum metadata; exact denial and cancellation
 use current canonical authority. Sensitive approval and recovery remain in the
 cockpit. Unknown delivery requires visible outbox recovery or an explicit fresh
 notice that retires old controls. The provider-free adapter is **Partial** and

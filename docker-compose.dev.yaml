@@ -78,6 +78,10 @@ services:
       - ./frontend/tsconfig.node.json:/app/tsconfig.node.json
     env_file:
       - .env.dev
+    environment:
+      # The container must listen beyond its own loopback for the port mapping;
+      # vite.config.ts otherwise binds 127.0.0.1.
+      VITE_DEV_HOST: "0.0.0.0"
     networks:
       - seraph-network-dev
     ports:

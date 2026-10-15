@@ -166,6 +166,16 @@ def test_production_mount_preflight_fails_closed_without_mountinfo(tmp_path):
     assert mount_check["status"] == "invalid"
 
 
+def test_frontend_dev_server_binds_loopback_unless_docker_dev_opts_in():
+    vite_config = (ROOT / "frontend" / "vite.config.ts").read_text()
+    compose = (ROOT / "docker-compose.dev.yaml").read_text()
+
+    assert 'process.env.VITE_DEV_HOST?.trim() || "127.0.0.1"' in vite_config
+    assert "host: devServerHost," in vite_config
+    assert '"0.0.0.0"' not in vite_config
+    assert 'VITE_DEV_HOST: "0.0.0.0"' in compose
+
+
 def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
     manage = (ROOT / "manage.sh").read_text()
     env = (ROOT / "env.prod.example").read_text()

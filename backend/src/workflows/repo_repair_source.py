@@ -984,6 +984,15 @@ async def repository_source_root(db, *, job_id, owner):
     return True
 
 
+# The operator approves host execution with these declared limitations; the
+# posture also records isolation_claim=none and network_isolation=not_verified.
+REPOSITORY_PATCH_APPROVAL_SUMMARY = (
+    "Review the exact bounded repository patch. Approving runs the repository's tests on this host "
+    "as the Seraph user with no isolation: network is not blocked, tests can read local files "
+    "(including ~/.ssh and Seraph's database and vault), a detached process can outlive the proven "
+    "cleanup, and diagnostics redaction is pattern-based.")
+
+
 def _repository_lane_busy():
     from src.work_board.repository import BoardError
     return BoardError("repository_execution_busy",
@@ -2233,7 +2242,7 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
         from src.approval.repository import approval_repository
         approval = await approval_repository.get_or_create_pending(session_id=owner.session_id,
             tool_name=REPO_REPAIR_APPROVAL_TOOL, risk_level="high", request_id=approval_id,
-            fingerprint=approval_fingerprint, summary="Review the exact bounded repository patch",
+            fingerprint=approval_fingerprint, summary=REPOSITORY_PATCH_APPROVAL_SUMMARY,
             details={"action": REPO_REPAIR_APPROVAL_ACTION, "approval_owner_principal_id": owner.principal_id,
                 "approval_owner_operator_session_id": owner.session_id, "approval_execution_owner_principal_id": owner.principal_id,
                 "approval_execution_session_id": owner.session_id, "approval_operator_principal_id": owner.principal_id,

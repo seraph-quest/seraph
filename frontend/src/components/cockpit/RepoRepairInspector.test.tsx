@@ -123,6 +123,12 @@ describe("RepoRepairInspector", () => {
     render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
     expect(await screen.findByText("Preflight: verified")).toBeInTheDocument();
     expect(screen.queryByText(/Preflight: blocked or unknown/)).not.toBeInTheDocument();
+    // The declared local-host limitations are shown before any approval.
+    const warning = screen.getByText(/Trusted host execution: no isolation guarantee/);
+    expect(warning).toHaveTextContent("unrestricted network access");
+    expect(warning).toHaveTextContent("~/.ssh and Seraph's database and vault");
+    expect(warning).toHaveTextContent("can outlive it");
+    expect(warning).toHaveTextContent("redaction is pattern-based");
   });
 
   it("does not treat the ready status alone as verified preflight", async () => {

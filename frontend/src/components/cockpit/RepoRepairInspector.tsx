@@ -1414,7 +1414,7 @@ export function RepoRepairInspector({
         {posture.profile === "repo-node24-npm-v1" ? <div>Recorded job preflight: {typeof projectionForRender.preflight?.status === "string" ? projectionForRender.preflight.status : "blocked"}</div> : <div>Preflight: {projectionForRender.preflight?.ok === true ? "verified" : `blocked or unknown${projectionForRender.preflight && typeof projectionForRender.preflight.reason === "string" ? ` · ${projectionForRender.preflight.reason}` : ""}`}</div>}
         <div>Preparation: {preparationReady ? "ready" : "blocked"} · execution: {executionReady ? "ready" : localHostExecution && preparationReady ? "awaiting exact host approval" : "blocked"}</div>
         <div>Posture: isolation {posture.isolation_claim ?? "unknown"} · network {posture.network_isolation ?? "unknown"} · resources {posture.resource_enforcement ?? "unknown"}</div>
-        {localHostExecution && <div className="text-amber-200">Trusted host execution: no isolation guarantee. This job may access the host filesystem and network as the Seraph user after the exact approval.</div>}
+        {localHostExecution && <div className="text-amber-200">Trusted host execution: no isolation guarantee. After the exact approval, the repository's tests run as the Seraph user with unrestricted network access and can read local files, including ~/.ssh and Seraph's database and vault. "Cleanup proven" covers only the supervised process tree; a test that detaches (for example via systemd-run or at) can outlive it. Diagnostics redaction is pattern-based. Approve only repositories you trust.</div>}
         <div>Memory: {projectionForRender.memory_status} · provider contact: {projectionForRender.execution.provider_contacted ? "recorded" : "not recorded"}</div>
       </div>
 

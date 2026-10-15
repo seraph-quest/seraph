@@ -47,6 +47,19 @@ recovery action stays fail-closed (HTTP 503). New admissions record the
 [ADR-032](./decisions/032-repository-crash-recovery-evidence.md) v4 evidence,
 but that evidence authorizes no recovery yet.
 
+Declared limitation: repository checks run as `local_host_execution` with
+`isolation_claim=none` and `network_isolation=not_verified`. After the exact
+approval, the repository's tests run as the Seraph user. They can use the
+network and read local files, including `~/.ssh` and Seraph's database and
+vault. "Cleanup proven" covers only the supervised process tree (subreaper and
+waitpid); a same-user process that detaches, for example via `systemd-run --user`
+or `at`, can outlive it. Diagnostics redaction is pattern-based, not complete.
+Approve only repositories you trust. Approved patches are limited to text
+sections on allowed paths: binary, rename, copy, mode, symlink and header-less
+sections are rejected by the parent, the worker and git's own numstat.
+Publication of an iterative result must equal the base plus the approved input
+patch.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

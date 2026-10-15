@@ -1801,6 +1801,13 @@ Only a lost producer or Unknown result stays held. Crash recovery under
 `POST /api/workflows/repo-repair/{id}/source-recovery` returns 503. Ordinary repair
 behavior below is unchanged.
 
+Checks run as `local_host_execution` with no isolation. The tests can use the
+network and read the Seraph user's files (`~/.ssh`, Seraph's database and vault).
+A detached process can outlive "cleanup proven", and diagnostics redaction is
+pattern-based. The inspector and the patch approval state these limitations.
+Approved patches may contain only text sections on allowed paths, and an
+iterative publication must equal the base plus the approved input patch.
+
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)
 owns its accepted contract; availability requires the installed reviewed program revision.

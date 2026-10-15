@@ -655,7 +655,9 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
                 assert actual["runtime_role"] == "lifecycle_host"
                 assert actual["readiness"]["state"] == "verified"
                 assert started <= actual["readiness"]["checked_at"] <= int(time.time()*1000)
-                assert actual["plugins"] == [{"id":"seraph.host-lifecycle@1.0.0", "state":"ready", "reason":None}]
+                assert [(item["id"], item["state"], item["reason"]) for item in actual["plugins"]] == [
+                    (spec["id"], "ready", None) for spec in host.reviewed.profile["plugins"]]
+                assert {item["id"]: item["digest"] for item in actual["plugins"]} == host.reviewed.plugin_digests
                 assert not {"boot_nonce", "pid", "stderr", "env"} & actual.keys()
                 assert host.boot_nonce not in response.text
                 assert (await client.get("/health")).json() == {"status":"ok"}

@@ -19,15 +19,96 @@ CORDIS_INTEGRITY = "sha512-xG90nPNQxR272cC4lR/m5LHevegIJvdddQBlKdEAdGz3n+zgH5lsg
 NPM_VERSION = "11.8.0"
 PACKAGE_ROOT = Path(__file__).resolve().parents[3] / "runtime" / "cordis"
 BUILD_FILES = (
-    "package.json", "package-lock.json", "profile.json", "tsconfig.json",
-    "scripts/toolchain.mjs", "scripts/build-manifest.mjs", "src/bootstrap.ts",
-    "src/composition.ts", "src/protocol.ts", "src/resources.ts",
-    "dist/src/bootstrap.js", "dist/src/composition.js", "dist/src/protocol.js", "dist/src/resources.js",
+    'package.json',
+    'package-lock.json',
+    'profile.json',
+    'tsconfig.json',
+    'scripts/toolchain.mjs',
+    'scripts/build-manifest.mjs',
+    'src/bootstrap.ts',
+    'src/composition.ts',
+    'src/protocol.ts',
+    'src/resources.ts',
+    'src/contracts/client.ts',
+    'src/contracts/methods.ts',
+    'src/contracts/schema.ts',
+    'src/contracts/authority.ts',
+    'src/contracts/goals.ts',
+    'src/contracts/tasks.ts',
+    'src/contracts/capabilities.ts',
+    'src/contracts/inference.ts',
+    'src/contracts/memory.ts',
+    'src/contracts/artifacts.ts',
+    'src/contracts/audit.ts',
+    'src/contracts/research.ts',
+    'src/contracts/conversation.ts',
+    'src/contracts/scheduler.ts',
+    'src/contracts/connections.ts',
+    'src/contracts/agent_loop.ts',
+    'src/contracts/source_extraction.ts',
+    'src/plugins/index.ts',
+    'src/plugins/proxy.ts',
+    'src/plugins/authority/index.ts',
+    'src/plugins/goals/index.ts',
+    'src/plugins/tasks/index.ts',
+    'src/plugins/capabilities/index.ts',
+    'src/plugins/inference/index.ts',
+    'src/plugins/memory/index.ts',
+    'src/plugins/artifacts/index.ts',
+    'src/plugins/audit/index.ts',
+    'src/plugins/research/index.ts',
+    'src/plugins/conversation/index.ts',
+    'src/plugins/scheduler/index.ts',
+    'src/plugins/connections/index.ts',
+    'src/plugins/agent_loop/index.ts',
+    'src/plugins/source_extraction/index.ts',
+    'dist/src/bootstrap.js',
+    'dist/src/composition.js',
+    'dist/src/protocol.js',
+    'dist/src/resources.js',
+    'dist/src/contracts/client.js',
+    'dist/src/contracts/methods.js',
+    'dist/src/contracts/schema.js',
+    'dist/src/contracts/authority.js',
+    'dist/src/contracts/goals.js',
+    'dist/src/contracts/tasks.js',
+    'dist/src/contracts/capabilities.js',
+    'dist/src/contracts/inference.js',
+    'dist/src/contracts/memory.js',
+    'dist/src/contracts/artifacts.js',
+    'dist/src/contracts/audit.js',
+    'dist/src/contracts/research.js',
+    'dist/src/contracts/conversation.js',
+    'dist/src/contracts/scheduler.js',
+    'dist/src/contracts/connections.js',
+    'dist/src/contracts/agent_loop.js',
+    'dist/src/contracts/source_extraction.js',
+    'dist/src/plugins/index.js',
+    'dist/src/plugins/proxy.js',
+    'dist/src/plugins/authority/index.js',
+    'dist/src/plugins/goals/index.js',
+    'dist/src/plugins/tasks/index.js',
+    'dist/src/plugins/capabilities/index.js',
+    'dist/src/plugins/inference/index.js',
+    'dist/src/plugins/memory/index.js',
+    'dist/src/plugins/artifacts/index.js',
+    'dist/src/plugins/audit/index.js',
+    'dist/src/plugins/research/index.js',
+    'dist/src/plugins/conversation/index.js',
+    'dist/src/plugins/scheduler/index.js',
+    'dist/src/plugins/connections/index.js',
+    'dist/src/plugins/agent_loop/index.js',
+    'dist/src/plugins/source_extraction/index.js',
 )
 PACKAGE_FILES = (*BUILD_FILES, "dist/build-manifest.json")
 # Child gets no PATH/HOME/config or credentials. Absolute argv needs no lookup.
 CHILD_ENV = {"LANG": "C.UTF-8", "TZ": "UTC"}
 KNOWN_PLUGIN = "seraph.host-lifecycle@1.0.0"
+KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-loop.v1', 'seraph.source-extraction.v1')
+
+
+# Closed per-plugin configuration fields (all currently empty).
+PLUGIN_CONFIG_FIELDS: dict[str, frozenset[str]] = {identifier: frozenset() for identifier in KNOWN_PLUGINS}
 
 
 class CompositionBlocked(ValueError):
@@ -44,6 +125,9 @@ class ReviewedComposition:
     profile: dict[str, Any]
     composition_digest: str
     package_digest: str
+    # Per-plugin implementation/config identity derived from the verified
+    # build manifest; the child must report exactly these digests.
+    plugin_digests: dict[str, str] | None = None
 
     @property
     def entrypoint(self) -> Path:
@@ -55,13 +139,48 @@ def validate_profile(value: Any) -> dict[str, Any]:
     if type(profile["protocol"]) is not int or profile["protocol"] != 1 or profile["profile_id"] != "seraph-cordis-bootstrap-v1":
         raise ProtocolError("invalid reviewed profile")
     plugins = profile["plugins"]
-    if type(plugins) is not list or len(plugins) != 1:
+    if type(plugins) is not list or not 1 <= len(plugins) <= len(KNOWN_PLUGINS):
         raise ProtocolError("required host plugin missing")
-    spec = closed(plugins[0], {"id", "required", "dependencies", "config"})
-    if spec["id"] != KNOWN_PLUGIN or spec["required"] is not True or spec["dependencies"] != [] or type(spec["dependencies"]) is not list:
-        raise ProtocolError("unknown or invalid plugin")
-    closed(spec["config"], set())
+    cursor = 0
+    for spec in plugins:
+        closed(spec, {"id", "required", "dependencies", "config"})
+        # Literal registry order: no duplicates or unknown IDs. Service
+        # providers may be optional; their methods then return typed blocks.
+        try:
+            position = KNOWN_PLUGINS.index(spec["id"], cursor)
+        except ValueError as exc:
+            raise ProtocolError("unknown or invalid plugin") from exc
+        if type(spec["required"]) is not bool or type(spec["dependencies"]) is not list or spec["dependencies"] != []:
+            raise ProtocolError("unknown or invalid plugin")
+        cursor = position + 1
+        closed(spec["config"], set(PLUGIN_CONFIG_FIELDS[spec["id"]]))
+    if plugins[0]["id"] != KNOWN_PLUGIN or plugins[0]["required"] is not True:
+        raise ProtocolError("required host plugin missing")
     return profile
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def plugin_files(identifier: str) -> tuple[str, ...]:
+    """Mirror of runtime/cordis/src/composition.ts ``pluginFiles``."""
+    if identifier == KNOWN_PLUGIN:
+        return ("src/composition.ts", "dist/src/composition.js")
+    match = re.fullmatch(r"seraph\.([a-z-]+)\.v1", identifier)
+    if match is None or identifier not in KNOWN_PLUGINS:
+        raise ProtocolError("unknown plugin")
+    name = match[1].replace("-", "_", 1)
+    return (f"src/plugins/{name}/index.ts", f"dist/src/plugins/{name}/index.js", f"src/contracts/{name}.ts",
+            f"dist/src/contracts/{name}.js", "src/plugins/proxy.ts", "dist/src/plugins/proxy.js",
+            "src/contracts/methods.ts", "dist/src/contracts/methods.js", "src/contracts/schema.ts",
+            "dist/src/contracts/schema.js")
+
+
+def plugin_digest(spec: dict[str, Any], files: dict[str, str]) -> str:
+    hashes = {path: files[path] for path in plugin_files(spec["id"])}
+    return hashlib.sha256(_canonical({"id": spec["id"], "required": spec["required"], "config": spec["config"],
+                                      "files": hashes}).encode()).hexdigest()
 
 
 def _trusted_file(path: Path, *, executable: bool = False) -> None:
@@ -130,7 +249,8 @@ def reviewed_composition(*, node_path: Path | None = None, root: Path = PACKAGE_
                 raise CompositionBlocked("runtime_build_stale")
             digest.update(name.encode("ascii") + b"\0" + contents + b"\0")
         composition_digest = hashlib.sha256(json.dumps(profile, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
-        return ReviewedComposition(root, node, version, profile, composition_digest, digest.hexdigest())
+        digests = {spec["id"]: plugin_digest(spec, files) for spec in profile["plugins"]}
+        return ReviewedComposition(root, node, version, profile, composition_digest, digest.hexdigest(), digests)
     except CompositionBlocked:
         raise
     except (OSError, ProtocolError, AttributeError, TypeError, KeyError, ValueError) as exc:

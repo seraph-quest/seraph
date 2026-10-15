@@ -56,6 +56,18 @@ or operator workspace. A managed keyless Linux x64 probe with denied IPv4/IPv6
 socket creation establishes only that platform's owned-child lifecycle; native
 macOS and later typed-service/research migration are not proven by it.
 
+The **Cordis typed service bridge core** from
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) is **Partial**: the
+fourteen typed services and 34-method closed inventory exist as forwarding-only
+providers, with per-domain `RuntimeCompositionState` ownership epochs fencing
+Cordis-bound jobs. Fourteen methods have native Python owners (authority, goal
+read, task admission/inspection/checkpoint/cancel, the four metadata reads and
+the read-artifact-audit journey with explicit `no_learning`); the other twenty,
+including inference, Memory mutations, research, conversation/agent-loop,
+scheduler and bound adapters, return typed `blocked` results. Memory
+composition-snapshot accounting is not shipped. See the
+[guide section](./12-current-app-guide.md#cordis-typed-service-bridge-1007).
+
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.

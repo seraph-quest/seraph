@@ -760,6 +760,7 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
         process.stdin.flush()
         process.stdin.close()
         ordinal = 0
+        denied = False
         while True:
             try:
                 message = receive(parent, payload["deadline_at"])
@@ -767,15 +768,25 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
                 if str(exc) != "original_producer_parent_eof":
                     raise
                 break
-            if (set(message) != {"kind", *OriginalProducerCommand.__dataclass_fields__}
+            if (denied or set(message) != {"kind", *OriginalProducerCommand.__dataclass_fields__}
                     or message["kind"] != "command" or type(message["ordinal"]) is not int
                     or message["ordinal"] != ordinal + 1
                     or message["registration_digest"] != ack.registration_digest):
                 raise ValueError("original_producer_command_order")
             command = OriginalProducerCommand(message["registration_digest"], message["ordinal"], message["argv_digest"])
             _COMMANDS[command] = owner
-            if owner.authorize_command(command) is not True:
-                raise ValueError("original_producer_command_authority_denied")
+            try:
+                authorized = owner.authorize_command(command) is True
+            except Exception:
+                # A committed stop, cutoff or changed authority refuses this
+                # command. The live producer is not abandoned: it spawns
+                # nothing further and still publishes its signed interrupted
+                # prefix, which is verified below before any lane release.
+                authorized = False
+            if not authorized:
+                denied = True
+                send(parent, {"kind": "command_denied", **{key: message[key] for key in command.__dataclass_fields__}})
+                continue
             ordinal += 1
             send(parent, {"kind": "command_ack", **{key: message[key] for key in command.__dataclass_fields__}})
         transport = finish_supervisor(process, deadline=payload["deadline_at"], stream_limit=executor.limits.max_stream_bytes)

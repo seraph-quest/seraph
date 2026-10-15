@@ -901,10 +901,27 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         stopped = await stop_repository_root(source_owner, jobs, job_id=root_id,
             owner=owner, general_task_service=service)
         actual = await asyncio.wait_for(executing, timeout=20)
-        assert actual['cleanup_proven'] is True and actual['recovery_action'] == 'repository_stopped'
-        assert (await jobs.get_job(root_id))['status'] == 'cancelled'
-        assert (await jobs.get_job(binding.invocation_id))['status'] == 'cancelled'
-        assert root_id not in source_owner._iterative_lanes
+        # The original producer is interrupted and reaped, and its partial
+        # prefix is physically read back. A killed command's effects are not
+        # known, so Stop alone never releases the original: the Root, native
+        # child, reservation and lane stay held as a stop-pending partial
+        # until reconciliation (managed recovery follow-up of #1009).
+        from src.execution.repo_supervisor import start_identity
+        assert stopped['pending'] is True
+        assert actual['cleanup_proven'] is True and actual['status'] == 'held_partial'
+        assert actual['stop_pending'] is True and actual['recovery_action'] == 'repository_stop_pending'
+        assert start_identity(marker['pid']) != marker['pid_start_identity']
+        assert (await jobs.get_job(root_id))['status'] == 'running'
+        assert (await jobs.get_job(binding.invocation_id))['status'] == 'running'
+        async with factory() as db:
+            from src.workflows.repo_repair_source import _repository_record
+            run = await jobs._fetch(db, root_id)
+            assert jobs._repo_repair_reservation_state(run)['status'] == 'held'
+            assert _repository_record(run, 'repository:stop-intent:v1') is not None
+            identity = actual['iteration_id']
+            for kind in ('cleanup', 'readback'):
+                assert _repository_record(run, 'repository:' + kind + ':' + identity)['status'] == 'held_partial'
+        assert root_id in source_owner._iterative_lanes
         assert len(contacted) == 1
         return
     executed = await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,

@@ -16,7 +16,8 @@ from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 
 from .contracts import succeeded
 from .dispatch import (READ_JOB_KIND, NativeServiceBlocked, _append_receipt, _canonical, _digest, _writer,
-                       cas_run, checkpoint_receipt, operation_ref, read_context)
+                       cas_run, checkpoint_receipt, operation_ref, read_context,
+                       transient_storage_error)
 from .ownership import ARTIFACT_CHILDREN
 
 ARTIFACT_TYPE = "cordis_service_read"
@@ -182,7 +183,10 @@ async def dispatch_artifact_operation(dispatcher, frame, payload, scope):
                 return result
         except (OperationalError, PoolTimeoutError) as exc:
             # The file already exists: storage contention while settling is an
-            # unproven physical effect, never harmless busy contention.
+            # unproven physical effect, never harmless busy contention. Other
+            # storage faults still fence the boot.
+            if not transient_storage_error(exc):
+                raise
             raise NativeServiceBlocked("native_artifact_owner_operation_unproven") from exc
     async with dispatcher.jobs._session() as db:
         run, context = await _current(dispatcher, db, scope, method)

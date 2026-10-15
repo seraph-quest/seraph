@@ -75,13 +75,14 @@ async def _persist_bound_admission_receipt(
 _sync_bridge = local()
 
 
-def sync_bridge_caller_thread() -> int | None:
-    """Thread id blocked joining the current bridge thread, if this is one.
+def sync_bridge_blocked_callers() -> tuple[int, ...]:
+    """Thread ids blocked, directly or through nested bridges, on this thread.
 
-    That caller cannot release anything it holds until the bridge returns, so
-    a lock it holds must fail fast here instead of waiting forever.
+    Each of them is joining a bridge thread in the chain that leads here, so
+    none can release anything it holds until this bridge returns; a lock held
+    by any of them must fail fast instead of waiting forever.
     """
-    return getattr(_sync_bridge, "caller", None)
+    return getattr(_sync_bridge, "callers", ())
 
 
 def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
@@ -94,10 +95,11 @@ def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
     result: list[_SyncResult] = []
     error: list[BaseException] = []
     caller_context = contextvars.copy_context()
-    caller_thread = get_ident()
+    # A bridge started from inside another bridge inherits its blocked chain.
+    blocked_callers = (*sync_bridge_blocked_callers(), get_ident())
 
     def runner() -> None:
-        _sync_bridge.caller = caller_thread
+        _sync_bridge.callers = blocked_callers
         try:
             result.append(caller_context.run(asyncio.run, awaitable))
         except BaseException as exc:  # pragma: no cover - defensive thread bridge

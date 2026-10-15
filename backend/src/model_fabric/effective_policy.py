@@ -38,9 +38,9 @@ class LoopAgnosticLock:
         while not self._lock.acquire(blocking=False):
             holder = self._holder
             if holder is not None:
-                from .execution import sync_bridge_caller_thread
-                if holder == sync_bridge_caller_thread():
-                    # The holder is blocked joining this bridge thread and can
+                from .execution import sync_bridge_blocked_callers
+                if holder in sync_bridge_blocked_callers():
+                    # The holder is blocked joining this bridge chain and can
                     # never release: fail instead of deadlocking.
                     raise RuntimeError("configuration_mutation_lock is held by the caller blocked on this sync bridge")
             await asyncio.sleep(delay)

@@ -83,6 +83,39 @@ async def test_bridge_from_the_holding_loop_thread_fails_fast_instead_of_deadloc
     assert not lock.locked()
 
 
+def test_nested_bridges_from_the_holding_loop_thread_fail_fast():
+    """Holder A -> bridge B -> bridge C -> acquire must raise, not hang."""
+    lock = LoopAgnosticLock()
+    outcome: list[BaseException | str] = []
+
+    async def innermost() -> None:
+        async with lock:
+            pass
+
+    async def middle() -> None:
+        # Runs on bridge B's loop, so this starts a second bridge C.
+        _run_awaitable_sync(innermost())
+
+    def scenario() -> None:
+        async def holder() -> None:
+            async with lock:
+                _run_awaitable_sync(middle())
+        try:
+            asyncio.run(holder())
+            outcome.append("no error")
+        except BaseException as exc:
+            outcome.append(exc)
+
+    # A daemon thread bounds a regression: the suite fails instead of hanging.
+    worker = threading.Thread(target=scenario, daemon=True)
+    worker.start()
+    worker.join(10)
+    assert not worker.is_alive(), "nested sync bridge deadlocked on the held lock"
+    assert len(outcome) == 1 and isinstance(outcome[0], RuntimeError)
+    assert "held by the caller blocked on this sync bridge" in str(outcome[0])
+    assert not lock.locked()
+
+
 @pytest.mark.asyncio
 async def test_cancelled_waiter_does_not_leave_the_lock_held():
     lock = LoopAgnosticLock()

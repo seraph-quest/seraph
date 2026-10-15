@@ -847,7 +847,14 @@ costs, and embedding usefulness remain externally unverified.
   shows the worst case per call (declared window + output cap) in tokens, in
   dollars when the operator enters preview-only $/M prices (otherwise at a
   $3/$15 reference), and warns when the bound is below it. Chat and agent turns
-  report the latch with `recovery_action: review_cost_overrun`.
+  report the latch with `recovery_action: review_cost_overrun` and the minimum
+  bound that reviews it (`minimum_request_bound_microusd`, the snapshot's
+  `overrun_max_cost_microusd`). **Inference accounting** lists up to 16
+  `unreviewed_overruns` (operation, job, runtime path, charge and held bound in
+  $ and µUSD) and the minimum bound. A save whose largest enabled bound is below
+  that minimum is refused before any policy, credential or accounting change
+  with HTTP 409 `request_bound_below_overrun`. A new bound changes the route
+  contract, so Prove route (billed canaries) must run again after the review.
 - **Proof lifetime and Prove route.** The canary section offers a 1-, 8- or
   24-hour proof lifetime (the backend maximum, published as
   `canary_proof_ttl.max_seconds`). **Prove route** runs one canary per required

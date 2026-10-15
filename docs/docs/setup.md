@@ -42,9 +42,11 @@ not through environment model variables.
    output is capped by max output tokens, but OpenRouter bills what the call
    actually costs. **If a call is billed above its bound, Seraph records the
    overrun and blocks every further OpenRouter call** (chat, agent turns and
-   background jobs) until you review it: find the overrun under **Inference
-   accounting**, raise the request bound to at least the billed charge and save
-   the setup again. Chat names this as "an earlier call was billed above its
+   background jobs) until you review it: **Inference accounting** shows each
+   overrun charge and the minimum bound; raise the request bound to at least
+   that amount and save the setup again (a lower bound is refused with the
+   required minimum), then press **Prove route** again, because the new bound
+   changes the route. Chat names this as "an earlier call was billed above its
    request cost bound". Size the bound for a full prompt window plus the output
    cap: the panel previews that worst case in tokens and, if you enter the
    model's $/M prices (preview only, not saved), in dollars, and warns when the

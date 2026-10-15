@@ -17,6 +17,7 @@ from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import (
     openrouter_route_blocked_message,
+    route_block_overrun_minimum,
     route_error_from,
     run_direct_local_chat,
     should_use_direct_local_chat,
@@ -987,7 +988,9 @@ async def websocket_chat(websocket: WebSocket):
                     continue
                 except NoCompliantModelRouteError as exc:
                     safe_error = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
-                    blocked_message = openrouter_route_blocked_message(exc)
+                    blocked_message = openrouter_route_blocked_message(
+                        exc, minimum_bound_microusd=await route_block_overrun_minimum(exc),
+                    )
                     logger.info("Direct OpenRouter websocket chat blocked before provider contact", extra={"reason": safe_error})
                     await log_agent_run_event(
                         session_id=session.id,
@@ -1289,7 +1292,11 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_text(
                     WSResponse(
                         type="error",
-                        content=openrouter_route_blocked_message(exc, provider_contacted=contacted),
+                        content=openrouter_route_blocked_message(
+                            exc,
+                            provider_contacted=contacted,
+                            minimum_bound_microusd=await route_block_overrun_minimum(exc),
+                        ),
                         reason=NoCompliantModelRouteError.code,
                         session_id=session.id,
                         seq=_next_seq(),

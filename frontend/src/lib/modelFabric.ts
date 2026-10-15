@@ -223,6 +223,12 @@ export interface InferenceAccountingStatus {
   remaining_microusd?: number | null;
   operations_truncated?: boolean;
   operation_count?: number;
+  /** Largest unreviewed settled charge; a saved request bound must cover it. */
+  overrun_max_cost_microusd?: number;
+  unreviewed_overruns?: Array<{
+    operation_id: string; job_id: string; runtime_path: string; period_id: string;
+    bound_microusd: number; actual_cost_microusd: number;
+  }>;
   operations: Array<{
     operation_id: string; job_id: string; owner_id: string; runtime_path: string;
     state: string; revision: number; bound_microusd: number; period_id: string;
@@ -258,6 +264,16 @@ export function normalizeInferenceAccounting(value: unknown): InferenceAccountin
     remaining_microusd: typeof record.remaining_microusd === "number" ? record.remaining_microusd : null,
     operations_truncated: record.operations_truncated === true,
     operation_count: typeof record.operation_count === "number" ? record.operation_count : undefined,
+    overrun_max_cost_microusd: typeof record.overrun_max_cost_microusd === "number" && Number.isSafeInteger(record.overrun_max_cost_microusd)
+      && record.overrun_max_cost_microusd >= 0 ? record.overrun_max_cost_microusd : undefined,
+    unreviewed_overruns: Array.isArray(record.unreviewed_overruns) ? record.unreviewed_overruns.slice(0, 16).flatMap((item) => {
+      const row = recordOf(item);
+      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string"
+        || !Number.isSafeInteger(row.bound_microusd) || !Number.isSafeInteger(row.actual_cost_microusd)) return [];
+      return [{ operation_id: row.operation_id, job_id: row.job_id, runtime_path: String(row.runtime_path ?? ""),
+        period_id: String(row.period_id ?? ""), bound_microusd: row.bound_microusd as number,
+        actual_cost_microusd: row.actual_cost_microusd as number }];
+    }) : [],
     operations: operations.flatMap((item) => {
       const row = recordOf(item);
       if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string" || typeof row.revision !== "number" || typeof row.bound_microusd !== "number") return [];

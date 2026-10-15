@@ -27,6 +27,7 @@ from config.settings import settings
 from src.agent.direct_chat import (
     openrouter_route_block_reason,
     openrouter_route_block_recovery,
+    route_block_overrun_minimum,
     route_error_from,
     run_direct_local_chat,
     should_use_direct_local_chat,
@@ -78,13 +79,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _route_block_detail(error: BaseException, *, provider_contacted: bool = False) -> dict[str, object]:
+async def _route_block_detail(error: BaseException, *, provider_contacted: bool = False) -> dict[str, object]:
     reason = openrouter_route_block_reason(error)
-    message, recovery_action = openrouter_route_block_recovery(reason, provider_contacted=provider_contacted)
+    minimum = await route_block_overrun_minimum(error)
+    message, recovery_action = openrouter_route_block_recovery(
+        reason, provider_contacted=provider_contacted, minimum_bound_microusd=minimum,
+    )
     return {
         "message": message,
         "route_reason": reason,
         "recovery_action": recovery_action,
+        **({"minimum_request_bound_microusd": minimum} if minimum is not None else {}),
         # A denial after earlier calls of the same agent turn is not a
         # preflight refusal: those calls reached the provider.
         "remote_outcome": "contacted_before_block" if provider_contacted else "not_contacted",
@@ -755,7 +760,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 status_code=503,
                 detail={
                     "code": NoCompliantModelRouteError.code,
-                    **_route_block_detail(exc),
+                    **(await _route_block_detail(exc)),
                 },
             ) from exc
         except Exception as e:
@@ -969,7 +974,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             if contacted else "REST OpenRouter agent chat blocked before provider contact",
             extra={"reason": safe_reason},
         )
-        detail = _route_block_detail(exc, provider_contacted=contacted)
+        detail = await _route_block_detail(exc, provider_contacted=contacted)
         await log_agent_run_event(
             session_id=session.id,
             transport="rest",

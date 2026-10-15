@@ -331,7 +331,7 @@ def test_unreviewed_overrun_names_review_recovery_and_mid_turn_is_honest():
     message, action = openrouter_route_block_recovery(openrouter_route_block_reason(error))
     assert action == "review_cost_overrun"
     assert "billed above its request cost bound" in message
-    assert "raise the request cost bound to at least that charge" in message
+    assert "raise the request cost bound to at least the billed charge shown there" in message
     assert message.endswith("No model call was made.")
 
     mid_turn = openrouter_route_blocked_message(error, provider_contacted=True)
@@ -520,3 +520,30 @@ def test_enabled_memory_consolidation_still_flushes(background_workspace):
         assert asyncio.run(flush.flush_session_memory("session-1", trigger="post_response")) is True
     consolidate.assert_awaited_once()
     flush._reset_memory_flush_state()
+
+
+def test_overrun_message_names_the_minimum_bound_and_reproving():
+    from src.agent.direct_chat import microusd_dollars
+
+    message, action = openrouter_route_block_recovery(
+        "provider_charge_exceeded_reservation", minimum_bound_microusd=612_340)
+    assert action == "review_cost_overrun"
+    assert "at least $0.61234 (612,340 µUSD, the largest unreviewed charge)" in message
+    assert "press Prove route again" in message
+    assert microusd_dollars(1_000_000) == "1" and microusd_dollars(50_000) == "0.05"
+
+
+@pytest.mark.asyncio
+async def test_overrun_minimum_is_read_only_for_overrun_blocks():
+    from src.agent.direct_chat import route_block_overrun_minimum
+    from src.workflows.job_runtime import durable_job_repository
+
+    snapshot = AsyncMock(return_value={"status": "blocked", "overrun_max_cost_microusd": 612_340})
+    with patch.object(durable_job_repository, "inference_accounting_snapshot", snapshot):
+        assert await route_block_overrun_minimum(
+            NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))) == 612_340
+        assert await route_block_overrun_minimum(NoCompliantModelRouteError(("proof_missing:text",))) is None
+    snapshot.assert_awaited_once()
+    with patch.object(durable_job_repository, "inference_accounting_snapshot", AsyncMock(side_effect=RuntimeError("x"))):
+        assert await route_block_overrun_minimum(
+            NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))) is None

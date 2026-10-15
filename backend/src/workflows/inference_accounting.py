@@ -857,6 +857,10 @@ class InferenceAccountingRepositoryMixin:
                         "reserved_microusd": reserved, "unknown_microusd": unknown,
                         "remaining_microusd": max(0, account.ceiling_microusd - committed - reserved - unknown),
                         "overrun_max_cost_microusd": max((row["actual_cost_microusd"] for row in overruns), default=0),
+                        # Bounded projection so the operator can see each charge to review.
+                        "unreviewed_overruns": [{key: row[key] for key in ("operation_id", "job_id", "runtime_path",
+                            "period_id", "bound_microusd", "actual_cost_microusd")}
+                            for row in sorted(overruns, key=lambda item: -item["actual_cost_microusd"])[:16]],
                         "operation_count": len(rows), "operations_truncated": len(rows) > 128,
                         "operations": [_operator_operation(row) for row in sorted((item for item in rows if job_id is None or item.job_id == job_id), key=lambda item: (item.state not in {"reserved", "contact_started", "unknown"}, -item.priority, item.sequence))[:128]],
                         "memory_status": "no_learning"}

@@ -43,15 +43,46 @@ def openrouter_route_block_reason(error: BaseException) -> str:
     return "no_compliant_route"
 
 
-def _route_block_body(reason: str) -> tuple[str, str]:
+def microusd_dollars(value: int) -> str:
+    """Exact dollar text for an integer micro-USD amount, e.g. 61234 -> 0.061234."""
+    whole, fraction = divmod(int(value), 1_000_000)
+    text = f"{fraction:06d}".rstrip("0")
+    return f"{whole}.{text}" if text else str(whole)
+
+
+async def route_block_overrun_minimum(error: BaseException) -> int | None:
+    """Return the bound that reviews the current overrun, for an overrun block only.
+
+    The value is the largest unreviewed settled charge from the accounting
+    owner: a bounded, non-sensitive amount the operator needs to recover.
+    """
+    if openrouter_route_block_reason(error).partition(":")[0] != PROVIDER_OVERRUN_CODE:
+        return None
+    try:
+        from src.workflows.job_runtime import durable_job_repository
+
+        snapshot = await durable_job_repository.inference_accounting_snapshot()
+    except Exception:
+        return None
+    value = snapshot.get("overrun_max_cost_microusd")
+    return value if type(value) is int and 0 < value <= 1_000_000_000_000 else None
+
+
+def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) -> tuple[str, str]:
     code, _, detail = reason.partition(":")
     capability = detail.replace("_", " ") if detail else ""
     if code == PROVIDER_OVERRUN_CODE:
+        target = (
+            f"at least ${microusd_dollars(minimum_bound_microusd)} ({minimum_bound_microusd:,} µUSD, "
+            "the largest unreviewed charge)"
+            if minimum_bound_microusd else "at least the billed charge shown there"
+        )
         return (
             "OpenRouter is paused: an earlier call was billed above its request cost bound, and Seraph "
             "blocks every further paid call until that overrun is reviewed. Open "
-            f"{_SETTINGS}, find the overrun under Inference accounting, raise the request cost bound to "
-            "at least that charge and save the setup to record the review.",
+            f"{_SETTINGS}, check the overrun under Inference accounting, raise the request cost bound to "
+            f"{target} and save the setup to record the review. The new bound changes the route, so "
+            "press Prove route again afterwards (each canary is one real, billed provider call).",
             "review_cost_overrun",
         )
     if code == "proof_expired":
@@ -105,7 +136,12 @@ def _route_block_body(reason: str) -> tuple[str, str]:
     )
 
 
-def openrouter_route_block_recovery(reason: str, *, provider_contacted: bool = False) -> tuple[str, str]:
+def openrouter_route_block_recovery(
+    reason: str,
+    *,
+    provider_contacted: bool = False,
+    minimum_bound_microusd: int | None = None,
+) -> tuple[str, str]:
     """Map one selector rejection code to an operator message and recovery action.
 
     The codes come from the canonical selector or the accounting owner; only the
@@ -114,7 +150,7 @@ def openrouter_route_block_recovery(reason: str, *, provider_contacted: bool = F
     of the same turn reached the provider, so the message must not claim that
     no model call was made.
     """
-    body, action = _route_block_body(reason)
+    body, action = _route_block_body(reason, minimum_bound_microusd)
     if provider_contacted:
         return f"{body} {_MID_TURN}", action
     if action == "configure_openrouter":
@@ -122,9 +158,16 @@ def openrouter_route_block_recovery(reason: str, *, provider_contacted: bool = F
     return f"{body} {_NO_CALL}", action
 
 
-def openrouter_route_blocked_message(error: BaseException, *, provider_contacted: bool = False) -> str:
+def openrouter_route_blocked_message(
+    error: BaseException,
+    *,
+    provider_contacted: bool = False,
+    minimum_bound_microusd: int | None = None,
+) -> str:
     return openrouter_route_block_recovery(
-        openrouter_route_block_reason(error), provider_contacted=provider_contacted
+        openrouter_route_block_reason(error),
+        provider_contacted=provider_contacted,
+        minimum_bound_microusd=minimum_bound_microusd,
     )[0]
 
 

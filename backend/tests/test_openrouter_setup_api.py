@@ -325,6 +325,33 @@ async def test_v2_activation_requires_exact_accounting_and_reserve_readback(clie
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_v2_bound_below_unreviewed_overrun_is_refused_specifically_before_mutation(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.workflows.job_runtime import durable_job_repository
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    snapshot = durable_job_repository.inference_accounting_snapshot
+    async def overrun_snapshot(**kwargs):
+        result = await snapshot(**kwargs)
+        result["overrun_max_cost_microusd"] = 612_340
+        return result
+    monkeypatch.setattr(durable_job_repository, "inference_accounting_snapshot", overrun_snapshot)
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    before = path.read_bytes() if path.exists() else None
+    response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
+        "openrouter_setup": _v2_setup_payload(api_key="sk-overrun-fixture")})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == "request_bound_below_overrun"
+    assert detail["minimum_request_bound_microusd"] == 612_340
+    assert "at least $0.61234 (612,340 µUSD)" in detail["message"]
+    assert "Prove route" in detail["message"]
+    # Refused before revocation, credential or accounting mutation.
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert read_model_fabric_configuration().egress_revoked is False
+    assert await vault_repository.get("openrouter_api_key") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.parametrize("mutation", (
     "legacy_model", "legacy_capabilities", "unknown_slot", "string_enabled",
     "boolean_bound", "missing_upstream", "mixed_embedding", "vision_without_text",

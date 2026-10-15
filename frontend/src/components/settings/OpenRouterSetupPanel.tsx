@@ -358,7 +358,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
                 <span className="text-retro-text/40">{dollarPreview(route.requestCostBoundDollars)} reserved per call</span>
               </div>
               <div className="col-span-2 text-retro-text/40">
-                The bound is reserved per call; OpenRouter does not cap the charge at it. If a call is billed above the bound, Seraph records the overrun and blocks every further OpenRouter call until you review it: raise the bound to at least the billed charge (see Inference accounting) and save this setup.
+                The bound is reserved per call; OpenRouter does not cap the charge at it. If a call is billed above the bound, Seraph records the overrun and blocks every further OpenRouter call until you review it: raise the bound to at least the billed charge shown under Inference accounting and save this setup, then press Prove route again (a new bound changes the route, and canaries are billed).
               </div>
               <label htmlFor={"openrouter-" + slot + "-input-price"} className="text-retro-text/40">Model prices ($/M, preview only)</label>
               <div className="flex min-w-0 items-center gap-1">

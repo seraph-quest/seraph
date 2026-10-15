@@ -561,6 +561,12 @@ async def _put_near_text(body, persisted):
         egress_revision=final_revision, egress_revoked=persisted.egress_revoked and not setup.enabled,
         egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
     validate_active_model_fabric_configuration(target)
+    planned_bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
+    if old_or is not None:
+        planned_bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
+        if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
+            planned_bounds.append(old_or.request_cost_bound_microusd)
+    await _require_review_covers_overrun(max(planned_bounds, default=None))
     previous_key = await vault_repository.get("near_text_api_key") if raw_key.strip() else None
     mutated = False
     root = Path(settings.workspace_dir).resolve()
@@ -716,6 +722,28 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
     return await model_fabric_settings_payload()
 
 
+async def _require_review_covers_overrun(review: int | None) -> None:
+    """Refuse, before any mutation, a save whose bound cannot review the overrun.
+
+    Saving reviews unreviewed overruns only up to the largest enabled request
+    bound; a lower bound would otherwise fail late with a generic accounting
+    error after the policy was already revoked for the save.
+    """
+    from src.agent.direct_chat import microusd_dollars
+    from src.workflows.job_runtime import durable_job_repository
+
+    snapshot = await durable_job_repository.inference_accounting_snapshot()
+    minimum = snapshot.get("overrun_max_cost_microusd")
+    if type(minimum) is int and minimum > 0 and (review is None or review < minimum):
+        raise HTTPException(status_code=409, detail={
+            "code": "request_bound_below_overrun",
+            "minimum_request_bound_microusd": minimum,
+            "message": (f"The request cost bound must be at least ${microusd_dollars(minimum)} "
+                f"({minimum:,} µUSD) to review the unreviewed overrun. Raise it and save again, "
+                "then press Prove route (billed canaries)."),
+        })
+
+
 async def _put_openrouter_v2(body, setup_input, persisted):
     """Witnessed revoke→credential/accounting→activate, never cross-store atomic."""
     from src.workspace.accounting_witness import maintenance_accounting_lock, PolicyRevisionConflict, policy_continuity
@@ -762,6 +790,12 @@ async def _put_openrouter_v2(body, setup_input, persisted):
         near = replace(persisted.near_text, spend_ceiling_microusd=setup.spend_ceiling_microusd)
         target = replace(target, near_text=_carry_near_consent(near, persisted, final_revision))
     validate_active_model_fabric_configuration(target)
+    planned_review = max((route.request_cost_bound_microusd for route in (setup.routes or {}).values() if route is not None and route.enabled), default=None)
+    if setup.routes is None:
+        planned_review = setup.request_cost_bound_microusd
+    if target.near_text is not None and target.near_text.enabled:
+        planned_review = max(planned_review or 0, target.near_text.request_cost_bound_microusd)
+    await _require_review_covers_overrun(planned_review)
     previous_process_value = str(settings.openrouter_api_key or "")
     previous_vault_value = await _snapshot_setup_credential() if raw_key.strip() else None
     credential_mutated = False

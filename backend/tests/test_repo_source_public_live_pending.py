@@ -58,7 +58,7 @@ async def test_authenticated_live_original_producer_pending_preserves_root_and_p
         original_start(tasks)
         captured["tasks"] = tasks
 
-    async def observe_issuer(service, jobs, job, *, register_ready, authorize_command):
+    async def observe_issuer(service, jobs, job, *, register_ready, authorize_command, registration_readback):
         assert "producer_owner" not in captured
         def observe_ready(ready):
             ack = register_ready(ready)  # Original commit/readback/fence first.
@@ -74,7 +74,8 @@ async def test_authenticated_live_original_producer_pending_preserves_root_and_p
             assert release.wait(window), "Original bounded ACK observation expired"
             return ack  # Exact original object, never reconstructed authority.
         actual = await original_issue(service, jobs, job,
-            register_ready=observe_ready, authorize_command=authorize_command)
+            register_ready=observe_ready, authorize_command=authorize_command,
+            registration_readback=registration_readback)
         captured.update(producer_owner=actual, source=service, jobs=jobs, job=job)
         return actual
 

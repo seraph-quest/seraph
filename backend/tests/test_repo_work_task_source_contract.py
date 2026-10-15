@@ -19,8 +19,11 @@ def test_legacy_envelope_canonical_shape_does_not_gain_null_repository_field():
         "descriptors": [descriptor().model_dump(mode="json")],
         "strategy": {"schema_version": 1, "status": "none", "method_id": None,
             "version": None, "digest": None, "typed_data": None, "reason": None},
-        "evidence": [], "proposal_group": None, "proposal_provenance": None}
+        "evidence": [], "proposal_group": None, "proposal_provenance": None,
+        # The current non-repository envelope (#999) serializes this null field.
+        "specialist_handoff": None}
     envelope = GeneralTaskEnvelope.model_validate(fields)
+    assert "repository_source" not in envelope.model_dump(mode="json")
     assert envelope.model_dump(mode="json") == fields
     assert json.loads(envelope.model_dump_json()) == fields
 

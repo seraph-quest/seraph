@@ -8,6 +8,7 @@ native child or parent.
 
 import pytest
 
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
@@ -80,7 +81,7 @@ def test_unsealed_wait_and_final_objects_are_not_transition_authority():
 
 
 @pytest.mark.asyncio
-async def test_sqlite_wait_writer_rejects_unsealed_source_without_mutating_child(task_runtime):
+async def test_sqlite_wait_writer_rejects_unsealed_source_without_mutating_child(task_runtime, native_admission_lifecycle):
     from tests.test_general_task_native_guard import admitted_child
     from src.work_board.general_task_native import publish_positive_claim
 
@@ -112,7 +113,7 @@ async def test_sqlite_wait_writer_rejects_unsealed_source_without_mutating_child
 
 
 @pytest.mark.asyncio
-async def test_sqlite_final_writer_rejects_unsealed_source_without_mutating_child(task_runtime):
+async def test_sqlite_final_writer_rejects_unsealed_source_without_mutating_child(task_runtime, native_admission_lifecycle):
     from tests.test_general_task_native_guard import admitted_child
     from src.work_board.general_task_native import publish_positive_claim
 

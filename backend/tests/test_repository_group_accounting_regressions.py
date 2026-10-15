@@ -7,13 +7,14 @@ from src.model_fabric.accounting import DurableInferenceBrokerMixin
 from src.workflows.general_task_accounting import entry_for, validate_recovered_entry
 from src.workflows.inference_accounting import InferenceAccountingError
 from src.work_board.repository import BoardError
+from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_general_task_continuation_accounting import continuation_fixture
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
 
 @pytest.mark.asyncio
-async def test_released_precontact_calls_do_not_renew_original_group_allowance(task_runtime, monkeypatch):
+async def test_released_precontact_calls_do_not_renew_original_group_allowance(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch, max_calls=1)
     async def deny_before_contact(_broker, _handle):
         raise InferenceAccountingError("literal_precontact_denial")
@@ -36,7 +37,7 @@ async def test_released_precontact_calls_do_not_renew_original_group_allowance(t
 
 
 @pytest.mark.asyncio
-async def test_original_row_recovery_rechecks_role_binding_and_current_parent(task_runtime, monkeypatch):
+async def test_original_row_recovery_rechecks_role_binding_and_current_parent(task_runtime, monkeypatch, native_admission_lifecycle):
     sessions, dispatcher, planner, transport, owner, parent, task, attempt, manifest, envelope = await continuation_fixture(task_runtime, monkeypatch)
     async with sessions() as db:
         await planner.continue_plan(db, owner, parent=parent, task=task, attempt=attempt,

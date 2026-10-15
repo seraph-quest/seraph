@@ -342,7 +342,12 @@ async def _validate_repository_stop_input_sql(db, context):
     from src.work_board.input_artifacts import _resolve_input_artifact_metadata_for_task
     task, parent, attempt = (context[key] for key in ("task", "parent", "attempt"))
     from src.workflows.general_task_guard import assert_original_parent_authority
+    from src.workflows.general_task_accounting import validate_group_owner
     assert_original_parent_authority(parent)
+    # An expired original group can only be closed by its automatic cleanup.
+    # This SQL-only check precedes every private Source read; the later
+    # proposal recheck repeats it under the final writer.
+    await validate_group_owner(db, context["group"])
     if (task.capability_id != "agent.task.v1" or attempt.task_id != task.task_id
             or attempt.workflow_run_id != parent.run_identity or attempt.ended_at is not None
             or attempt.cancel_requested_at is not None or task.owner_principal_id != parent.owner_principal_id

@@ -23,6 +23,16 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 from tests.repository_admission_lifecycle import repository_admission_signer
 
 
+# Each case runs only inside the external two-epoch harness, which checks out a
+# pinned historical tree and supplies these variables. An ordinary run has no
+# historical epoch to classify.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("SERAPH_HISTORICAL_STARTUP_PACKET")
+    or not os.environ.get("SERAPH_HISTORICAL_STARTUP_MODE"),
+    reason="requires the two-epoch historical startup harness "
+           "(SERAPH_HISTORICAL_STARTUP_PACKET/SERAPH_HISTORICAL_STARTUP_MODE)")
+
+
 BASES = {
     "v1": "19399fbd52bee21242419fabba502d49fb3fa91b",
     "v2": "0f4910eb11dec08fcffd2bbcdb471bbad0c95110",

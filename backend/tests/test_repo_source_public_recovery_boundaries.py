@@ -18,6 +18,14 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 
 
+# Both journeys drive the public Source recovery action to completion. That
+# action is held fail-closed (HTTP 503) for #1009; the inference deadline cap
+# these journeys also cover is proven without it in
+# test_repository_work_natural_intent.py.
+pytestmark = pytest.mark.skip(
+    reason="public Source crash recovery is held (fail-closed 503) pending the #1009 managed-recovery follow-up")
+
+
 def _original_limits(monkeypatch, *, iterations, seconds):
     original = fixtures._actual_source_callback_journey
     async def construct(*args, **kwargs):

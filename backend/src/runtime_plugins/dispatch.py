@@ -72,8 +72,7 @@ def transient_storage_error(exc: BaseException) -> bool:
     if isinstance(exc, PoolTimeoutError):
         return True
     message = str(getattr(exc, "orig", exc)).lower()
-    return isinstance(exc, OperationalError) and ("database is locked" in message or "database is busy" in message
-                                                  or "database table is locked" in message)
+    return isinstance(exc, OperationalError) and ("database is locked" in message or "database is busy" in message)
 
 
 class NativeServiceBlocked(ValueError):

@@ -19,6 +19,7 @@ import threading
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, event, func, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -1097,6 +1098,59 @@ async def test_locked_database_during_a_read_journey_blocks_only_that_job(live_h
     fresh = await execute_native_read(operator=operator, candidate=candidate, idempotency_key="busy-2",
                                       host=host, jobs=jobs)
     assert fresh["job"]["status"] == "succeeded"
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_contention_after_stage_wrote_its_file_is_unproven_not_busy(live_host, service_db, monkeypatch):
+    """A lock while settling a written stage is an unresolved effect, never busy."""
+    from src.runtime_plugins import service_artifacts
+    host, jobs, calls = live_host
+    operator = await _operator()
+    original_readback = service_artifacts.readback
+    state = {"raised": False}
+
+    def locked_once(run, context):
+        if not state["raised"]:
+            state["raised"] = True
+            raise OperationalError("UPDATE workflow_run_state", {}, Exception("database is locked"))
+        return original_readback(run, context)
+    monkeypatch.setattr(service_artifacts, "readback", locked_once)
+    before = host.service_dispatch.transient_failures
+    _, digest = native_capability_inventory()
+    candidate = {"schema_version": 1, "method": "capabilities.list", "cursor": None, "limit": 2,
+                 "native_inventory_digest": digest}
+    with pytest.raises(NativeServiceBlocked) as unproven:
+        await execute_native_read(operator=operator, candidate=candidate, idempotency_key="stage-lock",
+                                  host=host, jobs=jobs)
+    assert state["raised"]
+    assert unproven.value.reason_code == "native_artifact_owner_operation_unproven"
+    assert host.service_dispatch.transient_failures == before
+    async with get_session() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.idempotency_key == "stage-lock"))).scalar_one()
+    assert run.status == "blocked" and run.failure_reason == "native_artifact_owner_operation_unproven"
+    assert [item["status"] for item in json.loads(run.effect_receipts_json)] == ["intent"]
+    assert host.admitting
+
+
+@pytest.mark.asyncio
+async def test_persistent_contention_while_blocking_leaves_the_job_for_stale_recovery():
+    """Marking a job blocked under persistent contention never escapes as a raw error."""
+    from types import SimpleNamespace
+    from src.runtime_plugins.service_jobs import _block
+
+    class LockedJobs:
+        async def transition_job(self, *args, **kwargs):
+            raise OperationalError("UPDATE workflow_run_state", {}, Exception("database is locked"))
+
+    class BrokenJobs:
+        async def transition_job(self, *args, **kwargs):
+            raise OperationalError("UPDATE workflow_run_state", {}, Exception("disk I/O error"))
+    scope = SimpleNamespace(witness={"invocation_ref": "job-1", "lease_owner": "owner", "fence": 1})
+    await _block(LockedJobs(), scope, "native_child_result_mismatch")
+    with pytest.raises(OperationalError):
+        await _block(BrokenJobs(), scope, "native_child_result_mismatch")
 
 
 @pytest.mark.asyncio

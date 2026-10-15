@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 import hashlib
 import json
 
+from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
+
 from .contracts import succeeded
 from .dispatch import (READ_JOB_KIND, NativeServiceBlocked, _append_receipt, _canonical, _digest, _writer,
                        cas_run, checkpoint_receipt, operation_ref, read_context)
@@ -151,32 +153,37 @@ async def dispatch_artifact_operation(dispatcher, frame, payload, scope):
         except (OSError, BoardError) as exc:
             # The committed intent stays unresolved; a new call cannot replay it.
             raise NativeServiceBlocked("native_artifact_owner_operation_unproven") from exc
-        async with dispatcher.jobs._session() as db:
-            run, context = await _current(dispatcher, db, scope, method)
-            ops = context["operations"]
-            if (len(ops) != 1 or ops[0]["state"] != "intent" or ops[0]["call_ref"] != call_ref
-                    or ops[0]["request_ref"] != request_ref):
-                raise NativeServiceBlocked("native_artifact_operation_changed")
-            reference, actual, digest = readback(run, context)
-            from src.artifacts.registry import build_artifact_record
-            record = build_artifact_record(file_path=reference, artifact_type=ARTIFACT_TYPE, producer=run.job_kind,
-                                           run_id=run.run_identity, session_id=run.session_id, content=actual)
-            artifact_receipt = {key: record[key] for key in ("artifact_id", "artifact_type", "file_path", "producer",
-                                                             "content_sha256", "size_bytes", "exists")}
-            artifact_receipt["recorded_at"] = datetime.now(timezone.utc).isoformat()
-            effects = [item for item in json.loads(run.effect_receipts_json or "[]")
-                       if not (isinstance(item, dict) and item.get("effect_id") == request_ref)]
-            effects.append(_effect_receipt(run, request_ref=request_ref, path=reference, digest=digest,
-                                           status="succeeded", readback_ref=request_ref + ":readback"))
-            result = succeeded(method, {"artifact_ref": record["artifact_id"], "digest": digest,
-                                        "size_bytes": len(actual)})
-            # Seal Python's own result; the owner compares the child's echo to it.
-            ops[0].update(state="settled", artifact_ref=record["artifact_id"], result_digest=_digest(result))
-            await cas_run(db, run, checkpoint_context_json=_canonical(context), effect_receipts_json=_canonical(effects),
-                          artifact_receipts_json=_append_receipt(run.artifact_receipts_json, artifact_receipt,
-                                                                 key="artifact_id"))
-            await db.commit()
-            return result
+        try:
+            async with dispatcher.jobs._session() as db:
+                run, context = await _current(dispatcher, db, scope, method)
+                ops = context["operations"]
+                if (len(ops) != 1 or ops[0]["state"] != "intent" or ops[0]["call_ref"] != call_ref
+                        or ops[0]["request_ref"] != request_ref):
+                    raise NativeServiceBlocked("native_artifact_operation_changed")
+                reference, actual, digest = readback(run, context)
+                from src.artifacts.registry import build_artifact_record
+                record = build_artifact_record(file_path=reference, artifact_type=ARTIFACT_TYPE, producer=run.job_kind,
+                                               run_id=run.run_identity, session_id=run.session_id, content=actual)
+                artifact_receipt = {key: record[key] for key in ("artifact_id", "artifact_type", "file_path", "producer",
+                                                                 "content_sha256", "size_bytes", "exists")}
+                artifact_receipt["recorded_at"] = datetime.now(timezone.utc).isoformat()
+                effects = [item for item in json.loads(run.effect_receipts_json or "[]")
+                           if not (isinstance(item, dict) and item.get("effect_id") == request_ref)]
+                effects.append(_effect_receipt(run, request_ref=request_ref, path=reference, digest=digest,
+                                               status="succeeded", readback_ref=request_ref + ":readback"))
+                result = succeeded(method, {"artifact_ref": record["artifact_id"], "digest": digest,
+                                            "size_bytes": len(actual)})
+                # Seal Python's own result; the owner compares the child's echo to it.
+                ops[0].update(state="settled", artifact_ref=record["artifact_id"], result_digest=_digest(result))
+                await cas_run(db, run, checkpoint_context_json=_canonical(context), effect_receipts_json=_canonical(effects),
+                              artifact_receipts_json=_append_receipt(run.artifact_receipts_json, artifact_receipt,
+                                                                     key="artifact_id"))
+                await db.commit()
+                return result
+        except (OperationalError, PoolTimeoutError) as exc:
+            # The file already exists: storage contention while settling is an
+            # unproven physical effect, never harmless busy contention.
+            raise NativeServiceBlocked("native_artifact_owner_operation_unproven") from exc
     async with dispatcher.jobs._session() as db:
         run, context = await _current(dispatcher, db, scope, method)
         ops = context["operations"]

@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from pathlib import PurePosixPath
 import shutil
@@ -462,23 +463,112 @@ def _validate_allowed_paths(raw: object) -> set[str]:
     return set(normalized)
 
 
+_PATCH_DIFF_GIT = re.compile(r"diff --git a/([^\t ]+) b/([^\t ]+)")
+_PATCH_INDEX = re.compile(r"index [0-9a-f]{7,64}\.\.[0-9a-f]{7,64}(?: 100644| 100755)?")
+_PATCH_HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?")
+
+
+def _patch_header_path(value: str, prefix: str) -> str | None:
+    if value == "/dev/null":
+        return None
+    if not value.startswith(prefix) or "\t" in value:
+        raise WorkerInputError("patch file header is unsupported")
+    raw = value[len(prefix):]
+    path = _safe_relative(raw)
+    if path != raw:
+        raise WorkerInputError("patch path is not canonical")
+    return path
+
+
 def _validate_patch_paths(patch: bytes, allowed_paths: set[str]) -> list[str]:
+    """Strict text-diff grammar: every section names only allowed regular files.
+
+    git apply also honours header-less ``diff --git`` sections, binary
+    patches, renames, copies, mode changes and symlinks. Each of those, and
+    any line outside a counted hunk, is rejected rather than ignored, so the
+    validated path set is exactly the set git can change.
+    """
     if len(patch) > MAX_PATCH_BYTES:
         raise WorkerInputError("patch byte limit exceeded")
-    changed: set[str] = set()
     try:
         text = patch.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise WorkerInputError("patch must be UTF-8") from exc
-    for line in text.splitlines():
-        if line.startswith("+++ b/") or line.startswith("--- a/"):
-            raw = line[6:]
-            if raw == "/dev/null":
-                continue
-            path = _safe_relative(raw)
-            if path not in allowed_paths:
-                raise WorkerInputError(f"patch path is not allowed: {path}")
-            changed.add(path)
+    if "\x00" in text or "\r" in text:
+        raise WorkerInputError("patch contains unsupported control bytes")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    changed: set[str] = set()
+    index = 0
+    while index < len(lines):
+        header_path = None
+        new_file = deleted = False
+        if lines[index].startswith("diff "):
+            match = _PATCH_DIFF_GIT.fullmatch(lines[index])
+            if match is None or match[1] != match[2]:
+                raise WorkerInputError("patch diff header is unsupported")
+            header_path = _patch_header_path("a/" + match[1], "a/")
+            index += 1
+            while index < len(lines) and not lines[index].startswith("--- "):
+                extended = lines[index]
+                if _PATCH_INDEX.fullmatch(extended):
+                    pass
+                elif extended == "new file mode 100644":
+                    new_file = True
+                elif extended in {"deleted file mode 100644", "deleted file mode 100755"}:
+                    deleted = True
+                else:
+                    raise WorkerInputError("patch section is unsupported: " + " ".join(extended.split()[:3])[:64])
+                index += 1
+        if index + 1 >= len(lines) or not lines[index].startswith("--- ") or not lines[index + 1].startswith("+++ "):
+            raise WorkerInputError("patch section requires ---/+++ file headers")
+        old_path = _patch_header_path(lines[index][4:], "a/")
+        new_path = _patch_header_path(lines[index + 1][4:], "b/")
+        if (old_path is None and new_path is None
+                or old_path is not None and new_path is not None and old_path != new_path
+                or header_path is not None and header_path != (new_path or old_path)
+                or new_file != (header_path is not None and old_path is None)
+                or deleted != (header_path is not None and new_path is None)):
+            raise WorkerInputError("patch section header is inconsistent")
+        path = new_path or old_path
+        if path not in allowed_paths:
+            raise WorkerInputError(f"patch path is not allowed: {path}")
+        index += 2
+        hunks = 0
+        while index < len(lines) and lines[index].startswith("@@"):
+            match = _PATCH_HUNK.fullmatch(lines[index])
+            if match is None:
+                raise WorkerInputError("patch hunk header is malformed")
+            old_count = 1 if match[2] is None else int(match[2])
+            new_count = 1 if match[4] is None else int(match[4])
+            index += 1
+            while old_count or new_count:
+                if index >= len(lines):
+                    raise WorkerInputError("patch hunk is truncated")
+                body = lines[index]
+                if body.startswith("\\"):
+                    index += 1
+                    continue
+                if body == "" or body.startswith(" "):
+                    old_count, new_count = old_count - 1, new_count - 1
+                elif body.startswith("-"):
+                    old_count -= 1
+                elif body.startswith("+"):
+                    new_count -= 1
+                else:
+                    raise WorkerInputError("patch hunk line is malformed")
+                if old_count < 0 or new_count < 0:
+                    raise WorkerInputError("patch hunk counts are inconsistent")
+                index += 1
+            while index < len(lines) and lines[index].startswith("\\"):
+                index += 1
+            hunks += 1
+        if not hunks:
+            raise WorkerInputError("patch section has no text hunks")
+        if path in changed:
+            raise WorkerInputError("patch names one path twice")
+        changed.add(path)
     if not changed:
         raise WorkerInputError("patch has no supported file paths")
     return sorted(changed)

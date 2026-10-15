@@ -19,7 +19,7 @@ def receipt(reason):
 
 def test_literal_allowlist_is_exact_original_worker_source():
     source = (Path(__file__).resolve().parents[1] / "src/execution/repo_worker.py").read_text()
-    assert hashlib.sha256(source.encode()).hexdigest() == "8517ce83332510d8966121cf6dd19fbf9b7999b52f82d6af7758366c33458838"
+    assert hashlib.sha256(source.encode()).hexdigest() == "24b546360483dd71a2736c22cdc6af84b2d30b09c53e1fd41a15fd82d0a6237e"
     rows = []
     def visit(node, function=""):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -148,9 +148,9 @@ def test_existing_loaded_library_and_link_helpers_still_reject_unrelated_error()
 def test_original_sandbox_method_and_bootstrap_are_source_pinned():
     root = Path(__file__).resolve().parents[1]
     sandbox = (root / 'src/execution/repo_sandbox.py').read_bytes()
-    assert hashlib.sha256(sandbox).hexdigest() == 'b76ed9b07ea2e9979bb7c795bc7bc29a61d0a70ef706982e702e0fa168e76fb4'
+    assert hashlib.sha256(sandbox).hexdigest() == 'da3df6b6b567d279787da5cd7b0bcf6f1378c4967814b4f127fc38aa51807a62'
     assert native._PUBLICATION_ORIGINAL_EXECUTE_CODE is native._PUBLICATION_ORIGINAL_EXECUTE.__code__
-    raises = [node for node in ast.walk(ast.parse(sandbox)) if isinstance(node, ast.Raise) and node.lineno == 3831]
+    raises = [node for node in ast.walk(ast.parse(sandbox)) if isinstance(node, ast.Raise) and node.lineno == 3853]
     assert len(raises) == 1
     assert raises[0].exc.args[0].value == 'local worker was blocked before terminal readback'
     source = (root / 'src/execution/repo_publication_runtime.py').read_bytes()

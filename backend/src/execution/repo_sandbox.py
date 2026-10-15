@@ -778,30 +778,52 @@ def validate_archive_members(payload: bytes, *, max_bytes: int) -> list[str]:
 
 
 def _patch_paths_from_diff(patch: bytes, allowed_paths: Iterable[str]) -> tuple[str, ...]:
-    """Return and validate the paths named by an approved unified diff."""
+    """Return and validate the paths an approved text diff can change.
+
+    The strict worker grammar rejects header-less, binary, rename, copy,
+    mode and symlink sections. git's own numstat of the same bytes must then
+    name exactly the same text paths, so no section is ignored by one parser
+    and applied by the other.
+    """
+    from src.execution.repo_worker import WorkerInputError, _validate_patch_paths
     allowed = {_safe_relative_path(value) for value in allowed_paths}
     if not allowed or len(allowed) > 64:
         raise RepoSandboxError("allowed_paths is invalid")
     if len(patch) > RepoSandboxLimits().max_patch_bytes:
         raise RepoSandboxError("patch byte limit exceeded")
     try:
-        text = patch.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise RepoSandboxError("patch must be UTF-8") from exc
-    changed: set[str] = set()
-    for line in text.splitlines():
-        if not (line.startswith("+++ b/") or line.startswith("--- a/")):
-            continue
-        raw = line[6:]
-        if raw == "/dev/null":
-            continue
-        path = _safe_relative_path(raw)
-        if path not in allowed:
-            raise RepoSandboxError(f"patch path is not allowed: {path}")
-        changed.add(path)
-    if not changed:
-        raise RepoSandboxError("patch has no supported file paths")
-    return tuple(sorted(changed))
+        changed = _validate_patch_paths(patch, allowed)
+    except WorkerInputError as exc:
+        raise RepoSandboxError(str(exc)) from exc
+    if _git_numstat_paths(patch) != changed:
+        raise RepoSandboxError("patch paths differ from git apply")
+    return tuple(changed)
+
+
+def _git_numstat_paths(patch: bytes) -> list[str]:
+    """Paths git apply would change; binary and rename/copy entries fail.
+
+    Callers apply the approved text with exactly one final newline, so a
+    model diff without one is checked in that applied form.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="seraph-patch-") as scratch:
+        try:
+            result = subprocess.run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "apply",
+                    "--numstat", "-z", "-"], input=patch if patch.endswith(b"\n") else patch + b"\n", cwd=scratch, capture_output=True, timeout=10,
+                env={"PATH": "/usr/bin:/bin", "HOME": scratch, "LANG": "C", "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CEILING_DIRECTORIES": scratch})
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RepoSandboxError("patch could not be checked by git apply") from exc
+    if result.returncode != 0 or not result.stdout.endswith(b"\0"):
+        raise RepoSandboxError("patch is rejected by git apply")
+    paths = []
+    for entry in result.stdout[:-1].split(b"\0"):
+        fields = entry.split(b"\t")
+        if (len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit() or not fields[2]):
+            raise RepoSandboxError("patch contains a binary, rename or copy section")
+        paths.append(fields[2].decode("utf-8", errors="strict"))
+    return sorted(paths)
 
 
 def _worker_test_args(test_args: Iterable[str], allowed_paths: Iterable[str]) -> tuple[str, ...]:

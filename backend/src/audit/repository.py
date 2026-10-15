@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlmodel import select, col
 
-from src.db.engine import get_session
+from src.db.engine import bound_lock_wait, get_session
 from src.db.models import AuditEvent
 from src.db.session_refs import ensure_sessions_exist
 
@@ -23,8 +23,12 @@ class AuditRepository:
         risk_level: str = "low",
         policy_mode: str = "full",
         details: dict[str, Any] | None = None,
+        lock_wait_ms: int | None = None,
     ) -> AuditEvent:
         async with get_session() as db:
+            if lock_wait_ms is not None:
+                # Best-effort audits on read paths give up instead of queueing.
+                await bound_lock_wait(db, lock_wait_ms)
             await ensure_sessions_exist(db, [session_id])
             event = AuditEvent(
                 session_id=session_id,

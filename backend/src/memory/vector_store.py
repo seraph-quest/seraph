@@ -9,7 +9,7 @@ import lancedb
 import pyarrow as pa
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import READ_PATH_AUDIT_WAIT_MS, log_integration_event_sync
 from src.memory.embedder import EmbeddingMetadata, EmbeddingUnavailableError, embed, embedding_metadata
 from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, read_model_fabric_configuration
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry, canonical_workspace_root
@@ -94,6 +94,7 @@ def _log_vector_store_event(outcome: str, details: dict | None = None) -> None:
         name=_TABLE_NAME,
         outcome=outcome,
         details=details,
+        lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
     )
 
 

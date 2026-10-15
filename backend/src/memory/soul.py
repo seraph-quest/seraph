@@ -2,7 +2,7 @@ import logging
 import os
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import READ_PATH_AUDIT_WAIT_MS, log_integration_event_sync
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,7 @@ def _log_soul_event(outcome: str, details: dict | None = None) -> None:
         name=os.path.basename(_soul_path),
         outcome=outcome,
         details=details,
+        lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
     )
 
 

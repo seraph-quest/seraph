@@ -20,7 +20,7 @@ import httpx
 
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import READ_PATH_AUDIT_WAIT_MS, log_integration_event_sync
 from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration, OPENROUTER_SETUP_V2_SCHEMA_VERSION
 from src.model_fabric.proofs import proof_is_fresh
 from src.model_fabric.remote_inference_admission import (
@@ -134,6 +134,7 @@ def _log_embedding_event(outcome: str, details: dict[str, Any] | None = None) ->
         name=_embedder_name(),
         outcome=outcome,
         details=details,
+        lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
     )
 
 

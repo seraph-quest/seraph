@@ -1804,7 +1804,8 @@ behavior below is unchanged.
 Checks run as `local_host_execution` with no isolation. The tests can use the
 network and read the Seraph user's files (`~/.ssh`, Seraph's database and vault).
 A detached process can outlive "cleanup proven", and diagnostics redaction is
-pattern-based. The inspector and the patch approval state these limitations.
+pattern-based. The inspector and the patch approval state these limitations;
+host isolation is tracked in [#1065](https://github.com/seraph-quest/seraph/issues/1065).
 Approved patches may contain only text sections on allowed paths, and an
 iterative publication must equal the base plus the approved input patch.
 

@@ -801,7 +801,7 @@ def _patch_paths_from_diff(patch: bytes, allowed_paths: Iterable[str]) -> tuple[
 
 
 def _git_numstat_paths(patch: bytes) -> list[str]:
-    """Paths git apply would change; binary and rename/copy entries fail.
+    """Paths git apply would change; binary, rename, copy and mode entries fail.
 
     Callers apply the approved text with exactly one final newline, so a
     model diff without one is checked in that applied form.
@@ -810,15 +810,24 @@ def _git_numstat_paths(patch: bytes) -> list[str]:
     with tempfile.TemporaryDirectory(prefix="seraph-patch-") as scratch:
         try:
             result = subprocess.run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "apply",
-                    "--numstat", "-z", "-"], input=patch if patch.endswith(b"\n") else patch + b"\n", cwd=scratch, capture_output=True, timeout=10,
+                    "--numstat", "--summary", "-z", "-"], input=patch if patch.endswith(b"\n") else patch + b"\n", cwd=scratch, capture_output=True, timeout=10,
                 env={"PATH": "/usr/bin:/bin", "HOME": scratch, "LANG": "C", "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CEILING_DIRECTORIES": scratch})
         except (OSError, subprocess.SubprocessError) as exc:
             raise RepoSandboxError("patch could not be checked by git apply") from exc
-    if result.returncode != 0 or not result.stdout.endswith(b"\0"):
+    numstat, separator, summary = result.stdout.rpartition(b"\0")
+    if result.returncode != 0 or not separator:
         raise RepoSandboxError("patch is rejected by git apply")
+    # --summary lines follow the NUL-terminated numstat entries. Only plain
+    # regular-file creation or deletion may appear; mode changes, symlinks,
+    # renames and copies are refused here as well as by the text grammar.
+    import re
+    for line in summary.decode("utf-8", errors="strict").splitlines():
+        if not (re.fullmatch(r" create(?: mode 100644)? (?!mode )\S.*", line)
+                or re.fullmatch(r" delete(?: mode 100644| mode 100755)? (?!mode )\S.*", line)):
+            raise RepoSandboxError("patch summary is unsupported: " + line.strip()[:64])
     paths = []
-    for entry in result.stdout[:-1].split(b"\0"):
+    for entry in numstat.split(b"\0"):
         fields = entry.split(b"\t")
         if (len(fields) != 3 or not fields[0].isdigit() or not fields[1].isdigit() or not fields[2]):
             raise RepoSandboxError("patch contains a binary, rename or copy section")

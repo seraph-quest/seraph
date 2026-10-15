@@ -54,9 +54,10 @@ network and read local files, including `~/.ssh` and Seraph's database and
 vault. "Cleanup proven" covers only the supervised process tree (subreaper and
 waitpid); a same-user process that detaches, for example via `systemd-run --user`
 or `at`, can outlive it. Diagnostics redaction is pattern-based, not complete.
-Approve only repositories you trust. Approved patches are limited to text
+Approve only repositories you trust; host isolation is tracked in
+[#1065](https://github.com/seraph-quest/seraph/issues/1065). Approved patches are limited to text
 sections on allowed paths: binary, rename, copy, mode, symlink and header-less
-sections are rejected by the parent, the worker and git's own numstat.
+sections are rejected by the parent, the worker and git's own numstat and summary.
 Publication of an iterative result must equal the base plus the approved input
 patch.
 

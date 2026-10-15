@@ -298,6 +298,16 @@ def _produce_direct(stage: Path, source: SourceGit, preview: dict, patch: bytes,
     commit = git("commit-tree", output_tree, "-p", preview["base_commit"], data=(preview["commit_message"] + "\n").encode()).decode().strip()
     git("update-ref", "refs/heads/" + preview["branch_name"], commit)
     changed = sorted(path for path in set(contents) | {item["path"] for item in output_files} if next((item for item in base_files if item["path"] == path), None) != next((item for item in output_files if item["path"] == path), None))
+    # Changed paths come from this producer's own base and output manifests,
+    # never from test-writable Git state, and must be paths the approved
+    # text patch names (checked by git's own numstat of those exact bytes).
+    from src.execution.repo_sandbox import RepoSandboxError, _git_numstat_paths
+    try:
+        approved_paths = set(_git_numstat_paths(approved_patch if approved_patch is not None else patch))
+    except RepoSandboxError as exc:
+        raise PublicationError("approved_patch_unsupported") from exc
+    if not set(changed) <= approved_paths:
+        raise PublicationError("published_paths_outside_approved_patch")
     return {"local_commit": commit, "tree": output_tree, "base_tree": tree_id, "files": output_files, "changed_paths": changed, "stage": str(stage)}
 
 

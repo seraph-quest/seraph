@@ -95,7 +95,9 @@ def _plugins(value: Any) -> None:
         raise ProtocolError("invalid plugins")
     seen: set[str] = set()
     for plugin in value:
-        closed(plugin, {"id", "state", "reason"})
+        closed(plugin, {"id", "state", "reason", "digest"})
+        if type(plugin["digest"]) is not str or not HEX64.fullmatch(plugin["digest"]):
+            raise ProtocolError("invalid plugin digest")
         identifier = plugin["id"]
         if type(identifier) is not str or not 1 <= len(identifier) <= 128 or identifier in seen:
             raise ProtocolError("invalid plugin identity")

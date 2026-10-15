@@ -147,9 +147,18 @@ service plugins to the reviewed profile: `seraph.authority.v1`, `goals`,
 `source-extraction` (Context keys `seraphAuthority` through
 `seraphSourceExtraction`). Contracts live in `runtime/cordis/src/contracts/` and
 providers in `runtime/cordis/src/plugins/`. Providers carry no state or policy:
-each forwards only the same method of the one original invocation Python sent,
-with that invocation's reference, composition epoch and original deadline
-(ordinary calls are capped at 30 seconds and never renewed).
+a provider call is a callback inside the one original invocation Python sent,
+carrying that invocation's reference, composition epoch and original deadline
+(ordinary calls are capped at 30 seconds and never renewed). Python admits a
+callback only for a method in that invocation's frozen reviewed closure
+(at most 16 callbacks per call); other methods get a typed `blocked` result.
+Profile entries use the literal registry order with a closed per-plugin
+configuration schema (currently empty); the host plugin is required, service
+providers may be marked optional or omitted, and an absent provider's methods
+return `service_provider_not_composed`. Each reported plugin state carries a
+digest of its plugin ID, required flag, configuration and reviewed build-file
+hashes; Python recomputes it from the verified build manifest and fences the
+boot on any mismatch, so jobs can pin provider/config identity.
 
 Service frames carry a positive `composition_epoch` and canonical
 `invocation_ref`; payloads use closed schemas of canonical references, never

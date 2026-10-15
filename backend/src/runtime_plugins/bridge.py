@@ -16,6 +16,8 @@ from .contracts import SERVICE_METHODS, validate_request, validate_result
 from .protocol import MAX_PENDING, ProtocolError, encode_frame, read_frame, rpc_deadline
 
 STDERR_LIMIT = 65_536
+# Finite callbacks one original invocation's providers may make.
+MAX_CALLBACKS = 16
 
 
 class HostBlocked(RuntimeError):
@@ -27,7 +29,7 @@ class Pending:
     frame: dict[str, Any]
     future: asyncio.Future[dict[str, Any]]
     native_binding: Any = None
-    native_forwarded: bool = False
+    native_callbacks: int = 0
 
 
 class CordisHost:
@@ -181,9 +183,12 @@ class CordisHost:
 
     def _verify_plugins(self, plugins: list[dict[str, Any]]) -> None:
         assert self.reviewed is not None
-        expected = {plugin["id"] for plugin in self.reviewed.profile["plugins"]}
-        if {plugin["id"] for plugin in plugins} != expected or any(plugin["state"] != "ready" for plugin in plugins):
-            raise ProtocolError("required plugin unavailable")
+        specs = {spec["id"]: spec for spec in self.reviewed.profile["plugins"]}
+        digests = self.reviewed.plugin_digests or {}
+        if ({plugin["id"] for plugin in plugins} != set(specs) or len(plugins) != len(specs)
+                or any(plugin["digest"] != digests.get(plugin["id"]) for plugin in plugins)
+                or any(specs[plugin["id"]]["required"] and plugin["state"] != "ready" for plugin in plugins)):
+            raise ProtocolError("required plugin unavailable or provider digest changed")
 
     async def _read_loop(self) -> None:
         assert self.process is not None and self.process.stdout is not None
@@ -195,8 +200,9 @@ class CordisHost:
                         or frame["package_digest"] != self.reviewed.package_digest):
                     raise ProtocolError("boot, package or sequence mismatch")
                 if frame["kind"] == "request":
-                    # The only child-originated request is the same-method
-                    # forward of one pending original native invocation.
+                    # A child request is only a callback inside one pending
+                    # original native invocation; its method is gated by that
+                    # invocation's reviewed closure in the dispatcher.
                     if (frame["method"] not in SERVICE_METHODS or self.service_dispatch is None
                             or not self.admitting or frame["request_id"] != f"c-{frame['seq']}"
                             or self._unresolved >= MAX_PENDING
@@ -204,13 +210,13 @@ class CordisHost:
                         raise ProtocolError("unadmitted native service request")
                     originals = [entry for entry in self._pending.values()
                                  if entry.native_binding is not None and not entry.future.done()
-                                 and not entry.native_forwarded
+                                 and entry.native_callbacks < MAX_CALLBACKS
                                  and all(entry.frame[key] == frame[key] for key in (
-                                     "method", "invocation_ref", "composition_epoch", "deadline_at",
+                                     "invocation_ref", "composition_epoch", "deadline_at",
                                      "boot_nonce", "package_digest", "composition_digest"))]
                     if len(originals) != 1:
                         raise ProtocolError("native request lacks unique original scoped invocation")
-                    originals[0].native_forwarded = True
+                    originals[0].native_callbacks += 1
                     self._in_seq = frame["seq"]
                     self._unresolved += 1
                     name = f"service-{frame['seq']}"

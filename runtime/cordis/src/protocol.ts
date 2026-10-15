@@ -125,7 +125,8 @@ function plugins(value: Json | undefined): void {
   if (!Array.isArray(value) || value.length > 64) throw new ProtocolError('invalid plugins');
   const seen = new Set<string>();
   for (const item of value) {
-    const plugin = closed(item, ['id', 'state', 'reason']);
+    const plugin = closed(item, ['id', 'state', 'reason', 'digest']);
+    if (typeof plugin.digest !== 'string' || !hex64.test(plugin.digest)) throw new ProtocolError('invalid plugin digest');
     if (typeof plugin.id !== 'string' || plugin.id.length < 1 || plugin.id.length > 128 || seen.has(plugin.id)) throw new ProtocolError('invalid plugin identity');
     seen.add(plugin.id);
     if (typeof plugin.state !== 'string' || !['ready', 'blocked', 'stopped'].includes(plugin.state) || (plugin.reason !== null && (typeof plugin.reason !== 'string' || plugin.reason.length > 256))) throw new ProtocolError('invalid plugin state');

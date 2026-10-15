@@ -171,3 +171,32 @@ test('scoped providers return positive read job artifact readback projections wi
   assert.deepEqual(calls,['goals.read','tasks.admit','artifacts.adopt','artifacts.read']);
   await composition.dispose();
 });
+test('closed per-plugin config, optional providers and per-plugin digests fail closed', async () => {
+  const base = profile() as unknown as {plugins: Record<string, unknown>[]} & Record<string, unknown>;
+  const variant = (plugins: Record<string, unknown>[]) => ({...base, plugins}) as unknown as Parameters<typeof validateProfile>[0];
+  assert.throws(() => validateProfile(variant(base.plugins.map((p, i) => i === 3 ? {...p, config: {path: '/tmp'}} : p))), /configuration/);
+  assert.throws(() => validateProfile(variant([...base.plugins].reverse())), /plugin/);
+  assert.throws(() => validateProfile(variant([...base.plugins, base.plugins[1]!])), /plugin/);
+  assert.throws(() => validateProfile(variant(base.plugins.slice(1))), /host/);
+  assert.throws(() => validateProfile(variant([{...base.plugins[0]!, required: false}, ...base.plugins.slice(1)])), /host/);
+  assert.throws(() => validateProfile(variant([...base.plugins, {id: 'seraph.unreviewed.v1', required: false, dependencies: [], config: {}}])), /plugin/);
+  const optional = validateProfile(variant(base.plugins.filter(p => p.id !== 'seraph.research.v1')
+    .map(p => p.id === 'seraph.memory.v1' ? {...p, required: false} : p)));
+  const composition = new Composition(optional); await composition.start();
+  let contacts = 0;
+  const client: ScopedRequestClient = {isActive: () => true, request: async () => { contacts++; return blocked; }};
+  try {
+    composition.assertReady();
+    assert.deepEqual(await composition.invoke('research.buildPlan', {task_ref: 'native-1'}, client),
+      {status: 'blocked', reason_code: 'service_provider_not_composed', memory_status: 'no_learning'});
+    assert.equal(contacts, 0, 'an absent provider never contacts the native owner');
+    assert.deepEqual(await composition.invoke('memory.retrieve', {query_ref: 'native-1', limit: 1}, client), blocked);
+    assert.equal(contacts, 1);
+    const states = composition.states();
+    assert.equal(states.length, optional.plugins.length);
+    assert.ok(states.every(state => /^[0-9a-f]{64}$/.test(state.digest)));
+    assert.equal(new Set(states.map(state => state.digest)).size, states.length);
+  } finally {
+    assert.deepEqual(await composition.dispose(), {resources_remaining: 0, cordis_disposal: 'confirmed'});
+  }
+});

@@ -19,7 +19,7 @@ from src.runtime_plugins.protocol import encode_frame
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["unscoped", "boot", "sequence", "package", "epoch", "future_deadline", "capacity", "ambiguous", "completed_parent", "already_forwarded"])
+@pytest.mark.parametrize("failure", ["unscoped", "boot", "sequence", "package", "epoch", "future_deadline", "capacity", "ambiguous", "completed_parent", "callbacks_exhausted"])
 async def test_child_request_requires_exact_live_original_parent_scope_before_dispatch(failure):
     calls = []
     class Native:
@@ -47,8 +47,8 @@ async def test_child_request_requires_exact_live_original_parent_scope_before_di
             OriginalServiceInvocation({}, 1, deadline))
     if failure == "completed_parent":
         future.set_result(None)
-    if failure == "already_forwarded":
-        host._pending["r-1"].native_forwarded = True
+    if failure == "callbacks_exhausted":
+        host._pending["r-1"].native_callbacks = 16
     child = {**parent, "request_id": "c-1"}
     if failure == "boot": child["boot_nonce"] = "d" * 64
     if failure == "sequence": child.update(seq=2, request_id="c-2")

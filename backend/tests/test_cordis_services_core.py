@@ -666,3 +666,127 @@ async def test_goal_programme_authority_is_resolved_from_current_programme_not_i
             await dispatcher.current_authority(db, stale)
         assert lineage.value.reason_code == "native_programme_lineage_changed"
     assert calls == ["programme-1", "revoked"]
+
+
+# ------------------------------------------------------------------ seams #1008 builds on
+
+def _top_level(body):
+    parts, depth, current = [], 0, ""
+    for char in body:
+        depth += char in "([{"
+        depth -= char in ")]}"
+        if char == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += char
+    return [part for part in [*parts, current.strip()] if part]
+
+
+def _ts_fields(body, named):
+    """Top-level field names of a TS object literal, expanding ``...spread``."""
+    fields = set()
+    for part in _top_level(body):
+        if part.startswith("..."):
+            fields |= named[part[3:]]
+        else:
+            fields.add(part.split(":", 1)[0].strip())
+    return fields
+
+
+def _ts_schemas():
+    """Parse the closed TS inventory: method -> (input fields, output fields)."""
+    import re
+    source = (PACKAGE / "src/contracts/methods.ts").read_text()
+    named = {"artifact": _ts_fields(re.search(r"const artifact = \{(.*?)\};", source).group(1), {}),
+             "capability": _ts_fields(re.search(r"const capability = object\(\{(.*?)\}\);", source).group(1), {})}
+    block = source[source.index("const outputs = {") + len("const outputs = {"):source.index("};\nexport const serviceSchemas")]
+    outputs = {}
+    for part in _top_level(block):
+        name, _, value = part.partition(":")
+        name, value = name.strip(), value.strip()
+        if not value:  # shorthand reference to a named schema
+            outputs[name] = named[name]
+        elif value.startswith("object({"):
+            outputs[name] = _ts_fields(value[len("object({"):-len("})")], named)
+        else:
+            outputs[name] = named[value[len("object("):-1]]
+    entries = {}
+    for method, fields, output in re.findall(
+            r"'([\w-]+\.\w+)': \{input: object\(\{(.*?)\}\), output: outputs\.(\w+)\}", source):
+        entries[method] = (_ts_fields(fields, named), outputs[output])
+    return entries
+
+
+def test_ts_and_python_method_inventories_stay_in_lockstep():
+    from src.runtime_plugins.contracts import REQUESTS, RESULTS
+    entries = _ts_schemas()
+    assert set(entries) == set(REQUESTS) == set(RESULTS) == set(METHOD_DOMAINS)
+    for method in ("research.executeAccepted", "source-extraction.extract", "research.buildPlan"):
+        assert method in entries
+    for method, (inputs, outputs) in entries.items():
+        assert inputs == set(REQUESTS[method]), method
+        assert outputs == set(RESULTS[method]), method
+
+
+@pytest.mark.asyncio
+async def test_callbacks_are_gated_by_the_reviewed_closure_not_method_equality(service_db):
+    dispatcher = NativeServiceDispatcher()
+    async with get_session() as db:
+        binding = await bind_invocation(db, method="capabilities.list", native_branch="artifact")
+    witness = {"invocation_ref": "job-x", "package_digest": "a" * 64, "host_composition_digest": "b" * 64,
+               "original_deadline_at": 2_000_000_000_000, "checkpoint_id": "missing"}
+    scope = OriginalServiceInvocation(witness, binding, "c" * 64)
+    parent_epoch = binding.epoch_for("capabilities.list")
+    called = CalledServiceInvocation(scope, "capabilities.list", parent_epoch, 1_900_000_000_000, "r-1", "c" * 64)
+
+    def frame(method):
+        return {"method": method, "payload": _payload(method), "invocation_ref": "job-x",
+                "composition_epoch": parent_epoch, "boot_nonce": "c" * 64, "package_digest": "a" * 64,
+                "composition_digest": "b" * 64, "deadline_at": 1_900_000_000_000}
+    outside = await dispatcher.dispatch(frame("goals.read"), called_scope=called)
+    assert outside["reason_code"] == "native_method_not_in_closure"
+    # A different in-closure method passes correlation and reaches the owner's
+    # current-state checks (which then deny this fixture's missing job).
+    inside = await dispatcher.dispatch(frame("artifacts.stage"), called_scope=called)
+    assert inside["status"] == "blocked"
+    assert inside["reason_code"] not in {"native_method_not_in_closure", "native_original_frame_changed"}
+
+
+def test_python_profile_accepts_optional_providers_and_rejects_unknown_config():
+    from copy import deepcopy
+    from src.runtime_plugins.composition import PACKAGE_ROOT, validate_profile
+    from src.runtime_plugins.protocol import ProtocolError, decode_json
+    base = decode_json((PACKAGE_ROOT / "profile.json").read_bytes())
+    optional = deepcopy(base)
+    optional["plugins"] = [dict(spec, required=False) if spec["id"] == "seraph.memory.v1" else spec
+                           for spec in optional["plugins"] if spec["id"] != "seraph.research.v1"]
+    assert validate_profile(optional) is optional
+    for change in ("config", "order", "host_optional", "unknown", "duplicate"):
+        broken = deepcopy(base)
+        if change == "config":
+            broken["plugins"][2]["config"] = {"path": "/tmp"}
+        elif change == "order":
+            broken["plugins"][1], broken["plugins"][2] = broken["plugins"][2], broken["plugins"][1]
+        elif change == "host_optional":
+            broken["plugins"][0]["required"] = False
+        elif change == "unknown":
+            broken["plugins"].append({"id": "seraph.unreviewed.v1", "required": False, "dependencies": [], "config": {}})
+        else:
+            broken["plugins"].append(deepcopy(broken["plugins"][1]))
+        with pytest.raises(ProtocolError):
+            validate_profile(broken)
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_child_reports_build_derived_plugin_digests_and_mismatch_fences(live_host):
+    host, _, _ = live_host
+    status = await host.refresh_status()
+    reported = {item["id"]: item["digest"] for item in status["plugins"]}
+    assert reported == host.reviewed.plugin_digests and len(set(reported.values())) == len(reported)
+    from dataclasses import replace
+    host.reviewed = replace(host.reviewed, plugin_digests={**host.reviewed.plugin_digests,
+                                                           "seraph.tasks.v1": "0" * 64})
+    fenced = await host.refresh_status()
+    assert fenced["state"] != "ready" or fenced["readiness"]["state"] != "verified"

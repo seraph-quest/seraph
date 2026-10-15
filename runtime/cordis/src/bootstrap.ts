@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   const [major, minor] = process.versions.node.split(".").map(Number);
   if (!((major === 22 && (minor ?? 0) >= 12) || major === 24)) throw new ProtocolError("unsupported Node");
   const identity = packageIdentity();
-  const composition = new Composition(identity.profile);
+  const composition = new Composition(identity.profile, identity.plugin_digests);
   const pipes = new Resources();
   pipes.track("owned-input", () => { process.stdin.destroy(); });
   const pending = new Map<string, Pending>();
@@ -36,7 +36,9 @@ async function main(): Promise<void> {
     const client: ScopedRequestClient = {
       isActive: () => scope.active && !quiescing && !failure && incoming.deadline_at > Date.now(),
       request: async <M extends ServiceMethod>(method: M, input: Input<M>) => {
-        if (!client.isActive() || method !== incoming.method) throw new ProtocolError("stale native service scope");
+        // Any finite service method may be requested; Python admits only methods in
+        // the original invocation's reviewed closure and returns typed blocks otherwise.
+        if (!client.isActive()) throw new ProtocolError("stale native service scope");
         if (pending.size + scopes.size >= MAX_PENDING) return {status: "blocked", reason_code: "bridge_capacity_exceeded", memory_status: "no_learning"};
         const seq = ++outboundSeq;
         const request: Frame = { ...incoming, seq, request_id: `c-${seq}`, kind: "request", payload: validateInput(method, input) as unknown as Record<string, Json> };

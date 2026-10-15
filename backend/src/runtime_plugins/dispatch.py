@@ -323,9 +323,12 @@ class NativeServiceDispatcher:
             return blocked("native_original_scope_missing")
         scope = called_scope.original
         try:
+            # A callback is correlated to its pending original call by the
+            # parent's exact identity; its own method is gated by the frozen
+            # reviewed closure below, never by plugin choice.
             if (frame["invocation_ref"] != scope.witness["invocation_ref"]
-                    or method != called_scope.method or not scope.binding.allows(method)
-                    or frame["composition_epoch"] != scope.binding.epoch_for(method)
+                    or not scope.binding.allows(called_scope.method)
+                    or called_scope.composition_epoch != scope.binding.epoch_for(called_scope.method)
                     or frame["composition_epoch"] != called_scope.composition_epoch
                     or frame["boot_nonce"] != scope.host_boot_nonce
                     or frame["boot_nonce"] != called_scope.host_boot_nonce
@@ -334,6 +337,8 @@ class NativeServiceDispatcher:
                     or frame["deadline_at"] != called_scope.deadline_at
                     or frame["deadline_at"] > scope.deadline_at):
                 raise NativeServiceBlocked("native_original_frame_changed")
+            if not scope.binding.allows(method):
+                raise NativeServiceBlocked("native_method_not_in_closure")
             if method in BLOCKED_METHODS:
                 # Typed and operator-visible; no authority or private bytes used.
                 return blocked(BLOCKED_METHODS[method])

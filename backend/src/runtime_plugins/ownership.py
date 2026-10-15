@@ -33,6 +33,8 @@ _SHA = re.compile(r"[a-f0-9]{64}\Z")
 _REF = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 _MAX_EPOCH = 2**63 - 1
 _ACTIVE_STATUSES = ("running", "awaiting_approval", "paused")
+# Not yet started: blocked visibly by an epoch change, never left stranded.
+_UNSTARTED_STATUSES = ("accepted", "queued")
 
 
 class CompositionBindingError(ValueError):
@@ -309,6 +311,15 @@ def seed_legacy_inventory_sync(connection) -> int:
     return len(DOMAINS)
 
 
+def _boot_proved(runtime_domain: str, owner_kind: str, composition_digest: str, boot_host) -> bool:
+    if owner_kind == "legacy":
+        return composition_digest == legacy_composition_digest(runtime_domain)
+    from .bridge import CordisHost
+    reviewed = getattr(boot_host, "reviewed", None)
+    return (type(boot_host) is CordisHost and boot_host.admitting and reviewed is not None
+            and (reviewed.plugin_digests or {}).get(runtime_domain) == composition_digest)
+
+
 @asynccontextmanager
 async def composition_writer(db):
     """Fresh immediate writer under the existing workspace maintenance fence."""
@@ -333,21 +344,24 @@ def _phase(prior_epoch: int, epoch: int, state: str) -> str:
 
 async def transition_owner(db, *, runtime_domain: str, expected: CompositionDependency, expected_state: str,
                            owner_kind: str, epoch: int, composition_digest: str, state: str,
-                           boot_verified: bool = False) -> str:
+                           boot_host=None) -> str:
     """Exact fenced CAS of one domain owner; returns the recovery receipt id.
 
     Allowed moves: ready -> draining (same epoch, stop new admission);
     draining|blocked -> blocked at a strictly higher epoch (quiesced; owner may
-    change only here); blocked -> ready at the same epoch only with a verified
-    boot. Epochs never decrease and an owner change always takes a new epoch,
-    so racing cutovers from one expected row produce exactly one winner.
+    change only here; unstarted jobs bound to the prior owner become visibly
+    blocked); blocked -> ready at the same epoch only with a boot proof: the
+    fixed legacy digest, or for ``cordis`` the currently admitting host whose
+    verified build reports exactly this domain's plugin digest. Epochs never
+    decrease and an owner change always takes a new epoch, so racing cutovers
+    from one expected row produce exactly one winner.
     """
     from src.workspace.lifecycle import _LIFECYCLE_FENCE_DEPTH
     if _LIFECYCLE_FENCE_DEPTH.get() <= 0 or not db.in_transaction():
         raise CompositionBindingError("composition_stopped_writer_required")
     incoming = CompositionDependency(runtime_domain, owner_kind, epoch, composition_digest)
     if (type(expected) is not CompositionDependency or expected.runtime_domain != runtime_domain
-            or expected_state not in STATES or state not in STATES or type(boot_verified) is not bool):
+            or expected_state not in STATES or state not in STATES):
         raise CompositionBindingError("composition_expected_binding_required")
     changed_owner = (owner_kind, composition_digest) != (expected.owner_kind, expected.composition_digest)
     if epoch < expected.epoch or (changed_owner and epoch == expected.epoch):
@@ -357,13 +371,15 @@ async def transition_owner(db, *, runtime_domain: str, expected: CompositionDepe
     elif state == "blocked":
         allowed = epoch > expected.epoch and expected_state in {"draining", "blocked"}
     else:
-        allowed = expected_state == "blocked" and epoch == expected.epoch and boot_verified
+        allowed = (expected_state == "blocked" and epoch == expected.epoch
+                   and _boot_proved(runtime_domain, owner_kind, composition_digest, boot_host))
     if not allowed:
         raise CompositionBindingError("composition_transition_not_allowed")
     rows = await inventory(db)
     prior = rows.get(runtime_domain)
     if prior is None or _checked_row(prior) != expected or prior.state != expected_state:
         raise CompositionBindingError("composition_owner_changed")
+    stranded: list[str] = []
     if state == "blocked":
         # Quiesce: an epoch change never strands a live leased attempt that
         # was admitted against the prior owner.
@@ -377,10 +393,29 @@ async def transition_owner(db, *, runtime_domain: str, expected: CompositionDepe
                 continue
             if expected in bound.dependency_vector:
                 raise CompositionBindingError("composition_not_quiescent")
+        unstarted = (await db.execute(select(WorkflowRunState.run_identity, WorkflowRunState.composition_binding_json)
+                                      .where(WorkflowRunState.composition_binding_json.is_not(None),
+                                             WorkflowRunState.status.in_(_UNSTARTED_STATUSES)))).all()
+        for run_identity, raw in unstarted:
+            try:
+                bound = RuntimeCompositionBinding.from_json(raw)
+            except CompositionBindingError:
+                stranded.append(run_identity)
+                continue
+            if expected in bound.dependency_vector:
+                stranded.append(run_identity)
+        if stranded:
+            from datetime import datetime, timezone
+            await db.execute(update(WorkflowRunState).where(
+                WorkflowRunState.run_identity.in_(stranded),
+                WorkflowRunState.status.in_(_UNSTARTED_STATUSES)).values(
+                    status="blocked", failure_reason="composition_owner_changed",
+                    revision=WorkflowRunState.revision + 1, updated_at=datetime.now(timezone.utc))
+                .execution_options(synchronize_session=False))
     proof = dict(schema_version=1, runtime_domain=runtime_domain, prior=expected.payload(),
                  prior_state=expected_state, target=incoming.payload(), state=state,
                  phase=_phase(expected.epoch, epoch, state),
-                 prior_recovery_receipt_ref=prior.recovery_receipt_ref)
+                 prior_recovery_receipt_ref=prior.recovery_receipt_ref, blocked_unstarted_jobs=sorted(stranded))
     receipt = AuditEvent(session_id=None, actor="runtime", event_type=RECOVERY_EVENT,
                          summary="Runtime composition owner transition", details_json=_canonical(proof))
     db.add(receipt)

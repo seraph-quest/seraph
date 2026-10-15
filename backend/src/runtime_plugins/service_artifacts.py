@@ -168,13 +168,15 @@ async def dispatch_artifact_operation(dispatcher, frame, payload, scope):
                        if not (isinstance(item, dict) and item.get("effect_id") == request_ref)]
             effects.append(_effect_receipt(run, request_ref=request_ref, path=reference, digest=digest,
                                            status="succeeded", readback_ref=request_ref + ":readback"))
-            ops[0].update(state="settled", artifact_ref=record["artifact_id"])
+            result = succeeded(method, {"artifact_ref": record["artifact_id"], "digest": digest,
+                                        "size_bytes": len(actual)})
+            # Seal Python's own result; the owner compares the child's echo to it.
+            ops[0].update(state="settled", artifact_ref=record["artifact_id"], result_digest=_digest(result))
             await cas_run(db, run, checkpoint_context_json=_canonical(context), effect_receipts_json=_canonical(effects),
                           artifact_receipts_json=_append_receipt(run.artifact_receipts_json, artifact_receipt,
                                                                  key="artifact_id"))
             await db.commit()
-            return succeeded(method, {"artifact_ref": record["artifact_id"], "digest": digest,
-                                      "size_bytes": len(actual)})
+            return result
     async with dispatcher.jobs._session() as db:
         run, context = await _current(dispatcher, db, scope, method)
         ops = context["operations"]
@@ -204,15 +206,16 @@ async def dispatch_artifact_operation(dispatcher, frame, payload, scope):
                                details_json=_canonical(audit_details(run, context)))
             db.add(event)
             await db.flush()
-            value = {"receipt_ref": request_ref}
-        ops.append({"method": method, "request_ref": request_ref, "state": "settled", "call_ref": call_ref,
-                    "artifact_ref": artifact_ref})
-        revision = await cas_run(db, run, checkpoint_context_json=_canonical(context), **values)
-        if method == "audit.append":
             # The canonical job CAS revision commits the AuditEvent with it.
-            value["revision"] = revision
+            value = {"receipt_ref": request_ref, "revision": int(run.revision or 1) + 1}
+        result = succeeded(method, value)
+        ops.append({"method": method, "request_ref": request_ref, "state": "settled", "call_ref": call_ref,
+                    "artifact_ref": artifact_ref, "result_digest": _digest(result)})
+        revision = await cas_run(db, run, checkpoint_context_json=_canonical(context), **values)
+        if method == "audit.append" and revision != value["revision"]:
+            raise NativeServiceBlocked("native_audit_revision_changed")
         await db.commit()
-        return succeeded(method, value)
+        return result
 
 
 async def assert_artifact_completion(db, run) -> dict:
@@ -222,11 +225,30 @@ async def assert_artifact_completion(db, run) -> dict:
     ops = context["operations"]
     if [op["method"] for op in ops] != list(ARTIFACT_CHILDREN) or any(op["state"] != "settled" for op in ops):
         raise NativeServiceBlocked("native_artifact_completion_unproven")
-    reference, _, digest = readback(run, context)
+    reference, actual, digest = readback(run, context)
+    # The sealed artifacts.read result must equal Python's own current readback.
+    expected_read = succeeded("artifacts.read", {"artifact_ref": ops[0]["artifact_ref"], "digest": digest,
+                                                 "size_bytes": len(actual), "content": actual.decode("utf-8")})
+    if ops[2].get("result_digest") != _digest(expected_read):
+        raise NativeServiceBlocked("native_artifact_readback_changed")
     event = await db.get(AuditEvent, ops[3]["request_ref"], populate_existing=True)
     if (event is None or event.session_id != run.session_id or event.actor != "runtime"
             or event.event_type != AUDIT_EVENT_TYPE or event.summary != AUDIT_SUMMARY
             or json.loads(event.details_json or "null") != audit_details(run, context)):
         raise NativeServiceBlocked("native_artifact_audit_readback_unproven")
     return {"artifact_ref": ops[0]["artifact_ref"], "file_path": reference, "content_digest": digest,
-            "audit_event_ref": event.id, "result_digest": context["result"]["result_digest"]}
+            "audit_event_ref": event.id, "result_digest": context["result"]["result_digest"],
+            "result": context["result"]["payload"], "artifact_readback": expected_read}
+
+
+def assert_child_echo(run, method: str, observed: dict) -> None:
+    """A child's answer to the parent call must equal Python's sealed result."""
+    context = read_context(run)
+    if method in ARTIFACT_CHILDREN:
+        ops = context["operations"]
+        sealed = ops[-1] if ops else None
+        if (sealed is None or sealed["method"] != method or sealed["state"] != "settled"
+                or sealed.get("result_digest") != _digest(observed)):
+            raise NativeServiceBlocked("native_child_result_mismatch")
+    elif context["result"] is None or observed != context["result"]["payload"]:
+        raise NativeServiceBlocked("native_child_result_mismatch")

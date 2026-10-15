@@ -159,10 +159,12 @@ sequencing and review status belong in issues/PRs/Project, not this document.
 The [#1007](https://github.com/seraph-quest/seraph/issues/1007) core slice
 implements the fourteen typed service identities (`seraph.<noun>.v1`, Context
 keys `seraphAuthority` ... `seraphSourceExtraction`) and the fixed 34-method
-inventory as forwarding-only Cordis providers. A provider can only forward the
-same method of the one original Python-issued invocation back over the owned
-pipe; Python's finite dispatcher re-resolves the job, lease, fence, deadline,
-composition owners and authority before any private bytes or effect.
+inventory as forwarding-only Cordis providers. A provider call is a bounded
+callback inside one original Python-issued invocation, admitted only for a
+method in that invocation's frozen reviewed closure. Python's finite dispatcher
+re-resolves the job, lease, fence, deadline, composition owners and authority
+before any private bytes or effect, and the child's answers are accepted only
+when they equal the result Python itself sealed or recorded durably.
 
 One `RuntimeCompositionState` row per runtime domain records the owner
 (`legacy`/`cordis`), a monotonic epoch, the composition digest, `ready`,

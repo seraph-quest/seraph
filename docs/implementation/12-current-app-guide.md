@@ -178,11 +178,17 @@ before private bytes or effects.
 recovery audit receipt). Startup seeds `legacy` epoch 1 only into an empty
 table; a partial inventory stays partial so missing owners keep denying calls.
 Cordis-bound jobs persist `composition_binding_json`, and the canonical job CAS
-repeats it, so a draining, changed or missing owner fences checkpoints,
-artifacts, effects and terminal transitions. Owner transitions require the
-workspace maintenance fence: `ready -> draining` stops admission, a strictly
-higher-epoch `blocked` state follows only when no leased attempt is bound to the
-old owner, and `ready` requires a verified boot. Rollback is a new epoch.
+repeats it, so a draining, changed or missing owner fences claims, heartbeats,
+checkpoints, artifacts, effects and successful completion. Stopping transitions
+(`failed`/`cancelled`) and stale-job recovery are not composition-fenced, so an
+old-epoch job can still be stopped. Owner transitions require the workspace
+maintenance fence: `ready -> draining` stops admission; a strictly higher-epoch
+`blocked` state follows only when no leased attempt is bound to the old owner,
+and it marks accepted/queued jobs bound to that owner `blocked`
+(`composition_owner_changed`, listed in the recovery receipt). `ready` requires a
+boot proof: the fixed legacy digest, or for `cordis` the currently admitting
+host whose verified build reports exactly that domain's plugin digest. Rollback
+is a new epoch and never revives blocked jobs.
 
 Native owners in this slice: `authority.resolve`, `goals.read`, `tasks.admit`
 (reports the idempotent admission and whether it was replayed),
@@ -193,15 +199,23 @@ Native owners in this slice: `authority.resolve`, `goals.read`, `tasks.admit`
 journey. That journey admits one `runtime_service_read_v1` job, performs the
 read, stages the sealed result as a private 0600 workspace file (intent before
 effect), adopts and reads it back, appends one `runtime_service_observed` audit
-event and settles the job with explicit `no_learning`. An exact retry reuses the
-same job and never re-executes. All other methods (`tasks.settle`,
+event and settles the job with explicit `no_learning`. The child's answer to
+each call must equal the result Python sealed for it (task answers must match
+the durable job row); any difference blocks the job with
+`native_child_result_mismatch`, and only Python-owned values are returned. An
+exact retry reuses the same job and never re-executes; an interrupted stage
+stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle`,
 `capabilities.invoke`, `inference.request`, `memory.propose`,
 `memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
 `agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
 `source-extraction.extract`) return a typed `blocked` reason, also listed in
 the runtime status `native_services` block. No HTTP route yet exposes the bridge
 to the browser, and the Memory composition-snapshot accounting amendments
-recorded on #1007 are not implemented.
+recorded on #1007 are not implemented. The acceptance tests deny every Python
+socket connection/DNS lookup and give the child no network configuration, but
+they do not OS-sandbox the Node child's own network access. A database error
+inside one callback currently fences the whole host boot rather than returning
+a typed block.
 
 ## Task conversation continuity
 

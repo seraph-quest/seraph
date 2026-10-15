@@ -35,7 +35,7 @@ from src.runtime_plugins.ownership import (
     legacy_composition_digest, seed_legacy_inventory_sync, transition_owner, validate_invocation)
 from src.runtime_plugins.read_admission import native_capability_inventory
 from src.runtime_plugins.service_jobs import (
-    admit_service_job, claim_service_job, execute_native_read, open_invocation)
+    admit_service_job, claim_service_job, execute_native_read, open_invocation, verified_task_call)
 from src.workflows.job_runtime import DurableJobLeaseError, DurableJobRepository
 from src.workspace.lifecycle import lifecycle_fence_marker
 
@@ -161,12 +161,16 @@ async def test_cutover_rules_epochs_only_increase_and_require_fence(service_db):
                 await transition_owner(db, runtime_domain=domain, expected=legacy, expected_state="draining",
                                        owner_kind="cordis", epoch=2, composition_digest=cordis, state="blocked")
                 target = CompositionDependency(domain, "cordis", 2, cordis)
-                with pytest.raises(CompositionBindingError):  # no unverified boot
-                    await transition_owner(db, runtime_domain=domain, expected=target, expected_state="blocked",
-                                           owner_kind="cordis", epoch=2, composition_digest=cordis, state="ready")
+                # Ready needs a boot proof: the admitting host's verified
+                # plugin digest for exactly this domain.
+                for proof in (None, _boot_host({domain: "d" * 64}), _boot_host({domain: cordis}, admitting=False)):
+                    with pytest.raises(CompositionBindingError):
+                        await transition_owner(db, runtime_domain=domain, expected=target, expected_state="blocked",
+                                               owner_kind="cordis", epoch=2, composition_digest=cordis,
+                                               state="ready", boot_host=proof)
                 await transition_owner(db, runtime_domain=domain, expected=target, expected_state="blocked",
                                        owner_kind="cordis", epoch=2, composition_digest=cordis, state="ready",
-                                       boot_verified=True)
+                                       boot_host=_boot_host({domain: cordis}))
                 with pytest.raises(CompositionBindingError):  # epochs never decrease
                     await transition_owner(db, runtime_domain=domain, expected=target, expected_state="ready",
                                            owner_kind="legacy", epoch=1, composition_digest=legacy.composition_digest,
@@ -184,6 +188,19 @@ async def test_cutover_rules_epochs_only_increase_and_require_fence(service_db):
             select(AuditEvent).where(AuditEvent.event_type == "runtime_composition_recovery"))).scalars()]
     assert [proof["phase"] for proof in proofs].count("awaiting_boot") == 2
     assert all(proof["runtime_domain"] == domain for proof in proofs)
+
+
+def _boot_host(digests, *, admitting=True):
+    """Reviewed-host stand-in for the pure ownership rule (no child process)."""
+    from types import SimpleNamespace
+    from src.runtime_plugins.bridge import CordisHost
+    from src.runtime_plugins.composition import ReviewedComposition
+    host = CordisHost()
+    host.reviewed = ReviewedComposition(Path("/reviewed"), Path("/reviewed/node"), "v24.13.1", {}, "b" * 64,
+                                        "c" * 64, dict(digests))
+    host.state, host._cleanup_state = ("ready" if admitting else "blocked"), "pending"
+    host.process = SimpleNamespace(returncode=None)
+    return host
 
 
 def _race(db_path: Path, digest: str, barrier: threading.Barrier, outcomes: list):
@@ -376,23 +393,23 @@ async def test_live_task_services_forward_through_real_child(live_host):
     goal = await host.request_service("goals.read", {}, original_scope=scope)
     assert goal["value"] == {"goal_ref": goal_id, "revision": 1, "title": "Ship #1007",
                              "description": "private goal plan"}
-    admitted = await host.request_service("tasks.admit", {"request_ref": job["job_id"]}, original_scope=scope)
+    admitted = await verified_task_call(host, jobs, scope, "tasks.admit", {"request_ref": job["job_id"]})
     assert admitted["value"]["job_ref"] == job["job_id"] and admitted["value"]["replayed"] is False
-    checkpoint = await host.request_service("tasks.checkpoint", {"checkpoint_ref": "step-1"}, original_scope=scope)
+    checkpoint = await verified_task_call(host, jobs, scope, "tasks.checkpoint", {"checkpoint_ref": "step-1"})
     assert checkpoint["status"] == "succeeded", checkpoint
     replay = await host.request_service("tasks.checkpoint", {"checkpoint_ref": "step-1"}, original_scope=scope)
     assert replay["reason_code"] == "native_receipt_replay_denied"
     unbound = await host.request_service("tasks.checkpoint", {"checkpoint_ref": "plugin-chosen"}, original_scope=scope)
     assert unbound["reason_code"] == "native_checkpoint_reference_not_bound"
-    inspected = await host.request_service("tasks.inspect", {"job_ref": job["job_id"]}, original_scope=scope)
+    inspected = await verified_task_call(host, jobs, scope, "tasks.inspect", {"job_ref": job["job_id"]})
     assert inspected["value"]["state"] == "running"
     # The child forwarded exactly the same method each time; no other crossing.
     assert [call["method"] for call in calls] == ["authority.resolve", "goals.read", "tasks.admit",
                                                   "tasks.checkpoint", "tasks.checkpoint", "tasks.checkpoint",
                                                   "tasks.inspect"]
     revision = (await jobs.get_job(job["job_id"]))["revision"]
-    cancelled = await host.request_service("tasks.cancel", {"job_ref": job["job_id"], "expected_revision": revision},
-                                           original_scope=scope)
+    cancelled = await verified_task_call(host, jobs, scope, "tasks.cancel",
+                                         {"job_ref": job["job_id"], "expected_revision": revision})
     assert cancelled["value"]["state"] == "cancelled"
     after = await host.request_service("tasks.inspect", {"job_ref": job["job_id"]}, original_scope=scope)
     assert after["reason_code"] == "native_original_attempt_changed"
@@ -559,8 +576,15 @@ async def test_read_job_artifact_readback_journey_records_explicit_no_learning(l
         readbacks = [item for item in job["effects"] if item["receipt_kind"] == "readback"]
         assert len(readbacks) == 1 and readbacks[0]["details"] == {"no_learning": True, "verified": True}
         assert [item["checkpoint_id"] for item in job["checkpoints"]][1:] == ["cordis-read:result", "cordis-read:adopt"]
+        async with get_session() as db:
+            from src.runtime_plugins.dispatch import read_context
+            sealed = read_context((await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.run_identity == job["job_id"]))).scalar_one())
+        # Returned values are Python's sealed result and Python's own readback.
+        assert value["result"] == sealed["result"]["payload"]
+        assert value["completion"]["result_digest"] == sealed["result"]["result_digest"]
         content = value["artifact_readback"]["value"]["content"]
-        assert json.loads(content) == value["result"]
+        assert json.loads(content) == sealed["result"]["payload"]
         physical = Path(settings.workspace_dir) / job["artifacts"][0]["file_path"]
         assert physical.read_bytes() == content.encode()
         assert physical.stat().st_mode & 0o777 == 0o600
@@ -790,3 +814,124 @@ async def test_child_reports_build_derived_plugin_digests_and_mismatch_fences(li
                                                            "seraph.tasks.v1": "0" * 64})
     fenced = await host.refresh_status()
     assert fenced["state"] != "ready" or fenced["readiness"]["state"] != "verified"
+
+
+
+# ------------------------------------------------------------------ child answers are never authority
+
+@needs_host
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tampered", ["memory.retrieve", "artifacts.read", "audit.append"])
+async def test_child_fabricated_parent_results_never_settle_the_job(live_host, tampered):
+    """Regression for the critic probe: a child that performs the real callback
+    but answers the parent with different schema-valid values is rejected."""
+    host, jobs, _ = live_host
+    operator = await _operator()
+    async with get_session() as db:
+        db.add(Memory(id="m1", content="raw", summary="real summary", source_session_id=operator.session_id))
+    real = host.request_service
+
+    async def tampering(method, payload, *, original_scope):
+        result = await real(method, payload, original_scope=original_scope)
+        if method != tampered:
+            return result
+        if method == "memory.retrieve":
+            value = {"records": [{"record_ref": "fake", "text": "FABRICATED",
+                                  "text_digest": hashlib.sha256(b"FABRICATED").hexdigest()}]}
+        elif method == "artifacts.read":
+            value = {**result["value"], "content": "{}", "size_bytes": 2,
+                     "digest": hashlib.sha256(b"{}").hexdigest()}
+        else:
+            value = {**result["value"], "revision": result["value"]["revision"] + 7}
+        return {**result, "value": value}
+    host.request_service = tampering
+    with pytest.raises(NativeServiceBlocked) as denied:
+        await execute_native_read(operator=operator, idempotency_key="tamper-" + tampered, host=host, jobs=jobs,
+                                  candidate={"schema_version": 1, "method": "memory.retrieve", "query": "real",
+                                             "limit": 5, "status": "active"})
+    assert denied.value.reason_code == "native_child_result_mismatch"
+    async with get_session() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.idempotency_key == "tamper-" + tampered))).scalar_one()
+    assert run.status == "blocked" and run.failure_reason == "native_child_result_mismatch"
+    assert "FABRICATED" not in (run.result_summary or "") and run.result_digest is None
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_child_fabricated_task_receipt_is_rejected_against_the_durable_row(live_host):
+    host, jobs, _ = live_host
+    operator = await _operator()
+    job, scope = await _task_scope(host, jobs, operator, key="task-tamper")
+    real = host.request_service
+
+    async def tampering(method, payload, *, original_scope):
+        result = await real(method, payload, original_scope=original_scope)
+        return {**result, "value": {**result["value"], "receipt_ref": "cordis-task:never-recorded"}}
+    host.request_service = tampering
+    with pytest.raises(NativeServiceBlocked) as denied:
+        await verified_task_call(host, jobs, scope, "tasks.checkpoint", {"checkpoint_ref": "step-1"})
+    assert denied.value.reason_code == "native_child_result_mismatch"
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_interrupted_stage_stays_visibly_unresolved_and_is_never_reexecuted(live_host, monkeypatch):
+    from src.work_board import input_artifacts
+    host, jobs, calls = live_host
+    operator = await _operator()
+
+    def lost_disk(path, payload):
+        raise OSError("disk unavailable")
+    monkeypatch.setattr(input_artifacts, "_write_payload", lost_disk)
+    _, digest = native_capability_inventory()
+    candidate = {"schema_version": 1, "method": "capabilities.describe", "capability_id": "native_tool:read_file",
+                 "native_inventory_digest": digest}
+    with pytest.raises(NativeServiceBlocked) as denied:
+        await execute_native_read(operator=operator, idempotency_key="interrupted", host=host, jobs=jobs,
+                                  candidate=candidate)
+    assert denied.value.reason_code == "native_artifact_owner_operation_unproven"
+    async with get_session() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.idempotency_key == "interrupted"))).scalar_one()
+    effects = json.loads(run.effect_receipts_json)
+    assert [(item["effect_type"], item["status"]) for item in effects] == [("cordis_read_artifact", "intent")]
+    from src.runtime_plugins.dispatch import read_context
+    assert [op["state"] for op in read_context(run)["operations"]] == ["intent"]
+    calls_before = len(calls)
+    monkeypatch.undo()
+    retry = await execute_native_read(operator=operator, idempotency_key="interrupted", host=host, jobs=jobs,
+                                      candidate=candidate)
+    assert retry["replayed"] is True and retry["job"]["job_id"] == run.run_identity
+    assert retry["job"]["status"] != "succeeded" and len(calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_epoch_change_visibly_blocks_unstarted_jobs_bound_to_the_old_owner(service_db):
+    operator = await _operator()
+    accepted, _ = await admit_service_job(operator=operator, origin_method="tasks.admit", native_branch="workflow",
+                                          candidate={"schema_version": 1, "checkpoint_refs": []},
+                                          idempotency_key="unstarted", reviewed_composition=None)
+    expected = CompositionDependency("seraph.tasks.v1", "legacy", 1, legacy_composition_digest("seraph.tasks.v1"))
+    with lifecycle_fence_marker():
+        for target_state, epoch, prior_state in (("draining", 1, "ready"), ("blocked", 2, "draining")):
+            async with get_session() as db:
+                async with composition_writer(db):
+                    receipt = await transition_owner(db, runtime_domain="seraph.tasks.v1", expected=expected,
+                                                     expected_state=prior_state, owner_kind="legacy", epoch=epoch,
+                                                     composition_digest=expected.composition_digest,
+                                                     state=target_state)
+    job = await DurableJobRepository().get_job(accepted["job_id"])
+    assert job["status"] == "blocked" and job["failure_reason"] == "composition_owner_changed"
+    async with get_session() as db:
+        proof = json.loads((await db.get(AuditEvent, receipt)).details_json)
+    assert proof["blocked_unstarted_jobs"] == [accepted["job_id"]]
+    # Rollback to ready at the new epoch never revives the blocked job.
+    rolled = CompositionDependency("seraph.tasks.v1", "legacy", 2, expected.composition_digest)
+    with lifecycle_fence_marker():
+        async with get_session() as db:
+            async with composition_writer(db):
+                await transition_owner(db, runtime_domain="seraph.tasks.v1", expected=rolled, expected_state="blocked",
+                                       owner_kind="legacy", epoch=2, composition_digest=expected.composition_digest,
+                                       state="ready")
+    assert (await DurableJobRepository().get_job(accepted["job_id"]))["status"] == "blocked"

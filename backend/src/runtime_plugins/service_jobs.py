@@ -164,6 +164,35 @@ async def open_invocation(*, job_id: str, owner: str, fence: int, host, admissio
     return scope
 
 
+async def verified_task_call(host, jobs, scope, method: str, payload: dict) -> dict:
+    """Forward a task method and accept the child's answer only if the durable
+    job row independently shows the same receipt/revision/state."""
+    jobs = _jobs(jobs)
+    result = await host.request_service(method, payload, original_scope=scope)
+    if result["status"] != "succeeded":
+        return result
+    value = result["value"]
+    job = await jobs.get_job(scope.witness["invocation_ref"])
+    artifacts = [item["artifact_id"] for item in job["artifacts"] if item.get("artifact_id")]
+    receipts = {item["checkpoint_id"] for item in job["checkpoints"]}
+    if method == "tasks.admit":
+        ok = (value["job_ref"] == job["job_id"] and value["replayed"] is scope.witness["admission_replayed"]
+              and value["revision"] <= job["revision"])
+    elif method == "tasks.inspect":
+        ok = value == {"job_ref": job["job_id"], "revision": job["revision"], "state": job["status"],
+                       "artifact_refs": artifacts}
+    elif method == "tasks.checkpoint":
+        ok = value["receipt_ref"] in receipts and value["revision"] <= job["revision"]
+    elif method == "tasks.cancel":
+        ok = value == {"job_ref": job["job_id"], "revision": job["revision"], "state": job["status"]} \
+            and job["status"] == "cancelled"
+    else:
+        raise NativeServiceBlocked("native_task_method_not_verifiable")
+    if not ok:
+        raise NativeServiceBlocked("native_child_result_mismatch")
+    return result
+
+
 async def _block(jobs, scope, reason: str) -> None:
     from src.workflows.job_runtime import DurableJobError
     try:
@@ -178,7 +207,7 @@ async def _block(jobs, scope, reason: str) -> None:
 async def execute_native_read(*, operator, candidate: dict, idempotency_key: str, host=None, jobs=None) -> dict:
     """Temporary-state read -> job -> artifact -> readback, with explicit no_learning."""
     from .bridge import HostBlocked, cordis_host
-    from .service_artifacts import assert_artifact_completion, next_wire_inputs
+    from .service_artifacts import assert_artifact_completion, assert_child_echo, next_wire_inputs
     host = host or cordis_host
     jobs = _jobs(jobs)
     if not host.admitting or host.reviewed is None:
@@ -194,18 +223,24 @@ async def execute_native_read(*, operator, candidate: dict, idempotency_key: str
     scope = await open_invocation(job_id=job["job_id"], owner=owner, fence=fence, host=host,
                                   admission_replayed=replayed, candidate=candidate, jobs=jobs)
     try:
+        # The child's answers are never authority: each must equal the result
+        # Python itself sealed in the job's private context for that call.
         result = await host.request_service(method, wire_inputs(candidate, job["job_id"]), original_scope=scope)
         if result["status"] != "succeeded":
             raise NativeServiceBlocked(result["reason_code"])
-        readback = None
+        async with jobs._session() as db:
+            assert_child_echo(await jobs._fetch(db, job["job_id"]), method, result)
         for _ in range(4):
             async with jobs._session() as db:
                 artifact_method, inputs = next_wire_inputs(await jobs._fetch(db, job["job_id"]))
             observed = await host.request_service(artifact_method, inputs, original_scope=scope)
             if observed["status"] != "succeeded":
                 raise NativeServiceBlocked(observed["reason_code"])
-            if artifact_method == "artifacts.read":
-                readback = observed
+            async with jobs._session() as db:
+                assert_child_echo(await jobs._fetch(db, job["job_id"]), artifact_method, observed)
+        async with jobs._session() as db:
+            from .dispatch import read_context
+            sealed_digest = read_context(await jobs._fetch(db, job["job_id"]))["result"]["result_digest"]
         dispatcher = NativeServiceDispatcher(jobs=jobs)
         proof: dict = {}
 
@@ -216,11 +251,12 @@ async def execute_native_read(*, operator, candidate: dict, idempotency_key: str
         completed = await jobs.transition_job(
             job["job_id"], "succeeded", owner=owner, fencing_token=fence,
             result={"no_learning": True, "memory_status": "no_learning", "method": method,
-                    "result_digest": _digest(result)},
+                    "sealed_result_digest": sealed_digest},
             result_summary="Native service read verified with explicit no_learning",
             terminal_authority_check=completion)
-        return {"job": completed, "result": result, "artifact_readback": readback, "completion": proof,
-                "replayed": False, "memory_status": "no_learning"}
+        # Return only Python-owned values: the sealed read and Python's own readback.
+        return {"job": completed, "result": proof["result"], "artifact_readback": proof["artifact_readback"],
+                "completion": proof, "replayed": False, "memory_status": "no_learning"}
     except (NativeServiceBlocked, HostBlocked) as exc:
         reason = getattr(exc, "reason_code", None) or "native_read_execution_blocked"
         await _block(jobs, scope, reason)

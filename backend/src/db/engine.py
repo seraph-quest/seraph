@@ -26,15 +26,54 @@ engine = create_async_engine(
 )
 
 
+_SQLITE_BUSY_TIMEOUT_MS = 5000
+_BOUNDED_LOCK_WAIT_MARKER = "seraph_bounded_lock_wait"
+
+
 def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     cursor.close()
 
 
+def _restore_sqlite_busy_timeout(dbapi_connection, connection_record, _connection_proxy) -> None:
+    # A best-effort writer shortened this pooled connection's lock wait; give
+    # the standard wait back before any other caller can use the connection.
+    if connection_record.info.pop(_BOUNDED_LOCK_WAIT_MARKER, False):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.close()
+
+
 event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+event.listen(engine.sync_engine, "checkout", _restore_sqlite_busy_timeout)
+
+
+async def bound_lock_wait(session: AsyncSession, milliseconds: int) -> None:
+    """Shorten SQLite's lock wait for the rest of this session's work.
+
+    Only for best-effort writes on read paths (#702): a foreign writer then
+    costs the request ``milliseconds`` instead of the standard busy timeout,
+    and the caller degrades instead of queueing every request behind it. The
+    pool restores the standard wait when the connection is next checked out.
+    """
+    connection = await session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    sync_engine = connection.engine.sync_engine
+    if not event.contains(sync_engine, "checkout", _restore_sqlite_busy_timeout):
+        event.listen(sync_engine, "checkout", _restore_sqlite_busy_timeout)
+    connection.info[_BOUNDED_LOCK_WAIT_MARKER] = True
+    await connection.exec_driver_sql(f"PRAGMA busy_timeout={int(milliseconds)}")
+
+
+def is_database_locked(exc: BaseException) -> bool:
+    """Whether ``exc`` is SQLite lock contention rather than a real fault."""
+    message = str(getattr(exc, "orig", None) or exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
 
 async_session_factory = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False

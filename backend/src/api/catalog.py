@@ -258,10 +258,13 @@ def _bundled_skill_source_by_name(name: str) -> str | None:
     return None
 
 
-def catalog_skill_by_name() -> dict[str, dict[str, Any]]:
+def catalog_skill_by_name(
+    catalog: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Index catalog skills; pass an already loaded ``catalog`` to skip a rescan."""
     return {
         str(item["name"]): item
-        for item in _load_catalog().get("skills", [])
+        for item in (catalog if catalog is not None else _load_catalog()).get("skills", [])
         if isinstance(item, dict) and isinstance(item.get("name"), str)
     }
 

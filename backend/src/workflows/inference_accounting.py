@@ -163,7 +163,7 @@ def _witness(account: InferenceAccountingOwner) -> dict[str, object]:
 
 
 @contextmanager
-def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=None):
+def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=None, exclusive: bool = True):
     if held_workspace is not None:
         from src.workspace.accounting_witness import assert_deployment_binding
         if held_workspace.host_root != root:
@@ -196,6 +196,11 @@ def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=Non
             if not initialize:
                 raise InferenceAccountingError("accounting_continuity_unavailable")
             directory.mkdir(mode=0o700, parents=False)
+        if not exclusive:
+            # Read-only verification: the receipt is replaced atomically, and a
+            # reader must never make a writer's non-blocking flock fail busy.
+            yield workspace
+            return
         descriptor = os.open(directory / "accounting.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             try:
@@ -214,10 +219,12 @@ def _continuity_lock(root: Path, *, initialize: bool = False, held_workspace=Non
 class InferenceAccountingRepositoryMixin:
     """Focused storage operations inherited by the canonical job repository."""
 
-    async def _accounting_begin(self, db: Any) -> None:
+    async def _accounting_begin(self, db: Any, *, read_only: bool = False) -> None:
         if db.get_bind().dialect.name != "sqlite":
             raise InferenceAccountingError("accounting_storage_unsupported")
-        await db.execute(text("BEGIN IMMEDIATE"))
+        # A deferred BEGIN pins one consistent WAL snapshot without taking the
+        # writer lock, so status polls never queue behind a foreign writer.
+        await db.execute(text("BEGIN" if read_only else "BEGIN IMMEDIATE"))
 
     async def record_provider_denial_quiescence(self, proof):
         """Durable completion proof from the real closed broker callback path."""
@@ -817,49 +824,77 @@ class InferenceAccountingRepositoryMixin:
                 return _operation_payload(row)
 
     async def inference_accounting_snapshot(self, *, now: datetime | None = None, job_id: str | None = None, continuity_workspace=None) -> dict[str, object]:
+        """Advisory ledger view; admission re-checks everything under the writer lock.
+
+        Reads use a deferred snapshot. They escalate to the original writer
+        transaction only when the period high-water mark must be persisted or
+        continuity does not verify (a writer persists the witness before its
+        commit), so either outcome matches the serialized read.
+        """
         period = period_id(now or datetime.now(timezone.utc))
         try:
-            async with self._session() as db:
-                await self._accounting_begin(db)
-                account, rows = await self._accounting_rows(db)
-                with _continuity_lock(Path(settings.workspace_dir).resolve(), held_workspace=continuity_workspace) as workspace:
-                    self._assert_accounting_continuity(workspace, account, rows)
-                    from src.workspace.accounting_witness import period_state, unreviewed_overruns
-                    owner_data, operations = account.model_dump(mode="json"), [_operation_payload(row) for row in rows]
-                    period_status = period_state(owner_data, operations, period)
-                    if period > period_status["period_high_water"]:
-                        history = json.loads(account.settings_history_json)
-                        history.append({"kind": "period_observed", "period_id": period, "recorded_at": datetime.now(timezone.utc).isoformat()})
-                        account.settings_history_json = _json(history)
-                        await self._persist_accounting_witness(db, workspace, account, rows)
-                        owner_data = account.model_dump(mode="json")
-                        period_status = period_state(owner_data, operations, period)
-                    overruns = unreviewed_overruns(owner_data, operations)
-                    reason = period_status["reason_code"] or ("provider_charge_exceeded_reservation" if overruns else None)
-                    committed = sum(row.actual_cost_microusd or 0 for row in rows if row.state == "settled" and row.period_id >= period)
-                    reserved = sum(row.bound_microusd for row in rows if row.state == "reserved")
-                    unknown = sum(row.bound_microusd for row in rows if row.state in {"contact_started", "unknown"})
-                    current_review = next((entry for entry in reversed(json.loads(account.settings_history_json))
-                        if entry.get("kind") == "request_reserve_review"
-                        and entry.get("revision") == account.settings_revision), None)
-                    return {**period_status, "status": "blocked" if reason else "ready", "reason_code": reason,
-                        "accounting_continuity_verified": True, "revision": account.revision,
-                        "ledger_digest": account.ledger_digest,
-                        "request_reserve_review": {"settings_revision": current_review["revision"],
-                            "accounting_revision": current_review["accounting_revision"],
-                            "bound_microusd": current_review["bound_microusd"]} if current_review else None,
-                        "period_review": {"endpoint": "/api/settings/model-fabric/accounting/period", "method": "POST",
-                            "period_id": period, "expected_revision": account.revision,
-                            "authority_scope": "deployment_accounting"} if period_status["reason_code"] else None,
-                        "deployment_id": account.deployment_id,
-                        "period_id": period, "settings_revision": account.settings_revision,
-                        "ceiling_microusd": account.ceiling_microusd, "committed_microusd": committed,
-                        "reserved_microusd": reserved, "unknown_microusd": unknown,
-                        "remaining_microusd": max(0, account.ceiling_microusd - committed - reserved - unknown),
-                        "overrun_max_cost_microusd": max((row["actual_cost_microusd"] for row in overruns), default=0),
-                        "operation_count": len(rows), "operations_truncated": len(rows) > 128,
-                        "operations": [_operator_operation(row) for row in sorted((item for item in rows if job_id is None or item.job_id == job_id), key=lambda item: (item.state not in {"reserved", "contact_started", "unknown"}, -item.priority, item.sequence))[:128]],
-                        "memory_status": "no_learning"}
+            if continuity_workspace is None:
+                snapshot = await self._accounting_snapshot(period, job_id, read_only=True)
+                if snapshot is not None:
+                    return snapshot
+            snapshot = await self._accounting_snapshot(period, job_id, continuity_workspace=continuity_workspace)
+            assert snapshot is not None
+            return snapshot
         except Exception as exc:
             return {"status": "blocked", "reason_code": getattr(exc, "code", "accounting_continuity_unavailable"),
                 "remaining_microusd": None, "period_id": period, "operations": [], "memory_status": "no_learning"}
+
+    async def _accounting_snapshot(self, period: str, job_id: str | None, *, read_only: bool = False,
+                                   continuity_workspace=None) -> dict[str, object] | None:
+        async with self._session() as db:
+            await self._accounting_begin(db, read_only=read_only)
+            account, rows = await self._accounting_rows(db)
+            with _continuity_lock(Path(settings.workspace_dir).resolve(), held_workspace=continuity_workspace,
+                                  exclusive=not read_only) as workspace:
+                try:
+                    self._assert_accounting_continuity(workspace, account, rows)
+                except Exception:
+                    # Unserialized, a concurrent writer may have persisted the
+                    # witness ahead of its commit; only the serialized read may
+                    # conclude continuity is broken.
+                    if read_only and account is not None:
+                        return None
+                    raise
+                from src.workspace.accounting_witness import period_state, unreviewed_overruns
+                owner_data, operations = account.model_dump(mode="json"), [_operation_payload(row) for row in rows]
+                period_status = period_state(owner_data, operations, period)
+                if period > period_status["period_high_water"]:
+                    if read_only:
+                        return None
+                    history = json.loads(account.settings_history_json)
+                    history.append({"kind": "period_observed", "period_id": period, "recorded_at": datetime.now(timezone.utc).isoformat()})
+                    account.settings_history_json = _json(history)
+                    await self._persist_accounting_witness(db, workspace, account, rows)
+                    owner_data = account.model_dump(mode="json")
+                    period_status = period_state(owner_data, operations, period)
+                overruns = unreviewed_overruns(owner_data, operations)
+                reason = period_status["reason_code"] or ("provider_charge_exceeded_reservation" if overruns else None)
+                committed = sum(row.actual_cost_microusd or 0 for row in rows if row.state == "settled" and row.period_id >= period)
+                reserved = sum(row.bound_microusd for row in rows if row.state == "reserved")
+                unknown = sum(row.bound_microusd for row in rows if row.state in {"contact_started", "unknown"})
+                current_review = next((entry for entry in reversed(json.loads(account.settings_history_json))
+                    if entry.get("kind") == "request_reserve_review"
+                    and entry.get("revision") == account.settings_revision), None)
+                return {**period_status, "status": "blocked" if reason else "ready", "reason_code": reason,
+                    "accounting_continuity_verified": True, "revision": account.revision,
+                    "ledger_digest": account.ledger_digest,
+                    "request_reserve_review": {"settings_revision": current_review["revision"],
+                        "accounting_revision": current_review["accounting_revision"],
+                        "bound_microusd": current_review["bound_microusd"]} if current_review else None,
+                    "period_review": {"endpoint": "/api/settings/model-fabric/accounting/period", "method": "POST",
+                        "period_id": period, "expected_revision": account.revision,
+                        "authority_scope": "deployment_accounting"} if period_status["reason_code"] else None,
+                    "deployment_id": account.deployment_id,
+                    "period_id": period, "settings_revision": account.settings_revision,
+                    "ceiling_microusd": account.ceiling_microusd, "committed_microusd": committed,
+                    "reserved_microusd": reserved, "unknown_microusd": unknown,
+                    "remaining_microusd": max(0, account.ceiling_microusd - committed - reserved - unknown),
+                    "overrun_max_cost_microusd": max((row["actual_cost_microusd"] for row in overruns), default=0),
+                    "operation_count": len(rows), "operations_truncated": len(rows) > 128,
+                    "operations": [_operator_operation(row) for row in sorted((item for item in rows if job_id is None or item.job_id == job_id), key=lambda item: (item.state not in {"reserved", "contact_started", "unknown"}, -item.priority, item.sequence))[:128]],
+                    "memory_status": "no_learning"}

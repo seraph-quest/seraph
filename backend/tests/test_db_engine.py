@@ -993,7 +993,12 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
     tmp_path,
     monkeypatch,
 ):
-    """Concurrent authentication coalesces a stale session touch to one write."""
+    """Concurrent authentication coalesces a stale touch and never waits on a writer.
+
+    #702: the touch is bookkeeping on an already validated read. Under a
+    foreign writer it is deferred (not persisted, session not extended) and
+    every request is answered while the writer still holds the lock.
+    """
     pool = production_engine.sync_engine.pool
     assert pool._pool.maxsize == 20
     assert pool._max_overflow == 0
@@ -1145,27 +1150,31 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
         ]
         await asyncio.wait_for(initial_reads_completed.wait(), timeout=10)
         await _wait_for_update()
-        # Give the DBAPI writer a scheduling turn while the independent
-        # BEGIN IMMEDIATE connection still owns SQLite's writer reservation.
-        await asyncio.sleep(0.05)
-        assert all(not task.done() for task in auth_tasks), "a touch completed before the writer lock was released"
-        with counter_lock:
-            observed_updates = updates_entered
-        assert observed_updates == 1, "stale touch writes must remain coalesced under contention"
-        assert max_checked_out == 20
-        assert max_checked_out <= 20
-        await _release_lock()
-
         results = await asyncio.wait_for(
             asyncio.gather(*auth_tasks, return_exceptions=True),
-            timeout=15,
+            timeout=4,
         )
+        assert not lock_released
         failures = [result for result in results if isinstance(result, BaseException)]
         assert failures == []
         assert len(results) == 40
         with counter_lock:
-            assert updates_entered == 1
+            observed_updates = updates_entered
+        # Requests that find a touch in flight skip it; only a request whose
+        # read finished after a deferred attempt may try again.
+        assert 1 <= observed_updates < 40, "stale touch writes must remain coalesced under contention"
+        assert max_checked_out == 20
+        assert max_checked_out <= 20
+        async with setup_factory() as session:
+            deferred = await session.get(OperatorSession, "auth-contention-session")
+            assert deferred is not None
+            deferred_last_seen = deferred.last_seen_at
+        if deferred_last_seen.tzinfo is None:
+            deferred_last_seen = deferred_last_seen.replace(tzinfo=timezone.utc)
+        assert deferred_last_seen == now, "a deferred touch must not extend the session"
+        await _release_lock()
 
+        await authenticate_session("auth-contention-session")
         async with setup_factory() as session:
             record = await session.get(OperatorSession, "auth-contention-session")
             assert record is not None

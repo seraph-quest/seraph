@@ -783,9 +783,10 @@ def run_original_producer(executor, job, *, stage, payload, posture, owner, obse
                 # nothing further and still publishes its signed interrupted
                 # prefix, which is verified below before any lane release.
                 import logging
+                code = getattr(exc, "code", None)
                 logging.getLogger(__name__).warning(
                     "original producer command %d refused: %s %s", command.ordinal,
-                    type(exc).__name__, str(exc)[:128])
+                    type(exc).__name__, code if isinstance(code, str) and len(code) <= 64 else "-")
                 authorized = False
             if not authorized:
                 denied = True

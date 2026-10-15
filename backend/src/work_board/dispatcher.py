@@ -831,14 +831,16 @@ async def _reserve_repo_repair_execution_capacity(
     authority_digest: str,
     execution_deadline_at: str,
     expected_revision: int | None,
+    lane: RepoRepairCapacityLane | None = None,
 ) -> RepoRepairCapacityLane:
-    """Acquire the physical lane and its exact durable reservation."""
+    """Acquire the physical lane (unless already held) and its exact durable reservation."""
 
-    lane = await asyncio.to_thread(
-        try_acquire_repo_repair_capacity,
-        workspace_root,
-        job_id=job_id,
-    )
+    if lane is None:
+        lane = await asyncio.to_thread(
+            try_acquire_repo_repair_capacity,
+            workspace_root,
+            job_id=job_id,
+        )
     if lane is None:
         raise DurableJobAdmissionDenied("repo_repair_execution_busy")
     try:

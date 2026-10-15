@@ -15,6 +15,7 @@ from src.work_board.contracts import WorkBoardOwner, RepositoryNativeStopClosure
 from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now
 
 STOP_ID = "repository:stop-intent:v1"
+EXPIRY_CLOSER_RETRY_SECONDS = 300
 AUTOMATIC_REASONS = frozenset({"deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"})
 _ISSUED = weakref.WeakKeyDictionary()
 _STAGED = weakref.WeakKeyDictionary()
@@ -1069,8 +1070,16 @@ async def close_expired_repository_roots(service, jobs):
             if held and row.deadline_at is not None and _as_utc(row.deadline_at) <= now:
                 candidates.append((row.run_identity, WorkBoardOwner(
                     principal_id=row.owner_principal_id, session_id=row.operator_session_id)))
+    import time
+    # A Root whose closure stays pending (unproven producer, Unknown cost) is
+    # retried only after a back-off, not re-staged on every dispatcher pass.
+    backoff = getattr(service, "_expiry_closer_retry_at", None)
+    if backoff is None:
+        backoff = service._expiry_closer_retry_at = {}
     closed = []
     for job_id, owner in candidates:
+        if time.monotonic() < backoff.get(job_id, 0.0):
+            continue
         try:
             reason = await _expired_automatic_reason(service, jobs, job_id=job_id, owner=owner)
             if reason is None:
@@ -1079,7 +1088,10 @@ async def close_expired_repository_roots(service, jobs):
                 general_task_service=None, reason=reason)
             if not stopped["pending"]:
                 closed.append(job_id)
+                backoff.pop(job_id, None)
+                continue
         except Exception as exc:
             logging.getLogger(__name__).warning("expired original repository %s remains held: %s",
                 job_id, type(exc).__name__)
+        backoff[job_id] = time.monotonic() + EXPIRY_CLOSER_RETRY_SECONDS
     return closed

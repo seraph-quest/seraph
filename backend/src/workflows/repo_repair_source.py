@@ -1051,102 +1051,120 @@ async def prepare_repository_native_source(general_task_service, jobs, binding, 
     # while another original still holds the lane.
     from src.workflows.repo_repair_stop import close_expired_repository_roots
     await close_expired_repository_roots(source, jobs)
-    await _assert_repository_lane_available(db_factory=jobs._session)
-    pending = await jobs.get_job(binding.invocation_id)
-    if (pending is None or pending["status"] not in {"accepted", "queued"}
-            or pending["attempt_count"] or pending["lease"]["fencing_token"]
-            or pending["lease"]["owner"] or pending["effects"]):
-        raise DurableJobLeaseError("original unclaimed repository child required")
-    cutoff = min(binding.original_deadline_at, binding.native_deadline_at)
-    remaining = (cutoff - _utc_now()).total_seconds()
-    if remaining <= 0:
-        raise DurableJobLeaseError("original repository cutoff expired")
-    if pending["status"] == "accepted":
-        await jobs.queue_job(binding.invocation_id)
-    child = await jobs.claim_job(binding.invocation_id, owner=child_owner, lease_seconds=max(1, ceil(remaining)))
-    await publish_positive_claim(jobs, binding, child_owner=child_owner,
-        child_fence=child["lease"]["fencing_token"])
-    from src.work_board.general_task_runtime_artifacts import read_current_native_tool_input, read_current_native_envelope
-    async with jobs._session() as db:
-        current_child = await jobs._fetch(db, binding.invocation_id)
-        private = await read_current_native_tool_input(db, current_child)
-        work = RepoWorkInput.model_validate(private.inputs)
-        goal = await db.get(Goal, binding.goal_id)
-        budget = deserialize_admission_budget(goal)
-        capacity = budget.max_outstanding_jobs if budget else 1
-        from src.db.models import WorkBoardTask
-        parent = await jobs._fetch(db, binding.parent_job_id)
-        parent_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
-        parent_attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
-        original_group = (await read_current_native_envelope(db, parent, parent_task, parent_attempt)).proposal_group
-    owner = WorkBoardOwner(principal_id=binding.owner_principal_id, session_id=binding.original_root_id)
-    repository = general_task_service.repository
-    async with source.session_factory() as db:
-        artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
-            capability_id="engineering.repo-repair.v1", goal_id=binding.goal_id, goal_revision=binding.goal_revision,
-            input=work.model_dump(mode="json"), idempotency_key="repository-source:" + binding.invocation_id))
-        created = await repository.create_task(db, owner, WorkBoardTaskCreate(
-            title="Repair " + work.repository_ref[:100], goal_id=binding.goal_id, goal_revision=binding.goal_revision,
-            capability_id="engineering.repo-repair.v1", input_artifact_id=artifact.artifact_id,
-            idempotency_scope="original-repository-child", idempotency_key=binding.invocation_id,
-            status="todo", requires_review=False))
-        await db.commit()
-    async with source.session_factory() as db:
-        ready = await repository.promote_task_ready(db, created.task.task_id,
-            expected_revision=created.task.task_revision, actor_principal_id=owner.principal_id,
-            actor_session_id=owner.session_id)
-        await db.commit()
-    async with source.session_factory() as db:
-        claimed = await repository.claim_ready_task(db, created.task.task_id,
-            expected_revision=ready.task.task_revision, lease_owner=child_owner, lease_seconds=max(1, ceil(remaining)))
-        await db.commit()
-    if claimed is None:
+    # The physical lane flock is held from the busy check through the exact
+    # durable reservation, so two concurrent admissions cannot both pass the
+    # check and strand a claimed child; a busy lane denies before any claim.
+    import asyncio
+    from src.workflows.repair_capacity import try_acquire_repo_repair_capacity
+    planned_root = "repository:" + _source_digest([binding.invocation_id, "original-root"])
+    admission_lane = await asyncio.to_thread(try_acquire_repo_repair_capacity,
+        str(source._workspace()), job_id=planned_root)
+    if admission_lane is None:
         raise _repository_lane_busy()
-    async with source.session_factory() as db:
-        check, scope = await prepare_repository_original_admission(source, db,
-            native_invocation_id=binding.invocation_id, repository_task_id=created.task.task_id,
-            repository_attempt_id=claimed.attempt.attempt_id)
-    inputs = {"schema_version": 1, "capability_id": "engineering.repo-repair.v1",
-        "input": work.model_dump(mode="json")}
-    root_id = "repository:" + _source_digest([binding.invocation_id, "original-root"])
-    deadline = min(cutoff, _as_utc(claimed.attempt.lease_expires_at),
-        _utc_now() + timedelta(seconds=work.limits.max_total_seconds))
-    if budget is None:
-        raise DurableJobLeaseError("original repository Goal budget required")
-    deadline = min(deadline, original_group.issued_at + timedelta(seconds=budget.max_runtime_seconds),
-        *(_as_utc(value) for value in (goal.due_date, budget.period_expires_at) if value is not None))
-    spec = DurableJobSpec(identity=DurableJobIdentity(root_id, "user", owner.principal_id,
-        "engineering.repo-repair.v1", "1", "original-repository-child", binding.invocation_id),
-        inputs=inputs, session_id=owner.session_id, operator_session_id=owner.session_id,
-        goal_id=binding.goal_id, goal_revision=binding.goal_revision, deadline_at=deadline,
-        resource_claims=("repo-repair-execution",), max_attempts=1, max_outstanding_jobs=capacity,
-        budget_microusd=work.limits.max_cost_microusd, run_fingerprint=_digest(inputs),
-        declared_authority={"principal": owner.principal_id, "owner_kind": "user", "session_id": owner.session_id,
-            "capability_id": "engineering.repo-repair.v1", "budget_microusd": work.limits.max_cost_microusd})
-    async with scope():
-        admitted = await jobs.admit_job(spec, admission_authority_check=check)
-    async with source.session_factory() as db:
-        await repository.link_attempt_workflow_run(db, created.task.task_id, claimed.attempt.attempt_id,
-            workflow_run_id=root_id, expected_revision=claimed.task.task_revision,
-            board_fence=claimed.attempt.fencing_token, lease_owner=claimed.attempt.lease_owner,
-            workflow_projection=admitted, expected_identity={
-                "job_id": root_id, "owner_kind": "user", "owner_principal_id": owner.principal_id,
-                "service_id": spec.service_id, "operator_session_id": owner.session_id, "session_id": owner.session_id,
-                "goal_id": binding.goal_id, "goal_revision": binding.goal_revision,
-                "job_kind": spec.identity.job_kind, "capability_version": "1", "input_digest": _digest(inputs),
-                "authority_digest": _digest(spec.declared_authority), "run_fingerprint": spec.run_fingerprint,
-                "idempotency_scope": spec.identity.idempotency_scope, "idempotency_key": binding.invocation_id})
-        await db.commit()
-    await jobs.queue_job(root_id)
-    await jobs.claim_job(root_id, owner=child_owner, lease_seconds=max(1, ceil((deadline - _utc_now()).total_seconds())))
-    from src.work_board.dispatcher import _reserve_repo_repair_execution_capacity
-    async with jobs._session() as db:
-        root = await jobs._fetch(db, root_id)
-    source._iterative_lanes[root_id] = await _reserve_repo_repair_execution_capacity(
-        jobs=jobs, job_id=root_id, attempt_id=claimed.attempt.attempt_id,
-        workspace_root=str(source._workspace()), owner=root.lease_owner,
-        fencing_token=root.fencing_token, authority_digest=root.authority_digest,
-        execution_deadline_at=deadline.isoformat(), expected_revision=root.revision)
+    fresh_lane = admission_lane._quarantine_job_id is None
+    handed = False
+    try:
+        await _assert_repository_lane_available(db_factory=jobs._session)
+        pending = await jobs.get_job(binding.invocation_id)
+        if (pending is None or pending["status"] not in {"accepted", "queued"}
+                or pending["attempt_count"] or pending["lease"]["fencing_token"]
+                or pending["lease"]["owner"] or pending["effects"]):
+            raise DurableJobLeaseError("original unclaimed repository child required")
+        cutoff = min(binding.original_deadline_at, binding.native_deadline_at)
+        remaining = (cutoff - _utc_now()).total_seconds()
+        if remaining <= 0:
+            raise DurableJobLeaseError("original repository cutoff expired")
+        if pending["status"] == "accepted":
+            await jobs.queue_job(binding.invocation_id)
+        child = await jobs.claim_job(binding.invocation_id, owner=child_owner, lease_seconds=max(1, ceil(remaining)))
+        await publish_positive_claim(jobs, binding, child_owner=child_owner,
+            child_fence=child["lease"]["fencing_token"])
+        from src.work_board.general_task_runtime_artifacts import read_current_native_tool_input, read_current_native_envelope
+        async with jobs._session() as db:
+            current_child = await jobs._fetch(db, binding.invocation_id)
+            private = await read_current_native_tool_input(db, current_child)
+            work = RepoWorkInput.model_validate(private.inputs)
+            goal = await db.get(Goal, binding.goal_id)
+            budget = deserialize_admission_budget(goal)
+            capacity = budget.max_outstanding_jobs if budget else 1
+            from src.db.models import WorkBoardTask
+            parent = await jobs._fetch(db, binding.parent_job_id)
+            parent_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == binding.task_id))
+            parent_attempt = await db.get(WorkBoardAttempt, binding.attempt_id)
+            original_group = (await read_current_native_envelope(db, parent, parent_task, parent_attempt)).proposal_group
+        owner = WorkBoardOwner(principal_id=binding.owner_principal_id, session_id=binding.original_root_id)
+        repository = general_task_service.repository
+        async with source.session_factory() as db:
+            artifact = await prepare_input_artifact(db, owner, WorkBoardInputArtifactCreate(schema_version=1,
+                capability_id="engineering.repo-repair.v1", goal_id=binding.goal_id, goal_revision=binding.goal_revision,
+                input=work.model_dump(mode="json"), idempotency_key="repository-source:" + binding.invocation_id))
+            created = await repository.create_task(db, owner, WorkBoardTaskCreate(
+                title="Repair " + work.repository_ref[:100], goal_id=binding.goal_id, goal_revision=binding.goal_revision,
+                capability_id="engineering.repo-repair.v1", input_artifact_id=artifact.artifact_id,
+                idempotency_scope="original-repository-child", idempotency_key=binding.invocation_id,
+                status="todo", requires_review=False))
+            await db.commit()
+        async with source.session_factory() as db:
+            ready = await repository.promote_task_ready(db, created.task.task_id,
+                expected_revision=created.task.task_revision, actor_principal_id=owner.principal_id,
+                actor_session_id=owner.session_id)
+            await db.commit()
+        async with source.session_factory() as db:
+            claimed = await repository.claim_ready_task(db, created.task.task_id,
+                expected_revision=ready.task.task_revision, lease_owner=child_owner, lease_seconds=max(1, ceil(remaining)))
+            await db.commit()
+        if claimed is None:
+            raise _repository_lane_busy()
+        async with source.session_factory() as db:
+            check, scope = await prepare_repository_original_admission(source, db,
+                native_invocation_id=binding.invocation_id, repository_task_id=created.task.task_id,
+                repository_attempt_id=claimed.attempt.attempt_id)
+        inputs = {"schema_version": 1, "capability_id": "engineering.repo-repair.v1",
+            "input": work.model_dump(mode="json")}
+        root_id = "repository:" + _source_digest([binding.invocation_id, "original-root"])
+        deadline = min(cutoff, _as_utc(claimed.attempt.lease_expires_at),
+            _utc_now() + timedelta(seconds=work.limits.max_total_seconds))
+        if budget is None:
+            raise DurableJobLeaseError("original repository Goal budget required")
+        deadline = min(deadline, original_group.issued_at + timedelta(seconds=budget.max_runtime_seconds),
+            *(_as_utc(value) for value in (goal.due_date, budget.period_expires_at) if value is not None))
+        spec = DurableJobSpec(identity=DurableJobIdentity(root_id, "user", owner.principal_id,
+            "engineering.repo-repair.v1", "1", "original-repository-child", binding.invocation_id),
+            inputs=inputs, session_id=owner.session_id, operator_session_id=owner.session_id,
+            goal_id=binding.goal_id, goal_revision=binding.goal_revision, deadline_at=deadline,
+            resource_claims=("repo-repair-execution",), max_attempts=1, max_outstanding_jobs=capacity,
+            budget_microusd=work.limits.max_cost_microusd, run_fingerprint=_digest(inputs),
+            declared_authority={"principal": owner.principal_id, "owner_kind": "user", "session_id": owner.session_id,
+                "capability_id": "engineering.repo-repair.v1", "budget_microusd": work.limits.max_cost_microusd})
+        async with scope():
+            admitted = await jobs.admit_job(spec, admission_authority_check=check)
+        async with source.session_factory() as db:
+            await repository.link_attempt_workflow_run(db, created.task.task_id, claimed.attempt.attempt_id,
+                workflow_run_id=root_id, expected_revision=claimed.task.task_revision,
+                board_fence=claimed.attempt.fencing_token, lease_owner=claimed.attempt.lease_owner,
+                workflow_projection=admitted, expected_identity={
+                    "job_id": root_id, "owner_kind": "user", "owner_principal_id": owner.principal_id,
+                    "service_id": spec.service_id, "operator_session_id": owner.session_id, "session_id": owner.session_id,
+                    "goal_id": binding.goal_id, "goal_revision": binding.goal_revision,
+                    "job_kind": spec.identity.job_kind, "capability_version": "1", "input_digest": _digest(inputs),
+                    "authority_digest": _digest(spec.declared_authority), "run_fingerprint": spec.run_fingerprint,
+                    "idempotency_scope": spec.identity.idempotency_scope, "idempotency_key": binding.invocation_id})
+            await db.commit()
+        await jobs.queue_job(root_id)
+        await jobs.claim_job(root_id, owner=child_owner, lease_seconds=max(1, ceil((deadline - _utc_now()).total_seconds())))
+        from src.work_board.dispatcher import _reserve_repo_repair_execution_capacity
+        async with jobs._session() as db:
+            root = await jobs._fetch(db, root_id)
+        handed = True  # The reservation owner keeps or quarantines it from here.
+        source._iterative_lanes[root_id] = await _reserve_repo_repair_execution_capacity(
+            jobs=jobs, job_id=root_id, attempt_id=claimed.attempt.attempt_id,
+            workspace_root=str(source._workspace()), owner=root.lease_owner,
+            fencing_token=root.fencing_token, authority_digest=root.authority_digest,
+            execution_deadline_at=deadline.isoformat(), expected_revision=root.revision,
+            lane=admission_lane)
+    finally:
+        if not handed and fresh_lane:
+            await asyncio.to_thread(admission_lane.release_after_denied)
     return await prepare_repository_iteration(source, jobs, job_id=root_id, owner=owner, iteration_index=1)
 
 

@@ -225,3 +225,55 @@ async def test_hung_check_times_out_at_the_original_cutoff_and_releases_the_lane
     assert await close_expired_repository_roots(source, flow["jobs"]) == [flow["root_id"]]
     await _assert_released(flow, status="failed", reason="deadline_exhausted")
     await _successor_runs(flow, "after-hung-check")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_admissions_cannot_both_claim_the_lane(accounting_db, monkeypatch, repository_admission_signer):
+    from src.auth.service import authenticate_session
+    from src.workflows.repo_repair_source import prepare_repository_native_source
+    from src.workflows.repo_repair_stop import stop_repository_root
+    from tests.test_repo_work_task_publication import actual_native_source
+    factory, owner, service, jobs, first, request = await actual_native_source(
+        accounting_db, monkeypatch, goal_capacity=4, claim_child=False)
+    _, _, _, _, second, _ = await admit_existing_source_request(factory, owner, service,
+        request.model_copy(update={"idempotency_key": "concurrent-second"}), claim_child=False)
+    operator = await authenticate_session(owner.session_id, touch=False)
+    bindings = (first, second)
+    results = await asyncio.gather(*(prepare_repository_native_source(service, jobs, binding,
+        child_owner="concurrent-worker-" + str(index), principal=operator.principal)
+        for index, binding in enumerate(bindings)), return_exceptions=True)
+    winners = [(binding, result) for binding, result in zip(bindings, results) if isinstance(result, dict)]
+    losers = [(binding, result) for binding, result in zip(bindings, results) if isinstance(result, BaseException)]
+    assert len(winners) == 1 and len(losers) == 1, results
+    (loser, error), (_, won) = losers[0], winners[0]
+    assert isinstance(error, BoardError) and error.code == "repository_execution_busy"
+    # The loser never claimed its child, so it stays retryable.
+    pending = await jobs.get_job(loser.invocation_id)
+    assert pending["status"] in {"accepted", "queued"} and not pending["attempt_count"]
+    stopped = await stop_repository_root(service.repository_source_service, jobs,
+        job_id=won["repository_job_id"], owner=owner, general_task_service=service)
+    assert stopped["pending"] is False
+    retried = await prepare_repository_native_source(service, jobs, loser,
+        child_owner="concurrent-retry", principal=operator.principal)
+    assert retried["awaiting_repository_consent"] is True
+
+
+@pytest.mark.asyncio
+async def test_closer_backs_off_a_root_whose_closure_stays_pending(accounting_db, monkeypatch, repository_admission_signer):
+    from src.workflows import repo_repair_stop as stop
+    flow = await _original(accounting_db, monkeypatch,
+        work_limits={"max_iterations": 3, "max_total_seconds": 5, "max_cost_usd": 0.0010019})
+    source, jobs = flow["service"].repository_source_service, flow["jobs"]
+    await asyncio.sleep(max(0, (await _cutoff(flow) - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+    attempts = []
+    async def pending_stop(*args, **kwargs):
+        attempts.append(kwargs["job_id"])
+        return {"pending": True}
+    with monkeypatch.context() as pending:
+        pending.setattr(stop, "stop_repository_root", pending_stop)
+        assert await stop.close_expired_repository_roots(source, jobs) == []
+        assert await stop.close_expired_repository_roots(source, jobs) == []
+    assert attempts == [flow["root_id"]]  # Not re-staged on the next pass.
+    source._expiry_closer_retry_at[flow["root_id"]] = 0.0  # The back-off has elapsed.
+    assert await stop.close_expired_repository_roots(source, jobs) == [flow["root_id"]]
+    await _assert_released(flow, status="failed", reason="deadline_exhausted")

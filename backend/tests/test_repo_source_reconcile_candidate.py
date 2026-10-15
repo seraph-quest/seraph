@@ -75,7 +75,7 @@ async def test_genuine_sameboot_candidate_selects_original_and_preserves_public_
 
 
 @pytest.mark.skip(reason="exercises the unreleased managed-recovery reconcile candidate (no production caller; "
-    "public Source recovery is held at 503); tracked by the #1009 managed-recovery follow-up")
+    "public Source recovery is held at 503); tracked by the managed-recovery follow-up #1063")
 @pytest.mark.asyncio
 async def test_genuine_unknown_candidate_remains_nonmutating_held(
         accounting_db, monkeypatch, repository_admission_signer):

@@ -23,7 +23,7 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 # these journeys also cover is proven without it in
 # test_repository_work_natural_intent.py.
 pytestmark = pytest.mark.skip(
-    reason="public Source crash recovery is held (fail-closed 503) pending the #1009 managed-recovery follow-up")
+    reason="public Source crash recovery is held (fail-closed 503) pending the managed-recovery follow-up #1063")
 
 
 def _original_limits(monkeypatch, *, iterations, seconds):

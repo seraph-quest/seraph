@@ -1789,12 +1789,17 @@ Bounded iterative repository work is **Partial** under
 [ADR-030](./decisions/030-bounded-iterative-repository-work.md). An accepted
 `repository_work` Task runs up to three manually approved patch iterations within
 its original limits. The plan can be literal or a reviewed planner proposal. Each
-iteration returns a local patch and the actual pytest or npm output. Failed checks
-feed the next iteration, and base drift or a dirty tree blocks execution. Crash
-recovery under [ADR-032](./decisions/032-repository-crash-recovery-evidence.md)
-remains **Planned**. `POST /api/workflows/repo-repair/{id}/source-recovery`
-returns 503. An interrupted or lost original producer stays held until the
-managed-recovery follow-up ships. Ordinary repair behavior below is unchanged.
+iteration returns a local patch and the actual pytest or npm output. A check that
+exits non-zero feeds the next iteration, and base drift or a dirty tree blocks
+execution. One original holds the workspace repository lane, and other repository
+Tasks get `repository_execution_busy`. A timed-out, truncated or interrupted check
+is a partial: Stop closes it and releases the lane. An expired original closes by
+its deadline on Stop, on the next repository admission or on the dispatcher tick.
+Only a lost producer or Unknown result stays held. Crash recovery under
+[ADR-032](./decisions/032-repository-crash-recovery-evidence.md) remains **Planned**
+([#1063](https://github.com/seraph-quest/seraph/issues/1063)), and
+`POST /api/workflows/repo-repair/{id}/source-recovery` returns 503. Ordinary repair
+behavior below is unchanged.
 
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)

@@ -28,13 +28,22 @@ existing extension/capability-pack support does not establish that migration.
 plan or accepts a reviewed planner proposal. After selected-source consent, up to
 three manually approved patch iterations run under the original deadline, cost and
 iteration limits with Python pytest or Node 24 npm test/build checks. Each run
-records a local patch artifact and the actual requested command output. A failed check
-continues into the next bounded iteration without renewing those limits. Base drift or
-a dirty live tree blocks before execution; the live tree is never overwritten.
-Missing boundary: crash/restart recovery. The public Source recovery action stays
-fail-closed (HTTP 503). A Stop that interrupts a running command, or a lost
-original producer, keeps the original held (stop pending or Unknown) until the
-tracked managed-recovery follow-up ships. New admissions record the
+records a local patch artifact and the actual requested command output. A requested
+check that exits non-zero continues into the next bounded iteration without renewing
+those limits. Base drift or a dirty live tree blocks before execution; the live tree
+is never overwritten.
+
+One original holds the workspace's single repository lane, so a second repository
+Task is refused with `repository_execution_busy` until the first closes. A
+timed-out, output-truncated or Stop-interrupted check is recorded as a partial with
+its logs, never as a check result. Operator Stop then closes it and releases the
+lane. After its original cutoff, the original closes by its own deadline cause: on
+operator Stop, on the next repository admission, or on the dispatcher tick, with
+no live operator session required. Only an unproven process closure stays held:
+a lost or still-running original producer, or an Unknown result or cost.
+Crash/restart recovery for those cases is the tracked follow-up
+[#1063](https://github.com/seraph-quest/seraph/issues/1063). The public Source
+recovery action stays fail-closed (HTTP 503). New admissions record the
 [ADR-032](./decisions/032-repository-crash-recovery-evidence.md) v4 evidence,
 but that evidence authorizes no recovery yet.
 

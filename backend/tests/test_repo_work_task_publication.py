@@ -850,23 +850,29 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         operator_session_id=owner.session_id)
     assert approved.status == 'approved'
     if node_readback_drift is not None:
-        sandbox = service.repository_source_service.sandbox
-        original_read = sandbox._read_private_output
-        def changed_result(directory, name):
-            raw = original_read(directory, name)
-            if name == 'supervisor-result.json':
-                result = json.loads(raw)
+        # The original Source producer is a separate supervised process: its
+        # finalizer verifies supervisor-result.json (covered directly by
+        # test_repo_original_producer_finalizer_node). This parent can only
+        # observe the producer's signed completion and exported outputs, so
+        # the drift is applied to exactly those bytes at the parent readback.
+        from src.execution import repo_original_producer as producer
+        original_read = producer.read_file
+        def changed_result(directory, name, maximum):
+            raw = original_read(directory, name, maximum)
+            if name == 'diff.patch' and node_readback_drift == 'body_hash':
+                return raw + b'\n'
+            if name == 'completion.json' and node_readback_drift != 'body_hash':
+                envelope = json.loads(raw)
+                manifest = envelope['completion']['manifest']
                 if node_readback_drift == 'missing':
-                    result.pop('tested_file_hash_metadata')
+                    manifest.pop('tested_file_hash_metadata')
                 elif node_readback_drift == 'tampered':
-                    result['tested_file_hash_metadata'][0]['sha256'] = 'f' * 64
-                elif node_readback_drift == 'body_hash':
-                    result['diff_sha256'] = 'f' * 64
+                    manifest['tested_file_hash_metadata'][0]['sha256'] = 'f' * 64
                 else:
-                    result['token'] = '0' * 64
-                return json.dumps(result).encode()
+                    manifest['supervisor_identity']['token'] = '0' * 64
+                return producer.canonical(envelope)
             return raw
-        monkeypatch.setattr(sandbox, '_read_private_output', changed_result)
+        monkeypatch.setattr(producer, 'read_file', changed_result)
         from src.execution.repo_sandbox import RepoSandboxError
         with pytest.raises(RepoSandboxError):
             await execute_repository_iteration(service.repository_source_service, jobs, job_id=root_id,

@@ -542,16 +542,18 @@ async def test_authenticated_source_three_iteration_approval_execution_and_readb
             assert approved["status"] == "approved"
             await call("POST", prefix + "/resume", body={**resume, "expected_proposal_revision": proposal["revision"] + 1}, status=409)
             if readback_drift:
-                sandbox = service.repository_source_service.sandbox
-                original_read = sandbox._read_private_output
-                def changed_output(directory, name):
-                    raw = original_read(directory, name)
-                    if name == "supervisor-result.json":
-                        result = json.loads(raw)
-                        result["tested_file_hash_metadata"][0]["sha256"] = "f" * 64
-                        return json.dumps(result).encode()
+                # The original producer process verifies supervisor-result.json
+                # itself; this parent observes only its signed completion.
+                from src.execution import repo_original_producer as producer
+                original_read = producer.read_file
+                def changed_output(directory, name, maximum):
+                    raw = original_read(directory, name, maximum)
+                    if name == "completion.json":
+                        envelope = json.loads(raw)
+                        envelope["completion"]["manifest"]["tested_file_hash_metadata"][0]["sha256"] = "f" * 64
+                        return producer.canonical(envelope)
                     return raw
-                monkeypatch.setattr(sandbox, "_read_private_output", changed_output)
+                monkeypatch.setattr(producer, "read_file", changed_output)
                 await call("POST", prefix + "/resume", body=resume, status=503)
                 with monkeypatch.context() as private_reads:
                     private_reads.setattr(service.repository_source_service, "_read_private_artifact", forbid_private)

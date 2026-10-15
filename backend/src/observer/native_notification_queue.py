@@ -1215,14 +1215,20 @@ class NativeNotificationQueue:
             ),
         )
         for predicate, reason, degraded_state in bulk_failures:
-            if not apply:
-                ids = await db.execute(
+            ids = (
+                await db.execute(
                     select(NativeNotificationOutbox.id).where(
                         scope, NativeNotificationOutbox.status == "queued", predicate,
                     )
                 )
-                for row_id in ids.scalars().all():
+            ).scalars().all()
+            if not apply:
+                for row_id in ids:
                     due.setdefault(row_id, ("failed", degraded_state))
+                continue
+            if not ids:
+                # A zero-row UPDATE still takes SQLite's writer lock; an idle
+                # daemon poll must not (#1074).
                 continue
             await db.execute(
                 update(NativeNotificationOutbox)
@@ -1256,6 +1262,12 @@ class NativeNotificationQueue:
 
         async with self._lock:
             async with self._session() as db:
+                # Claims and reconciliation only touch active rows: an idle
+                # daemon poll answers without SQLite's writer lock (#1074).
+                idle = (await db.execute(select(NativeNotificationOutbox.id).where(
+                    scope, NativeNotificationOutbox.status.in_(ACTIVE_STATUSES)).limit(1))).first() is None
+                if idle:
+                    return None
                 if db.in_transaction():
                     await db.commit()
                 if db.get_bind().dialect.name == "sqlite":

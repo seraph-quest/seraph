@@ -57,6 +57,8 @@ from src.observer.user_state import InterruptionMode
 from src.tools.policy import MCP_POLICY_MODES, TOOL_POLICY_MODES
 from src.scheduler.background_inference import (
     BACKGROUND_INFERENCE_JOBS,
+    SETTINGS_UNREADABLE,
+    BackgroundInferenceSettingsUnreadable,
     background_inference_job_enabled,
     background_inference_status,
     write_background_inference_settings,
@@ -74,6 +76,8 @@ class BackgroundInferenceSettingsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     jobs: dict[str, StrictBool] = Field(min_length=1, max_length=len(BACKGROUND_INFERENCE_JOBS))
+    # Required (with every job listed) to overwrite an unreadable toggle file.
+    replace_unreadable: StrictBool = False
 
 
 class ScreenAnalysisSettingsRequest(BaseModel):
@@ -1491,7 +1495,15 @@ async def get_background_inference_settings():
 async def set_background_inference_settings(body: BackgroundInferenceSettingsRequest):
     """Persist per-job toggles; changes apply at each job's next run."""
     try:
-        write_background_inference_settings(dict(body.jobs))
+        write_background_inference_settings(dict(body.jobs), replace_unreadable=body.replace_unreadable)
+    except BackgroundInferenceSettingsUnreadable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": SETTINGS_UNREADABLE,
+                "message": "Stored toggles are unreadable. Review every job and confirm replacing them.",
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"code": "background_inference_job_invalid", "message": str(exc)}) from exc
     except OSError as exc:

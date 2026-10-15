@@ -607,13 +607,17 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
 
 /**
  * Compact chat-route proof posture for the composer meta line, e.g.
- * "PROOFS 5H LEFT" or "PROOF EXPIRED: HEALTH". Null when no text-route proof
+ * "PROOFS 5H LEFT", "PROOF EXPIRED: HEALTH" or "PROOF FAILED: TOOL USE". Null when no text-route proof
  * metadata exists (legacy or unconfigured deployments).
  */
 export function textRouteProofLabel(runtime: ModelFabricRuntimeStatus | null | undefined, now = Date.now()): string | null {
   const proofs = runtime?.proofs.filter((proof) => proof.profile_id === "openrouter.text") ?? [];
   if (!proofs.length) return null;
   const capability = (value: string) => value.replace(/_/g, " ").toUpperCase();
+  // A failed canary needs a different fix than a missing one (check the
+  // model, upstream or timeout before proving again), so name it.
+  const failed = proofs.find((proof) => proof.status === "failed");
+  if (failed) return "PROOF FAILED: " + capability(failed.capability);
   const expired = proofs.find((proof) => proof.status === "stale");
   if (expired) return "PROOF EXPIRED: " + capability(expired.capability);
   const missing = proofs.find((proof) => proof.status !== "fresh");

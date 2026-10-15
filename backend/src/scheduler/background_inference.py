@@ -107,7 +107,11 @@ def read_background_inference_settings() -> tuple[dict[str, bool], str | None]:
     return {job_id: bool(jobs.get(job_id, True)) for job_id in defaults}, None
 
 
-def write_background_inference_settings(jobs: dict[str, bool]) -> dict[str, bool]:
+class BackgroundInferenceSettingsUnreadable(ValueError):
+    """The stored toggles cannot be read, so a partial save would guess the rest."""
+
+
+def write_background_inference_settings(jobs: dict[str, bool], *, replace_unreadable: bool = False) -> dict[str, bool]:
     unknown = set(jobs) - set(_JOBS)
     if unknown:
         raise ValueError("unknown background inference job")
@@ -116,9 +120,14 @@ def write_background_inference_settings(jobs: dict[str, bool]) -> dict[str, bool
     with _lock:
         current, error = read_background_inference_settings()
         if error is not None:
-            # Rebuild from defaults rather than the fail-closed projection so a
-            # repaired file reflects only what the operator now chose.
-            current = {job.job_id: True for job in BACKGROUND_INFERENCE_JOBS}
+            # The operator's other choices are unknown. Saving one toggle must
+            # not silently turn every other job back ON (or OFF): replacing
+            # the file needs an explicit confirmation and every job's value.
+            if not replace_unreadable:
+                raise BackgroundInferenceSettingsUnreadable(SETTINGS_UNREADABLE)
+            if set(jobs) != set(_JOBS):
+                raise ValueError("replacing unreadable background inference settings requires every job's toggle")
+            current = {}
         merged = {**current, **jobs}
         path = background_inference_settings_path()
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

@@ -16,6 +16,7 @@ from src.llm_runtime import (
 )
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.model_fabric.contracts import NoCompliantModelRouteError
+from src.workflows.inference_accounting import InferenceAccountingError
 
 
 OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE = (
@@ -26,6 +27,12 @@ OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE = (
 
 _SETTINGS = "Settings → Models & OpenRouter"
 _NO_CALL = "No model call was made."
+# An agent turn can be denied after earlier steps already called the model.
+_MID_TURN = (
+    "Earlier steps of this turn had already called the model, so those calls may be billed "
+    "and any tool actions they took stand; the reply is incomplete. Check the result before resending."
+)
+PROVIDER_OVERRUN_CODE = "provider_charge_exceeded_reservation"
 
 
 def openrouter_route_block_reason(error: BaseException) -> str:
@@ -36,74 +43,105 @@ def openrouter_route_block_reason(error: BaseException) -> str:
     return "no_compliant_route"
 
 
-def openrouter_route_block_recovery(reason: str) -> tuple[str, str]:
-    """Map one selector rejection code to an operator message and recovery action.
-
-    The codes come from the canonical selector; only the bounded code and the
-    capability name are echoed, never provider or credential detail.
-    """
+def _route_block_body(reason: str) -> tuple[str, str]:
     code, _, detail = reason.partition(":")
     capability = detail.replace("_", " ") if detail else ""
+    if code == PROVIDER_OVERRUN_CODE:
+        return (
+            "OpenRouter is paused: an earlier call was billed above its request cost bound, and Seraph "
+            "blocks every further paid call until that overrun is reviewed. Open "
+            f"{_SETTINGS}, find the overrun under Inference accounting, raise the request cost bound to "
+            "at least that charge and save the setup to record the review.",
+            "review_cost_overrun",
+        )
     if code == "proof_expired":
         return (
             f"OpenRouter chat is blocked: the {capability} capability proof for the text route expired. "
             f"Open {_SETTINGS} and press Prove route (each canary is one real, billed provider call), "
-            f"or choose a longer proof lifetime. {_NO_CALL}",
+            "or choose a longer proof lifetime.",
             "prove_route",
         )
     if code == "proof_missing":
         return (
             f"OpenRouter chat is blocked: the text route has no {capability} capability proof yet. "
-            f"Open {_SETTINGS} and press Prove route (each canary is one real, billed provider call). {_NO_CALL}",
+            f"Open {_SETTINGS} and press Prove route (each canary is one real, billed provider call).",
             "prove_route",
         )
     if code == "capability_not_declared":
         return (
             "OpenRouter chat is blocked: this turn needs a capability the text route does not declare "
             f"(chat needs streaming; agent turns need tool use). Enable it in {_SETTINGS}, save, "
-            f"then Prove route. {_NO_CALL}",
+            "then Prove route.",
             "declare_capability",
         )
     if code == "profile_limit_unknown_or_insufficient" and detail == "context_tokens":
         return (
             "OpenRouter chat is blocked: this conversation is larger than the text route's context window. "
-            f"Raise the context window in {_SETTINGS} (then Prove route) or start a new session. {_NO_CALL}",
+            f"Raise the context window in {_SETTINGS} (then Prove route) or start a new session.",
             "raise_context_window",
         )
     if code == "profile_limit_unknown_or_insufficient":
         return (
             f"OpenRouter chat is blocked: the text route's {capability} limit is too low for this turn. "
-            f"Adjust it in {_SETTINGS}, save, then Prove route. {_NO_CALL}",
+            f"Adjust it in {_SETTINGS}, save, then Prove route.",
             "adjust_route_limits",
         )
     if code == "requirement_noncompliant":
         return (
             f"OpenRouter chat is blocked: the last {capability} proof did not meet this route's requirement. "
-            f"Prove route again in {_SETTINGS}, or raise the timeout. {_NO_CALL}",
+            f"Prove route again in {_SETTINGS}, or raise the timeout.",
             "prove_route",
         )
     if code.startswith("profile_cost"):
         return (
             "OpenRouter chat is blocked: the text route's spend metadata is missing, stale, or above the ceiling. "
-            f"Review the ceiling and request bound in {_SETTINGS} and save. {_NO_CALL}",
+            f"Review the ceiling and request bound in {_SETTINGS} and save.",
             "review_spend_ceiling",
         )
-    return OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE, "configure_openrouter"
+    return (
+        f"OpenRouter chat is blocked. Open {_SETTINGS} and save an allowed model, upstream, "
+        "cloud-egress consent, and a finite spend ceiling.",
+        "configure_openrouter",
+    )
 
 
-def openrouter_route_blocked_message(error: BaseException) -> str:
-    return openrouter_route_block_recovery(openrouter_route_block_reason(error))[0]
+def openrouter_route_block_recovery(reason: str, *, provider_contacted: bool = False) -> tuple[str, str]:
+    """Map one selector rejection code to an operator message and recovery action.
+
+    The codes come from the canonical selector or the accounting owner; only the
+    bounded code and the capability name are echoed, never provider or
+    credential detail. ``provider_contacted`` marks a denial after earlier calls
+    of the same turn reached the provider, so the message must not claim that
+    no model call was made.
+    """
+    body, action = _route_block_body(reason)
+    if provider_contacted:
+        return f"{body} {_MID_TURN}", action
+    if action == "configure_openrouter":
+        return OPENROUTER_CHAT_ROUTE_BLOCKED_MESSAGE, action
+    return f"{body} {_NO_CALL}", action
+
+
+def openrouter_route_blocked_message(error: BaseException, *, provider_contacted: bool = False) -> str:
+    return openrouter_route_block_recovery(
+        openrouter_route_block_reason(error), provider_contacted=provider_contacted
+    )[0]
 
 
 def route_error_from(error: BaseException) -> NoCompliantModelRouteError | None:
-    """Find a route denial wrapped by the agent framework's generation error."""
+    """Find a route denial wrapped by the agent framework's generation error.
+
+    Only explicit causes (``raise ... from``) are followed: an implicit
+    ``__context__`` can be a route error that was already handled earlier in the
+    turn and must not be reported as the reason for this failure.
+    """
     seen: set[int] = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen and len(seen) < 8:
         if isinstance(current, NoCompliantModelRouteError):
             return current
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return None
 
 
@@ -309,16 +347,23 @@ async def stream_direct_local_chat(
         streaming=True,
     )
     parts: list[str] = []
-    async for delta in stream_completion_with_fallback(
-        messages=messages,
-        temperature=settings.model_temperature,
-        max_tokens=min(settings.model_max_tokens, 512),
-        runtime_path=runtime_path,
-        request_context=context,
-        request_id=context.request_id,
-    ):
-        parts.append(delta)
-        yield delta
+    try:
+        async for delta in stream_completion_with_fallback(
+            messages=messages,
+            temperature=settings.model_temperature,
+            max_tokens=min(settings.model_max_tokens, 512),
+            runtime_path=runtime_path,
+            request_context=context,
+            request_id=context.request_id,
+        ):
+            parts.append(delta)
+            yield delta
+    except InferenceAccountingError as exc:
+        # An unreviewed overrun is refused at reservation, before the
+        # transport runs; report it as the no-contact block it is.
+        if parts or exc.code != PROVIDER_OVERRUN_CODE:
+            raise
+        raise NoCompliantModelRouteError((exc.code,)) from exc
 
     if not parts:
         fallback = "I am here. What should we focus on first?"

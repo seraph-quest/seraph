@@ -106,8 +106,8 @@ describe("OpenRouterSetupPanel", () => {
     for (const capability of ["text", "tool_use", "structured_output", "streaming"]) {
       expect(screen.getByLabelText("OpenRouter text " + capability + " capability")).toBeChecked();
     }
-    expect(screen.getByLabelText("OpenRouter text request cost bound (USD)")).toHaveValue("0.05");
-    expect(within(screen.getByRole("group", { name: "OpenRouter text route" })).getByText("= 50,000 µUSD reserved per call")).toBeInTheDocument();
+    expect(screen.getByLabelText("OpenRouter text request cost bound (USD)")).toHaveValue("0.50");
+    expect(within(screen.getByRole("group", { name: "OpenRouter text route" })).getByText("= 500,000 µUSD reserved per call")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Enable OpenRouter text route"));
     change("OpenRouter text model ID", "fixture/text");
     change("OpenRouter text upstream allow-list", "fixture-upstream");
@@ -120,9 +120,28 @@ describe("OpenRouterSetupPanel", () => {
     expect(value.spend_ceiling_microusd).toBe(5_000_000);
     expect(value.routes.text).toMatchObject({
       capabilities: ["text", "tool_use", "structured_output", "streaming"],
-      request_cost_bound_microusd: 50_000,
+      request_cost_bound_microusd: 500_000,
       context_window_tokens: 200_000,
     });
+  });
+
+  it("previews the worst-case call cost and warns when the bound is below it", () => {
+    render(<OpenRouterSetupPanel setup={null} stale={false} policyRevision={7} onSave={vi.fn()} />);
+    const preview = () => screen.getByTestId("openrouter-text-worst-case");
+    // Default 65,536-token window + 4,096 output at the $3/$15 reference prices.
+    expect(preview()).toHaveTextContent("Worst case per call: 65,536 prompt + 4,096 output tokens ≈ $0.258048 at a reference");
+    expect(screen.queryByTestId("openrouter-text-bound-warning")).toBeNull();
+    expect(screen.getByRole("group", { name: "OpenRouter text route" })).toHaveTextContent("blocks every further OpenRouter call until you review it");
+    change("OpenRouter text request cost bound (USD)", "0.05");
+    expect(screen.getByTestId("openrouter-text-bound-warning")).toHaveTextContent("below this worst case (reference prices)");
+    change("OpenRouter text input price per million tokens (preview only)", "1");
+    change("OpenRouter text output price per million tokens (preview only)", "2");
+    expect(preview()).toHaveTextContent("≈ $0.073728 at the prices entered");
+    expect(screen.getByTestId("openrouter-text-bound-warning")).toHaveTextContent("pauses every OpenRouter call until you review the overrun");
+    change("OpenRouter text input price per million tokens (preview only)", "0.1");
+    change("OpenRouter text output price per million tokens (preview only)", "0.2");
+    expect(preview()).toHaveTextContent("≈ $0.007373 at the prices entered");
+    expect(screen.queryByTestId("openrouter-text-bound-warning")).toBeNull();
   });
 
   it("round-trips stored micro-USD values through the dollar inputs unchanged", async () => {

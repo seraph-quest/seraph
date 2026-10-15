@@ -30,11 +30,25 @@ not through environment model variables.
 2. Keep the default text capabilities (`text`, `tool use`, `structured output`,
    `streaming`): direct chat streams and agent turns call tools.
 3. Optionally set **Context window tokens**; it is independent of max output
-   tokens and defaults to 65,536 when left blank.
+   tokens and defaults to 65,536 when left blank. The value is your assertion
+   about the model: Seraph does not check it against the model's real context
+   length, so set it no higher than the model supports.
 4. Enter the **monthly ceiling** and the per-call **request cost bound** in
-   dollars (the micro-USD value is previewed; the bound is prefilled at $0.05),
+   dollars (the micro-USD value is previewed; the bound is prefilled at $0.50),
    acknowledge cloud egress, and save. Saving and status reads never call a
    provider.
+
+   The request bound is a reservation, not a provider-side price cap: the
+   output is capped by max output tokens, but OpenRouter bills what the call
+   actually costs. **If a call is billed above its bound, Seraph records the
+   overrun and blocks every further OpenRouter call** (chat, agent turns and
+   background jobs) until you review it: find the overrun under **Inference
+   accounting**, raise the request bound to at least the billed charge and save
+   the setup again. Chat names this as "an earlier call was billed above its
+   request cost bound". Size the bound for a full prompt window plus the output
+   cap: the panel previews that worst case in tokens and, if you enter the
+   model's $/M prices (preview only, not saved), in dollars, and warns when the
+   bound is below it.
 5. In the canary section, choose a **proof lifetime** (1, 8 or 24 hours) and
    press **Prove route**. It runs one canary per required capability plus
    `health` and `latency_ms`. Each canary is a real, billed OpenRouter call.
@@ -55,7 +69,15 @@ daily briefing, evening review, activity digest, weekly review, end-of-day
 report analysis and the screenshot observation digest. They are on by default.
 **Settings → Models & OpenRouter → Background inference** lists each job with
 its approximate calls/day and lets you switch it off; a switched-off job makes
-no model call and shows `skipped: disabled by operator`.
+no model call and shows `skipped: disabled by operator`. The memory
+consolidation switch also stops the consolidation that otherwise runs after a
+reply, after a workflow, before context compaction and when a session is
+deleted. Not covered by these switches: guardian opportunity assessment (runs
+only for an opportunity you queued, with its own funded reservation), chat
+title generation (one text call per new conversation) and screenshot folder
+analysis (vision route, gated by its own consent and source settings). If the
+stored switches become unreadable, every scheduled model call pauses and the
+panel asks you to set every job and confirm before replacing them.
 `SCHEDULER_ENABLED=false` still stops all scheduled work, including Work
 dispatch.
 

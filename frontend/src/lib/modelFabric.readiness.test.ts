@@ -42,6 +42,10 @@ describe("daily-use model-fabric helpers", () => {
       { capability: "latency_ms", status: "stale", expires_at: "2026-10-15T11:00:00Z" },
     ]), now)).toBe("PROOF EXPIRED: LATENCY MS");
     expect(textRouteProofLabel(runtime([{ capability: "tool_use", status: "missing", expires_at: null }]), now)).toBe("PROOF MISSING: TOOL USE");
+    expect(textRouteProofLabel(runtime([
+      { capability: "text", status: "fresh", expires_at: "2026-10-16T11:00:00Z" },
+      { capability: "tool_use", status: "failed", expires_at: "2026-10-16T11:00:00Z" },
+    ]), now)).toBe("PROOF FAILED: TOOL USE");
     expect(textRouteProofLabel(runtime([]), now)).toBeNull();
     expect(textRouteProofLabel(null, now)).toBeNull();
   });

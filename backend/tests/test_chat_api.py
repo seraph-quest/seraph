@@ -257,6 +257,69 @@ class TestChatAPI:
         )
 
     @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_agent_mid_turn_route_block_reports_earlier_provider_contact(
+        self,
+        mock_onboarding,
+        mock_search,
+        client,
+    ):
+        from smolagents.utils import AgentGenerationError
+        from src.llm_runtime import _note_provider_contact
+
+        def _run(_message):
+            # Step 1 reached the provider transport; step 2 is then denied.
+            _note_provider_contact()
+            try:
+                raise NoCompliantModelRouteError(("proof_expired:tool_use",))
+            except NoCompliantModelRouteError as exc:
+                raise AgentGenerationError("Error in generating model output", MagicMock()) from exc
+
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = _run
+        mock_onboarding.return_value = mock_agent
+
+        response = await client.post("/api/chat", json={"message": "Inspect my priorities"})
+
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert detail["route_reason"] == "proof_expired:tool_use"
+        assert detail["remote_outcome"] == "contacted_before_block"
+        assert detail["retry_required"] is False
+        assert "No model call was made" not in detail["message"]
+        assert "Earlier steps of this turn had already called the model" in detail["message"]
+
+        events = await audit_repository.list_events(limit=10)
+        assert any(
+            event["event_type"] == "agent_run_blocked"
+            and event["details"]["runtime"] == "openrouter-agent"
+            and event["details"]["failure_stage"] == "mid_turn_route"
+            and event["details"]["remote_outcome"] == "contacted_before_block"
+            for event in events
+        )
+
+    @patch("src.memory.vector_store.search_formatted", return_value="")
+    @patch("src.api.chat.create_onboarding_agent")
+    async def test_chat_agent_unreviewed_overrun_names_review_recovery(
+        self,
+        mock_onboarding,
+        mock_search,
+        client,
+    ):
+        mock_agent = MagicMock()
+        mock_agent.run.side_effect = NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))
+        mock_onboarding.return_value = mock_agent
+
+        response = await client.post("/api/chat", json={"message": "Inspect my priorities"})
+
+        detail = response.json()["detail"]
+        assert response.status_code == 503
+        assert detail["recovery_action"] == "review_cost_overrun"
+        assert "billed above its request cost bound" in detail["message"]
+        assert "Inference accounting" in detail["message"]
+        assert detail["remote_outcome"] == "not_contacted"
+
+    @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_chat_with_session(self, mock_onboarding, mock_create_agent, mock_search, client):

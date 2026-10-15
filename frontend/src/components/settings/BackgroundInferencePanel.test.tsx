@@ -48,4 +48,29 @@ describe("BackgroundInferencePanel", () => {
     expect(screen.getByLabelText("Background inference: daily briefing")).toBeChecked();
     expect(screen.getByLabelText("Background inference: strategist tick")).toBeEnabled();
   });
+
+  it("refuses a single-toggle save over unreadable toggles and replaces them only after confirmation", async () => {
+    const unreadable = { ...payload(true), error_code: "background_inference_settings_unreadable",
+      jobs: payload(true).jobs.map((item) => ({ ...item, enabled: false, last_skip: null })) };
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => response(init?.method === "PUT"
+      ? { ...payload(true), jobs: [job("strategist_tick", false), job("daily_briefing", true, 1), job("weekly_activity_review", false, 0.14)] }
+      : unreadable));
+    vi.stubGlobal("fetch", fetch);
+    render(<BackgroundInferencePanel />);
+    expect(await screen.findByText(/earlier choices are unknown/)).toBeInTheDocument();
+    expect(screen.getByText(/Chat title generation/)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Background inference: daily briefing"));
+    // Editing an unreadable set only changes the local draft.
+    expect(fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+    expect(screen.getByLabelText("Background inference: daily briefing")).toBeChecked();
+    const replace = screen.getByRole("button", { name: "Replace stored toggles" });
+    expect(replace).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("Confirm replacing unreadable background toggles"));
+    fireEvent.click(replace);
+    await waitFor(() => expect(screen.queryByText(/earlier choices are unknown/)).not.toBeInTheDocument());
+    const put = fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
+    expect(JSON.parse(String(put[1]?.body))).toEqual({
+      jobs: { strategist_tick: false, daily_briefing: true, weekly_activity_review: false }, replace_unreadable: true,
+    });
+  });
 });

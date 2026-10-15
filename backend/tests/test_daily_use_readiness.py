@@ -42,6 +42,9 @@ from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalTy
 
 # The capability set the Settings panel now proposes for a new text route.
 DEFAULT_TEXT_CAPABILITIES = ("text", "tool_use", "structured_output", "streaming")
+# Selector tests use one fixed clock for profile pricing time, proofs, request
+# deadline and the decision, so wall-clock drift cannot change the result.
+NOW = 1_800_000_000.0
 
 
 def _route(**changes) -> OpenRouterRoute:
@@ -93,13 +96,16 @@ def _proofs(profile, *, now: float, expires_at: float | None = None):
     )
 
 
+PRINCIPAL = TrustPrincipal(
+    principal_id="operator-daily-use",
+    principal_type=PrincipalType.OPERATOR,
+    grants=(AuthorityGrant.MODEL_INFERENCE,),
+    session_id="session-daily-use",
+)
+
+
 def _context(setup, *, payload, streaming=False, extra=()):
-    principal = TrustPrincipal(
-        principal_id="operator-daily-use",
-        principal_type=PrincipalType.OPERATOR,
-        grants=(AuthorityGrant.MODEL_INFERENCE,),
-        session_id="session-daily-use",
-    )
+    principal = PRINCIPAL
     with patch(
         "src.model_fabric.caller_context.effective_workload_policy",
         return_value=openrouter_policy_for_setup(setup, "chat_agent"),
@@ -116,22 +122,26 @@ def _context(setup, *, payload, streaming=False, extra=()):
         )
 
 
+def _fixed_context(setup, **kwargs):
+    return replace(_context(setup, **kwargs), deadline_at=NOW + 600)
+
+
 def _text_profile(setup):
     (profile,) = openrouter_profiles_for_setup(setup)
-    return profile
+    return replace(profile, cost_source_updated_at=NOW - 60)
 
 
 def test_default_text_route_admits_streaming_chat_and_tool_using_agent_turns():
     setup = _setup()
     profile = _text_profile(setup)
-    now = time.time() + 1
+    now = NOW
     proofs = _proofs(profile, now=now)
     # About 60 KB of conversation and tool schema: far above the old
     # output-cap-derived 4096-token window, within the decoupled default.
     payload = {"messages": [{"role": "user", "content": "x" * 60_000}]}
 
-    streaming = _context(setup, payload=payload, streaming=True)
-    agent = _context(setup, payload=payload, extra=(ModelCapability.TOOL_USE,))
+    streaming = _fixed_context(setup, payload=payload, streaming=True)
+    agent = _fixed_context(setup, payload=payload, extra=(ModelCapability.TOOL_USE,))
     assert "streaming" in streaming.requirements.capabilities
     assert "tool_use" in agent.requirements.capabilities
     assert streaming.requirements.context_tokens > 4096
@@ -144,10 +154,10 @@ def test_default_text_route_admits_streaming_chat_and_tool_using_agent_turns():
 def test_old_narrow_default_is_rejected_for_both_turn_kinds():
     setup = _setup(_route(capabilities=("text", "structured_output")))
     profile = _text_profile(setup)
-    now = time.time() + 1
+    now = NOW
     proofs = _proofs(profile, now=now)
     for kwargs in ({"streaming": True}, {"extra": (ModelCapability.TOOL_USE,)}):
-        context = _context(setup, payload={"message": "hi"}, **kwargs)
+        context = _fixed_context(setup, payload={"message": "hi"}, **kwargs)
         decision = select_route(context, (candidate_from_profile(profile),), proofs, now=now)
         assert not decision.allowed
         assert decision.rejections[0].reason_code == "capability_not_declared"
@@ -181,9 +191,9 @@ def test_stored_route_without_context_window_reads_and_round_trips_unchanged():
 def test_expired_proof_yields_specific_rejection_and_recovery_message():
     setup = _setup()
     profile = _text_profile(setup)
-    now = time.time() + 1
+    now = NOW
     expired = _proofs(profile, now=now, expires_at=now - 1)
-    context = _context(setup, payload={"message": "hi"}, streaming=True)
+    context = _fixed_context(setup, payload={"message": "hi"}, streaming=True)
     decision = select_route(context, (candidate_from_profile(profile),), expired, now=now)
     reason = decision.rejections[0].reason_code
     assert reason == "proof_expired:health"
@@ -301,3 +311,212 @@ def test_disabled_end_of_day_analysis_makes_zero_model_calls(background_workspac
     completion.assert_not_called()
     status = {job["job_id"]: job for job in background_inference.background_inference_status()["jobs"]}
     assert status["end_of_day_goal_report"]["last_skip"]["reason"] == "disabled_by_operator"
+
+
+def test_route_error_ignores_an_earlier_handled_denial_in_implicit_context():
+    # A route error handled earlier in the turn must not be reported as the
+    # reason for an unrelated later failure raised while handling it.
+    try:
+        try:
+            raise NoCompliantModelRouteError(("proof_expired:health",))
+        except NoCompliantModelRouteError:
+            raise RuntimeError("tool failed")
+    except RuntimeError as unrelated:
+        assert unrelated.__context__ is not None
+        assert route_error_from(unrelated) is None
+
+
+def test_unreviewed_overrun_names_review_recovery_and_mid_turn_is_honest():
+    error = NoCompliantModelRouteError(("provider_charge_exceeded_reservation",))
+    message, action = openrouter_route_block_recovery(openrouter_route_block_reason(error))
+    assert action == "review_cost_overrun"
+    assert "billed above its request cost bound" in message
+    assert "raise the request cost bound to at least that charge" in message
+    assert message.endswith("No model call was made.")
+
+    mid_turn = openrouter_route_blocked_message(error, provider_contacted=True)
+    assert "No model call was made" not in mid_turn
+    assert "Earlier steps of this turn had already called the model" in mid_turn
+    generic_mid_turn = openrouter_route_blocked_message(NoCompliantModelRouteError(), provider_contacted=True)
+    assert "before any provider request" not in generic_mid_turn
+
+
+def test_accounting_overrun_denial_keeps_its_reason_on_the_route_error():
+    from src.llm_runtime import _route_denial_error
+    from src.workflows.inference_accounting import InferenceAccountingError
+
+    accounting = InferenceAccountingError("provider_charge_exceeded_reservation")
+    error = _route_denial_error([], accounting)
+    assert error.reason_codes == ("provider_charge_exceeded_reservation",)
+    assert error.__cause__ is accounting
+    assert openrouter_route_block_recovery(openrouter_route_block_reason(error))[1] == "review_cost_overrun"
+    # Selector denials still win, and unrelated errors add no reason.
+    assert _route_denial_error(["proof_missing:text"], accounting).reason_codes == ("proof_missing:text",)
+    assert _route_denial_error([], RuntimeError("boom")).reason_codes == ()
+
+
+def test_request_contact_registry_is_scoped_to_the_registered_request():
+    from src import llm_runtime
+
+    llm_runtime._register_request("agent-ws:contact-test")
+    token = llm_runtime.set_current_llm_request_id("agent-ws:contact-test")
+    try:
+        assert llm_runtime.request_provider_contacted("agent-ws:contact-test") is False
+        llm_runtime._note_provider_contact()
+        assert llm_runtime.request_provider_contacted("agent-ws:contact-test") is True
+        assert llm_runtime.request_provider_contacted("agent-ws:other") is False
+    finally:
+        llm_runtime.reset_current_llm_request_id(token)
+        llm_runtime._finish_request("agent-ws:contact-test")
+    assert llm_runtime.request_provider_contacted("agent-ws:contact-test") is False
+
+
+def _live_profile_and_proofs(setup):
+    """Real-clock profile and fresh proofs for paths that call the selector unpinned."""
+    (profile,) = openrouter_profiles_for_setup(setup)
+    proofs = {proof.capability: proof for proof in _proofs(profile, now=time.time())}
+    return profile, proofs
+
+
+@pytest.mark.asyncio
+async def test_real_direct_chat_stream_requests_what_the_default_text_route_admits():
+    from src.agent import direct_chat
+
+    setup = _setup()
+    profile, proofs = _live_profile_and_proofs(setup)
+    captured = {}
+
+    async def intercepted_transport_owner(**kwargs):
+        # The owned boundary below direct chat; nothing beyond it runs.
+        captured.update(kwargs)
+        yield "hello"
+
+    with (
+        patch.object(direct_chat, "stream_completion_with_fallback", intercepted_transport_owner),
+        patch.object(direct_chat, "_uses_openrouter_profile", return_value=True),
+        patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=PRINCIPAL),
+        patch("src.model_fabric.caller_context.effective_workload_policy",
+              return_value=openrouter_policy_for_setup(setup, "chat_agent")),
+        patch("src.agent.session.session_manager.get_task_continuity_context", AsyncMock(return_value="")),
+    ):
+        deltas = [delta async for delta in direct_chat.stream_direct_local_chat(
+            "hello there", runtime_path="chat_agent", is_onboarding=False, session_id=PRINCIPAL.session_id)]
+
+    assert deltas == ["hello"]
+    context = captured["request_context"]
+    assert "streaming" in context.requirements.capabilities
+    decision = select_route(context, (candidate_from_profile(profile),), tuple(proofs.values()))
+    assert decision.allowed, decision.rejections
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_stream_reports_unreviewed_overrun_as_no_contact_block():
+    from src.agent import direct_chat
+    from src.workflows.inference_accounting import InferenceAccountingError
+
+    setup = _setup()
+
+    async def refused(**_kwargs):
+        raise InferenceAccountingError("provider_charge_exceeded_reservation")
+        yield  # pragma: no cover
+
+    with (
+        patch.object(direct_chat, "stream_completion_with_fallback", refused),
+        patch.object(direct_chat, "_uses_openrouter_profile", return_value=True),
+        patch("src.model_fabric.caller_context.get_current_trust_principal", return_value=PRINCIPAL),
+        patch("src.model_fabric.caller_context.effective_workload_policy",
+              return_value=openrouter_policy_for_setup(setup, "chat_agent")),
+        patch("src.agent.session.session_manager.get_task_continuity_context", AsyncMock(return_value="")),
+        pytest.raises(NoCompliantModelRouteError) as raised,
+    ):
+        async for _delta in direct_chat.stream_direct_local_chat(
+                "hello there", runtime_path="chat_agent", is_onboarding=False, session_id=PRINCIPAL.session_id):
+            pass
+    assert raised.value.reason_codes == ("provider_charge_exceeded_reservation",)
+
+
+def test_real_agent_generate_tool_turn_is_admitted_by_the_default_text_route(monkeypatch):
+    """Run FallbackLiteLLMModel.generate through the real canonical preflight.
+
+    Only the proof store, the admission broker and the governed transport are
+    intercepted; the request context, capabilities and route selection are real.
+    """
+    from types import SimpleNamespace
+
+    from src import llm_runtime
+    from src.model_fabric.repository import model_fabric_repository
+
+    monkeypatch.setattr(settings, "openrouter_api_key", "fixture-openrouter-key")
+    setup = _setup()
+    profile, proofs = _live_profile_and_proofs(setup)
+    requested_capabilities = []
+    captured = {}
+
+    async def latest_capability_proof(*, capability, **_kwargs):
+        requested_capabilities.append(capability)
+        return proofs.get(capability)
+
+    def transport(*, decision, context, body, api_key):
+        captured.update(decision=decision, context=context, body=body)
+        return (
+            SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]),
+            {"choices": [{"message": {"content": "ok"}}], "usage": {"cost": "0.000002"}},
+        )
+
+    tools = [{"type": "function", "function": {"name": "read_goals", "description": "Read goals",
+        "parameters": {"type": "object", "properties": {}}}}]
+    with (
+        patch.object(llm_runtime, "provider_profiles", return_value={profile.id: profile}),
+        patch.object(llm_runtime, "_fallback_targets", return_value=[]),
+        patch.object(llm_runtime, "get_current_trust_principal", return_value=PRINCIPAL),
+        patch("src.model_fabric.caller_context.effective_workload_policy",
+              return_value=openrouter_policy_for_setup(setup, "chat_agent")),
+        patch.object(model_fabric_repository, "latest_capability_proof", side_effect=latest_capability_proof),
+        patch.object(llm_runtime, "_execute_sync_with_gpu_admission", side_effect=lambda **kw: kw["operation"]()),
+        patch.object(llm_runtime, "_new_route_receipt_session", return_value=None),
+        patch.object(llm_runtime, "_can_log_request", return_value=False),
+        patch.object(llm_runtime, "_governed_openai_chat_completion", side_effect=transport),
+    ):
+        model = llm_runtime.FallbackLiteLLMModel(
+            model_id=profile.routing_model, api_base=profile.api_base, api_key="fixture-openrouter-key",
+            runtime_profile=profile.id, runtime_path="chat_agent", max_tokens=512,
+        )
+        model.generate([{"role": "user", "content": "what are my goals?"}], tools_to_call_from=tools)
+
+    assert "tool_use" in captured["context"].requirements.capabilities
+    assert "tool_use" in requested_capabilities
+    assert captured["decision"].allowed
+    assert captured["body"]["tools"] == tools
+
+
+@pytest.mark.parametrize("trigger", ["post_response", "workflow_completed", "pre_compaction", "session_end"])
+def test_disabled_memory_consolidation_gates_every_flush_trigger(background_workspace, trigger):
+    from src.memory import flush
+
+    background_inference.write_background_inference_settings({"memory_consolidation": False})
+    consolidate = AsyncMock(side_effect=AssertionError("consolidation model call must not run"))
+    fingerprint = AsyncMock(side_effect=AssertionError("disabled flush must not read the session"))
+    with patch("src.memory.consolidator.consolidate_session", consolidate), \
+            patch.object(flush, "_build_session_flush_fingerprint", fingerprint):
+        if trigger == "workflow_completed":
+            # The workflow manager's synchronous entry point.
+            assert flush.flush_session_memory_sync(session_id="session-1", trigger=trigger, workflow_name="wf") is False
+        else:
+            assert asyncio.run(flush.flush_session_memory("session-1", trigger=trigger)) is False
+    consolidate.assert_not_called()
+    status = {job["job_id"]: job for job in background_inference.background_inference_status()["jobs"]}
+    assert status["memory_consolidation"]["last_skip"]["reason"] == "disabled_by_operator"
+
+
+def test_enabled_memory_consolidation_still_flushes(background_workspace):
+    from src.memory import flush
+
+    flush._reset_memory_flush_state()
+    result = MagicMock(should_cache_fingerprint=True)
+    consolidate = AsyncMock(return_value=result)
+    fingerprint = AsyncMock(return_value=flush.SessionFlushFingerprint(cache_key="session-1:t", fingerprint="f1"))
+    with patch("src.memory.consolidator.consolidate_session", consolidate), \
+            patch.object(flush, "_build_session_flush_fingerprint", fingerprint):
+        assert asyncio.run(flush.flush_session_memory("session-1", trigger="post_response")) is True
+    consolidate.assert_awaited_once()
+    flush._reset_memory_flush_state()

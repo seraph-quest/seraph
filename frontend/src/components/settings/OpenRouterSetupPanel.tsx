@@ -25,8 +25,15 @@ const DEFAULT_CAPABILITIES: Record<OpenRouterPurpose, string[]> = {
   vision: ["text", "vision", "structured_output"],
   embedding: ["embedding"],
 };
-const DEFAULT_REQUEST_BOUND_DOLLARS = "0.05";
+// The bound is a per-call reservation, not a provider-side price cap: a call
+// billed above it pauses every OpenRouter call until the overrun is reviewed.
+// $0.50 covers a full default window on a typical mid-range model.
+const DEFAULT_REQUEST_BOUND_DOLLARS = "0.50";
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 65536;
+// Reference prices ($ per million tokens) for the "bound looks small" warning
+// when the operator has not entered the model's own prices.
+const REFERENCE_INPUT_PRICE_PER_M = 3;
+const REFERENCE_OUTPUT_PRICE_PER_M = 15;
 interface RouteDraft {
   enabled: boolean;
   modelId: string;
@@ -39,6 +46,9 @@ interface RouteDraft {
   requestCostBoundDollars: string;
   /** Empty keeps the backend default prompt window. */
   contextWindowTokens: string;
+  /** Preview-only model prices ($ per million tokens); never saved. */
+  inputPricePerM: string;
+  outputPricePerM: string;
 }
 interface SetupDraft {
   routes: Record<OpenRouterPurpose, RouteDraft>;
@@ -68,6 +78,8 @@ function routeDraft(route: OpenRouterRouteValue | null | undefined, slot: OpenRo
     zeroDataRetention: route?.zero_data_retention ?? false,
     requestCostBoundDollars: route ? microusdToDollars(route.request_cost_bound_microusd) : DEFAULT_REQUEST_BOUND_DOLLARS,
     contextWindowTokens: route?.context_window_tokens ? String(route.context_window_tokens) : "",
+    inputPricePerM: "",
+    outputPricePerM: "",
   };
 }
 function draftFromSetup(setup: OpenRouterSetupStatus | null | undefined, revoked = false): SetupDraft {
@@ -101,7 +113,45 @@ function boundedDollars(value: string, label: string, minMicrousd: number, maxMi
 }
 function dollarPreview(value: string): string {
   const micro = dollarsToMicrousd(value);
-  return micro === null ? "enter dollars, e.g. 0.05" : "= " + micro.toLocaleString("en-US") + " µUSD";
+  return micro === null ? "enter dollars, e.g. 0.50" : "= " + micro.toLocaleString("en-US") + " µUSD";
+}
+function pricePerM(value: string): number | null {
+  const parsed = Number(value);
+  return value.trim() && Number.isFinite(parsed) && parsed >= 0 && parsed <= 10_000 ? parsed : null;
+}
+/**
+ * Worst-case charge for one call: the whole declared prompt window plus the
+ * output cap. With per-token prices micro-USD = tokens x ($ per million).
+ */
+function worstCaseCallMicrousd(promptTokens: number, outputTokens: number, inputPerM: number, outputPerM: number): number {
+  return Math.ceil(promptTokens * inputPerM + outputTokens * outputPerM);
+}
+function WorstCasePreview({ draft, slot }: { draft: RouteDraft; slot: OpenRouterPurpose }) {
+  const windowTokens = Number(draft.contextWindowTokens.trim() || DEFAULT_CONTEXT_WINDOW_TOKENS);
+  // Embeddings bill input only.
+  const outputTokens = slot === "embedding" ? 0 : Number(draft.maxOutputTokens);
+  if (!Number.isSafeInteger(windowTokens) || !Number.isSafeInteger(outputTokens)) return null;
+  const bound = dollarsToMicrousd(draft.requestCostBoundDollars);
+  const inputPrice = pricePerM(draft.inputPricePerM);
+  const outputPrice = slot === "embedding" ? 0 : pricePerM(draft.outputPricePerM);
+  const entered = inputPrice !== null && outputPrice !== null;
+  const worst = worstCaseCallMicrousd(windowTokens, outputTokens,
+    entered ? inputPrice : REFERENCE_INPUT_PRICE_PER_M, entered ? outputPrice : REFERENCE_OUTPUT_PRICE_PER_M);
+  const tokens = "Worst case per call: " + windowTokens.toLocaleString("en-US") + " prompt"
+    + (outputTokens ? " + " + outputTokens.toLocaleString("en-US") + " output" : "") + " tokens";
+  const priced = entered
+    ? " ≈ $" + microusdToDollars(worst) + " at the prices entered."
+    : " ≈ $" + microusdToDollars(worst) + " at a reference $" + REFERENCE_INPUT_PRICE_PER_M + "/M input, $" + REFERENCE_OUTPUT_PRICE_PER_M + "/M output; enter the model's prices for an exact preview.";
+  return (
+    <div className="col-span-2" data-testid={"openrouter-" + slot + "-worst-case"}>
+      <div className="text-retro-text/50">{tokens}{priced}</div>
+      {bound !== null && bound < worst && (
+        <div data-testid={"openrouter-" + slot + "-bound-warning"} className="text-yellow-400">
+          The request bound is below this worst case{entered ? "" : " (reference prices)"}. A call billed above the bound pauses every OpenRouter call until you review the overrun; raise the bound or lower the context window.
+        </div>
+      )}
+    </div>
+  );
 }
 function routeValue(draft: RouteDraft, slot: OpenRouterPurpose, ceiling: number): OpenRouterRouteValue | null {
   // An untouched absent purpose stays absent and does not block saving text.
@@ -175,9 +225,12 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
     setPurposeAcks({ vision: false, embedding: false });
   }
   function updateRoute<K extends keyof RouteDraft>(slot: OpenRouterPurpose, field: K, value: RouteDraft[K]) {
-    dirty.current = true;
+    // Preview-only prices are never saved, so they neither mark the setup
+    // edited nor reset a purpose acknowledgment.
+    const previewOnly = field === "inputPricePerM" || field === "outputPricePerM";
+    if (!previewOnly) dirty.current = true;
     setDraft((current) => ({ ...current, routes: { ...current.routes, [slot]: { ...current.routes[slot], [field]: value } } }));
-    if (slot !== "text") setPurposeAcks((current) => ({ ...current, [slot]: false }));
+    if (slot !== "text" && !previewOnly) setPurposeAcks((current) => ({ ...current, [slot]: false }));
   }
   function needsAck(slot: "vision" | "embedding"): boolean {
     return draft.routes[slot].enabled && (revoked || metadata?.slot_statuses[slot].error_code === "purpose_consent_stale"
@@ -304,6 +357,16 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
                 <input id={"openrouter-" + slot + "-bound"} aria-label={"OpenRouter " + slot + " request cost bound (USD)"} inputMode="decimal" value={route.requestCostBoundDollars} onChange={(event) => updateRoute(slot, "requestCostBoundDollars", event.target.value)} className={inputClass + " w-20"} />
                 <span className="text-retro-text/40">{dollarPreview(route.requestCostBoundDollars)} reserved per call</span>
               </div>
+              <div className="col-span-2 text-retro-text/40">
+                The bound is reserved per call; OpenRouter does not cap the charge at it. If a call is billed above the bound, Seraph records the overrun and blocks every further OpenRouter call until you review it: raise the bound to at least the billed charge (see Inference accounting) and save this setup.
+              </div>
+              <label htmlFor={"openrouter-" + slot + "-input-price"} className="text-retro-text/40">Model prices ($/M, preview only)</label>
+              <div className="flex min-w-0 items-center gap-1">
+                <input id={"openrouter-" + slot + "-input-price"} aria-label={"OpenRouter " + slot + " input price per million tokens (preview only)"} inputMode="decimal" value={route.inputPricePerM} placeholder="input" onChange={(event) => updateRoute(slot, "inputPricePerM", event.target.value)} className={inputClass + " w-16"} />
+                {slot !== "embedding" && <input aria-label={"OpenRouter " + slot + " output price per million tokens (preview only)"} inputMode="decimal" value={route.outputPricePerM} placeholder="output" onChange={(event) => updateRoute(slot, "outputPricePerM", event.target.value)} className={inputClass + " w-16"} />}
+                <span className="text-retro-text/40">not saved</span>
+              </div>
+              <WorstCasePreview draft={route} slot={slot} />
               <div className="text-retro-text/40">Retention</div>
               <label className="flex items-center gap-1 text-retro-text/70">
                 <input type="checkbox" aria-label={"Enable OpenRouter " + slot + " zero data retention"} checked={route.zeroDataRetention} onChange={(event) => updateRoute(slot, "zeroDataRetention", event.target.checked)} />zero data retention{slot !== "text" ? " (required when enabled)" : ""}

@@ -832,23 +832,44 @@ costs, and embedding usefulness remain externally unverified.
   (1,024–2,097,152). When unset, the generated profile declares 65,536 tokens
   instead of `max(max_output_tokens, 4096)`. Stored routes without the field
   keep their exact serialized form; the new default applies when the setup is
-  next saved, which also requires proving the route again.
+  next saved, which also requires proving the route again. The window is an
+  operator assertion: it is not checked against the model's real context
+  length, so a value above the model's limit fails at the provider instead.
 - **Dollar inputs.** The monthly ceiling and per-call request bound are entered
-  in dollars with a micro-USD preview; the request bound is prefilled at $0.05.
+  in dollars with a micro-USD preview; the request bound is prefilled at $0.50.
+- **Request bound and overrun latch.** The bound is a per-call reservation, not
+  a provider price cap (OpenRouter's `max_price` is a per-token price filter,
+  not a per-request limit, and is not sent; `max_tokens` already caps output at
+  the route's max output tokens). A settled charge above the bound is an
+  unreviewed overrun, and accounting then refuses every further OpenRouter
+  call with `provider_charge_exceeded_reservation` until the operator saves a
+  setup whose bound covers the charge (`request_reserve_review`). The panel
+  shows the worst case per call (declared window + output cap) in tokens, in
+  dollars when the operator enters preview-only $/M prices (otherwise at a
+  $3/$15 reference), and warns when the bound is below it. Chat and agent turns
+  report the latch with `recovery_action: review_cost_overrun`.
 - **Proof lifetime and Prove route.** The canary section offers a 1-, 8- or
   24-hour proof lifetime (the backend maximum, published as
   `canary_proof_ttl.max_seconds`). **Prove route** runs one canary per required
   capability plus `health` and `latency_ms`, in order, and stops at the first
   failure. Each canary is a real, billed provider call. The chat composer meta
-  line shows `PROOFS nH LEFT`, `PROOF EXPIRED: <capability>` or
-  `PROOF MISSING: <capability>` from `/api/runtime/status`.
+  line shows `PROOFS nH LEFT`, `PROOF EXPIRED: <capability>`,
+  `PROOF FAILED: <capability>` or `PROOF MISSING: <capability>` from
+  `/api/runtime/status`.
 - **Specific blocked reasons.** A route denial carries the selector code, and an
   exactly bound proof that aged out is reported as `proof_expired:<capability>`
   rather than `proof_missing:<capability>`. WebSocket and REST chat (including
   agent turns wrapped by the agent framework) name the capability and the
   recovery, e.g. Prove route, declare a capability, or raise the context window.
   REST responses add `route_reason` and `recovery_action` beside the stable
-  `no_compliant_route` code. Slot status adds `proof_reason`.
+  `no_compliant_route` code. Slot status adds `proof_reason`. A denial is
+  reported as a preflight block ("No model call was made",
+  `remote_outcome: not_contacted`) only when no call of that chat request
+  reached a provider transport; an agent turn denied after an earlier step
+  called the model is a mid-turn block (`failure_stage: mid_turn_route`,
+  `remote_outcome: contacted_before_block`) whose message says earlier calls
+  may be billed and their tool actions stand. Only explicit exception causes
+  are unwrapped, never an earlier handled route error.
 - **Background inference.** `GET/PUT /api/settings/background-inference` and
   the **Background inference** panel list the scheduled jobs that may call the
   text route (strategist tick, memory consolidation, daily briefing, evening
@@ -859,7 +880,16 @@ costs, and embedding usefulness remain externally unverified.
   reports still run deterministically without analysis. Toggles persist in
   `background-inference-settings.json` in the workspace. An unreadable file
   pauses scheduled model calls and reports
-  `background_inference_settings_unreadable` until a toggle is saved.
+  `background_inference_settings_unreadable`; a single-toggle save is then
+  refused (HTTP 409) and the panel asks for every job's value plus an explicit
+  confirmation (`replace_unreadable: true`). The `memory_consolidation` toggle
+  gates every consolidation trigger (scheduled catch-up, post-response,
+  workflow completion, pre-compaction and session end). Explicitly outside the
+  toggles: `guardian_opportunity_assessment` (runs only for operator-queued
+  opportunities with their own funded reservation), chat title generation
+  (one text call per new conversation, chat-triggered) and
+  `screenshot_folder_analysis` (vision route, gated by its purpose consent and
+  source settings).
 
 ### Local cockpit interaction boundaries
 

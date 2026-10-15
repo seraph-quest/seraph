@@ -573,7 +573,11 @@ are labelled as billed calls. Chat names the specific blocked reason (for
 example `proof_expired:health` → Prove route) and the composer shows proof
 expiry. Scheduled jobs that may call the text route stay ON by default with
 per-job toggles and call estimates; a disabled job makes no model call and
-reports `disabled_by_operator`. Settings → Telegram pairs and grants transit
+reports `disabled_by_operator`. The request bound defaults to $0.50 with a
+worst-case-per-call preview, because a charge above it latches every further
+OpenRouter call until the overrun is reviewed; chat names that latch and
+distinguishes a mid-turn agent block (earlier calls reached the provider) from
+a preflight block. Settings → Telegram pairs and grants transit
 consent over the existing API. Offline tests intercept all inference; a real
 OpenRouter session remains externally unverified. See the
 [current app guide](./12-current-app-guide.md#daily-use-readiness-1068).

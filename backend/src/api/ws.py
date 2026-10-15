@@ -69,6 +69,7 @@ from src.llm_runtime import (
     _finish_request,
     _mark_request_timed_out,
     _register_request,
+    request_provider_contacted,
     reset_current_llm_request_id,
     set_current_llm_request_id,
 )
@@ -1258,8 +1259,12 @@ async def websocket_chat(websocket: WebSocket):
                 raise
             except NoCompliantModelRouteError as exc:
                 safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+                # Earlier steps of this turn may already have called the
+                # provider; then the denial is a mid-turn block, not preflight.
+                contacted = request_provider_contacted(llm_request_id)
                 logger.info(
-                    "WebSocket OpenRouter agent chat blocked before provider contact",
+                    "WebSocket OpenRouter agent chat blocked mid-turn after provider contact"
+                    if contacted else "WebSocket OpenRouter agent chat blocked before provider contact",
                     extra={"reason": safe_reason},
                 )
                 await log_agent_run_event(
@@ -1274,8 +1279,9 @@ async def websocket_chat(websocket: WebSocket):
                         "error": safe_reason,
                         "request_id": llm_request_id,
                         "runtime": "openrouter-agent",
-                        "failure_stage": "route_preflight",
-                        "remote_outcome": "not_contacted",
+                        "step_count": step_num,
+                        "failure_stage": "mid_turn_route" if contacted else "route_preflight",
+                        "remote_outcome": "contacted_before_block" if contacted else "not_contacted",
                         "retry_required": False,
                     },
                 )
@@ -1283,7 +1289,7 @@ async def websocket_chat(websocket: WebSocket):
                 await websocket.send_text(
                     WSResponse(
                         type="error",
-                        content=openrouter_route_blocked_message(exc),
+                        content=openrouter_route_blocked_message(exc, provider_contacted=contacted),
                         reason=NoCompliantModelRouteError.code,
                         session_id=session.id,
                         seq=_next_seq(),

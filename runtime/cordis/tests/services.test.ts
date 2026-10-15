@@ -1,0 +1,202 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { Context, FiberState, symbols } from 'cordis';
+import { readFileSync } from 'node:fs';
+import { Composition, validateProfile } from '../src/composition.js';
+import { decodeJson, validateFrame } from '../src/protocol.js';
+import { invokeService, servicePlugins, SERVICE_KEYS } from '../src/plugins/index.js';
+import { SERVICE_METHODS, validateInput, validateResult, type Input, type ServiceMethod } from '../src/contracts/methods.js';
+import type { ScopedRequestClient } from '../src/contracts/client.js';
+import { ref, digest } from '../src/contracts/schema.js';
+
+const blocked = {status: 'blocked', reason_code: 'native_variant_not_supported', memory_status: 'no_learning'};
+const profile = () => validateProfile(decodeJson(readFileSync(new URL('../../profile.json', import.meta.url))));
+const input: Record<ServiceMethod, unknown> = {
+  'authority.resolve': {}, 'goals.read': {},
+  'tasks.admit': {request_ref:'native-1'}, 'tasks.inspect':{job_ref:'native-1'}, 'tasks.cancel':{job_ref:'native-1',expected_revision:1}, 'tasks.checkpoint':{checkpoint_ref:'native-1'}, 'tasks.settle':{outcome_ref:'native-1'},
+  'capabilities.list':{cursor:null,limit:10}, 'capabilities.describe':{capability_id:'work.json-format.v1'}, 'capabilities.invoke':{request_ref:'native-1'}, 'inference.request':{request_ref:'native-1'},
+  'memory.retrieve':{query_ref:'native-1',limit:10}, 'memory.propose':{request_ref:'native-1'}, 'memory.applyReviewed':{review_ref:'native-1'}, 'memory.forget':{request_ref:'native-1'},
+  'artifacts.read':{artifact_ref:'native-1',max_bytes:4096}, 'artifacts.stage':{request_ref:'native-1'}, 'artifacts.adopt':{request_ref:'native-1'}, 'audit.append':{event_ref:'native-1'},
+  'research.buildPlan':{task_ref:'native-1'}, 'research.executeAccepted':{plan_ref:'native-1'},
+  'conversation.accept':{turn_ref:'native-1'}, 'conversation.append':{message_ref:'native-1'}, 'conversation.read':{conversation_ref:'native-1',limit:10,before_message_ref:null}, 'conversation.cancel':{turn_ref:'native-1',expected_revision:1},
+  'scheduler.register':{request_ref:'native-1'}, 'scheduler.disable':{schedule_ref:'native-1',expected_revision:1}, 'scheduler.dispatchDue':{limit:10},
+  'connections.inspect':{connection_ref:'native-1'}, 'connections.invokeBoundAdapter':{operation_ref:'native-1'},
+  'agent-loop.startTurn':{turn_ref:'native-1'}, 'agent-loop.cancelTurn':{turn_ref:'native-1',expected_revision:1}, 'agent-loop.inspectTurn':{turn_ref:'native-1'},
+  'source-extraction.extract':{artifact_ref:'native-1',acquisition_receipt_ref:'receipt-1',source_slot:0,first_line:1,last_line:3},
+};
+test('canonical refs and digests reject terminal line separators and preserve exact bounds', () => {
+  for (const value of ['A', 'a'.repeat(128), 'AZaz09_.:-']) assert.equal(ref.parse(value), value);
+  for (const value of ['a'.repeat(64), '0123456789abcdef'.repeat(4)]) assert.equal(digest.parse(value), value);
+  for (const suffix of ['\n', '\r', '\u2028', '\u2029']) {
+    assert.throws(() => ref.parse('native-1' + suffix), /canonical reference/);
+    assert.throws(() => digest.parse('a'.repeat(64) + suffix), /service digest/);
+    assert.throws(() => validateResult('artifacts.read', {status:'succeeded', memory_status:'no_learning', value:{artifact_ref:'native-1', digest:'a'.repeat(64) + suffix, size_bytes:2, content:'ok'}}), /service digest/);
+  }
+  for (const value of ['', 'a'.repeat(129), 'a/b', 'é', null, 1, true, [], {}, new String('native-1')]) assert.throws(() => ref.parse(value));
+  for (const value of ['', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), null, 1, true, [], {}, new String('a'.repeat(64))]) assert.throws(() => digest.parse(value));
+});
+test('real scoped proxies reject terminal reference separators before IPC and preserve composition readiness', async () => {
+  const composition = new Composition(profile()); await composition.start();
+  let contacts = 0;
+  const client: ScopedRequestClient = {isActive:()=>true, request:async()=>{contacts++;return blocked;}};
+  const states = composition.states();
+  const remaining = composition.resources.remaining;
+  try {
+    const hostServices = SERVICE_KEYS.map(key => {
+      const original = (composition.context.get(key) as unknown as Record<symbol, unknown>)[symbols.original];
+      assert.ok(original !== null && original !== undefined, `${key} must have an original registered service`);
+      return original;
+    });
+    for (const method of SERVICE_METHODS) {
+      for (const [field, value] of Object.entries(input[method] as Record<string, unknown>)) {
+        if (typeof value !== 'string') continue;
+        for (const suffix of ['\n', '\r', '\u2028', '\u2029']) {
+          const invalid = {...input[method] as object, [field]:value + suffix};
+          await assert.rejects(composition.invoke(method, invalid as Input<typeof method>, client), /canonical reference/);
+          assert.equal(contacts, 0, `${method}.${field} must not contact native IPC`);
+          composition.assertReady();
+          assert.deepEqual(composition.states(), states);
+          assert.equal(composition.resources.remaining, remaining);
+          for (const [index, key] of SERVICE_KEYS.entries()) {
+            const original = (composition.context.get(key) as unknown as Record<symbol, unknown>)[symbols.original];
+            assert.equal(original === hostServices[index], true, `${key} registered service must be unchanged`);
+          }
+        }
+      }
+    }
+    assert.deepEqual(await composition.invoke('goals.read', {}, client), blocked);
+    assert.equal(contacts, 1, 'unrelated valid work remains usable');
+  } finally {
+    assert.deepEqual(await composition.dispose(), {resources_remaining:0, cordis_disposal:'confirmed'});
+  }
+});
+for (const method of SERVICE_METHODS) test(`real scoped Cordis provider forwards ${method} once and preserves native block`, async () => {
+  const calls: unknown[] = [];
+  const client: ScopedRequestClient = {isActive: () => true, request: async (name, value) => {calls.push([name,value]); return blocked;}};
+  const context = new Context(); context.logger.bufferSize = 0;
+  const fibers = await Promise.all(Object.values(servicePlugins(client)).map(plugin => context.plugin(plugin, {})));
+  assert.equal(calls.length,0, 'constructors must have no native effects');
+  assert.ok(fibers.every(fiber => fiber.state === FiberState.ACTIVE));
+  assert.ok(SERVICE_KEYS.every(key => context.get(key)));
+  assert.deepEqual(await invokeService(context, method, input[method] as Input<typeof method>), blocked);
+  assert.deepEqual(calls, [[method,input[method]]]);
+  await Promise.all(fibers.map(fiber => fiber.dispose()));
+  assert.equal(context.registry.size,0);
+  assert.ok(SERVICE_KEYS.every(key => !context.get(key)));
+});
+test('positive native projections preserve artifact readback and honest memory mutation statuses', () => {
+  const sha = 'a'.repeat(64);
+  assert.equal(validateResult('artifacts.read',{status:'succeeded',memory_status:'no_learning',value:{artifact_ref:'native-1',digest:sha,size_bytes:2,content:'ok'}}).status,'succeeded');
+  assert.equal(validateResult('tasks.admit',{status:'succeeded',memory_status:'no_learning',value:{job_ref:'native-1',revision:1,state:'accepted',replayed:true}}).status,'succeeded');
+  for (const [method, status] of [['memory.propose','proposal_only'],['memory.applyReviewed','reviewed_update'],['memory.forget','forgotten']] as const) {
+    const value = method === 'memory.propose' ? {proposal_ref:'proposal-1',revision:1,state:'proposed'} : {record_ref:'memory-1',receipt_ref:'memory-receipt-1'};
+    assert.equal(validateResult(method,{status:'succeeded',memory_status:status,value}).memory_status,status);
+    assert.throws(() => validateResult(method,{status:'succeeded',memory_status:'no_learning',value}));
+  }
+});
+test('memory evidence results use exact text digests and real receipt references', () => {
+  const value = {records:[{record_ref:'memory-1',text:'',text_digest:'a'.repeat(64)}]};
+  assert.equal(validateResult('memory.retrieve',{status:'succeeded',memory_status:'no_learning',value}).status,'succeeded');
+  assert.throws(() => validateResult('memory.retrieve',{status:'succeeded',memory_status:'no_learning',value:{records:[{record_ref:'memory-1',text:'',revision:1}]}}));
+  assert.throws(() => validateResult('memory.forget',{status:'succeeded',memory_status:'forgotten',value:{record_ref:'memory-1',revision:1}}));
+});
+test('closed requests deny client authority, URL/path/bytes, unsafe limits and asserted extraction provenance before native contact', () => {
+  for (const method of SERVICE_METHODS) for (const field of ['root_id','goal_id','route','budget','deadline_at','composition_epoch','owner_kind','authority_mode']) assert.throws(() => validateInput(method,{...input[method] as object,[field]:'injected'}));
+  for (const artifact_ref of ['/private/path','https://example.com','x'.repeat(129)]) assert.throws(() => validateInput('artifacts.read',{artifact_ref,max_bytes:1}));
+  for (const max_bytes of [0,65537,1.5,Number.MAX_SAFE_INTEGER+1]) assert.throws(() => validateInput('artifacts.read',{artifact_ref:'native-1',max_bytes}));
+  assert.throws(() => validateInput('source-extraction.extract',{...input['source-extraction.extract'] as object,raw_bytes:'secret'}));
+  assert.throws(() => validateInput('source-extraction.extract',{...input['source-extraction.extract'] as object,first_line:4,last_line:3}));
+  assert.throws(() => validateResult('source-extraction.extract',{status:'succeeded',memory_status:'no_learning',value:{artifact_ref:'native-1',input_digest:'a'.repeat(64),provider_digest:'b'.repeat(64),config_digest:'c'.repeat(64),evidence:[{source_ref:'source:0',text:'é'.repeat(2049)}]}}));
+});
+test('scope disposal and expiry fence retained providers and late native responses', async () => {
+  const composition = new Composition(profile()); await composition.start();
+  let active = true, release: ((value:unknown)=>void) | undefined;
+  const client: ScopedRequestClient = {isActive:()=>active,request:()=>new Promise(resolve=>{release=resolve;})};
+  const waiting = composition.invoke('goals.read',{},client);
+  await new Promise(resolve=>setImmediate(resolve));
+  active = false; release?.(blocked);
+  await assert.rejects(waiting,/unavailable/);
+  assert.equal(composition.resources.remaining,16); // host14 services + logger/lifecycle.
+  await composition.dispose(); assert.equal(composition.resources.remaining,0);
+});
+test('concurrent scopes retain independent original request clients and register no ambient authority', async () => {
+  const composition = new Composition(profile()); await composition.start();
+  const calls:string[]=[];
+  const make = (name:string):ScopedRequestClient=>({isActive:()=>true,request:async(method)=>{calls.push(`${name}:${method}`);return blocked;}});
+  assert.deepEqual(await Promise.all([composition.invoke('goals.read',{},make('first')),composition.invoke('tasks.inspect',{job_ref:'job-2'},make('second'))]),[blocked,blocked]);
+  assert.deepEqual(calls.sort(),['first:goals.read','second:tasks.inspect']);
+  await assert.rejects(composition.context.seraphGoals.read({}),/unavailable/);
+  await composition.dispose();
+});
+test('service frames require native scope/epoch and exact direction schemas', () => {
+  const frame={protocol:1,boot_nonce:'a'.repeat(64),request_id:'r-1',seq:1,kind:'request',method:'goals.read',invocation_ref:'job-1',composition_epoch:1,composition_digest:'b'.repeat(64),package_digest:'c'.repeat(64),deadline_at:2000000000000,payload:{}};
+  assert.equal(validateFrame(frame).method,'goals.read');
+  for (const change of [{invocation_ref:null},{composition_epoch:null},{composition_epoch:0},{method:'service.invoke'},{payload:{goal_id:'forged'}}]) assert.throws(()=>validateFrame({...frame,...change} as never));
+  assert.throws(()=>validateFrame({...frame,kind:'response',payload:{status:'succeeded',value:{},memory_status:'no_learning'}}));
+});
+test('retained disposed service cannot use a replacement registration as authority', async () => {
+  const context = new Context(); context.logger.bufferSize = 0;
+  let contacts = 0;
+  const client: ScopedRequestClient = {isActive:()=>true,request:async()=>{contacts++;return blocked;}};
+  const old = await context.plugin(servicePlugins(client)['seraph.goals.v1'],{});
+  const retained = context.seraphGoals;
+  await old.dispose();
+  const replacement = await context.plugin(servicePlugins(client)['seraph.goals.v1'],{});
+  await assert.rejects(retained.read({}),/unavailable/);
+  assert.equal(contacts,0);
+  assert.deepEqual(await context.seraphGoals.read({}),blocked);
+  await replacement.dispose();
+});
+test('scoped providers return positive read job artifact readback projections without synthesizing outputs', async () => {
+  const composition = new Composition(profile()); await composition.start();
+  const sha = 'a'.repeat(64);
+  const responses = {
+    'goals.read': {goal_ref:'goal-1',revision:1,title:'Reviewed goal',description:'Private native projection'},
+    'tasks.admit': {job_ref:'child-1',revision:1,state:'accepted',replayed:false},
+    'artifacts.adopt': {artifact_ref:'artifact-1',digest:sha,size_bytes:2,receipt_ref:'readback-1'},
+    'artifacts.read': {artifact_ref:'artifact-1',digest:sha,size_bytes:2,content:'ok'},
+  };
+  const calls: string[] = [];
+  const client: ScopedRequestClient = {isActive:()=>true,request:async(method)=>{
+    calls.push(method);
+    assert.ok(Object.hasOwn(responses,method));
+    return {status:'succeeded',memory_status:'no_learning',value:responses[method as keyof typeof responses]};
+  }};
+  const goal = await composition.invoke('goals.read',{},client);
+  const job = await composition.invoke('tasks.admit',{request_ref:'native-candidate-1'},client);
+  const artifact = await composition.invoke('artifacts.adopt',{request_ref:'native-readback-1'},client);
+  const readback = await composition.invoke('artifacts.read',{artifact_ref:'artifact-1',max_bytes:2},client);
+  assert.equal(goal.status,'succeeded'); assert.equal(job.status,'succeeded'); assert.equal(artifact.status,'succeeded');
+  assert.deepEqual(readback,{status:'succeeded',memory_status:'no_learning',value:responses['artifacts.read']});
+  assert.deepEqual(calls,['goals.read','tasks.admit','artifacts.adopt','artifacts.read']);
+  await composition.dispose();
+});
+test('closed per-plugin config, optional providers and per-plugin digests fail closed', async () => {
+  const base = profile() as unknown as {plugins: Record<string, unknown>[]} & Record<string, unknown>;
+  const variant = (plugins: Record<string, unknown>[]) => ({...base, plugins}) as unknown as Parameters<typeof validateProfile>[0];
+  assert.throws(() => validateProfile(variant(base.plugins.map((p, i) => i === 3 ? {...p, config: {path: '/tmp'}} : p))), /configuration/);
+  assert.throws(() => validateProfile(variant([...base.plugins].reverse())), /plugin/);
+  assert.throws(() => validateProfile(variant([...base.plugins, base.plugins[1]!])), /plugin/);
+  assert.throws(() => validateProfile(variant(base.plugins.slice(1))), /host/);
+  assert.throws(() => validateProfile(variant([{...base.plugins[0]!, required: false}, ...base.plugins.slice(1)])), /host/);
+  assert.throws(() => validateProfile(variant([...base.plugins, {id: 'seraph.unreviewed.v1', required: false, dependencies: [], config: {}}])), /plugin/);
+  const optional = validateProfile(variant(base.plugins.filter(p => p.id !== 'seraph.research.v1')
+    .map(p => p.id === 'seraph.memory.v1' ? {...p, required: false} : p)));
+  const composition = new Composition(optional); await composition.start();
+  let contacts = 0;
+  const client: ScopedRequestClient = {isActive: () => true, request: async () => { contacts++; return blocked; }};
+  try {
+    composition.assertReady();
+    assert.deepEqual(await composition.invoke('research.buildPlan', {task_ref: 'native-1'}, client),
+      {status: 'blocked', reason_code: 'service_provider_not_composed', memory_status: 'no_learning'});
+    assert.equal(contacts, 0, 'an absent provider never contacts the native owner');
+    assert.deepEqual(await composition.invoke('memory.retrieve', {query_ref: 'native-1', limit: 1}, client), blocked);
+    assert.equal(contacts, 1);
+    const states = composition.states();
+    assert.equal(states.length, optional.plugins.length);
+    assert.ok(states.every(state => /^[0-9a-f]{64}$/.test(state.digest)));
+    assert.equal(new Set(states.map(state => state.digest)).size, states.length);
+  } finally {
+    assert.deepEqual(await composition.dispose(), {resources_remaining: 0, cordis_disposal: 'confirmed'});
+  }
+});

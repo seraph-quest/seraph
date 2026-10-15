@@ -7,6 +7,90 @@
       "required": true,
       "dependencies": [],
       "config": {}
+    },
+    {
+      "id": "seraph.authority.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.goals.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.tasks.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.capabilities.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.inference.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.memory.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.artifacts.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.audit.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.research.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.conversation.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.scheduler.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.connections.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.agent-loop.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.source-extraction.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
     }
   ]
 }

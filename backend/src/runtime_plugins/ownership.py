@@ -316,8 +316,12 @@ def _boot_proved(runtime_domain: str, owner_kind: str, composition_digest: str, 
         return composition_digest == legacy_composition_digest(runtime_domain)
     from .bridge import CordisHost
     reviewed = getattr(boot_host, "reviewed", None)
+    # The provider must be composed and running in this boot, not merely listed.
+    running = [plugin for plugin in getattr(boot_host, "_plugins", ())
+               if plugin.get("id") == runtime_domain and plugin.get("state") == "ready"
+               and plugin.get("digest") == composition_digest]
     return (type(boot_host) is CordisHost and boot_host.admitting and reviewed is not None
-            and (reviewed.plugin_digests or {}).get(runtime_domain) == composition_digest)
+            and (reviewed.plugin_digests or {}).get(runtime_domain) == composition_digest and len(running) == 1)
 
 
 @asynccontextmanager

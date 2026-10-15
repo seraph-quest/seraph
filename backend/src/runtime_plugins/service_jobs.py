@@ -165,32 +165,36 @@ async def open_invocation(*, job_id: str, owner: str, fence: int, host, admissio
 
 
 async def verified_task_call(host, jobs, scope, method: str, payload: dict) -> dict:
-    """Forward a task method and accept the child's answer only if the durable
-    job row independently shows the same receipt/revision/state."""
+    """Forward a task method; accept the child's answer only if it equals the
+    value Python builds from the durable job row, and return Python's value.
+    Any mismatch blocks the job with ``native_child_result_mismatch``."""
+    from .contracts import succeeded
     jobs = _jobs(jobs)
     result = await host.request_service(method, payload, original_scope=scope)
     if result["status"] != "succeeded":
         return result
-    value = result["value"]
     job = await jobs.get_job(scope.witness["invocation_ref"])
-    artifacts = [item["artifact_id"] for item in job["artifacts"] if item.get("artifact_id")]
-    receipts = {item["checkpoint_id"] for item in job["checkpoints"]}
     if method == "tasks.admit":
-        ok = (value["job_ref"] == job["job_id"] and value["replayed"] is scope.witness["admission_replayed"]
-              and value["revision"] <= job["revision"])
+        expected = {"job_ref": job["job_id"], "revision": job["revision"], "state": job["status"],
+                    "replayed": scope.witness["admission_replayed"]}
     elif method == "tasks.inspect":
-        ok = value == {"job_ref": job["job_id"], "revision": job["revision"], "state": job["status"],
-                       "artifact_refs": artifacts}
+        expected = {"job_ref": job["job_id"], "revision": job["revision"], "state": job["status"],
+                    "artifact_refs": [item["artifact_id"] for item in job["artifacts"] if item.get("artifact_id")]}
     elif method == "tasks.checkpoint":
-        ok = value["receipt_ref"] in receipts and value["revision"] <= job["revision"]
+        receipt_ref = "cordis-task:" + payload["checkpoint_ref"]
+        receipts = [item for item in job["checkpoints"] if item.get("checkpoint_id") == receipt_ref]
+        payload_revision = (receipts[0].get("payload") or {}).get("revision") if len(receipts) == 1 else None
+        expected = {"receipt_ref": receipt_ref, "revision": payload_revision}
     elif method == "tasks.cancel":
-        ok = value == {"job_ref": job["job_id"], "revision": job["revision"], "state": job["status"]} \
-            and job["status"] == "cancelled"
+        expected = {"job_ref": job["job_id"], "revision": job["revision"], "state": job["status"]}
+        if job["status"] != "cancelled":
+            expected = None
     else:
         raise NativeServiceBlocked("native_task_method_not_verifiable")
-    if not ok:
+    if expected is None or None in expected.values() or result["value"] != expected:
+        await _block(jobs, scope, "native_child_result_mismatch")
         raise NativeServiceBlocked("native_child_result_mismatch")
-    return result
+    return succeeded(method, expected)
 
 
 async def _block(jobs, scope, reason: str) -> None:

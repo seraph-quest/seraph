@@ -419,10 +419,14 @@ class NativeServiceDispatcher:
             receipt_ref = "cordis-task:" + checkpoint_ref
             if len(receipt_ref) > 128:
                 raise NativeServiceBlocked("native_checkpoint_reference_unsupported")
-            receipt = checkpoint_receipt(receipt_ref, {"checkpoint_ref": checkpoint_ref, "no_learning": True},
-                                         run.fencing_token)
-            revision = await cas_run(db, run, checkpoint_receipts_json=_append_receipt(
-                run.checkpoint_receipts_json, receipt, key="checkpoint_id"))
+            # The receipt records the job revision its own CAS commits, so the
+            # owner can verify a child's answer against the durable row.
+            revision = int(run.revision or 1) + 1
+            receipt = checkpoint_receipt(receipt_ref, {"checkpoint_ref": checkpoint_ref, "revision": revision,
+                                                       "no_learning": True}, run.fencing_token)
+            if await cas_run(db, run, checkpoint_receipts_json=_append_receipt(
+                    run.checkpoint_receipts_json, receipt, key="checkpoint_id")) != revision:
+                raise NativeServiceBlocked("native_original_job_cas_changed")
             return succeeded(method, {"receipt_ref": receipt_ref, "revision": revision})
         raise NativeServiceBlocked("native_method_candidate_not_bound")
 

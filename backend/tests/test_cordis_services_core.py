@@ -163,7 +163,8 @@ async def test_cutover_rules_epochs_only_increase_and_require_fence(service_db):
                 target = CompositionDependency(domain, "cordis", 2, cordis)
                 # Ready needs a boot proof: the admitting host's verified
                 # plugin digest for exactly this domain.
-                for proof in (None, _boot_host({domain: "d" * 64}), _boot_host({domain: cordis}, admitting=False)):
+                for proof in (None, _boot_host({domain: "d" * 64}), _boot_host({domain: cordis}, admitting=False),
+                              _boot_host({domain: cordis}, plugin_state="blocked")):
                     with pytest.raises(CompositionBindingError):
                         await transition_owner(db, runtime_domain=domain, expected=target, expected_state="blocked",
                                                owner_kind="cordis", epoch=2, composition_digest=cordis,
@@ -190,7 +191,7 @@ async def test_cutover_rules_epochs_only_increase_and_require_fence(service_db):
     assert all(proof["runtime_domain"] == domain for proof in proofs)
 
 
-def _boot_host(digests, *, admitting=True):
+def _boot_host(digests, *, admitting=True, plugin_state="ready"):
     """Reviewed-host stand-in for the pure ownership rule (no child process)."""
     from types import SimpleNamespace
     from src.runtime_plugins.bridge import CordisHost
@@ -200,6 +201,8 @@ def _boot_host(digests, *, admitting=True):
                                         "c" * 64, dict(digests))
     host.state, host._cleanup_state = ("ready" if admitting else "blocked"), "pending"
     host.process = SimpleNamespace(returncode=None)
+    host._plugins = [{"id": domain, "state": plugin_state, "reason": None, "digest": digest}
+                     for domain, digest in digests.items()]
     return host
 
 
@@ -935,3 +938,75 @@ async def test_epoch_change_visibly_blocks_unstarted_jobs_bound_to_the_old_owner
                                        owner_kind="legacy", epoch=2, composition_digest=expected.composition_digest,
                                        state="ready")
     assert (await DurableJobRepository().get_job(accepted["job_id"]))["status"] == "blocked"
+
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_child_reused_checkpoint_receipt_or_false_admit_state_blocks_the_job(live_host):
+    """Critic probe 2: answers must equal Python's row-derived value exactly."""
+    host, jobs, _ = live_host
+    operator = await _operator()
+    for lie in ("checkpoint_reuse", "admit_state"):
+        job, scope = await _task_scope(host, jobs, operator, key="lie-" + lie)
+        ok = await verified_task_call(host, jobs, scope, "tasks.checkpoint", {"checkpoint_ref": "step-1"})
+        receipt = next(item for item in (await jobs.get_job(job["job_id"]))["checkpoints"]
+                       if item["checkpoint_id"] == "cordis-task:step-1")
+        assert ok["value"] == {"receipt_ref": "cordis-task:step-1", "revision": receipt["payload"]["revision"]}
+        real = host.request_service
+
+        async def lying(method, payload, *, original_scope):
+            current = await jobs.get_job(job["job_id"])
+            if lie == "checkpoint_reuse":  # answers step-2 without making the callback
+                return {"status": "succeeded", "memory_status": "no_learning",
+                        "value": {"receipt_ref": "cordis-task:step-1", "revision": current["revision"]}}
+            return {"status": "succeeded", "memory_status": "no_learning",
+                    "value": {"job_ref": job["job_id"], "revision": current["revision"], "state": "succeeded",
+                              "replayed": False}}
+        host.request_service = lying
+        try:
+            method, payload = (("tasks.checkpoint", {"checkpoint_ref": "step-2"}) if lie == "checkpoint_reuse"
+                               else ("tasks.admit", {"request_ref": job["job_id"]}))
+            with pytest.raises(NativeServiceBlocked) as denied:
+                await verified_task_call(host, jobs, scope, method, payload)
+        finally:
+            host.request_service = real
+        assert denied.value.reason_code == "native_child_result_mismatch"
+        after = await jobs.get_job(job["job_id"])
+        assert after["status"] == "blocked" and after["failure_reason"] == "native_child_result_mismatch"
+        assert "cordis-task:step-2" not in {item["checkpoint_id"] for item in after["checkpoints"]}
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_boot_proof_requires_the_domain_provider_running_in_the_live_child(live_host):
+    host, _, _ = live_host
+    domain = "seraph.memory.v1"
+    digest = host.reviewed.plugin_digests[domain]
+    legacy = CompositionDependency(domain, "legacy", 1, legacy_composition_digest(domain))
+    target = CompositionDependency(domain, "cordis", 2, digest)
+    with lifecycle_fence_marker():
+        async with get_session() as db:
+            async with composition_writer(db):
+                await transition_owner(db, runtime_domain=domain, expected=legacy, expected_state="ready",
+                                       owner_kind="legacy", epoch=1, composition_digest=legacy.composition_digest,
+                                       state="draining")
+                await transition_owner(db, runtime_domain=domain, expected=legacy, expected_state="draining",
+                                       owner_kind="cordis", epoch=2, composition_digest=digest, state="blocked")
+        saved = host._plugins
+        host._plugins = [dict(item, state="blocked") if item["id"] == domain else item for item in saved]
+        try:
+            async with get_session() as db:
+                with pytest.raises(CompositionBindingError):
+                    async with composition_writer(db):
+                        await transition_owner(db, runtime_domain=domain, expected=target, expected_state="blocked",
+                                               owner_kind="cordis", epoch=2, composition_digest=digest,
+                                               state="ready", boot_host=host)
+        finally:
+            host._plugins = saved
+        async with get_session() as db:
+            async with composition_writer(db):
+                await transition_owner(db, runtime_domain=domain, expected=target, expected_state="blocked",
+                                       owner_kind="cordis", epoch=2, composition_digest=digest, state="ready",
+                                       boot_host=host)
+    assert await _row(domain) == (target, "ready")

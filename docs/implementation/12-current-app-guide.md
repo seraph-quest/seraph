@@ -187,7 +187,8 @@ maintenance fence: `ready -> draining` stops admission; a strictly higher-epoch
 and it marks accepted/queued jobs bound to that owner `blocked`
 (`composition_owner_changed`, listed in the recovery receipt). `ready` requires a
 boot proof: the fixed legacy digest, or for `cordis` the currently admitting
-host whose verified build reports exactly that domain's plugin digest. Rollback
+host whose verified build reports exactly that domain's plugin digest and whose
+child reports that provider running. Rollback
 is a new epoch and never revives blocked jobs.
 
 Native owners in this slice: `authority.resolve`, `goals.read`, `tasks.admit`
@@ -200,8 +201,9 @@ journey. That journey admits one `runtime_service_read_v1` job, performs the
 read, stages the sealed result as a private 0600 workspace file (intent before
 effect), adopts and reads it back, appends one `runtime_service_observed` audit
 event and settles the job with explicit `no_learning`. The child's answer to
-each call must equal the result Python sealed for it (task answers must match
-the durable job row); any difference blocks the job with
+each call must equal the result Python sealed for it (task answers must equal
+the value Python builds from the durable job row, including the checkpoint
+receipt's recorded revision); any difference blocks the job with
 `native_child_result_mismatch`, and only Python-owned values are returned. An
 exact retry reuses the same job and never re-executes; an interrupted stage
 stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle`,

@@ -49,6 +49,21 @@ CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
         ContentOrigin.EXTERNAL_UNTRUSTED,
         "normal",
     ),
+    # #1018: Cordis inference.request purposes, through the same broker and ledger.
+    "cordis_interactive_inference": CanonicalRouteSpec(
+        InferenceWorkload.INTERACTIVE,
+        (ModelCapability.TEXT,),
+        "interactive_chat",
+        ContentOrigin.OPERATOR_INPUT,
+        "interactive",
+    ),
+    "cordis_background_inference": CanonicalRouteSpec(
+        InferenceWorkload.BACKGROUND,
+        (ModelCapability.TEXT,),
+        "agent_reasoning",
+        ContentOrigin.OPERATOR_INPUT,
+        "normal",
+    ),
     "chat_agent": CanonicalRouteSpec(
         InferenceWorkload.INTERACTIVE,
         (ModelCapability.TEXT,),

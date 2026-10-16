@@ -35,13 +35,13 @@ function projection(content: string): Projection | undefined {
   } catch { return undefined; }
 }
 
-/** The step must belong to a reviewed interactive preset whose bounds it keeps (#1020). */
+/** The step must belong to a reviewed interactive or delegated-child preset whose bounds it keeps (#1020). */
 function presetDenial(ctx: Context, step: Projection): string | undefined {
   const resolved = ctx.seraphAgentPresets.resolve(step.preset_id);
   if (!resolved) return 'agent_preset_unavailable';
   if (resolved.digest !== step.preset_digest) return 'agent_preset_changed';
   const { kind, max_steps, tools } = resolved.preset;
-  if (kind !== 'interactive') return 'agent_preset_kind_invalid';
+  if (kind !== 'interactive' && kind !== 'child') return 'agent_preset_kind_invalid';
   if (typeof max_steps === 'number' && step.max_steps !== max_steps) return 'agent_preset_bound_exceeded';
   if (tools === 'none' && step.kind === 'tool_calls') return 'agent_preset_tools_denied';
   return undefined;

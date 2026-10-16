@@ -1630,7 +1630,7 @@ async def websocket_chat(websocket: WebSocket):
                 await _cordis_blocked(turn_reason or "agent_turn_failed")
                 logger.exception("Agent streaming failed")
                 safe_error = await redact_secrets_in_text(
-                    turn_blocked_message(turn_reason) if turn_reason else f"Agent error: {e}")
+                    turn_blocked_message(turn_reason, active_cordis_turn) if turn_reason else f"Agent error: {e}")
                 await log_agent_run_event(
                     session_id=session.id,
                     transport="websocket",

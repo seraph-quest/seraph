@@ -56,6 +56,7 @@ BLOCKED_METHODS = MappingProxyType({
     "agent-loop.cancelTurn": "native_turn_producer_not_bound",
     "agent-loop.inspectTurn": "native_turn_producer_not_bound",
     "guardian.startTurn": "native_turn_producer_not_bound",
+    "delegation.startChild": "native_turn_producer_not_bound",
     "scheduler.register": "native_scheduler_not_bound",
     "scheduler.disable": "native_scheduler_not_bound",
     "scheduler.dispatchDue": "native_scheduler_not_bound",
@@ -448,7 +449,7 @@ class NativeServiceDispatcher:
             if scope.binding.native_branch == "governed":
                 from .governed_services import dispatch_governed
                 return await dispatch_governed(self, frame, payload, scope)
-            if scope.binding.native_branch in {"agent_loop", "guardian"}:
+            if scope.binding.native_branch in {"agent_loop", "guardian", "delegation"}:
                 from .agent_turns import dispatch_turn_step
                 return await dispatch_turn_step(self, frame, payload, scope)
             if scope.binding.native_branch in {"programme_planning", "programme_discovery"}:

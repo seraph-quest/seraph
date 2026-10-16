@@ -26,7 +26,7 @@ pytestmark = [needs_cordis, pytest.mark.asyncio]
 
 
 # #1020 adds the presets (cut over first; agent-loop's prerequisite) and guardian domains.
-MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN, "seraph.delegation.v1"]
 
 
 def _by_domain(receipts):

@@ -116,7 +116,7 @@ def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, 
         names.add("seraph.goals.v1")
     if method in {"artifacts.adopt", "audit.append"}:
         names.add("seraph.artifacts.v1")
-    if method in {"memory.applyReviewed", "memory.forget"}:
+    if method in {"memory.propose", "memory.applyReviewed", "memory.forget"}:
         names.add("seraph.audit.v1")
     if method in GOVERNED_ORIGINS:
         # Governed effects need the artifact and audit owners explicitly (#1018).

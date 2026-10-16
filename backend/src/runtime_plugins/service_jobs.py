@@ -20,7 +20,9 @@ from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 from .dispatch import (CONTEXT_TAG, READ_JOB_KIND, TASK_JOB_KIND, WITNESS_PREFIX, NativeServiceBlocked,
                        NativeServiceDispatcher, OriginalServiceInvocation, _canonical, _checked_witness, _digest,
                        _ms, _stored_witness, _writer, cas_run, checkpoint_receipt, transient_storage_error)
+from .memory_mutations import MEMORY_JOB_KIND, MUTATION_METHODS, validate_mutation_candidate
 from .ownership import RuntimeCompositionBinding, bind_invocation
+from .protocol import ProtocolError
 from .read_admission import validate_read_candidate, wire_inputs
 
 SERVICE_TIMEOUT = timedelta(seconds=30)
@@ -40,7 +42,8 @@ def _jobs(jobs):
 
 async def admit_service_job(*, operator, origin_method: str, native_branch: str, candidate: dict,
                             idempotency_key: str, reviewed_composition, goal_id: str | None = None,
-                            goal_revision: int | None = None, jobs=None) -> tuple[dict, bool]:
+                            goal_revision: int | None = None, jobs=None,
+                            admission_authority_check=None) -> tuple[dict, bool]:
     """Admit one Cordis-bound job; returns (job, replayed)."""
     from src.auth.ownership import _current_root
     from src.auth.service import authenticate_principal
@@ -69,8 +72,18 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
         if candidate["method"] != origin_method:
             raise NativeServiceBlocked("native_governed_candidate_changed")
         job_kind = GOVERNED_JOB_KIND
+    elif native_branch == "base" and origin_method in MUTATION_METHODS:
+        try:
+            candidate = validate_mutation_candidate(origin_method, candidate)
+        except ProtocolError as exc:
+            raise NativeServiceBlocked("native_memory_candidate_invalid") from exc
+        if admission_authority_check is None:
+            raise NativeServiceBlocked("native_memory_admission_check_required")
+        job_kind = MEMORY_JOB_KIND
     else:
         raise NativeServiceBlocked("native_branch_unsupported")
+    if admission_authority_check is not None and job_kind != MEMORY_JOB_KIND:
+        raise NativeServiceBlocked("native_admission_check_unexpected")
     job_id = "cordis-svc:" + _digest({"root": operator.session_id, "kind": job_kind, "key": idempotency_key})
     for attempt in range(2):
         async with get_session() as db:
@@ -98,7 +111,7 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
             run_fingerprint=_digest({"candidate": candidate, "root": operator.session_id, "origin": origin_method,
                                      "branch": native_branch, "deadline": deadline.isoformat()}))
         try:
-            job = await jobs.admit_job(spec)
+            job = await jobs.admit_job(spec, admission_authority_check=admission_authority_check)
         except DurableJobIdempotencyConflict:
             # A concurrent first admission won with its own cutoff; reread it
             # once and replay exactly. A genuine immutable conflict persists.

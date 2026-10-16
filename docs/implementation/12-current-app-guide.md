@@ -2204,13 +2204,39 @@ target. Local source/output and current policy metadata reads inside selected
 SQLite writers are bounded by their contracts; their lock duration and physical
 filesystem race limits remain relevant.
 
+### Quarantined downloads and selected desktop drafts (#1014)
+
+[ADR-034](./decisions/034-selected-desktop-draft-actions.md) owns this target.
+`POST /api/browser/downloads` takes a request key and at most two exact public
+file URLs plus the exact redirect targets allowed for them. A JavaScript-free
+isolated Chromium context reaches each URL; the bytes come from Seraph's own
+bounded transport (public HTTPS only, 10 MiB) and are identified from their
+content: PDF, DOCX, XLSX, CSV or plain text. A wrong claimed type, executable,
+HTML, an out-of-grant redirect or oversized bytes stop before adoption. Files
+land read-only in a private quarantine with their source URL, redirect chain
+and claimed type. `GET /api/browser/downloads/{artifact_id}` shows metadata and
+an inert preview; `DELETE` revokes the file. Seraph never opens or runs a
+download. Uploads, file choosers and file controls stay refused before any page
+event or network transfer. Authenticated-session downloads wait for #1013.
+
+Desktop drafts run in the local daemon only: `python daemon/desktop_drafts.py
+probe | inspect | replace --replacement-file FILE`. Replacement shows the exact
+selected text and replacement, needs the typed preview digest prefix, re-reads
+focus and selection immediately before writing, and reads the text back.
+A focus, window, text or selection change aborts with no write; an uncertain
+write is reported for inspection and never reapplied. Terminals, passwords,
+browsers, payment fields and system settings are refused. Linux needs
+`gir1.2-atspi-2.0` and a session bus; otherwise the probe reports unavailable.
+macOS reports unavailable. The paired edge status carries the probe; the core
+never dispatches desktop writes.
+
 ### Profiled public form preparation (#1012)
 
 `browser.interact.v2` adds a separate registered HTTPBin public form preview
 under [ADR-029](./decisions/029-profiled-browser-interactions.md). The capability
 is **Partial**: bounded public-form preparation and preview are available;
-authenticated exact transactions (#1013), downloads and selected local desktop
-draft actions (#1014) remain **Planned**.
+authenticated exact transactions (#1013) remain **Planned**. Quarantined public
+downloads and selected local desktop draft actions (#1014) are described below.
 The existing public browser v1 remains navigate/extract only. From the public
 browser Work form, explicitly open the HTTPBin preparation controls, select a
 current Goal, acknowledge one public document contact/site access logging, and

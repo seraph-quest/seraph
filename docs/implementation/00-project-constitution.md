@@ -165,6 +165,7 @@ The following architecture decisions are normative:
 28. [ADR-028: Reviewed typed task methods and reusable procedures](./decisions/028-reviewed-task-methods.md)
 29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
+34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

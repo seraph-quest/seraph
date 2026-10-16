@@ -29,6 +29,13 @@ Python lifecycle. Its bounded offline fill/select/check/radio-click and private
 literal preview reuse native jobs, current Root/Goal authority and the existing
 browser lane. Source or DOM drift, unknown effects and unverified cleanup block;
 submission, imported sessions and arbitrary-site writes remain excluded.
+[ADR-034](./decisions/034-selected-desktop-draft-actions.md) (#1014) adds at most
+two quarantined public downloads (10 MiB each; PDF, DOCX, XLSX, CSV, text)
+verified from their bytes, stored read-only with source metadata and never
+executed; uploads are refused before any contact. Selected local desktop text
+replacement runs only in the daemon after an exact preview with readback, and
+stops on any focus or selection change. Linux AT-SPI reports its actual
+readiness; macOS Accessibility and authenticated downloads remain Planned.
 Private values are encrypted; redacted action history survives reload without
 reopening old work. Linux local Chromium/TCP/SQLite checks prove the named
 mechanics with zero inference/provider spend. Business-form usefulness, production

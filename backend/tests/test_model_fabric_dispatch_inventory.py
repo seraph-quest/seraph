@@ -370,6 +370,15 @@ _REVIEWED_EXCEPTIONS = (
         "Keep behind the guarded browser source-read contract; reclassify if the endpoint becomes an inference route.",
     ),
     _review(
+        "browser/downloads.py",
+        628,
+        "OwnedDownloadTransport._fetch",
+        "client.stream",
+        "non_model_transport",
+        "Granted public HTTPS file download for the quarantined browser download lane; pins the resolved address, checks every redirect against the grant and streams bounded bytes. It does not request model inference.",
+        "Keep behind the browser download grant and quarantine contract; reclassify if the endpoint becomes an inference route.",
+    ),
+    _review(
         "security/http_transport.py",
         442,
         "_request_pinned_https",

@@ -64,6 +64,22 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system
 
+      - name: Install reviewed Node 24.13.1 (npm 11.8.0) for the Cordis runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.13.1"
+
+      - name: Build the reviewed Cordis package for discovery and Cordis suites
+        working-directory: runtime/cordis
+        timeout-minutes: 5
+        run: |
+          # runtime/cordis/scripts/toolchain.mjs gates on exactly npm 11.8.0.
+          if [ "$(npm --version)" != "11.8.0" ]; then npm install -g npm@11.8.0; fi
+          test "$(npm --version)" = "11.8.0"
+          npm ci --ignore-scripts
+          npm run build
+          echo "SERAPH_CORDIS_TEST_NODE=$(command -v node)" >> "$GITHUB_ENV"
+
       - name: Install Node 24.21.0 for native repository tests
         uses: actions/setup-node@v4
         with:

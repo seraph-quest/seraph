@@ -16,7 +16,7 @@
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
 #   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
-#   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed optional Cordis host.
+#   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed Cordis host (goal research).
 #   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
@@ -752,11 +752,59 @@ function start_local_frontend() {
     return 1
 }
 
+function cordis_cli() {
+    # Same keyless path as `./manage.sh cordis`: no operator env, credentials or workspace.
+    env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
+        python3 -m src.runtime_plugins.cli "$@"
+}
+
+# Goal discovery plans and extracts only through the reviewed Cordis host (#1008).
+# Node is CORDIS_NODE_PATH from the env file when set, else `node` on PATH; the
+# backend starts the host with the same Node. This preflight runs the reviewed
+# build when the package is missing or stale; like the frontend, it never
+# installs dependencies. Core startup continues either way: an unavailable
+# runtime stays an operator-visible block with its fix, never a Python fallback.
+function prepare_local_cordis() {
+    local status reason node_args=()
+    if [ -n "${CORDIS_NODE_PATH:-}" ]; then
+        node_args=(--node "$CORDIS_NODE_PATH")
+    fi
+    if status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
+        echo "Cordis research runtime: package available (live readiness: Settings > Cordis runtime host)"
+        return 0
+    fi
+    reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
+    case "$reason" in
+        node_missing|node_unavailable|node_unsupported|build_dependencies_missing) ;;
+        *)
+            echo "Building the reviewed Cordis research runtime ($reason) ..."
+            if cordis_cli build "${node_args[@]}" >>"$LOCAL_BACKEND_LOG_FILE" 2>&1 \
+                    && status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
+                echo "Cordis research runtime: package built and available"
+                return 0
+            fi
+            status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"
+            reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
+            ;;
+    esac
+    echo "Cordis research runtime unavailable (${reason:-unknown}); goal discovery is blocked and shows this in the cockpit." >&2
+    case "$reason" in
+        node_missing|node_unavailable|node_unsupported)
+            echo "  Fix: install Node 22.12+ or 24.x and set CORDIS_NODE_PATH in $ENV_FILE (or put it first on PATH), then rerun." >&2 ;;
+        build_dependencies_missing)
+            echo "  Fix: npm ci --prefix runtime/cordis --ignore-scripts (Node 24.13.1, npm 11.8.0), then rerun; this run builds it." >&2 ;;
+        *)
+            echo "  Fix: run ./manage.sh -e $ENV cordis build (see $LOCAL_BACKEND_LOG_FILE), then rerun." >&2 ;;
+    esac
+    return 0
+}
+
 function local_up() {
     if ! reject_prod_local_stack; then
         return 1
     fi
     ensure_runtime_dirs
+    prepare_local_cordis
     if ! start_local_backend; then
         echo "Local stack failed: backend did not start cleanly." >&2
         return 1

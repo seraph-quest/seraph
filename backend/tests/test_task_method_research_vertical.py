@@ -16,14 +16,17 @@ from sqlalchemy import select
 from config.settings import settings
 from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth, ResponseBytes
+from tests.cordis_research import needs_cordis
+from tests.test_goal_discovery_vertical import research_cordis  # noqa: F401
 from src.auth.middleware import OperatorAuthMiddleware
 from src.workflows.job_runtime import DurableJobRepository
 from src.db.task_method_models import TaskMethodActive
 
 
+@needs_cordis
 @pytest.mark.asyncio
 @pytest.mark.parametrize("termination", ["default_baseline", "completed", "tombstone", "programme_revoked", "identity_revoked"])
-async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_rollback(accounting_db, real_auth, monkeypatch, termination):
+async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_rollback(accounting_db, real_auth, research_cordis, monkeypatch, termination):
     from src.api import auth, goals, memory, work_board
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.dispatcher import WorkBoardDispatcher
@@ -140,7 +143,8 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
     await current.start()
     await goal_programme_service.start()
     discovery = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=public_dns, transport=public_transport),
-        resolver=public_dns, transport=public_transport, strategy_resolver=TaskMethodStrategyResolver(current))
+        resolver=public_dns, transport=public_transport, strategy_resolver=TaskMethodStrategyResolver(current),
+        cordis=research_cordis)
     await discovery.start()
     from src.work_board.dispatcher import _dispatcher
     monkeypatch.setattr(_dispatcher, "goal_discovery", discovery)

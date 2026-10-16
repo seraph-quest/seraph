@@ -422,7 +422,9 @@ def _private_input_file_metadata(metadata: os.stat_result) -> bool:
     )
 
 
-def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) -> bytes:
+def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int,
+                     max_bytes: int = INPUT_ARTIFACT_MAX_BYTES) -> bytes:
+    """No-follow digest-verified read; ``max_bytes`` lets an owner with a larger fixed cap (discovery raw sources) reuse it."""
     parent_fd = -1
     descriptor = -1
     try:
@@ -443,8 +445,8 @@ def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) ->
         stat_result = os.fstat(descriptor)
         if not _private_input_file_metadata(stat_result) or stat_result.st_size != int(expected_size):
             raise BoardError("input_artifact_file_invalid", "The input artifact is not the verified regular file", status_code=409)
-        if stat_result.st_size > INPUT_ARTIFACT_MAX_BYTES:
-            raise BoardError("input_artifact_too_large", "The input artifact exceeds 64 KiB", status_code=409)
+        if stat_result.st_size > max_bytes:
+            raise BoardError("input_artifact_too_large", "The input artifact exceeds its byte cap", status_code=409)
         chunks: list[bytes] = []
         remaining = stat_result.st_size
         while remaining:

@@ -118,10 +118,17 @@ def test_local_preflight_requires_enabled_private_workspace_and_fixed_runtime(tm
     assert LocalRepoRepairExecutor(_local_settings(enabled=False), workspace_dir=workspace).preflight().reason == "repo_sandbox_disabled"
 
 
-def test_local_executor_runs_real_staged_patch_and_preserves_source(tmp_path: Path):
+@pytest.mark.parametrize("repo_isolation", ["declared", "real"])
+def test_local_executor_runs_real_staged_patch_and_preserves_source(tmp_path: Path, repo_isolation: str):
     workspace = tmp_path / "workspace"
     workspace.mkdir(mode=0o700)
     runner = LocalRepoRepairExecutor(_local_settings(), workspace_dir=workspace)
+    if repo_isolation == "real":
+        # The same journey through the actual bubblewrap sandbox (#1065).
+        from tests.repo_isolation_support import isolation_unavailable
+        posture = runner.preflight().posture
+        if posture.get("isolation_variant") != "isolated":
+            isolation_unavailable(posture.get("isolation_unavailable_reason"))
     repo, patch, allowed = _repo(tmp_path)
     before_bytes = (repo / "src" / "app.py").read_bytes()
     job = _job(runner, repo, patch, allowed)

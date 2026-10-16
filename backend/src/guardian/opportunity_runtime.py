@@ -20,6 +20,9 @@ EVIDENCE_LIMIT = 16384
 SERVICE_ID = "guardian-opportunity"
 SERVICE_PRINCIPAL = "service:guardian-opportunity"
 RUNNER = "scheduler:guardian-opportunity"
+# Reason codes recording an operator cancel. No tick may overwrite them, or a
+# later execution would no longer see the cancel.
+OPERATOR_CANCEL_REASONS = frozenset({"cancel_requested", "assessment_cancel_requested", "operator_cancelled"})
 _executions: dict[str, asyncio.Task] = {}
 
 
@@ -144,7 +147,7 @@ async def _authority(db, opportunity_id, *, evidence=None, execution=False):
     row = await db.get(GuardianOpportunity, opportunity_id)
     if row is None or row.status not in {"queued", "assessing"}:
         raise OpportunityError("opportunity_not_pending")
-    if row.reason_code == "cancel_requested":
+    if row.reason_code in OPERATOR_CANCEL_REASONS:
         raise OpportunityError("assessment_cancel_requested")
     if execution and utc(row.assessment_deadline_at) <= now():
         raise OpportunityError("assessment_deadline_expired")
@@ -716,6 +719,13 @@ async def run_opportunity_tick():
     from src.db import engine as db_engine
     from src.db.models import GuardianOpportunity, InferenceCostReservation
     from src.guardian.opportunities import now, utc
+    from src.scheduler.background_inference import background_inference_skip_reason, record_background_inference_skip
+    # The #1112 toggle stops only new assessment model calls. Deadline expiry,
+    # adoption of already-contacted results and Unknown handling still run, and
+    # a queued candidate stays visible with the skip reason until its deadline.
+    paused = background_inference_skip_reason("guardian_opportunity_assessment")
+    if paused:
+        record_background_inference_skip("guardian_opportunity_assessment", paused)
     cursor = None
     started = 0
     examined = 0
@@ -742,6 +752,8 @@ async def run_opportunity_tick():
                     try:
                         await assert_coalesced_predecessor_closed(db, row)
                     except OpportunityError as exc:
+                        if row.reason_code in OPERATOR_CANCEL_REASONS:
+                            continue  # Keep the cancel visible to the next execution check.
                         await db.execute(text("BEGIN IMMEDIATE"))
                         expired = utc(row.assessment_deadline_at) <= now()
                         reason = "assessment_deadline_expired" if expired else exc.code
@@ -794,6 +806,8 @@ async def run_opportunity_tick():
                     recovered = native  # Startup already advanced its fence.
                 if recovered["status"] != "blocked" or recovered["effects"]:
                     continue
+                if paused:
+                    continue  # A second attempt is a new model call; it waits for the toggle.
                 # Physical proof is staged outside the native queue writer.
                 try:
                     try:
@@ -824,6 +838,22 @@ async def run_opportunity_tick():
                             status="blocked", reason_code=exc.code,
                             revision=GuardianOpportunity.revision + 1))
                     continue
+            if paused and row.status == "queued" and row.reason_code not in OPERATOR_CANCEL_REASONS:
+                async with db_engine.get_session() as db:
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    expired = utc(row.assessment_deadline_at) <= now()
+                    reason = "assessment_deadline_expired" if expired else paused
+                    # The revision fence also loses to a cancel committed after
+                    # this page was read; the next enabled tick closes it in _authority.
+                    await db.execute(update(GuardianOpportunity).where(
+                        GuardianOpportunity.id == row.id, GuardianOpportunity.revision == row.revision,
+                        GuardianOpportunity.status == "queued",
+                        or_(GuardianOpportunity.reason_code.is_(None), GuardianOpportunity.reason_code != reason)).values(
+                        status="blocked" if expired else "queued",
+                        reason_code=reason, revision=GuardianOpportunity.revision + 1))
+                continue
+            if paused:
+                continue
             if len(_executions) >= 16:
                 return {"started": started}
 

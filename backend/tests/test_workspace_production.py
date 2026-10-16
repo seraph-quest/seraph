@@ -1054,3 +1054,41 @@ def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monke
         # Operator evolution state is canonical and round-trips.
         assert (root / "evolution" / "runtime-state.json").read_text(encoding="utf-8").startswith('{"schema_version"')
     _cli(tmp_path, environment, "backup", "--archive", f"{writer}-after.zip")
+
+
+@pytest.mark.parametrize("with_object", [False, True], ids=["empty", "with-object"])
+def test_audio_documentation_objects_never_block_backup_restore_or_inventory(tmp_path, monkeypatch, with_object):
+    import hashlib
+    from types import SimpleNamespace
+    from config.settings import settings
+    from src.model_fabric import audio_documentation as documentation
+    from src.workspace.state_registry import production_workspace_inventory
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+    os.close(documentation.object_directory())  # <workspace>/.model-fabric/audio-documentation/objects
+    raw = b"bounded official documentation bytes"
+    source = SimpleNamespace(object_id="a" * 32 + ".source", size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    if with_object:
+        documentation.private_write(source.object_id, raw)
+        assert documentation.private_read(source) == raw
+
+    inventory = production_workspace_inventory(root)
+    assert inventory["status"] != "blocked", inventory
+    entries = {entry["logical_path"]: entry for entry in canonical_workspace_registry(root).build_manifest()["entries"]}
+    assert entries[".model-fabric"]["state_class"] == "cache"
+    archive = _cli(tmp_path, environment, "backup", "--archive", "audio-docs.zip")
+    import zipfile
+    with zipfile.ZipFile(archive["archive_path"]) as bundle:
+        # Rebuildable objects are never archived.
+        assert not any(".model-fabric" in name and name.endswith(".source") for name in bundle.namelist())
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    assert production_workspace_inventory(root)["status"] != "blocked"
+    _cli(tmp_path, environment, "backup", "--archive", "after-restore.zip")
+    # The canonical attestation row survives in seraph.db while its object is
+    # rebuildable: a missing object fails closed with a typed reason.
+    object_path = root / ".model-fabric" / "audio-documentation" / "objects" / source.object_id
+    object_path.unlink(missing_ok=True)
+    with pytest.raises(documentation.DocumentationError) as missing:
+        documentation.private_read(source)
+    assert missing.value.code == "audio_documentation_source_missing"

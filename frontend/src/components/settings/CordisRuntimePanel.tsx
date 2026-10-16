@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import { normalizeCordisRuntime } from "../../lib/cordisRuntime";
-import type { CordisRuntimeSnapshot } from "../../lib/cordisRuntime";
+import { chatRuntimeLabel, normalizeChatRuntime, normalizeCordisRuntime } from "../../lib/cordisRuntime";
+import type { ChatRuntimeStatus, CordisRuntimeSnapshot } from "../../lib/cordisRuntime";
+
+const CHAT_DOMAIN = "seraph.agent-loop.v1";
 
 export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: unknown; managed?: boolean }) {
   const [snapshot, setSnapshot] = useState<CordisRuntimeSnapshot | null>(null);
+  const [chat, setChat] = useState<ChatRuntimeStatus | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const generation = useRef(0), controller = useRef<AbortController | null>(null);
   async function refresh() {
@@ -18,11 +21,31 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       const value: unknown = await response.json();
       const result = normalizeCordisRuntime(value && typeof value === "object" && "cordis_runtime" in value ? value.cordis_runtime : null);
       if (!result) throw Error("Cordis runtime metadata missing or invalid");
-      if (version === generation.current) { setSnapshot(result); setError(null); }
+      const chatStatus = normalizeChatRuntime(value && typeof value === "object" && "chat_runtime" in value ? value.chat_runtime : null);
+      if (version === generation.current) { setSnapshot(result); setChat(chatStatus); setError(null); }
     } catch { if (version === generation.current) setError("Cordis runtime metadata is unavailable. Last confirmed state remains visible; refresh after restoring the host. Artifact settings remain usable."); }
     finally { clearTimeout(timeout); if (version === generation.current) setBusy(false); }
   }
   useEffect(() => { if (!managed) void refresh(); return () => { ++generation.current; controller.current?.abort(); }; }, [managed]);
+  const [moving, setMoving] = useState(false), [moveError, setMoveError] = useState<string | null>(null);
+  async function moveChat(target: "legacy" | "cordis") {
+    if (!chat || chat.owner_epoch === null) return;
+    const label = target === "legacy" ? "roll chat back to the legacy agent loop" : "cut chat over to the Cordis agent loop";
+    if (!window.confirm(`Confirm: ${label} (${CHAT_DOMAIN}). In-flight turns must finish first.`)) return;
+    setMoving(true); setMoveError(null);
+    try {
+      const response = await apiFetch(`${API_URL}/api/runtime/composition/domains/${CHAT_DOMAIN}/owner`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target, expected_epoch: chat.owner_epoch, confirm_domain: CHAT_DOMAIN }) });
+      if (!response.ok) {
+        const detail: unknown = await response.json().catch(() => null);
+        const code = detail && typeof detail === "object" && "detail" in detail && detail.detail && typeof detail.detail === "object"
+          && "code" in detail.detail ? String(detail.detail.code) : `HTTP ${response.status}`;
+        setMoveError(`Chat loop change refused: ${code}`);
+      }
+    } catch { setMoveError("Chat loop change failed; refresh and try again."); }
+    finally { setMoving(false); void refresh(); }
+  }
   useEffect(() => {
     if (!managed) return;
     const result = normalizeCordisRuntime(metadata);
@@ -31,7 +54,13 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
   }, [managed, metadata]);
   return <section aria-label="Cordis runtime host" className="mb-3 rounded border border-retro-text/10 p-2 text-[10px]">
     <div className="flex items-center justify-between gap-2"><h3>Cordis runtime host</h3><button type="button" disabled={busy} onClick={() => void refresh()}>{busy ? "Checking host…" : "Refresh Cordis host"}</button></div>
-    <p>This lifecycle host reports composition and cleanup. Agent-loop migration remains planned.</p>
+    <p>This lifecycle host reports composition and cleanup. Chat runs on the agent loop its owner row names.</p>
+    {chat && <p role="status" aria-label="Chat agent loop">{chatRuntimeLabel(chat)}</p>}
+    {chat?.loop === "blocked" && chat.recovery && <p role="status">Chat fix: {chat.recovery}</p>}
+    {chat && chat.owner_epoch !== null && (chat.owner_kind === "cordis"
+      ? <button type="button" disabled={moving} onClick={() => void moveChat("legacy")}>Roll chat back to legacy</button>
+      : chat.owner_kind === "legacy" && <button type="button" disabled={moving} onClick={() => void moveChat("cordis")}>Cut chat over to Cordis</button>)}
+    {moveError && <p role="status" className="text-yellow-400">{moveError}</p>}
     {error && <p role="status" className="text-yellow-400">{error}</p>}
     {!snapshot && <p role="status">{busy ? "Loading host state…" : "Host state unavailable"}</p>}
     {snapshot && <>

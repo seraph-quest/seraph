@@ -30,6 +30,15 @@ describe("PttAudioControl", () => {
     expect(screen.getByText("Choose or start a conversation before recording.")).toBeInTheDocument();
   });
 
+  it("shows an explicit voice route unavailable state with the typed and Telegram alternatives", () => {
+    vi.stubGlobal("fetch", vi.fn());
+    render(<PttAudioControl sessionId="conversation-1" />);
+    const status = screen.getByTestId("voice-route-unavailable");
+    expect(status).toHaveAttribute("role", "status");
+    expect(status).toHaveTextContent("Voice route unavailable");
+    expect(status).toHaveTextContent("paired Telegram");
+  });
+
   it("explains the LAN HTTP microphone limitation instead of failing silently", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

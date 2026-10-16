@@ -39,6 +39,7 @@ from src.api.vault import router as vault_router
 from src.api.work_board import router as work_board_router
 from src.api.workflows import router as workflows_router
 from src.api.ws import router as ws_router
+from src.api.runtime_composition import router as runtime_composition_router
 
 api_router = APIRouter()
 
@@ -82,3 +83,4 @@ api_router.include_router(settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(vault_router, prefix="/api", tags=["vault"])
 api_router.include_router(work_board_router, prefix="/api", tags=["work-board"])
 api_router.include_router(ws_router, prefix="/ws", tags=["websocket"])
+api_router.include_router(runtime_composition_router, prefix="/api", tags=["runtime"])

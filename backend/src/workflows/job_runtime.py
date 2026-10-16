@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+from contextlib import asynccontextmanager
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -930,8 +931,17 @@ def _safe_routine_publication_binding(value: Any) -> dict[str, Any] | None:
 
 def _safe_durable_authority(
     value: Any, *, repo_node_posture_expectation: Mapping[str, Any] | None = None,
-    native_research_projection=None, native_job_kind=None,
+    native_research_projection=None, native_job_kind=None, audio_admission=None,
 ) -> dict[str, Any]:
+    if native_job_kind == "audio_transcription_v1":
+        from src.workflows.audio_native import AudioNativeAdmissionBindingV1, AUTHORITY_KEY
+        if type(audio_admission) is not AudioNativeAdmissionBindingV1 or value.get(AUTHORITY_KEY) != audio_admission.payload():
+            raise ValueError("audio_native_protected_binding_required")
+        safe = _safe_structure({key: item for key, item in value.items() if key != AUTHORITY_KEY})
+        safe[AUTHORITY_KEY] = audio_admission.payload()
+        return safe
+    if isinstance(value, Mapping) and "audio_native_admission" in value:
+        raise ValueError("audio_native_binding_unexpected")
     if isinstance(value, Mapping) and value.get("authority_type") == "goal_programme_discovery_v1":
         from src.work_board.research_parent import discovery_authority
         return discovery_authority(value).model_dump(mode="json")
@@ -1359,6 +1369,10 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
 
 
 async def _verify_native_child_sql_scope(db, run, *, _repository_completion_witness=None):
+    if run.job_kind == "audio_transcription_v1":
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        _binding, audio = await guard_audio_pair(db, run, require_current=False)
+        await advance_audio_pair(db, run, audio)
     """Compile a private canonical journal witness before every child CAS."""
     from src.work_board.communication_preparation import assert_preparation_run_current
     await assert_preparation_run_current(db, run)
@@ -2678,11 +2692,17 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         opportunity_preference_witness=None,
         near_text_policy_scope=None,
         native_research_projection=None,
+        audio_admission=None,
     ) -> dict[str, Any]:
         # Internal server-only copy of actual selected Node preflight facts.
         # A separate method argument cannot be supplied by spec/request
         # serialization and is never persisted as durable authority itself.
         identity = spec.identity
+        if identity.job_kind == "audio_transcription_v1":
+            from src.workflows.audio_native import validate_spec
+            validate_spec(spec, audio_admission)
+        elif audio_admission is not None:
+            raise DurableJobAdmissionDenied("audio_native_binding_unexpected")
         if identity.job_kind == "general_task_native_tool_v1":
             from src.workflows.general_task_guard import is_fixed_child_admission
             if not is_fixed_child_admission(admission_authority_check):
@@ -2754,6 +2774,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             spec.declared_authority,
             native_research_projection=native_research_projection, native_job_kind=identity.job_kind,
             repo_node_posture_expectation=repo_node_posture_expectation,
+            audio_admission=audio_admission,
         )
         root_run_identity = identity.job_id
         branch_depth = 0
@@ -2782,8 +2803,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     # The pure canonical guard below commits the stale receipt
                     # for a bound task rather than admitting unreadable input.
                     admission_dependencies = None
+            if identity.job_kind == 'general_task_native_tool_v1' and prior_admission is None:
+                from src.workflows.general_task_guard import stage_positive_parent
+                await stage_positive_parent(self, db, spec.parent_job_id)
             await db.rollback()
             transaction_started = False
+            audio_capture = None
+            if audio_admission is not None:
+                if dialect_name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    transaction_started = True
+                from src.workflows.audio_native import guard_admission
+                audio_capture = await guard_admission(db, spec, audio_admission)
             if selected_context_admission is not None:
                 # The capture identity is independent from mutable Goal/Root/
                 # Task fields. Its exact primary lookup must precede ordinary
@@ -3143,6 +3174,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             db.add(run)
             try:
                 await db.flush()
+                if audio_admission is not None:
+                    from src.workflows.audio_native import bind_capture
+                    await bind_capture(db, audio_capture, audio_admission)
             except IntegrityError as exc:
                 # The unique binding is the authoritative concurrent-admission
                 # fence.  Re-read after rollback so the losing invocation is
@@ -3205,6 +3239,261 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     async def create_job(self, spec: DurableJobSpec) -> dict[str, Any]:
         """Compatibility alias emphasizing that ScheduledJob is only a trigger."""
         return await self.admit_job(spec)
+
+    async def load_audio_native_binding(self, job_id):
+        from src.workflows.audio_native import guard_audio_pair
+        async with self._session() as db:
+            run = await self._fetch(db, job_id)
+            binding, _ = await guard_audio_pair(db, run)
+            if binding is None:
+                raise DurableJobLeaseError("audio_native_binding_required")
+            return binding
+
+    async def validate_audio_inference_binding(self, request, binding):
+        from src.workflows.audio_native import guard_audio_pair
+        if binding.repository is not self or binding.job_id != request.job_id:
+            raise DurableJobLeaseError("audio_native_receipt_binding_mismatch")
+        async with self._session() as db:
+            run = await self._fetch(db, binding.job_id)
+            self._assert_lease(run, owner=binding.owner, fencing_token=binding.fencing_token)
+            native, _ = await guard_audio_pair(db, run, physical=True)
+            if (native is None or request.session_id != native.conversation_session_id
+                or request.owner_id != native.owner_principal_id or request.operation_id != native.operation_id
+                or request.runtime_path != "audio_transcription"
+                or request.deadline_at != _as_utc(native.original_deadline_at).timestamp()):
+                raise DurableJobLeaseError("audio_native_request_mismatch")
+            return native
+
+    async def audio_transition(self, job_id, *, expected_revision, expected_audio_revision,
+                               status, audio_changes, owner=None, fencing_token=None,
+                               require_current=True, audio_result=None):
+        """One writer for audio claim, cancellation, publication and cleanup."""
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id)
+            native, audio = await guard_audio_pair(db, run, require_current=require_current)
+            if native is None or _revision(run) != expected_revision or audio.revision != expected_audio_revision:
+                raise DurableJobLeaseError("audio_pair_revision_stale")
+            values = {"status": status, "revision": WorkflowRunState.revision + 1,
+                      "updated_at": _utc_now()}
+            cleanup_only = (status == run.status and run.lease_owner is None
+                and set(audio_changes) <= {"cleanup_status", "raw_path", "normalized_path", "error_code"})
+            if cleanup_only:
+                pass
+            elif status == "running":
+                if run.status not in {"accepted", "queued"} or run.attempt_count not in {0, 1} or audio.admission_operation_id:
+                    raise DurableJobLeaseError("audio_original_attempt_exhausted")
+                if not owner or fencing_token != run.fencing_token:
+                    raise DurableJobLeaseError("audio_claim_fence_invalid")
+                values.update(lease_owner=owner, lease_expires_at=_as_utc(native.original_deadline_at),
+                              fencing_token=WorkflowRunState.fencing_token + 1, attempt_count=1,
+                              started_at=_utc_now())
+            elif status == "cancelled":
+                values.update(lease_owner=None, lease_expires_at=None, finished_at=_utc_now())
+            elif status in {"succeeded", "degraded", "failed"}:
+                if status == "failed" and not require_current:
+                    # An expired original cutoff may close its own execution;
+                    # it cannot publish a result or replace a newer owner.
+                    if (run.status != "running" or not owner or run.lease_owner != owner
+                        or fencing_token is None or run.fencing_token != fencing_token):
+                        raise DurableJobLeaseError("audio_original_owner_required")
+                else:
+                    self._assert_lease(run, owner=owner, fencing_token=fencing_token)
+                if status == "succeeded":
+                    from src.workflows.audio_native import AudioTranscriptionResultV1
+                    from src.db.models import InferenceCostReservation
+                    from src.llm_runtime import _provider_profile
+                    from src.model_fabric.audio_contracts import audio_route_witness
+                    reservation = await db.get(InferenceCostReservation, native.operation_id)
+                    profile = _provider_profile("openrouter.audio")
+                    evidence, _ = await audio_route_witness(profile, proof_ref=native.endpoint_witness_ref)
+                    if (type(audio_result) is not AudioTranscriptionResultV1 or reservation is None
+                        or reservation.job_id != job_id or reservation.state != "settled"
+                        or reservation.contact_started_at is None or reservation.actual_cost_microusd != audio_result.actual_cost_microusd
+                        or reservation.provider_operation_id != audio_result.provider_generation_id
+                        or audio.admission_operation_id != native.operation_id
+                        or audio_result.audio_job_id != audio.id or audio_result.operation_id != native.operation_id
+                        or audio_result.effective_model_id != evidence.endpoint.model_id
+                        or audio_result.effective_upstream_endpoint_tag != evidence.endpoint.upstream_endpoint_tag):
+                        raise DurableJobLeaseError("audio_settled_original_result_required")
+                    audio_changes = {**audio_changes, "transcript": audio_result.transcript,
+                        "transcript_digest": audio_result.transcript_digest,
+                        "result_digest": _digest({key: value for key, value in __import__("dataclasses").asdict(audio_result).items() if key != "transcript"})}
+                values.update(lease_owner=None, lease_expires_at=None, finished_at=_utc_now())
+            elif status != run.status or run.status not in DURABLE_JOB_TERMINAL_STATUSES:
+                raise DurableJobTransitionError("audio_transition_invalid")
+            await advance_audio_pair(db, run, audio, changes=audio_changes)
+            changed = await db.execute(update(WorkflowRunState).where(
+                WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == expected_revision,
+                WorkflowRunState.fencing_token == run.fencing_token).values(**values).execution_options(synchronize_session=False))
+            if not _rowcount_is_one(changed):
+                raise DurableJobLeaseError("audio_workflow_revision_stale")
+            result = await self._fetch(db, job_id)
+            db.expunge(result)
+            return _serialize(result)
+
+    async def recover_audio_owner(self):
+        """Startup releases dead Python leases, never replays contact."""
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        from src.db.models import InferenceCostReservation
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            runs = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.job_kind == "audio_transcription_v1", WorkflowRunState.status == "running"))).scalars().all()
+            for run in runs:
+                _binding, audio = await guard_audio_pair(db, run, require_current=False)
+                reservations = (await db.execute(select(InferenceCostReservation).where(
+                    InferenceCostReservation.job_id == run.run_identity))).scalars().all()
+                await advance_audio_pair(db, run, audio)
+                run.revision += 1
+                run.lease_expires_at = _utc_now() - timedelta(seconds=1)
+                if not reservations:
+                    run.status = "queued"
+                    run.lease_owner = None
+                    run.lease_expires_at = None
+                    run.fencing_token += 1
+                db.add(run)
+        await self.recover_inference_accounting()
+
+    async def confirm_audio_transcript(self, job_id, *, transcript, expected_digest,
+                                       owner_principal_id, operator_session_id):
+        from src.workflows.audio_native import guard_audio_pair, accounting_pair
+        from src.agent.session import session_manager
+        from src.db.models import Message
+        if not isinstance(transcript, str) or not transcript.strip() or len(transcript) > 20_000 or len(transcript.encode()) > 80_000 or "\x00" in transcript:
+            raise DurableJobTransitionError("transcript_invalid")
+        transcript = transcript.strip()
+        confirmed = hashlib.sha256(transcript.encode()).hexdigest()
+        async with self._session() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                await db.execute(text("BEGIN IMMEDIATE"))
+            run = await self._fetch(db, job_id)
+            native, audio = await guard_audio_pair(db, run)
+            if (native.owner_principal_id != owner_principal_id or native.original_root_id != operator_session_id
+                or run.status != "succeeded" or audio.status not in {"transcript_ready", "confirmed"}
+                or expected_digest != audio.transcript_digest):
+                raise DurableJobTransitionError("transcript_confirmation_stale")
+            existing = await db.get(Message, audio.message_id)
+            if audio.status == "confirmed":
+                if audio.confirmed_transcript_digest != confirmed or existing is None or existing.content != transcript:
+                    raise DurableJobTransitionError("transcript_confirmation_stale")
+                return audio.request_id
+            if existing is not None:
+                raise DurableJobTransitionError("canonical_message_identity_conflict")
+            ref = _json_load(audio.attachment_ref_json, {})
+            metadata = {"audio": {"request_id": audio.request_id, "workflow_job_id": job_id,
+                "transcript_digest": confirmed, "confirmed": True, "canonical_memory": "no_learning"},
+                "lineage": {"owner_principal_id": owner_principal_id, "operator_session_id": operator_session_id,
+                    "conversation_id": audio.session_id, "thread_id": audio.session_id, "attachment_refs": [ref]}}
+            await session_manager._add_message_in_db(db, audio.session_id, "user", transcript,
+                message_id=audio.message_id, metadata_json=_canonical(metadata), attachment_refs=[ref])
+            await accounting_pair(db, run, changes={"status": "confirmed", "confirmed_transcript_digest": confirmed,
+                "transcript": None})
+            return audio.request_id
+
+    async def cancel_audio_in_session(self, db, job_id, *, reason):
+        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+        run = await self._fetch(db, job_id)
+        _native, audio = await guard_audio_pair(db, run, require_current=False)
+        await advance_audio_pair(db, run, audio, changes={"status": "cancelled", "transcript": None,
+            "error_code": reason, "transport_status": "unknown" if audio.admission_operation_id else "cancelled"})
+        changed = await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == job_id,
+            WorkflowRunState.revision == run.revision, WorkflowRunState.fencing_token == run.fencing_token).values(
+            status="cancelled", revision=WorkflowRunState.revision + 1, lease_owner=None,
+            lease_expires_at=None, finished_at=_utc_now(), updated_at=_utc_now()).execution_options(synchronize_session=False))
+        if not _rowcount_is_one(changed):
+            raise DurableJobLeaseError("audio_cancel_pair_stale")
+
+    @staticmethod
+    def audio_task_capture_scope():
+        # Reuse the current audio effect owner; no parallel source lane.
+        from src.guardian.audio_worker import _AUDIO_EFFECT_LOCK
+        return _AUDIO_EFFECT_LOCK
+
+    def confirmed_audio_task_source_scope(self, *, owner, request_id, message_id, confirmed_digest):
+        # Exact source binding is checked with populate_existing in the
+        # caller's final SQLite writer; this scope owns local audio effects.
+        return self.audio_task_capture_scope()
+
+    async def check_confirmed_audio_task_source(self, db, *, owner, request_id,
+                                               message_id, confirmed_digest):
+        from src.workflows.audio_native import guard_audio_pair, utc
+        from src.db.models import AudioIngressJob, AudioConsentGrant, Message, OperatorSession
+        audio = (await db.execute(select(AudioIngressJob).where(
+            AudioIngressJob.request_id == request_id).execution_options(populate_existing=True))).scalars().one_or_none()
+        if audio is None or not audio.workflow_job_id:
+            raise DurableJobLeaseError("audio_confirmed_native_source_required")
+        run = await self._fetch(db, audio.workflow_job_id)
+        native, audio = await guard_audio_pair(db, run, require_current=False)
+        root = await db.get(OperatorSession, native.original_root_id, populate_existing=True)
+        now = _utc_now()
+        if (owner.principal_id != native.owner_principal_id or owner.session_id != native.original_root_id
+            or root is None or root.principal_id != owner.principal_id or root.revoked_at is not None
+            or root.is_bearer_tombstone or root.replaced_by_id
+            or utc(root.idle_expires_at) <= now or utc(root.absolute_expires_at) <= now
+            or run.status != "succeeded" or audio.status != "confirmed"
+            or audio.message_id != message_id or audio.confirmed_transcript_digest != confirmed_digest):
+            raise DurableJobLeaseError("audio_confirmed_source_changed")
+        for reference, boundary in ((native.capture_grant_ref, "capture"), (native.model_grant_ref, "cloud_upload")):
+            grant = (await db.execute(select(AudioConsentGrant).where(AudioConsentGrant.reference == reference))).scalars().one_or_none()
+            if (grant is None or grant.owner_principal_id != owner.principal_id or grant.operator_session_id != owner.session_id
+                or grant.state != "active" or grant.revoked_at is not None or grant.boundary != boundary or utc(grant.expires_at) <= now):
+                raise DurableJobLeaseError("audio_confirmed_source_grant_revoked")
+        message = await db.get(Message, message_id, populate_existing=True)
+        if (message is None or message.session_id != native.conversation_session_id or message.role != "user"
+            or hashlib.sha256(message.content.encode()).hexdigest() != confirmed_digest):
+            raise DurableJobLeaseError("audio_confirmed_source_changed")
+        return audio, message
+
+    async def reserve_audio_task_capture_metadata(self, db, *, owner, request_id,
+                                                 message_id, confirmed_digest, reservation):
+        from src.work_board.channel_capture import ChannelCaptureReservationV1
+        from src.workflows.audio_native import advance_audio_pair
+        if type(reservation) is not ChannelCaptureReservationV1:
+            raise DurableJobLeaseError("audio_task_capture_reservation_required")
+        # Call only before private artifact staging. Source reads are repeated
+        # after acquiring the same canonical SQLite writer.
+        await db.rollback()
+        if db.get_bind().dialect.name == "sqlite":
+            await db.execute(text("BEGIN IMMEDIATE"))
+        audio, message = await self.check_confirmed_audio_task_source(db, owner=owner,
+            request_id=request_id, message_id=message_id, confirmed_digest=confirmed_digest)
+        payload = reservation.model_dump(mode="json")
+        if (reservation.source_kind != "audio" or reservation.source_id != request_id
+            or reservation.owner_principal_id != owner.principal_id or reservation.original_root_id != owner.session_id
+            or reservation.canonical_message_id != message_id or reservation.source_digest != confirmed_digest
+            or reservation.conversation_session_id != message.session_id
+            or reservation.task_input.intent != message.content):
+            raise DurableJobLeaseError("audio_task_capture_source_mismatch")
+        metadata = _json_load(audio.metadata_json, {})
+        previous = metadata.get("channel_task_capture.v1")
+        from src.workflows.general_task_accounting import validate_group_owner
+        await validate_group_owner(db, reservation.proposal_group)
+        if previous is not None:
+            stored = ChannelCaptureReservationV1.model_validate(previous)
+            await validate_group_owner(db, stored.proposal_group)
+            # Compare request/source, retaining the original issued group and
+            # deadline instead of minting a new financial allowance on replay.
+            if any(getattr(stored, name) != getattr(reservation, name) for name in (
+                "source_kind", "source_id", "owner_principal_id", "original_root_id", "canonical_message_id",
+                "source_digest", "conversation_session_id", "request_digest", "goal_revision", "idempotency_key", "task_input")):
+                raise DurableJobIdempotencyConflict("audio_task_capture_changed")
+            await db.commit()
+            return stored
+        run = await self._fetch(db, audio.workflow_job_id)
+        await advance_audio_pair(db, run, audio,
+            changes={"metadata_json": _canonical({**metadata, "channel_task_capture.v1": payload})},
+            task_capture_reservation=reservation)
+        changed = await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == run.run_identity,
+            WorkflowRunState.revision == run.revision, WorkflowRunState.fencing_token == run.fencing_token).values(
+            revision=WorkflowRunState.revision + 1, updated_at=_utc_now()).execution_options(synchronize_session=False))
+        if not _rowcount_is_one(changed):
+            raise DurableJobLeaseError("audio_task_capture_pair_changed")
+        await db.commit()
+        return reservation
 
     async def replace_general_task_manifest(self, job_id, **bindings):
         from src.workflows.general_task_guard import replace_manifest
@@ -3593,6 +3882,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             staged_dependencies = None
             preflight_run = await self._fetch(db, job_id)
+            if preflight_run.job_kind == "audio_transcription_v1":
+                raise DurableJobTransitionError("audio_paired_writer_required")
             if to_status == "queued" and preflight_run.job_kind == "agent.task.v1":
                 from src.workflows.general_task_guard import read_manifest
                 native_manifest = read_manifest(preflight_run)
@@ -3636,6 +3927,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             native_writer = requires_native_writer(preflight_run)
             if dependency_guard:
                 staged_dependencies = await stage_run_dependencies(db, preflight_run)
+            from src.workflows.general_task_guard import stage_native_journal
+            await stage_native_journal(db, preflight_run)
+            if native_writer and preflight_run.job_kind == 'general_task_native_tool_v1' and to_status in {'succeeded', 'degraded'}:
+                from src.workflows.general_task_guard import stage_positive_parent, child_binding
+                await stage_positive_parent(self, db, child_binding(preflight_run).parent_job_id)
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
@@ -3649,6 +3945,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             run = await self._fetch(db, job_id)
             if native_writer and run.job_kind == "agent.task.v1":
                 await verify_native_writer(self, db, run)
+                if to_status in {'queued', 'running', 'succeeded', 'degraded'}:
+                    from src.workflows.general_task_guard import check_native_writer_source
+                    await check_native_writer_source(db, run)
             elif native_writer and to_status in {"succeeded", "degraded"}:
                 from src.workflows.general_task_guard import assert_general_task_child_terminal_current
                 await assert_general_task_child_terminal_current(self, db, run)
@@ -4461,6 +4760,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         async with self._session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
+            if preflight_run.job_kind == "audio_transcription_v1":
+                raise DurableJobLeaseError("audio_paired_writer_required")
             if preflight_run.job_kind in {"forgejo_issue_title_v1", "forgejo_form_transaction_v1", "inference.near-text.v1", "browser_interact_v2", "goal_public_discovery_v1"} and claim_authority_check is None:
                 raise DurableJobLeaseError("Forgejo claims require the fixed native authority callback")
             if preflight_run.job_kind == "guardian_opportunity_assess" and claim_authority_check is None:
@@ -4476,8 +4777,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 'work.evidence-dossier.v1', 'work.local-evidence-report.v1'}
             preference_guard = preflight_run.job_kind == "memory.opportunity-preference.v1"
             staged_dependencies = await stage_run_dependencies(db, preflight_run) if dependency_guard else None
+            native_claim = preflight_run.job_kind == "general_task_native_tool_v1"
+            from src.workflows.general_task_guard import stage_native_journal
+            if not native_claim or (not continue_existing_attempt
+                and preflight_run.attempt_count == 0 and preflight_run.fencing_token == 0):
+                await stage_native_journal(db, preflight_run)
             await db.rollback()
-            if claim_authority_check is not None or dependency_guard or preference_guard:
+            if (claim_authority_check is not None or dependency_guard or preference_guard
+                or native_claim):
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
             if preference_guard:
@@ -4490,6 +4797,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 if continue_existing_attempt or run.attempt_count != 0 or run.fencing_token != 0:
                     raise DurableJobLeaseError("the original general task native claim is exhausted")
                 await assert_general_task_child_phase_current(db, run)
+                from src.workflows.general_task_guard import child_binding, _current_original_sql
+                from src.work_board.channel_capture import check_current_captured_task_source
+                from src.work_board.contracts import WorkBoardOwner
+                _parent, task, _attempt, _manifest = await _current_original_sql(self, db, child_binding(run).parent_job_id)
+                await check_current_captured_task_source(db,
+                    WorkBoardOwner(principal_id=task.owner_principal_id, session_id=task.owner_session_id), task)
                 if json.loads(run.arguments_json).get("tool_id") == "document_build":
                     from src.work_board.document_build_native import validate_claim
                     validate_claim(self, run, claim_authority_check)
@@ -5105,6 +5418,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
             staged_dependencies = await stage_run_dependencies(db, preflight_run)
+            from src.workflows.general_task_guard import stage_native_journal
+            await stage_native_journal(db, preflight_run)
             await db.rollback()
             # SQLite WAL readers cannot reliably upgrade a snapshot to a
             # writer while another dispatcher is committing.  Acquire the
@@ -5127,6 +5442,14 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if requires_native_writer(run):
                 await verify_native_writer(self, db, run,
                     _repository_completion_witness=_repository_completion_witness)
+                from src.work_board.contracts import GENERAL_TASK_NATIVE_CHILD_KIND
+                if run.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND:
+                    from src.workflows.general_task_guard import assert_general_task_child_current
+                    await assert_general_task_child_current(db, run,
+                        _repository_completion_witness=_repository_completion_witness)
+                if checkpoint_id.startswith(('general:artifact:', 'general:verified:')):
+                    from src.workflows.general_task_guard import check_native_writer_source
+                    await check_native_writer_source(db, run)
             await recheck_run_dependencies(db, run, staged_dependencies)
             await _assert_canonical_goal_fence(
                 db,
@@ -6365,6 +6688,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     session_id=run.session_id, content=content,
                 )
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            if requires_native_writer(run):
+                from src.workflows.general_task_guard import stage_native_journal
+                await stage_native_journal(db, run)
             if requires_native_writer(run) or _repository_completion_witness is not None:
                 await db.rollback()
                 from src.work_board.repository import _begin_sqlite_immediate
@@ -6377,6 +6703,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if requires_native_writer(run):
                 await verify_native_writer(self, db, run,
                     _repository_completion_witness=_repository_completion_witness)
+                from src.workflows.general_task_guard import check_native_writer_source
+                await check_native_writer_source(db, run)
             if _deadline_expired(run):
                 raise DurableJobTransitionError("job deadline has expired")
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
@@ -6983,35 +7311,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if readback_authority_check is not None or _repository_completion_witness is not None:
                 if receipt_kind != "readback":
                     raise ValueError("authority callback requires a readback receipt")
-                from src.work_board.repository import _begin_sqlite_immediate
-                await _begin_sqlite_immediate(db)
             run = await self._fetch(db, job_id)
-            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
-            if requires_native_writer(run):
-                if readback_authority_check is None and _repository_completion_witness is None:
-                    await db.rollback()
-                    from src.work_board.repository import _begin_sqlite_immediate
-                    await _begin_sqlite_immediate(db)
-                    run = await self._fetch(db, job_id)
-            if _repository_completion_witness is not None:
-                await verify_recovered_repository_final_writer(self, db, run,
-                    completion_witness=_repository_completion_witness, kind="readback",
-                    descriptor={"effect_type": effect_type, "status": status,
-                        "target_path": target_path, "target_digest": target_digest,
-                        "content_sha256": content_sha256, "readback_id": readback_id,
-                        "verified_at": verified_at, "details": details})
-            if requires_native_writer(run):
-                await verify_native_writer(self, db, run,
-                    _repository_completion_witness=_repository_completion_witness)
-            await _assert_canonical_goal_fence(
-                db,
-                goal_id=getattr(run, "goal_id", None),
-                goal_revision=getattr(run, "goal_revision", None),
-                owner_kind=_text(getattr(run, "owner_kind", None)),
-                owner_principal_id=getattr(run, "owner_principal_id", None),
-                session_id=getattr(run, "session_id", None),
-                authority=getattr(run, "declared_authority_json", None),
-            )
             recovery_readback = (
                 receipt_kind == "readback"
                 and owner is None
@@ -7022,6 +7322,85 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 and run.status in {"unknown_external_effect", "cost_liability", "blocked", "failed"}
                 and not run.lease_owner
                 and not run.lease_expires_at
+            )
+            remote_terminal_settlement = (
+                effect_type == "remote_inference_admission"
+                and status in {"succeeded", "failed"}
+                and isinstance(safe_details, dict)
+                and isinstance(safe_details.get("receipt"), dict)
+                and _text(safe_details["receipt"].get("status"))
+                in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
+            )
+            from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
+            if requires_native_writer(run):
+                from src.workflows.general_task_guard import stage_native_journal
+                await stage_native_journal(db, run)
+                await db.rollback()
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                run = await self._fetch(db, job_id)
+                recovery_readback = (
+                    receipt_kind == "readback"
+                    and owner is None
+                    and fencing_token is None
+                    and isinstance(safe_details, Mapping)
+                    and _text(safe_details.get("reconciliation_owner_id"))
+                    == _text(getattr(run, "owner_principal_id", None))
+                    and run.status in {"unknown_external_effect", "cost_liability", "blocked", "failed"}
+                    and not run.lease_owner
+                    and not run.lease_expires_at
+                )
+                remote_terminal_settlement = (
+                    effect_type == "remote_inference_admission"
+                    and status in {"succeeded", "failed"}
+                    and isinstance(safe_details, dict)
+                    and isinstance(safe_details.get("receipt"), dict)
+                    and _text(safe_details["receipt"].get("status"))
+                    in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
+                )
+                if _repository_completion_witness is not None:
+                    await verify_recovered_repository_final_writer(self, db, run,
+                        completion_witness=_repository_completion_witness, kind="readback",
+                        descriptor={"effect_type": effect_type, "status": status,
+                            "target_path": target_path, "target_digest": target_digest,
+                            "content_sha256": content_sha256, "readback_id": readback_id,
+                            "verified_at": verified_at, "details": details})
+                await verify_native_writer(self, db, run,
+                    _repository_completion_witness=_repository_completion_witness)
+                if (not recovery_readback and not remote_terminal_settlement
+                    and status not in {'unknown', 'failed', 'blocked', 'cancelled'}
+                    and not (receipt_kind == 'readback' and status == 'succeeded'
+                        and run.job_kind == 'agent.task.v1' and effect_type == 'general_tool_call'
+                        and isinstance(safe_details, dict) and safe_details.get('verified') is True
+                        and safe_details.get('never_contacted') is True and safe_details.get('approval_precontact') is True
+                        and any(isinstance(item.get('payload'), dict)
+                            and item['payload'].get('phase') == 'approval_precontact'
+                            and item['payload'].get('effect_id') == effect_id
+                            and item['payload'].get('fence') == fencing_token
+                            and _digest(item['payload']) == content_sha256
+                            for item in _json_load(run.checkpoint_receipts_json, [])))):
+                    from src.workflows.general_task_guard import check_native_writer_source
+                    await check_native_writer_source(db, run)
+            elif readback_authority_check is not None or _repository_completion_witness is not None:
+                await db.rollback()
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                run = await self._fetch(db, job_id)
+                if _repository_completion_witness is not None:
+                    await verify_recovered_repository_final_writer(self, db, run,
+                        completion_witness=_repository_completion_witness, kind="readback",
+                        descriptor={"effect_type": effect_type, "status": status,
+                            "target_path": target_path, "target_digest": target_digest,
+                            "content_sha256": content_sha256, "readback_id": readback_id,
+                            "verified_at": verified_at, "details": details})
+            await _assert_canonical_goal_fence(
+                db,
+                goal_id=getattr(run, "goal_id", None),
+                goal_revision=getattr(run, "goal_revision", None),
+                owner_kind=_text(getattr(run, "owner_kind", None)),
+                owner_principal_id=getattr(run, "owner_principal_id", None),
+                session_id=getattr(run, "session_id", None),
+                authority=getattr(run, "declared_authority_json", None),
             )
             if run.job_kind in {"forgejo_issue_title_v1", "forgejo_form_transaction_v1"} and readback_authority_check is None:
                 raise DurableJobTransitionError("Forgejo effects require its fixed native authority callback")
@@ -7119,14 +7498,6 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                         if not receipt.get(field_name):
                             receipt[field_name] = previous.get(field_name)
             previous_status = _text(previous.get("status")) if previous is not None else ""
-            remote_terminal_settlement = (
-                effect_type == "remote_inference_admission"
-                and status in {"succeeded", "failed"}
-                and isinstance(safe_details, dict)
-                and isinstance(safe_details.get("receipt"), dict)
-                and _text(safe_details["receipt"].get("status"))
-                in {"succeeded", "settled", "failed", "cancelled", "expired", "rejected"}
-            )
             remote_uncertain_projection = (
                 effect_type == "remote_inference_admission"
                 and status == "blocked"
@@ -8301,11 +8672,19 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         return run
 
     @staticmethod
-    def _session():
+    @asynccontextmanager
+    async def _session():
         # Resolve dynamically so DB fixtures and migration shims can patch the
         # canonical job runtime session factory without changing production
         # persistence behavior.
-        return get_session()
+        from src.work_board.channel_capture import staged_captured_source_identity
+        with staged_captured_source_identity():
+            async with get_session() as db:
+                try:
+                    yield db
+                finally:
+                    from src.workflows.general_task_guard import close_native_journals
+                    close_native_journals(db)
 
 
 durable_job_repository = DurableJobRepository()

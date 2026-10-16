@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from src.extensions.telegram_transport import TelegramTransportError, default_telegram_transport
 from src.security.trust_contract import AuthorityGrant
+from src.work_board.channel_capture import TelegramCaptureSelection, ChannelTaskIngress, ChannelAction
 
 
 router = APIRouter()
@@ -80,6 +81,70 @@ async def telegram_status(request: Request) -> dict[str, Any]:
         raise _error(exc) from exc
 
 
+@router.put("/telegram/capture-selection")
+async def select_channel_capture(body: TelegramCaptureSelection, request: Request) -> dict:
+    from src.work_board.channel_capture import select_telegram_capture
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
+    owner, session, _ = _operator(request)
+    try:
+        return await select_telegram_capture(default_telegram_transport,
+            WorkBoardOwner(principal_id=owner, session_id=session), body)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/telegram/task-ingress")
+async def capture_channel_task(body: ChannelTaskIngress, request: Request) -> dict:
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
+    owner, session, _ = _operator(request)
+    try:
+        return await default_telegram_transport.capture_task(body,
+            owner_principal_id=owner, operator_session_id=session)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/telegram/task-actions")
+async def control_channel_task(body: ChannelAction, request: Request) -> dict:
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
+    from src.extensions.telegram_task_controls import TelegramTaskControls
+    owner, session, _ = _operator(request)
+    try:
+        return await TelegramTaskControls(default_telegram_transport).action(body,
+            owner_principal_id=owner, operator_session_id=session)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/telegram/output-review")
+async def inspect_channel_output(handle: str, request: Request) -> dict:
+    from src.work_board.repository import BoardError
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.channel_capture import resolve_output_handle
+    from src.api.work_board import _raise_board_error
+    from src.db.engine import get_session
+    owner, session, _ = _operator(request)
+    try:
+        async with default_telegram_transport._lock:
+            async with get_session() as db:
+                return await resolve_output_handle(db, WorkBoardOwner(principal_id=owner, session_id=session),
+                    handle, adapter=default_telegram_transport)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
 @router.post("/telegram/pair")
 async def pair_telegram(body: TelegramPairBody, request: Request) -> dict[str, Any]:
     owner, session, _ = _operator(request)
@@ -140,6 +205,8 @@ async def receive_telegram_update(payload: dict[str, Any], request: Request) -> 
     method; this branch's default transport remains recording-only.
     """
 
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
     owner, session, _ = _operator(request)
     try:
         return await default_telegram_transport.ingest_update(
@@ -147,6 +214,8 @@ async def receive_telegram_update(payload: dict[str, Any], request: Request) -> 
             owner_principal_id=owner,
             operator_session_id=session,
         )
+    except BoardError as exc:
+        _raise_board_error(exc)
     except TelegramTransportError as exc:
         raise _error(exc) from exc
 
@@ -155,11 +224,30 @@ async def receive_telegram_update(payload: dict[str, Any], request: Request) -> 
 async def telegram_task_notice(task_id: str, body: TelegramTaskNoticeBody, request: Request):
     """Explicit neutral notice; an ID or chat message never grants task authority."""
     from src.extensions.telegram_task_controls import TelegramTaskControls
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
     owner, session, _ = _operator(request)
     try:
         return await TelegramTaskControls(default_telegram_transport).notice(task_id,
             owner_principal_id=owner, operator_session_id=session,
             expected_revision=body.expected_revision, idempotency_key=body.idempotency_key)
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except TelegramTransportError as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/telegram/task-review")
+async def telegram_task_review(request: Request, handle: str) -> dict:
+    from src.extensions.telegram_task_controls import TelegramTaskControls
+    from src.work_board.repository import BoardError
+    from src.api.work_board import _raise_board_error
+    owner, session, _ = _operator(request)
+    try:
+        return await TelegramTaskControls(default_telegram_transport).read_exact_review(handle,
+            owner_principal_id=owner, operator_session_id=session)
+    except BoardError as exc:
+        _raise_board_error(exc)
     except TelegramTransportError as exc:
         raise _error(exc) from exc
 

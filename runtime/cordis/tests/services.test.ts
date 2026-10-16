@@ -203,3 +203,22 @@ test('closed per-plugin config, optional providers and per-plugin digests fail c
     assert.deepEqual(await composition.dispose(), {resources_remaining: 0, cordis_disposal: 'confirmed'});
   }
 });
+
+test('governed services are composed only with their authority, task, artifact and audit owners', async () => {
+  const base = profile() as unknown as {plugins: Record<string, unknown>[]} & Record<string, unknown>;
+  // Optional governed providers whose audit owner is absent stay unregistered (a required one fences readiness).
+  const governed = new Set(['seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.connections.v1']);
+  const withoutAudit = validateProfile({...base, plugins: base.plugins.filter(p => p.id !== 'seraph.audit.v1')
+    .map(p => governed.has(String(p.id)) ? {...p, required: false} : p)} as never);
+  const composition = new Composition(withoutAudit); await composition.start();
+  let contacts = 0;
+  const client: ScopedRequestClient = {isActive: () => true, request: async () => { contacts++; return blocked; }};
+  try {
+    for (const [method, input] of [['capabilities.invoke', {request_ref: 'native-1'}], ['inference.request', {request_ref: 'native-1'}],
+      ['connections.invokeBoundAdapter', {operation_ref: 'native-1'}]] as const) {
+      assert.deepEqual(await composition.invoke(method, input as never, client),
+        {status: 'blocked', reason_code: 'service_provider_not_composed', memory_status: 'no_learning'});
+    }
+    assert.equal(contacts, 0, 'a withdrawn governed provider never contacts the native owner');
+  } finally { await composition.dispose(); }
+});

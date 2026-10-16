@@ -17,7 +17,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, Query
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 from sqlalchemy import select, case
 
 from config.settings import settings
@@ -56,6 +56,16 @@ class PrepareRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=18000)
     idempotency_key: str = Field(min_length=36, max_length=36)
+    # The operator's explicit acceptance of a changed linked project source
+    # revision (C4.3). Absent for unlinked repairs and older requests.
+    acknowledged_project_source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_request(self, handler):
+        result = handler(self)
+        if self.acknowledged_project_source_digest is None:
+            result.pop("acknowledged_project_source_digest", None)
+        return result
 
     @field_validator("title", "commit_message", "body")
     @classmethod
@@ -188,7 +198,7 @@ class RepoPublicationService:
             "scan_limit_reached": len(identities) > 20 and offset >= 2000,
             "rejected_count": rejected}
 
-    async def repair(self, request, principal, session, *, _with_source_witness=False):
+    async def repair(self, request, principal, session, *, _with_source_witness=False, _refresh_project_source=None):
         await self.live(principal, session)
         root = await jobs.get_job(request.repair_job_id)
         if not root or root.get("job_kind") != "engineering.repo-repair.v1" or root.get("owner", {}).get("principal_id") != principal or root.get("operator_session_id") != session:
@@ -266,7 +276,48 @@ class RepoPublicationService:
             raise PublicationError("patch_digest_changed")
         binding["test_artifacts"] = {name: {"file_path": artifacts[name]["file_path"], "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in contents.items()}
         binding["tested_input_digest"] = digest(tested)
+        # A repair whose C1 task came from a project finding binds the exact
+        # accepted source revision; the item is re-read before external action.
+        from src.extensions.github_followthrough import GitHubFollowthroughError
+        from src.integrations.project_source import project_link_for_repair, project_source_publication_binding
+        link = await project_link_for_repair(root["job_id"], principal)
+        acknowledged = getattr(request, "acknowledged_project_source_digest", None)
+        if link is not None:
+            try:
+                binding["project_source"] = await project_source_publication_binding(self.adapter, link=link,
+                    principal=principal, session=session, connection=await self.adapter._get_connection_row(principal),
+                    acknowledged_digest=acknowledged,
+                    refresh=_with_source_witness if _refresh_project_source is None else _refresh_project_source)
+            except GitHubFollowthroughError as exc:
+                raise PublicationError(exc.code, status_code=exc.status_code) from exc
+        elif acknowledged is not None:
+            raise PublicationError("project_source_not_linked", status_code=422)
         return (binding, tested, patch, source_witness) if _with_source_witness else (binding, tested, patch)
+
+    async def refresh_project_source(self, preview, principal, session):
+        """Re-read the linked project item before an external action.
+
+        A no-op for an unlinked repair. Otherwise the current item must still
+        equal the exact revision bound into this approval (the task's, or the
+        one the operator explicitly accepted), or nothing is written.
+        """
+        expected = preview["repair_binding"].get("project_source")
+        if expected is None:
+            return
+        from src.extensions.github_followthrough import GitHubFollowthroughError
+        from src.integrations.project_source import project_link_for_repair, project_source_publication_binding
+        link = await project_link_for_repair(preview["repair_binding"]["repair_job_id"], principal)
+        if link is None:
+            raise PublicationError("project_source_link_missing")
+        try:
+            current = await project_source_publication_binding(self.adapter, link=link, principal=principal,
+                session=session, connection=await self.adapter._get_connection_row(principal),
+                acknowledged_digest=expected["accepted_digest"] if expected["operator_accepted_new_revision"] else None,
+                refresh=True)
+        except GitHubFollowthroughError as exc:
+            raise PublicationError(exc.code, status_code=exc.status_code) from exc
+        if current != expected:
+            raise PublicationError("project_source_changed_decision_required")
 
     async def tested_runtime_current(self, binding, tested):
         from src.execution.repo_sandbox import build_repo_repair_executor
@@ -374,6 +425,10 @@ class RepoPublicationService:
         current = await jobs.bind_approval_id(job_id, approval.id, **self.fence(current))
         await approval_repository.update_pending_details(approval.id, owner_principal_id=principal, operator_session_id=session, updates={"durable_authority_digest": current["authority_digest"], "durable_approval_id": approval.id, "approval_operator_principal_id": principal, "approval_expires_at": _approval_expiry(approval.expires_at).timestamp()})
         current = await jobs.transition_job(job_id, "awaiting_approval", reason="repo_publication_fresh_approval_required", **self.fence(current))
+        if "project_source" in binding:
+            from src.integrations.project_source import project_link_for_repair, record_project_link
+            await record_project_link(source=await project_link_for_repair(request.repair_job_id, principal),
+                link_kind="publication", target_id=job_id, parent_target_id=request.repair_job_id)
         return await self.view(current)
 
     @staticmethod
@@ -507,8 +562,13 @@ class RepoPublicationService:
             source_bound = await repository_publication_source_present(jobs, preview["request"]["repair_job_id"])
             if source_bound:
                 from src.model_fabric.effective_policy import configuration_mutation_lock
+                # The linked project item's network read stays outside the
+                # configuration lock; the binding inside it is compared without
+                # another read, and the item is read again before the first write.
+                await self.refresh_project_source(preview, principal, session)
                 async with configuration_mutation_lock:
-                    binding, tested, _patch, witness = await self.repair(PrepareRequest(**preview["request"]), principal, session, _with_source_witness=True)
+                    binding, tested, _patch, witness = await self.repair(PrepareRequest(**preview["request"]), principal, session,
+                        _with_source_witness=True, _refresh_project_source=False)
                     if binding != preview["repair_binding"] or tested != preview["tested_input"]:
                         raise PublicationError("publication_source_or_posture_changed")
                     await self.tested_runtime_current(binding, tested)
@@ -595,6 +655,8 @@ class RepoPublicationService:
             remote_base = await self.request(current, preview, prefix + "/git/ref/heads/" + preview["base_branch"])
             self.require(remote_base.get("object", {}).get("sha") == preview["base_commit"], "remote_base_changed")
             await self.verify_tree(current, preview, preview["base_commit"], preview["base_tree"], preview["tested_input"]["base_files"])
+            # Last read of the linked project item before the first GitHub write.
+            await self.refresh_project_source(preview, principal, session)
             for item in produced["files"]:
                 if item["path"] not in produced["changed_paths"]:
                     continue

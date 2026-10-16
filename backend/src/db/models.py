@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
 from sqlmodel import Field, SQLModel, Relationship
+from src.browser.forgejo_forms import EMPTY_FORM_PROFILES as _FORGEJO_EMPTY_FORM_PROFILES
 
 
 # ─── Enums ────────────────────────────────────────────────
@@ -1000,6 +1001,56 @@ class GitHubFollowthroughConnection(SQLModel, table=True):
     consent_revoked_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=_now, index=True)
     updated_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ProjectSourceSnapshot(SQLModel, table=True):
+    """One bounded read-only issue/PR sync of the selected repository.
+
+    Items are stored as an immutable canonical projection with a digest per
+    item and for the whole snapshot. A snapshot grants no execution or
+    publication authority; it is evidence other owners must refresh.
+    """
+
+    __tablename__ = "project_source_snapshots"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int
+    repository: str = Field(index=True)
+    scope_json: str = Field(sa_column=Column(Text, nullable=False))
+    scope_digest: str
+    items_json: str = Field(sa_column=Column(Text, nullable=False))
+    snapshot_digest: str = Field(index=True)
+    page_count: int
+    truncated: bool = Field(default=False)
+    fetched_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ProjectSourceLink(SQLModel, table=True):
+    """Navigable lineage from one exact source item revision to local work."""
+
+    __tablename__ = "project_source_links"
+    __table_args__ = (
+        Index("ux_project_source_links_target", "owner_principal_id", "link_kind", "target_id", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    snapshot_id: str = Field(index=True)
+    repository: str = Field(index=True)
+    item_number: int = Field(index=True)
+    item_kind: str
+    item_updated_at: str
+    item_digest: str
+    goal_id: str = Field(index=True)
+    goal_revision: int
+    finding_kind: str
+    link_kind: str = Field(index=True)
+    target_id: str = Field(index=True)
+    # The local owner a link hangs from: a publication's repair root.
+    parent_target_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
 
 
 class GuardianInboxDisposition(SQLModel, table=True):
@@ -3277,5 +3328,9 @@ class ForgejoConnection(SQLModel, table=True):
     read_consent_revision: int = Field(default=0)
     read_consent_expires_at: Optional[datetime] = Field(default=None)
     provisioning_job_id: Optional[str] = Field(default=None)
+    # Derive at import, before writers, from the same owner as migration and
+    # activation. A copied literal digest goes stale on grammar review.
+    reviewed_form_profiles_json: str = Field(default=_FORGEJO_EMPTY_FORM_PROFILES, max_length=1024)
+    form_profiles_revision: int = Field(default=0)
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

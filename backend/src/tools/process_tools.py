@@ -24,6 +24,7 @@ from smolagents import Tool
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
 from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
+from src.workspace import AgentAccessIndex, AgentWorkspaceAccess
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,10 @@ _SECRET_FILE_NAMES = {
     ".netrc",
     ".npmrc",
     ".pypirc",
+    ".vault-key",
     "credentials",
     "credentials.json",
+    "google_calendar_token.json",
     "google_credentials.json",
     "id_dsa",
     "id_ecdsa",
@@ -384,7 +387,12 @@ def _ensure_workspace_scoped_path(raw_path: str, cwd: Path, *, label: str) -> No
         raise ValueError(f"{label} must stay within the workspace.") from exc
 
 
-def _is_secret_like_workspace_path(path: Path) -> bool:
+def _is_secret_like_workspace_path(
+    path: Path,
+    index: AgentAccessIndex | None = None,
+    *,
+    include_ancestors: bool = True,
+) -> bool:
     workspace_relative = path.relative_to(_workspace_root())
     normalized_parts = tuple(part.lower() for part in workspace_relative.parts)
     normalized_posix = "/".join(normalized_parts)
@@ -399,20 +407,54 @@ def _is_secret_like_workspace_path(path: Path) -> bool:
         return True
     if any(name.endswith(suffix) for suffix in _SECRET_FILE_SUFFIXES):
         return True
-    return any(token in name for token in ("credential", "secret", "token"))
+    if any(token in name for token in ("credential", "secret", "token")):
+        return True
+    # Process arguments are reads, so only registry state denied outright
+    # (secrets, the database and its sidecars, credential-bearing settings)
+    # is refused here; the name lists above stay as defence in depth.
+    index = index or AgentAccessIndex(_workspace_root())
+    return index.access(path, include_ancestors=include_ancestors) is AgentWorkspaceAccess.DENIED
 
 
 def _directory_contains_secret_like_workspace_path(path: Path) -> bool:
     if not path.exists() or not path.is_dir():
         return False
-    for candidate in path.rglob("*"):
+    workspace = _workspace_root()
+    # One registry index serves the whole scan.  The search root and its
+    # ancestors were already classified by the caller, and this top-down walk
+    # classifies every directory before entering it, so each entry needs only
+    # its own name and inode checked; the first refused entry ends the scan.
+    # Directory symlinks are followed to their resolved target, because
+    # ``grep -R``, ``rg -L`` and ``find -L`` follow them: the scan must see
+    # what the command will read.  Visited directory inodes bound cycles.
+    index = AgentAccessIndex(workspace)
+    pending = [path.resolve()]
+    visited: set[tuple[int, int]] = set()
+    while pending:
+        directory = pending.pop()
         try:
-            resolved = candidate.resolve()
-            resolved.relative_to(_workspace_root())
-        except (OSError, ValueError):
+            metadata = directory.stat()
+            entries = list(os.scandir(directory))
+        except OSError:
             return True
-        if _is_secret_like_workspace_path(resolved):
-            return True
+        if (metadata.st_dev, metadata.st_ino) in visited:
+            continue
+        visited.add((metadata.st_dev, metadata.st_ino))
+        for entry in entries:
+            candidate = Path(entry.path)
+            try:
+                is_symlink = entry.is_symlink()
+                resolved = candidate.resolve() if is_symlink else candidate
+                resolved.relative_to(workspace)
+            except (OSError, ValueError):
+                return True
+            if _is_secret_like_workspace_path(resolved, index, include_ancestors=is_symlink):
+                return True
+            try:
+                if entry.is_dir(follow_symlinks=True):
+                    pending.append(resolved)
+            except OSError:
+                return True
     return False
 
 
@@ -429,7 +471,10 @@ def _ensure_process_search_path(raw_path: str, cwd: Path, *, label: str) -> None
     candidate = (raw_path or "").strip()
     resolved = (Path(candidate) if Path(candidate).is_absolute() else (cwd / candidate)).resolve()
     if _directory_contains_secret_like_workspace_path(resolved):
-        raise ValueError(f"{label} cannot recursively search workspace paths containing secret-like files.")
+        raise ValueError(
+            f"{label} cannot recursively search workspace paths containing secret-like files; "
+            "search a subdirectory such as notes/ instead."
+        )
 
 
 def _normalize_command(command: str) -> str:
@@ -456,7 +501,10 @@ def _normalize_command(command: str) -> str:
         raise ValueError(f"command '{normalized}' is not allowed in the process runtime.")
     if lowered in {"python", "python3"}:
         return sys.executable
-    return normalized
+    # Return the canonical allowlisted name: a case variant such as ``SED``
+    # would otherwise skip every per-command validator and the sed sandbox
+    # while still resolving on a case-insensitive filesystem.
+    return lowered
 
 
 def _parse_args_json(raw_args_json: str | None) -> list[str]:
@@ -776,7 +824,173 @@ def _validate_git_workspace_args(args: list[str], cwd: Path) -> None:
         index += 1
 
 
+_SED_VALUE_LONG_OPTIONS = ("expression", "file", "line-length")
+
+
+def _sed_long_option_takes_value(arg: str) -> bool:
+    # getopt accepts any unambiguous prefix of a long option name.
+    name = arg[2:]
+    return bool(name) and "=" not in name and any(option.startswith(name) for option in _SED_VALUE_LONG_OPTIONS)
+
+
+def _sed_in_place_requested(args: list[str]) -> bool:
+    """Detect -i in any spelling sed's getopt accepts before ``--``."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--":
+            return False
+        if arg.startswith("--"):
+            # ``--in-place`` is the only long option starting with "i", so
+            # every abbreviation (``--i``, ``--in``, ``--in-pla``) selects it.
+            if arg[2:3] == "i":
+                return True
+            if _sed_long_option_takes_value(arg):
+                index += 1
+            continue
+        if not arg.startswith("-") or arg == "-":
+            continue
+        for position, flag in enumerate(arg[1:], start=1):
+            if flag == "i":
+                return True
+            if flag in {"e", "f", "l"}:
+                # The rest of the cluster, or else the next argument, is this
+                # option's value and never another option.
+                if position == len(arg) - 1:
+                    index += 1
+                break
+    return False
+
+
+def _sed_sandboxed_args(executable: str, args: list[str]) -> list[str]:
+    """Force GNU sed's sandbox, which rejects the r/R/w/W/e commands and the
+    s///w and s///e flags.
+
+    Those commands name files or shell commands inside the script text, where
+    the path-argument checks cannot see them.  The runtime always prepends
+    ``--sandbox`` as the first option, so no later argument (an operand after
+    ``--``, an option value, a duplicate) can stand in for it.  A sed without
+    ``--sandbox`` fails to start rather than running unsandboxed.
+    """
+    if Path(executable).name != "sed":
+        return args
+    return ["--sandbox", *args]
+
+
+# Commands whose argv is screened token by token for registry-protected paths.
+_TOKEN_SCREENED_COMMANDS = frozenset({"cat", "ls", "head", "tail", "wc", "grep", "rg", "sed", "find"})
+
+
+def _argument_token_values(arg: str) -> list[str]:
+    """Every string a command could open from one argv token.
+
+    That is the token itself, the value of a ``--long=value`` option, and
+    every possible inline value of a short-option cluster (``-nep`` may mean
+    ``-n -e p``; ``-nf.vault-key`` may mean ``-n -f .vault-key``). Screening
+    all of them avoids modelling each command's option grammar.
+    """
+    values = [arg]
+    if arg.startswith("--"):
+        if "=" in arg:
+            values.append(arg.split("=", 1)[1])
+    elif arg.startswith("-") and len(arg) > 2:
+        values.extend(arg[position:] for position in range(2, len(arg)))
+    return [value for value in values if value and "\x00" not in value]
+
+
+def _reject_protected_argument_tokens(args: list[str], cwd: Path) -> None:
+    """Refuse any token (operand, assumed pattern or script, or option value)
+    that names registry-protected workspace state.
+
+    An existing path gets the full name and registry check; a token that names
+    nothing on disk is refused only when the registry itself denies that name,
+    so ordinary patterns such as ``token`` stay usable. A pattern spelled
+    exactly like a protected file (``grep .vault-key notes``) is refused too;
+    write such a pattern differently (for example ``grep '[.]vault-key'``).
+    """
+    workspace = _workspace_root()
+    index = AgentAccessIndex(workspace)
+    for arg in args:
+        for value in _argument_token_values(arg):
+            candidate = Path(value)
+            try:
+                resolved = (candidate if candidate.is_absolute() else cwd / candidate).resolve()
+                resolved.relative_to(workspace)
+            except (OSError, RuntimeError, ValueError):
+                # Outside the workspace (or unresolvable): the positional path
+                # checks below own the workspace-scope refusal.
+                continue
+            if os.path.lexists(resolved):
+                refused = _is_secret_like_workspace_path(resolved, index)
+            else:
+                refused = index.access(resolved) is AgentWorkspaceAccess.DENIED
+            if refused:
+                raise ValueError("path argument cannot target secret-like workspace files.")
+
+
+def _grep_directories_recurse(args: list[str]) -> bool:
+    """True when grep's -d/--directories action is recurse, in any spelling."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return False
+        value: str | None = None
+        if arg.startswith("--"):
+            name, sep, inline = arg[2:].partition("=")
+            if len(name) >= 2 and "directories".startswith(name):
+                if sep:
+                    value = inline
+                elif index + 1 < len(args):
+                    value = args[index + 1]
+        elif arg.startswith("-") and "d" in arg[1:]:
+            rest = arg[arg.index("d", 1) + 1 :]
+            if rest:
+                value = rest
+            elif index + 1 < len(args):
+                value = args[index + 1]
+        if value is not None and value.startswith("rec"):
+            return True
+        index += 1
+    return False
+
+
+def _is_recursive_long_option(arg: str) -> bool:
+    """--recursive / --dereference-recursive, including GNU unique-prefix abbreviations."""
+    if not arg.startswith("--"):
+        return False
+    name = arg[2:].partition("=")[0]
+    return len(name) >= 3 and ("recursive".startswith(name) or "dereference-recursive".startswith(name))
+
+
+def _grep_takes_separate_directories_value(arg: str) -> bool:
+    if arg.startswith("--"):
+        name = arg[2:]
+        return "=" not in name and len(name) >= 2 and "directories".startswith(name)
+    # A short cluster whose last flag is d (-d, -nd) takes the next token.
+    return arg.startswith("-") and len(arg) >= 2 and arg.endswith("d") and "e" not in arg[1:-1] and "f" not in arg[1:-1]
+
+
+def _is_directory_operand(raw_path: str, cwd: Path) -> bool:
+    candidate = (raw_path or "").strip()
+    if not candidate:
+        return False
+    try:
+        return (Path(candidate) if Path(candidate).is_absolute() else (cwd / candidate)).is_dir()
+    except OSError:
+        return False
+
+
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
+    _validate_command_specific_args(executable, args, cwd)
+    if Path(executable).name in _TOKEN_SCREENED_COMMANDS:
+        # Runs after the per-command checks so their specific refusals keep
+        # their wording; this pass catches whatever their grammars miss.
+        _reject_protected_argument_tokens(args, cwd)
+
+
+def _validate_command_specific_args(executable: str, args: list[str], cwd: Path) -> None:
     command_name = Path(executable).name
 
     _reject_network_capable_package_args(command_name, args)
@@ -845,14 +1059,25 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             index += 1
         return
 
+    if command_name == "sed" and "--sandbox" in args:
+        raise ValueError("sed --sandbox is applied by the process runtime; do not pass it.")
+    if command_name == "sed" and _sed_in_place_requested(args):
+        raise ValueError(
+            "sed in-place editing is blocked in the process runtime; use apply_workspace_patch for workspace edits."
+        )
+
+    if command_name == "rg" and any(arg.startswith(("--pre", "--hostname-bin")) for arg in args):
+        # --pre and --hostname-bin run an arbitrary program.
+        raise ValueError("rg --pre and --hostname-bin are blocked in the process runtime.")
+
     if command_name in {"grep", "rg", "sed"}:
         pattern_consumed = False
         path_argument_checked = False
         recursive_search = command_name == "rg" or any(
-            arg in {"-r", "-R", "--recursive", "--dereference-recursive"}
+            _is_recursive_long_option(arg)
             or (arg.startswith("-") and not arg.startswith("--") and any(flag in arg[1:] for flag in ("r", "R")))
             for arg in args
-        )
+        ) or (command_name == "grep" and _grep_directories_recurse(args))
         index = 0
         while index < len(args):
             arg = args[index]
@@ -886,6 +1111,11 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
                 pattern_consumed = True
                 index += 1
                 continue
+            if command_name == "grep" and _grep_takes_separate_directories_value(arg):
+                # -d/--directories ACTION: the next token is the action, not
+                # the pattern; recursion was already detected above.
+                index += 2
+                continue
             if command_name == "grep" and arg in {"--exclude-from"}:
                 if index + 1 >= len(args):
                     raise ValueError(f"{arg} requires a path argument.")
@@ -912,7 +1142,10 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             if not pattern_consumed and command_name in {"grep", "rg", "sed"}:
                 pattern_consumed = True
             else:
-                if recursive_search:
+                # A directory operand to grep or rg is scanned however
+                # recursion was requested, so no option spelling can reach
+                # protected files beneath it.
+                if recursive_search or (command_name in {"grep", "rg"} and _is_directory_operand(arg, cwd)):
                     _ensure_process_search_path(arg, cwd, label="path argument")
                 else:
                     _ensure_process_accessible_path(arg, cwd, label="path argument")
@@ -1606,7 +1839,7 @@ def _normalize_command_invocation(
     resolved_cwd = _normalize_cwd(cwd)
     _validate_interpreter_args(executable, args)
     _validate_workspace_scoped_args(executable, args, resolved_cwd)
-    return executable, args, resolved_cwd
+    return executable, _sed_sandboxed_args(executable, args), resolved_cwd
 
 
 @dataclass

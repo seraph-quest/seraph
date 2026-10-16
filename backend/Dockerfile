@@ -2,8 +2,9 @@
 # is runtime/cordis (Compose additional_contexts). Only reviewed sources and the
 # lockfile are copied; dependencies come from `npm ci` and the build writes the
 # hash-pinned dist/build-manifest.json the backend verifies before starting it.
-# Tag-pinned: no registry access was available to resolve a digest.
-FROM node:24.13.1-bookworm-slim AS cordis-build
+# Pinned by the multi-arch OCI index digest of node:24.13.1-bookworm-slim
+# (resolved from Docker Hub on 2026-10-16; linux/amd64, arm64, ppc64le, s390x).
+FROM node:24.13.1-bookworm-slim@sha256:a81a03dd965b4052269a57fac857004022b522a4bf06e7a739e25e18bce45af2 AS cordis-build
 WORKDIR /runtime/cordis
 COPY --from=cordis package.json package-lock.json profile.json tsconfig.json ./
 COPY --from=cordis scripts ./scripts
@@ -38,7 +39,6 @@ RUN uv run playwright install chromium
 
 # The backend resolves the Cordis package at /runtime/cordis (parents of
 # src/runtime_plugins/composition.py) and starts it with CORDIS_NODE_PATH.
-# Follow-up: pin node:24.13.1-bookworm-slim by digest once a registry is reachable.
 COPY --from=cordis-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=cordis-build /runtime/cordis /runtime/cordis
 ENV CORDIS_NODE_PATH=/usr/local/bin/node

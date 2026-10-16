@@ -219,7 +219,7 @@ class PublicSnapshotV1(Closed):
     digest: Digest
     lines: Annotated[list[str], Field(min_length=1, max_length=65536)]
     fetched_at: datetime
-    mime: Literal["text/plain", "text/html", "application/rss+xml", "application/atom+xml"]
+    mime: Literal["text/plain", "text/html", "application/rss+xml", "application/atom+xml", "application/xml", "text/xml"]
 
     @field_validator("fetched_at")
     @classmethod

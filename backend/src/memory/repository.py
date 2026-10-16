@@ -2887,6 +2887,46 @@ async def _load_memory_record_source_previews(
     }
 
 
+async def current_memory_record_summaries(
+    db,
+    *,
+    owner_session_id: str,
+    memory_ids: list[str],
+) -> dict[str, tuple[str | None, bool]]:
+    """Current owner-visible list-safe summaries for exact record ids.
+
+    Uses the caller's session (so a writer can recheck inside its own
+    transaction) with the same owner/tombstone/deletion-marker predicate,
+    preview bound and fail-closed redaction as ``list_memory_records``.
+    Records no longer visible are omitted.
+    """
+
+    ids = list(dict.fromkeys(memory_ids))
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            _memory_record_scope_statement(owner_session_id=owner_session_id, status=MemoryStatus.active)
+            .where(Memory.id.in_(ids))
+            .options(defer(Memory.content), defer(Memory.summary))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    visible = [row for row in rows if _canonical_memory_deletion_marker(row, check_text=False) is None]
+    previews = await _load_memory_record_previews(
+        db,
+        memory_ids=[row.id for row in visible],
+        field="summary",
+        max_length=_MEMORY_RECORD_SUMMARY_MAX,
+    )
+    summaries: dict[str, tuple[str | None, bool]] = {}
+    for row in visible:
+        value, truncated = previews.get(row.id, (None, False))
+        safe_summary, _degraded = await _memory_record_redact(db, value)
+        summaries[row.id] = (safe_summary, truncated)
+    return summaries
+
+
 async def _memory_record_projection(
     db,
     memory: Memory,

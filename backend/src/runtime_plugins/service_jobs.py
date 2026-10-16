@@ -270,8 +270,10 @@ async def execute_native_read(*, operator, candidate: dict, idempotency_key: str
                     "sealed_result_digest": sealed_digest},
             result_summary="Native service read verified with explicit no_learning",
             terminal_authority_check=completion)
-        # Return only Python-owned values: the sealed read and Python's own readback.
-        return {"job": completed, "result": proof["result"], "artifact_readback": proof["artifact_readback"],
+        # Return only Python-owned values: the child's read answer equals the
+        # digest Python sealed (checked above) and its records were rechecked
+        # as current at completion; the readback is Python's own.
+        return {"job": completed, "result": result, "artifact_readback": proof["artifact_readback"],
                 "completion": proof, "replayed": False, "memory_status": "no_learning"}
     except (NativeServiceBlocked, HostBlocked) as exc:
         reason = getattr(exc, "reason_code", None) or "native_read_execution_blocked"

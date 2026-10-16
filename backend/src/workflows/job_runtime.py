@@ -1351,13 +1351,14 @@ def _bounded_identifier(value: Any, *, field_name: str, limit: int = 512) -> str
     return normalized
 
 
-async def _verify_native_child_sql_scope(db, run):
+async def _verify_native_child_sql_scope(db, run, *, _repository_completion_witness=None):
     """Compile a private canonical journal witness before every child CAS."""
     from src.work_board.communication_preparation import assert_preparation_run_current
     await assert_preparation_run_current(db, run)
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import assert_general_task_child_phase_current
-        await assert_general_task_child_phase_current(db, run)
+        await assert_general_task_child_phase_current(db, run,
+            _repository_completion_witness=_repository_completion_witness)
     elif getattr(run, "job_kind", None) == "agent.task.v1":
         from src.workflows.specialist_delegation import is_specialist_root, assert_specialist_root_current
         if is_specialist_root(run):
@@ -1365,7 +1366,8 @@ async def _verify_native_child_sql_scope(db, run):
 
 
 def _append_parent_fence_condition(
-    conditions: list[Any], run: WorkflowRunState, *, now: datetime
+    conditions: list[Any], run: WorkflowRunState, *, now: datetime,
+    _repository_completion_witness=None
 ) -> None:
     """Require canonical goal identity and, for children, the live parent fence."""
     _append_goal_fence_condition(conditions, run)
@@ -1384,7 +1386,8 @@ def _append_parent_fence_condition(
             return
     if getattr(run, "job_kind", None) == "general_task_native_tool_v1":
         from src.workflows.general_task_guard import append_general_task_parent_gate
-        if append_general_task_parent_gate(conditions, run, now=now):
+        if append_general_task_parent_gate(conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness):
             return
     parent_job_id = _text(getattr(run, "parent_job_id", None))
     if not parent_job_id:
@@ -3200,9 +3203,33 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         from src.workflows.general_task_guard import admit_child
         return await admit_child(self, spec, **bindings)
 
-    async def publish_general_task_step_receipt(self, parent_id, **bindings):
+    async def publish_general_task_step_receipt(self, parent_id, *, staged_artifact,
+        child_id, owner, fencing_token, expected_parent_revision,
+        repository_final_witness=None, repository_final_authority_check=None,
+        repository_final_authority_scope=None, _repository_completion_witness=None):
         from src.workflows.general_task_guard import publish_step_receipt
-        return await publish_step_receipt(self, parent_id, **bindings)
+        return await publish_step_receipt(self, parent_id, staged_artifact=staged_artifact,
+            child_id=child_id, owner=owner, fencing_token=fencing_token,
+            expected_parent_revision=expected_parent_revision,
+            repository_final_witness=repository_final_witness,
+            repository_final_authority_check=repository_final_authority_check,
+            repository_final_authority_scope=repository_final_authority_scope,
+            _repository_completion_witness=_repository_completion_witness)
+
+    async def publish_repository_child_wait(self, child_id, *, owner, fencing_token,
+        expected_parent_revision, producer_witness):
+        from src.workflows.general_task_guard import publish_repository_child_wait
+        return await publish_repository_child_wait(self, child_id, owner=owner,
+            fencing_token=fencing_token, expected_parent_revision=expected_parent_revision,
+            producer_witness=producer_witness)
+
+    async def resume_repository_child_wait(self, child_id, *, owner,
+        expected_parent_revision, expected_child_revision, producer_witness):
+        from src.workflows.general_task_guard import resume_repository_child_wait
+        return await resume_repository_child_wait(self, child_id, owner=owner,
+            expected_parent_revision=expected_parent_revision,
+            expected_child_revision=expected_child_revision,
+            producer_witness=producer_witness)
 
     async def publish_general_task_tool_closure(self, child_id, **bindings):
         from src.workflows.general_task_guard import publish_tool_closure
@@ -3542,6 +3569,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         near_text_witness=None,
         near_text_policy_scope=None,
         _general_task_resume_witness=None,
+        _repository_publication_witness=None,
+        _repository_uncertainty_witness=None,
     ) -> dict[str, Any]:
         if to_status not in DURABLE_JOB_STATUSES:
             raise DurableJobTransitionError(f"unknown durable job status: {to_status}")
@@ -3562,6 +3591,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 to_status == "queued" and _general_task_approval_wait(preflight_run)
             )
             near_queue_guard = preflight_run.job_kind == "inference.near-text.v1" and to_status == "queued"
+            repository_publication_guard = (
+                preflight_run.job_kind == "engineering.repo-publication.v1" and to_status == "queued"
+            )
+            if _repository_publication_witness is not None and not repository_publication_guard:
+                raise DurableJobTransitionError("repository publication witness does not match this capability")
             if near_queue_guard or near_text_policy_scope is not None:
                 if to_status != "queued":
                     raise DurableJobTransitionError("NEAR policy scope is only valid for queueing")
@@ -3594,7 +3628,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             await db.rollback()
             near_writer_started = False
             general_writer_started = False
-            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer:
+            if (terminal_authority_check is not None and to_status in {"succeeded", "degraded"}) or dependency_guard or cancellation_authority_check is not None or guardian_queue_guard or preference_guard or near_queue_guard or general_resume_guard or native_writer or repository_publication_guard or _repository_uncertainty_witness is not None:
                 bind = db.get_bind()
                 dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
                 if dialect_name == "sqlite":
@@ -3709,6 +3743,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     approval_resume_receipt,
                     now=_utc_now(),
                 )
+                if repository_publication_guard:
+                    from src.workflows.repo_repair_source import validate_repository_publication_in_writer
+                    await validate_repository_publication_in_writer(db, _repository_publication_witness,
+                        publication_run=run)
                 effect_ledger = _effect_ledger_or_raise(run.effect_receipts_json)
                 if _job_has_unsafe_effects(effect_ledger):
                     raise DurableJobTransitionError(
@@ -3922,6 +3960,12 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 values["effect_receipts_json"] = _canonical(
                     _job_effect_ledger(run, [*(effect_ledger or []), approval_resume_record])
                 )
+            if _repository_uncertainty_witness is not None or (to_status == "unknown_external_effect"
+                    and reason in {"repository_callback_closure_unproven", "repository_process_closure_unproven"}):
+                from src.workflows.repo_repair_stop import append_repository_uncertainty_in_writer
+                await append_repository_uncertainty_in_writer(db, self, run,
+                    witness=_repository_uncertainty_witness, to_status=to_status, reason=reason,
+                    result=result, values=values)
             conditions = [WorkflowRunState.run_identity == job_id, WorkflowRunState.status == current]
             conditions.append(WorkflowRunState.revision == current_revision)
             if owner is not None:
@@ -4183,6 +4227,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         expires_at: float,
         expected_revision: int | None = None,
         reason: str = "operator_approval_resumed",
+        _repository_publication_witness=None,
     ) -> dict[str, Any]:
         """Resume approval-held work through the current authority binding.
 
@@ -4255,6 +4300,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             expected_revision=expected_revision,
             reason=reason,
             approval_resume_receipt=approval_resume_receipt,
+            _repository_publication_witness=_repository_publication_witness,
         )
 
     async def revoke_job(
@@ -5025,7 +5071,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         expected_revision: int | None = None,
         opportunity_preference_witness=None,
         native_physical_reservation=None,
+        _repository_completion_witness=None,
     ) -> dict[str, Any]:
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith("repository:"):
+            raise DurableJobTransitionError("repository source checkpoints require their fixed capability writer")
         if checkpoint_id == "general-task:current-manifest:v1":
             raise DurableJobTransitionError("general task manifest requires its fixed native writer")
         if isinstance(checkpoint_id, str) and checkpoint_id.startswith("general:delegation:"):
@@ -5038,6 +5087,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             raise DurableJobTransitionError("document process reservation/reap requires its fixed native owner")
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
+        if _repository_completion_witness is not None:
+            from src.workflows.repo_repair_source import (
+                verify_recovered_repository_final_writer, capture_recovered_repository_final_writer)
         async with self._session() as db:
             from src.memory.evidence_dependencies import stage_run_dependencies, recheck_run_dependencies
             preflight_run = await self._fetch(db, job_id)
@@ -5052,12 +5104,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if getattr(getattr(bind, "dialect", None), "name", "") == "sqlite":
                 await db.execute(text("BEGIN IMMEDIATE"))
             run = await self._fetch(db, job_id)
+            if _repository_completion_witness is not None:
+                await verify_recovered_repository_final_writer(self, db, run,
+                    completion_witness=_repository_completion_witness, kind="checkpoint",
+                    descriptor={"checkpoint_id": checkpoint_id, "state": state, "safe": safe,
+                        "checkpoint_payload": checkpoint_payload})
             if run.job_kind == "memory.opportunity-preference.v1" and checkpoint_id == "opportunity-preference-source-use":
                 from src.work_board.opportunity_preference_native import recheck_native
                 await recheck_native(db,run,witness=opportunity_preference_witness)
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
-                await verify_native_writer(self, db, run)
+                await verify_native_writer(self, db, run,
+                    _repository_completion_witness=_repository_completion_witness)
             await recheck_run_dependencies(db, run, staged_dependencies)
             await _assert_canonical_goal_fence(
                 db,
@@ -5157,8 +5215,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 WorkflowRunState.lease_owner == owner,
                 WorkflowRunState.lease_expires_at > now,
             ]
-            await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(checkpoint_conditions, run, now=now)
+            await _verify_native_child_sql_scope(db, run,
+                _repository_completion_witness=_repository_completion_witness)
+            _append_parent_fence_condition(checkpoint_conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -5173,6 +5233,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("stale job fencing token")
             refreshed = await self._fetch(db, job_id)
+            if _repository_completion_witness is not None:
+                await capture_recovered_repository_final_writer(self, db, refreshed,
+                    completion_witness=_repository_completion_witness, kind="checkpoint")
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "checkpoint", "status": "recorded", **receipt})
 
@@ -6174,6 +6237,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         independent external readback; it cannot claim, dispatch, or resume a
         job.
         """
+        if isinstance(checkpoint_id, str) and checkpoint_id.startswith("repository:"):
+            raise DurableJobTransitionError("repository source checkpoints require their fixed capability writer")
         if not _text(checkpoint_id):
             raise ValueError("checkpoint_id is required")
         if not _text(owner_kind) or not _text(owner_principal_id):
@@ -6268,6 +6333,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         owner: str | None = None,
         fencing_token: int | None = None,
         expected_revision: int | None = None,
+        _repository_completion_witness=None,
     ) -> dict[str, Any]:
         """Persist an operator-safe artifact receipt.
 
@@ -6276,15 +6342,30 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         current lease owner and fencing token so a stale runner cannot append
         an artifact after restart recovery.
         """
+        if _repository_completion_witness is not None:
+            from src.workflows.repo_repair_source import (
+                verify_recovered_repository_final_writer, capture_recovered_repository_final_writer)
         async with self._session() as db:
             run = await self._fetch(db, job_id)
+            if _repository_completion_witness is not None:
+                record = build_artifact_record(
+                    file_path=file_path, artifact_type=artifact_type,
+                    producer=run.job_kind, run_id=job_id,
+                    session_id=run.session_id, content=content,
+                )
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
-            if requires_native_writer(run):
+            if requires_native_writer(run) or _repository_completion_witness is not None:
                 await db.rollback()
                 from src.work_board.repository import _begin_sqlite_immediate
                 await _begin_sqlite_immediate(db)
                 run = await self._fetch(db, job_id)
-                await verify_native_writer(self, db, run)
+            if _repository_completion_witness is not None:
+                await verify_recovered_repository_final_writer(self, db, run,
+                    completion_witness=_repository_completion_witness, kind="artifact",
+                    descriptor={"file_path": file_path, "artifact_type": artifact_type, "content": content})
+            if requires_native_writer(run):
+                await verify_native_writer(self, db, run,
+                    _repository_completion_witness=_repository_completion_witness)
             if _deadline_expired(run):
                 raise DurableJobTransitionError("job deadline has expired")
             if run.status in DURABLE_JOB_TERMINAL_STATUSES:
@@ -6304,14 +6385,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                     )
             else:
                 self._assert_lease(run, owner=owner, fencing_token=fencing_token)
-            record = build_artifact_record(
-                file_path=file_path,
-                artifact_type=artifact_type,
-                producer=run.job_kind,
-                run_id=job_id,
-                session_id=run.session_id,
-                content=content,
-            )
+            if _repository_completion_witness is None:
+                record = build_artifact_record(
+                    file_path=file_path,
+                    artifact_type=artifact_type,
+                    producer=run.job_kind,
+                    run_id=job_id,
+                    session_id=run.session_id,
+                    content=content,
+                )
             receipt = {
                 "artifact_id": record["artifact_id"],
                 "artifact_type": record["artifact_type"],
@@ -6344,8 +6426,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
-            await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            await _verify_native_child_sql_scope(db, run,
+                _repository_completion_witness=_repository_completion_witness)
+            _append_parent_fence_condition(conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -6360,6 +6444,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("stale job fencing token")
             refreshed = await self._fetch(db, job_id)
+            if _repository_completion_witness is not None:
+                await capture_recovered_repository_final_writer(self, db, refreshed,
+                    completion_witness=_repository_completion_witness, kind="artifact")
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": "artifact", "status": "recorded", **receipt})
 
@@ -6835,6 +6922,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         fencing_token: int | None = None,
         expected_revision: int | None = None,
         readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        _repository_completion_witness=None,
     ) -> dict[str, Any]:
         """Persist a bounded effect or readback receipt on the job record.
 
@@ -6875,8 +6963,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 "target_digest": target_digest or "",
                 "adapter_idempotency_key": adapter_idempotency_key or "",
             })[:24]
+        if _repository_completion_witness is not None:
+            from src.workflows.repo_repair_source import (
+                verify_recovered_repository_final_writer, capture_recovered_repository_final_writer)
+            if receipt_kind != "readback":
+                raise ValueError("repository completion requires its original readback writer")
         async with self._session() as db:
-            if readback_authority_check is not None:
+            if readback_authority_check is not None or _repository_completion_witness is not None:
                 if receipt_kind != "readback":
                     raise ValueError("authority callback requires a readback receipt")
                 from src.work_board.repository import _begin_sqlite_immediate
@@ -6884,12 +6977,21 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             run = await self._fetch(db, job_id)
             from src.workflows.general_task_guard import requires_native_writer, verify_native_writer
             if requires_native_writer(run):
-                if readback_authority_check is None:
+                if readback_authority_check is None and _repository_completion_witness is None:
                     await db.rollback()
                     from src.work_board.repository import _begin_sqlite_immediate
                     await _begin_sqlite_immediate(db)
                     run = await self._fetch(db, job_id)
-                await verify_native_writer(self, db, run)
+            if _repository_completion_witness is not None:
+                await verify_recovered_repository_final_writer(self, db, run,
+                    completion_witness=_repository_completion_witness, kind="readback",
+                    descriptor={"effect_type": effect_type, "status": status,
+                        "target_path": target_path, "target_digest": target_digest,
+                        "content_sha256": content_sha256, "readback_id": readback_id,
+                        "verified_at": verified_at, "details": details})
+            if requires_native_writer(run):
+                await verify_native_writer(self, db, run,
+                    _repository_completion_witness=_repository_completion_witness)
             await _assert_canonical_goal_fence(
                 db,
                 goal_id=getattr(run, "goal_id", None),
@@ -7168,8 +7270,10 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
                 )
             else:
                 conditions.extend((WorkflowRunState.lease_owner.is_(None), WorkflowRunState.lease_expires_at.is_(None)))
-            await _verify_native_child_sql_scope(db, run)
-            _append_parent_fence_condition(conditions, run, now=now)
+            await _verify_native_child_sql_scope(db, run,
+                _repository_completion_witness=_repository_completion_witness)
+            _append_parent_fence_condition(conditions, run, now=now,
+                _repository_completion_witness=_repository_completion_witness)
             result_update = await db.execute(
                 update(WorkflowRunState)
                 .execution_options(synchronize_session=False)
@@ -7184,6 +7288,9 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             if not _rowcount_is_one(result_update):
                 raise DurableJobLeaseError("stale job fencing token")
             refreshed = await self._fetch(db, job_id)
+            if _repository_completion_witness is not None:
+                await capture_recovered_repository_final_writer(self, db, refreshed,
+                    completion_witness=_repository_completion_witness, kind="readback")
             db.expunge(refreshed)
             return _serialize(refreshed, receipt={"kind": receipt_kind, "status": "recorded", **receipt})
 
@@ -7204,6 +7311,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         fencing_token: int | None = None,
         expected_revision: int | None = None,
         readback_authority_check: Callable[[Any, Any], Awaitable[None]] | None = None,
+        _repository_completion_witness=None,
     ) -> dict[str, Any]:
         """Record an explicit readback receipt in the canonical effect ledger."""
         if effect_id and effect_type is None:
@@ -7235,6 +7343,7 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             fencing_token=fencing_token,
             expected_revision=expected_revision,
             readback_authority_check=readback_authority_check,
+            _repository_completion_witness=_repository_completion_witness,
         )
 
     async def record_remote_inference_receipt(
@@ -7861,9 +7970,18 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
     reconcile_job = reconcile_external_effect
 
     async def recover_stale_jobs(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+        from src.workflows.repo_repair_source import _repository_startup_mutation_fence
+        async with _repository_startup_mutation_fence():
+            return await self._recover_stale_jobs_locked(now=now)
+
+    async def _recover_stale_jobs_locked(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
         observed_at = now or _utc_now()
         recovered: list[dict[str, Any]] = await self.recover_inference_accounting(now=observed_at)
         async with self._session() as db:
+            from src.work_board.repository import _begin_sqlite_immediate
+            from src.workflows.repo_repair_source import _repository_startup_protected_lineage
+            await _begin_sqlite_immediate(db)
+            protected = await _repository_startup_protected_lineage(db)
             result = await db.execute(
                 select(WorkflowRunState).where(
                     WorkflowRunState.status == "running",
@@ -7872,6 +7990,8 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             )
             runs = result.scalars().all()
             for run in runs:
+                if run.run_identity in protected:
+                    continue
                 old_owner = run.lease_owner
                 expected_token = run.fencing_token
                 expected_revision = _revision(run)
@@ -8054,6 +8174,13 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        from src.workflows.repo_repair_source import _repository_startup_mutation_fence
+        async with _repository_startup_mutation_fence():
+            return await self._recover_stale_job_locked(job_id, now=now)
+
+    async def _recover_stale_job_locked(
+        self, job_id: str, *, now: datetime | None = None,
+    ) -> dict[str, Any]:
         """Recover one expired lease without touching unrelated jobs.
 
         Capability-specific recovery routes must not run the global stale-job
@@ -8067,7 +8194,15 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
         observed_at = now or _utc_now()
         await self.recover_inference_accounting(now=observed_at, job_id=job_id)
         async with self._session() as db:
+            from src.work_board.repository import _begin_sqlite_immediate
+            from src.workflows.repo_repair_source import _repository_startup_protected_lineage
+            await _begin_sqlite_immediate(db)
+            protected = await _repository_startup_protected_lineage(db)
             run = await self._fetch(db, job_id)
+            if job_id in protected:
+                db.expunge(run)
+                return _serialize(run, receipt={"kind": "targeted_recovery", "status": "noop",
+                    "reason": "original_repository_source_recovery_required", "operator_visible": True})
             if run.status != "running":
                 db.expunge(run)
                 return _serialize(run, receipt={"kind": "targeted_recovery", "status": "noop", "operator_visible": True})

@@ -16,7 +16,7 @@
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
 #   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
-#   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed optional Cordis host.
+#   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed Cordis host (goal research).
 #   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
@@ -634,7 +634,7 @@ function production_workspace_lifecycle() {
     # to that bind. It deliberately does not start Docker or contact a
     # provider.
     PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+        python3 -B "$SCRIPT_DIR/backend/workspace_cli.py" \
         --base-dir "$SCRIPT_DIR" "$lifecycle_command" "$@"
 }
 
@@ -646,20 +646,20 @@ function refresh_production_bind_identity() {
     local identity_json identity
     if ! identity_json=$(
         PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" \
-            python3 "$SCRIPT_DIR/backend/workspace_cli.py" \
+            python3 -B "$SCRIPT_DIR/backend/workspace_cli.py" \
             --base-dir "$SCRIPT_DIR" identity
     ); then
         echo "Error: unable to derive the production bind identity; workspace startup is blocked." >&2
         return 1
     fi
-    identity=$(printf '%s' "$identity_json" | python3 -c \
+    identity=$(printf '%s' "$identity_json" | python3 -B -c \
         'import json, sys; print(json.load(sys.stdin).get("bind_identity", ""))')
     if [[ ! "$identity" =~ ^[0-9a-f]{24}$ ]]; then
         echo "Error: production bind identity receipt is invalid; workspace startup is blocked." >&2
         return 1
     fi
     export SERAPH_PRODUCTION_BIND_IDENTITY="$identity"
-    SERAPH_WORKSPACE_LIFECYCLE_PATH=$(printf '%s' "$identity_json" | python3 -c \
+    SERAPH_WORKSPACE_LIFECYCLE_PATH=$(printf '%s' "$identity_json" | python3 -B -c \
         'import json, sys; print(json.load(sys.stdin).get("lifecycle_directory", ""))')
     if [[ ! -d "$SERAPH_WORKSPACE_LIFECYCLE_PATH" ]]; then
         echo "Error: production accounting continuity descriptor is unavailable." >&2
@@ -688,7 +688,7 @@ function reject_prod_local_stack() {
 }
 
 function start_local_backend() {
-    python3 "$SCRIPT_DIR/scripts/operator_schema_guard.py" "$LOCAL_WORKSPACE_DIR/seraph.db" || return 1
+    python3 -B "$SCRIPT_DIR/scripts/operator_schema_guard.py" "$LOCAL_WORKSPACE_DIR/seraph.db" || return 1
     if local_backend_is_running; then
         local pid
         pid=$(cat "$LOCAL_BACKEND_PID_FILE")
@@ -703,14 +703,14 @@ function start_local_backend() {
     # backend's trusted-directory reader will keep rejecting an existing
     # broad workspace rather than silently repairing its root.
     mkdir -p -m 700 "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR"
-    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    PYTHONPATH="$SCRIPT_DIR/backend${PYTHONPATH:+:$PYTHONPATH}" python3 -B -c \
         'import sys; from pathlib import Path; from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory; prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(sys.argv[1]).resolve()))' \
         "$LOCAL_WORKSPACE_DIR" || echo "Accounting continuity unavailable; billable inference remains blocked." >&2
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1
         export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend
-        exec uv run uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
+        exec uv run python -B -m uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
     ' seraph-local-backend "$SCRIPT_DIR/backend" "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR" "$LOCAL_UV_CACHE_DIR" "$LOCAL_DEFAULT_MODEL" "$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_BACKEND_LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$LOCAL_BACKEND_PID_FILE"
@@ -752,11 +752,59 @@ function start_local_frontend() {
     return 1
 }
 
+function cordis_cli() {
+    # Same keyless path as `./manage.sh cordis`: no operator env, credentials or workspace.
+    env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
+        python3 -m src.runtime_plugins.cli "$@"
+}
+
+# Goal discovery plans and extracts only through the reviewed Cordis host (#1008).
+# Node is CORDIS_NODE_PATH from the env file when set, else `node` on PATH; the
+# backend starts the host with the same Node. This preflight runs the reviewed
+# build when the package is missing or stale; like the frontend, it never
+# installs dependencies. Core startup continues either way: an unavailable
+# runtime stays an operator-visible block with its fix, never a Python fallback.
+function prepare_local_cordis() {
+    local status reason node_args=()
+    if [ -n "${CORDIS_NODE_PATH:-}" ]; then
+        node_args=(--node "$CORDIS_NODE_PATH")
+    fi
+    if status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
+        echo "Cordis research runtime: package available (live readiness: Settings > Cordis runtime host)"
+        return 0
+    fi
+    reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
+    case "$reason" in
+        node_missing|node_unavailable|node_unsupported|build_dependencies_missing) ;;
+        *)
+            echo "Building the reviewed Cordis research runtime ($reason) ..."
+            if cordis_cli build "${node_args[@]}" >>"$LOCAL_BACKEND_LOG_FILE" 2>&1 \
+                    && status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
+                echo "Cordis research runtime: package built and available"
+                return 0
+            fi
+            status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"
+            reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
+            ;;
+    esac
+    echo "Cordis research runtime unavailable (${reason:-unknown}); goal discovery is blocked and shows this in the cockpit." >&2
+    case "$reason" in
+        node_missing|node_unavailable|node_unsupported)
+            echo "  Fix: install Node 22.12+ or 24.x and set CORDIS_NODE_PATH in $ENV_FILE (or put it first on PATH), then rerun." >&2 ;;
+        build_dependencies_missing)
+            echo "  Fix: npm ci --prefix runtime/cordis --ignore-scripts (Node 24.13.1, npm 11.8.0), then rerun; this run builds it." >&2 ;;
+        *)
+            echo "  Fix: run ./manage.sh -e $ENV cordis build (see $LOCAL_BACKEND_LOG_FILE), then rerun." >&2 ;;
+    esac
+    return 0
+}
+
 function local_up() {
     if ! reject_prod_local_stack; then
         return 1
     fi
     ensure_runtime_dirs
+    prepare_local_cordis
     if ! start_local_backend; then
         echo "Local stack failed: backend did not start cleanly." >&2
         return 1
@@ -886,7 +934,7 @@ if [ "$COMMAND" = "cordis" ]; then
     # This finite keyless path never reads operator env, credentials or workspace.
     # Build uses already installed pins; probe launches/reaps the production host.
     exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
-        python3 -m src.runtime_plugins.cli "$@"
+        python3 -B -m src.runtime_plugins.cli "$@"
 fi
 COMPOSE_FILES=(
     -f "$SCRIPT_DIR/docker-compose.$ENV.yaml"
@@ -947,7 +995,7 @@ if [ "$COMMAND" = "health" ]; then
     if [ "$ENV" != "prod" ]; then
         error_exit "'health' is supported only with '-e prod'."
     fi
-    exec python3 "$SCRIPT_DIR/scripts/epic_736_health.py" "$@"
+    exec python3 -B "$SCRIPT_DIR/scripts/epic_736_health.py" "$@"
 fi
 
 # --- Execution ---

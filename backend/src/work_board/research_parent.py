@@ -403,3 +403,45 @@ class GoalDiscoveryInputs(BaseModel):
         if re.fullmatch(r"goal-programmes/[0-9a-f]{32}/[0-9a-f]{64}-[0-9a-f]{64}\.json", value) is None:
             raise ValueError("original native programme artifact path required")
         return value
+
+
+PLANNING_KIND = "goal_discovery_planning_v1"
+
+
+class GoalProgrammePlanningAuthority(BaseModel):
+    """Delegated service authority for one Cordis research planning call (#1008).
+
+    The planning job is goal-less on the ledger; every crossing revalidates
+    the current programme/grant/goal through ``programme_binding``.
+    """
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    authority_type: Literal["goal_programme_planning_v1"]
+    principal: Literal["service:guardian-goal-programmes"]
+    owner_kind: Literal["service"]
+    service_id: Literal["service:guardian-goal-programmes"]
+    capability_id: Literal["guardian.goal-discovery.v1"]
+    programme_binding: GoalProgrammeAuthorityBinding
+    occurrence_day: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    discovery_job_id: str = Field(pattern=r"^goal-discovery:[0-9a-f]{32}$")
+    planning_job_id: str = Field(pattern=r"^goal-discovery-plan:[0-9a-f]{32}$")
+    no_learning: Literal[True]
+
+    @field_validator("no_learning", mode="before")
+    @classmethod
+    def explicit_no_learning(cls, value):
+        if value is not True:
+            raise ValueError("programme planning never implicitly learns")
+        return value
+
+    @model_validator(mode="after")
+    def one_occurrence(self):
+        if self.discovery_job_id.split(":", 1)[1] != self.planning_job_id.split(":", 1)[1]:
+            raise ValueError("planning job belongs to exactly one discovery occurrence")
+        return self
+
+
+def planning_authority(value):
+    if isinstance(value, str):
+        import json
+        value = json.loads(value)
+    return GoalProgrammePlanningAuthority.model_validate(value)

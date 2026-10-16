@@ -11,7 +11,7 @@ from src.memory import vector_store
 _AUDIT_EVENTS: list[dict[str, object]] = []
 
 
-def _record_audit(*, integration_type, name, outcome, details=None):
+def _record_audit(*, integration_type, name, outcome, details=None, lock_wait_ms=None):
     _AUDIT_EVENTS.append(
         {
             "event_type": f"integration_{outcome}",

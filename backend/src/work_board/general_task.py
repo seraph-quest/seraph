@@ -32,7 +32,14 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
     if dispatcher is None:
         from src.work_board.dispatcher import _dispatcher
         dispatcher = _dispatcher
+    if dispatcher.general_tasks is not None:
+        raise RuntimeError("general task lifecycle already owned")
     if registry is None:
+        # Restore the canonical selector before the stock catalog and Source
+        # observe it. Untrusted persisted state yields the original disabled DTO.
+        from config.settings import settings
+        from src.execution.repo_sandbox import load_persisted_repo_sandbox_settings
+        settings.repo_sandbox, _selector_error = load_persisted_repo_sandbox_settings()
         from src.native_tools.registry import ToolRegistry
         from src.tools.mcp_manager import mcp_manager
         from src.extensions.registry import extension_registry
@@ -43,11 +50,22 @@ def current_task_service(*, registry=None, dispatcher=None, planner=None):
     from src.memory.task_methods import current_method, TaskMethodStrategyResolver
     service = GeneralTaskService(registry, planner=planner,
         strategy_resolver=TaskMethodStrategyResolver(current_method))
-    if dispatcher.general_tasks is not None:
-        raise RuntimeError("general task lifecycle already owned")
     try:
         registry.communication_dispatcher = dispatcher
         registry.start()
+        from src.native_tools.task_adapters import ToolRegistry, _repository_work_block_reason
+        from src.tools.policy import get_task_policy_snapshot
+        # Stock runtime descriptors require the owner composed below. Select
+        # this cold startup owner from the original policy/selector instead of
+        # asking the runtime catalog before its service has been bound.
+        repository_selected = (_repository_work_block_reason(get_task_policy_snapshot()["tool_mode"]) is None
+            if type(registry) is ToolRegistry else
+            any(item.tool_id == "repository_work" for item in registry.descriptors()))
+        if repository_selected:
+            from src.workflows.repo_repair import RepoRepairService
+            source = RepoRepairService(session_factory=dispatcher.session_provider, jobs=dispatcher.jobs)
+            service.repository_source_service = source
+            service.repository_work_adapter = source.native_iteration_adapter
         service.start()
         dispatcher.general_tasks = service
         yield service
@@ -156,11 +174,15 @@ def resolve_input(value, verified_outputs):
     return value
 
 
-async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_id, output, authority_check=None):
+async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_id, output, authority_check=None,
+                              _repository_completion_witness=None):
     """Task-specific checkpoint fields on the existing private artifact owner."""
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workspace import canonical_workspace_root
     from config.settings import settings
+    if _repository_completion_witness is not None:
+        from src.workflows.repo_repair_source import (
+            _expect_recovered_repository_final_writer, observe_recovered_repository_final_writer)
     if authority_check is not None:
         async with jobs._session() as db:
             run = await jobs._fetch(db, job_id)
@@ -173,21 +195,51 @@ async def write_step_artifact(jobs, *, job_id, owner, fence, plan_digest, step_i
     binding = {"schema_version": 1, "producer_ref": job_id, "step_id": step_id,
         "plan_digest": plan_digest, "producer_fence": fence, "file_path": reference,
         "content_sha256": sha, "size_bytes": len(content), "no_learning": True}
+    if _repository_completion_witness is not None:
+        await _expect_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="checkpoint", job_id=job_id,
+            descriptor={"checkpoint_id": "general:artifact:" + step_id, "state": binding,
+                "safe": True, "checkpoint_payload": binding})
     await jobs.record_checkpoint(job_id, checkpoint_id="general:artifact:" + step_id,
-        state=binding, checkpoint_payload=binding, owner=owner, fencing_token=fence)
+        state=binding, checkpoint_payload=binding, owner=owner, fencing_token=fence,
+        _repository_completion_witness=_repository_completion_witness)
+    if _repository_completion_witness is not None:
+        await observe_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="checkpoint")
     path = canonical_workspace_root(settings.workspace_dir) / reference
     _write_payload(path, content)
     actual = _safe_file_bytes(path, expected_digest=sha, expected_size=len(content))
     if actual != content:
         raise BoardError("general_task_artifact_changed", "Task output failed physical readback", status_code=409)
+    if _repository_completion_witness is not None:
+        await _expect_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="artifact", job_id=job_id,
+            descriptor={"file_path": reference, "artifact_type": "general_task_step", "content": actual})
     await jobs.record_artifact(job_id, file_path=reference, artifact_type="general_task_step",
-        content=actual, owner=owner, fencing_token=fence)
+        content=actual, owner=owner, fencing_token=fence,
+        _repository_completion_witness=_repository_completion_witness)
+    if _repository_completion_witness is not None:
+        await observe_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="artifact")
+    verified_at = datetime.now(timezone.utc).isoformat()
+    readback_details = {"verified": True, "output_exists": True, "no_learning": True}
+    if _repository_completion_witness is not None:
+        await _expect_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="readback", job_id=job_id,
+            descriptor={"effect_type": "general_task_artifact_readback", "target_path": reference,
+                "target_digest": sha, "content_sha256": sha, "status": "succeeded",
+                "readback_id": "general-artifact:" + key[:32], "verified_at": verified_at,
+                "details": readback_details})
     await jobs.record_readback(job_id, effect_type="general_task_artifact_readback",
         target_path=reference, target_digest=sha, content_sha256=sha,
         status="succeeded", readback_id="general-artifact:" + key[:32],
-        verified_at=datetime.now(timezone.utc).isoformat(),
-        details={"verified": True, "output_exists": True, "no_learning": True},
-        owner=owner, fencing_token=fence, **({"readback_authority_check": authority_check} if authority_check is not None else {}))
+        verified_at=verified_at,
+        details=readback_details,
+        owner=owner, fencing_token=fence, _repository_completion_witness=_repository_completion_witness,
+        **({"readback_authority_check": authority_check} if authority_check is not None else {}))
+    if _repository_completion_witness is not None:
+        await observe_recovered_repository_final_writer(jobs,
+            completion_witness=_repository_completion_witness, kind="readback")
     return binding, json.loads(actual)["output"]
 
 
@@ -229,11 +281,15 @@ def method_constraints(binding, descriptors):
 
 class GeneralTaskService:
     def __init__(self, registry: DescriptorRegistry, *, repository=None,
-                 strategy_resolver: StrategyResolver | None = None, planner=None):
+                 strategy_resolver: StrategyResolver | None = None, planner=None,
+                 repository_source_service=None):
         self.registry = registry
         self.repository = repository or WorkBoardRepository()
         self.strategy_resolver = strategy_resolver
         self.planner = planner
+        self.repository_source_service = repository_source_service
+        self.repository_work_adapter = (repository_source_service.native_iteration_adapter
+            if repository_source_service is not None else None)
         self.started = False
         self.delegation_jobs = None
         # Ephemeral original callback handles, never execution authority. They
@@ -256,6 +312,20 @@ class GeneralTaskService:
         """Reduce cancellation debt using retained original callbacks only."""
         from src.db.models import WorkBoardAttempt
         from src.workflows.job_runtime import DurableJobError
+        # Repository cancellation has a capability-specific source owner.  Let
+        # it reconcile a retained private stop witness before generic callback
+        # cleanup; a non-None result owns the whole observation and must not
+        # fall through to the ordinary closure path.
+        source = self.repository_source_service
+        observe_repository_stop = getattr(source, "observe_repository_stop", None) if source is not None else None
+        if callable(observe_repository_stop):
+            source_result = await observe_repository_stop(
+                general_task_service=self,
+                jobs=jobs,
+                parent_id=parent_id,
+            )
+            if source_result is not None:
+                return source_result
         bindings = [(child_id, binding, self._native_invocations.get(child_id))
             for child_id, binding in list(self._native_invocation_bindings.items())
             if binding.parent_job_id == parent_id]
@@ -583,6 +653,14 @@ class GeneralTaskService:
                      _procedure_invocation=None):
         if request.idempotency_key.startswith("specialist:") and _specialist_context is None:
             raise BoardError("specialist_delegation_publication_denied", "Specialist publication namespace is private", status_code=422)
+        def reject_repository_scope(plan):
+            if (plan is not None and any(step.tool_id == "repository_work" for step in plan.steps)
+                    and (publication_authority_scope is not None or publication_authority_check is not None)):
+                raise BoardError("repository_publication_scope_incompatible",
+                    "Repository Tasks require their single source-owned publication scope", status_code=409)
+        # Literal repository requests fail before inspection, artifact staging,
+        # planning, or database access when an unrelated scope is supplied.
+        reject_repository_scope(request.plan)
         if request.input.communication_selection is not None and request.plan is None:
             raise BoardError("communication_fixed_plan_required", "Communications preparation requires its fixed source-only plan", status_code=422)
         if (request.input.document_source is not None or request.input.document_build is not None) and request.plan is None:
@@ -599,6 +677,7 @@ class GeneralTaskService:
             WorkBoardTask.idempotency_key == request.idempotency_key))
         if existing is not None:
             original = GeneralTaskEnvelope.model_validate(_parse_typed_input(existing))
+            reject_repository_scope(original.plan)
             if _procedure_invocation is not None:
                 from src.work_board.repository import _begin_sqlite_immediate
                 await _begin_sqlite_immediate(db)
@@ -627,6 +706,32 @@ class GeneralTaskService:
                 .order_by(WorkBoardEvent.event_id.desc()).limit(1))
             if event is None:
                 raise BoardError("general_task_event_unavailable", "Task publication needs recovery", status_code=409)
+            if original.plan is not None and any(step.tool_id == "repository_work" for step in original.plan.steps):
+                original_task_row = existing.model_dump(mode="json")
+                from src.workflows.repo_repair_source import prepare_repository_task_publication
+                from src.work_board.repository import _begin_sqlite_immediate
+                from src.work_board.input_artifacts import read_input_artifact_metadata
+                from contextlib import AsyncExitStack
+                _, source_check, source_scope = prepare_repository_task_publication(
+                    self.repository_source_service, original, owner=owner,
+                    goal_revision=request.goal_revision, replay=True)
+                async with AsyncExitStack() as scopes:
+                    await scopes.enter_async_context(source_scope())
+                    if publication_authority_scope is not None:
+                        await scopes.enter_async_context(publication_authority_scope())
+                    await _begin_sqlite_immediate(db)
+                    await source_check(db)
+                    if publication_authority_check is not None:
+                        await publication_authority_check(db)
+                    artifact = await read_input_artifact_metadata(db, owner,
+                        artifact_id=existing.input_artifact_id)
+                    fresh = await db.scalar(select(WorkBoardTask).where(
+                        WorkBoardTask.task_id == existing.task_id).execution_options(populate_existing=True))
+                    if (fresh is None or fresh.typed_input_digest != artifact.typed_input_digest
+                            or fresh.typed_input_ref != artifact.typed_input_ref
+                            or fresh.model_dump(mode="json") != original_task_row):
+                        raise BoardError("repository_source_replay_changed", "Original Task artifact changed", status_code=409)
+                    await db.commit()
             return BoardMutation(existing, event, idempotent_replay=True)
         await self.repository._validate_goal(db, owner, goal_id=request.input.goal_ref,
             goal_revision=request.goal_revision)
@@ -707,6 +812,14 @@ class GeneralTaskService:
                     expires_at=min(operator.idle_expires_at, operator.absolute_expires_at))
                 envelope = envelope.model_copy(update={"proposal_group": group})
         envelope = envelope.model_copy(update={"evidence": evidence})
+        repository_source_check = repository_source_scope = None
+        if envelope.plan is not None and any(step.tool_id == "repository_work" for step in envelope.plan.steps):
+            reject_repository_scope(envelope.plan)
+            from src.workflows.repo_repair_source import prepare_repository_task_publication
+            binding, repository_source_check, repository_source_scope = prepare_repository_task_publication(
+                self.repository_source_service, envelope, owner=owner, goal_revision=request.goal_revision)
+            envelope = GeneralTaskEnvelope.model_validate({**envelope.model_dump(mode="json"),
+                "repository_source": binding.model_dump(mode="json")})
         if _procedure_invocation is not None:
             _procedure_invocation.stage_envelope(envelope)
         elif (envelope.strategy.status == "active"
@@ -785,8 +898,15 @@ class GeneralTaskService:
         # publication binds that exact artifact under the repository writer CAS.
         from contextlib import AsyncExitStack
         async with AsyncExitStack() as scopes:
+            if repository_source_scope is not None:
+                await scopes.enter_async_context(repository_source_scope())
             if publication_authority_scope is not None:
                 await scopes.enter_async_context(publication_authority_scope())
+            async def checked_publication(current_db):
+                if repository_source_check is not None:
+                    await repository_source_check(current_db)
+                if publication_authority_check is not None:
+                    await publication_authority_check(current_db)
             mutation = await self.repository.create_task(db, owner, WorkBoardTaskCreate(
                 title=request.input.intent[:200], body="General registered-tool task",
                 goal_id=request.input.goal_ref, goal_revision=request.goal_revision,
@@ -795,13 +915,14 @@ class GeneralTaskService:
                 idempotency_scope="general-task", idempotency_key=request.idempotency_key,
                 requires_review=_specialist_context is None,
                 origin_thread_id=_specialist_context.callback.run_identity if _specialist_context is not None else None),
-                publication_authority_check=publication_authority_check,
+                publication_authority_check=(checked_publication
+                    if repository_source_check is not None or publication_authority_check is not None else None),
                 accepted_method_stage=accepted_method_stage,
                 _specialist_publication=specialist_witness,
                 _procedure_invocation=_procedure_invocation)
             if _procedure_invocation is not None and not mutation.idempotent_replay:
                 await _procedure_invocation.publish(db, mutation.task)
-            if publication_authority_scope is not None:
+            if publication_authority_scope is not None or repository_source_scope is not None:
                 # The original publication CAS commits before its canonical
                 # configuration fence is released. Files were staged earlier.
                 await db.commit()
@@ -822,7 +943,7 @@ class GeneralTaskService:
         accepted = any(json.loads(item.metadata_json).get("status") == "todo" for item in acceptance_events)
         payload = {"task_id": task.task_id, "task_revision": task.task_revision,
             "accepted": accepted,
-            **envelope.model_dump(mode="json", exclude={"specialist_handoff"}), "no_learning": True,
+            **envelope.model_dump(mode="json", exclude={"repository_source", "specialist_handoff"}), "no_learning": True,
             "approval_pause": await self.approval_pause(db, owner, task, envelope)}
         from src.db.models import WorkBoardAttempt, WorkflowRunState
         from src.workflows.general_task_guard import read_manifest
@@ -1142,6 +1263,10 @@ class GeneralTaskService:
         if task.task_revision != request.expected_revision:
             raise BoardRevisionConflict(task_id, request.expected_revision, task.task_revision)
         prior = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
+        if (prior.repository_source is not None
+                or any(step.tool_id == "repository_work" for step in request.plan.steps)):
+            raise BoardError("repository_source_plan_immutable",
+                "Use an explicit new source-inspected request; this Task's original source and budget stay bound", status_code=409)
         if (prior.plan.revision if prior.plan else 0) != request.expected_plan_revision:
             raise BoardError("general_task_plan_revision_stale", "Plan changed before editing", status_code=409)
         original = await resolve_input_artifact_for_task(db, owner, artifact_id=task.input_artifact_id,

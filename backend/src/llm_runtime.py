@@ -66,6 +66,8 @@ from src.vlm_runtime import (
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
+# Monotonic deadlines of registered requests whose caller waits with a timeout.
+_runtime_request_deadlines: dict[str, float] = {}
 # Request ids whose turn reached a provider transport at least once.
 _runtime_request_contacts: set[str] = set()
 _target_health_lock = Lock()
@@ -3428,9 +3430,11 @@ def _messages_for_local_target(
     return compacted
 
 
-def _register_request(request_id: str) -> None:
+def _register_request(request_id: str, *, timeout_seconds: float | None = None) -> None:
     with _runtime_request_lock:
         _runtime_requests[request_id] = False
+        if timeout_seconds is not None:
+            _runtime_request_deadlines[request_id] = monotonic() + max(float(timeout_seconds), 0.0)
 
 
 def _mark_request_timed_out(request_id: str) -> None:
@@ -3442,6 +3446,7 @@ def _mark_request_timed_out(request_id: str) -> None:
 def _finish_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests.pop(request_id, None)
+        _runtime_request_deadlines.pop(request_id, None)
         _runtime_request_contacts.discard(request_id)
 
 
@@ -3489,9 +3494,12 @@ def _can_log_request(request_id: str | None) -> bool:
         return True
     with _runtime_request_lock:
         timed_out = _runtime_requests.get(request_id)
+        deadline = _runtime_request_deadlines.get(request_id)
     if timed_out is None:
         return False
-    return not timed_out
+    # The worker thread judges lateness against the caller's own deadline: the
+    # caller's loop may mark the timeout only after the worker has returned.
+    return not timed_out and (deadline is None or monotonic() < deadline)
 
 
 def set_current_llm_request_id(request_id: str) -> contextvars.Token[str | None]:
@@ -4690,7 +4698,7 @@ async def completion_with_fallback(
 ):
     """Async wrapper around the shared completion fallback flow."""
     request_id = uuid4().hex
-    _register_request(request_id)
+    _register_request(request_id, timeout_seconds=timeout)
     resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
     coro = asyncio.to_thread(
         completion_with_fallback_sync,

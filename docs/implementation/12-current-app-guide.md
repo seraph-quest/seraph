@@ -676,8 +676,10 @@ existing Python owner; the child only ever receives the job reference:
   UI is `mail_reply_already_sent`. A send that fails to start after the decision
   is `mail_reply_approved_not_sent`: nothing was sent and the approval stands, so
   the operator sends from the reply review or cancels. Once the send-once intent
-  exists, any failure (an unverified readback, a host timeout, a cancellation) is
-  `mail_reply_send_in_doubt`, "verify in Sent", never a plain refusal.
+  exists, or while the owner's send worker is still running (it outlives a host
+  timeout and may still claim it), any failure (an unverified readback, a host
+  timeout, a cancellation) is `mail_reply_send_in_doubt`, "verify in Sent", never
+  a plain refusal.
 
 Every owner check (session, connection state and revision, consent, binding,
 approval) runs before the intent, so a revoked or expired consent, a stale

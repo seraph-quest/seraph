@@ -871,7 +871,7 @@ first. Agent-loop and guardian follow, each with presets as a prerequisite.
   composition writer, then cut over.
 - An operator rollback of either new domain is sticky, as for agent-loop.
 
-**Not part of this slice:** the Board worker drafts (#1020 part 3). A source
+**Not part of this slice:** the Board worker drafts (#1020 part 3, below). A source
 inventory test maps every model and turn site to its owner category. It runs
 beside the transport-level dispatch inventory and does not replace it.
 
@@ -936,6 +936,44 @@ loops:
 - the governed transport could not describe a specialist as a tool.
 
 Both are fixed.
+
+### Cordis Board worker drafts (#1020, part 3)
+
+The Mail reply draft (`work.mail-reply-draft.v1`) and the meeting brief
+(`calendar.meeting-prep.v1`) are the dispatcher's only inline model calls.
+When the `seraph.board-workers.v1` owner is Cordis, each runs as one worker
+turn under its reviewed preset (`worker.mail_reply_draft`,
+`worker.meeting_prep`: `strategist_agent`, temperature 0.2, 2048 tokens,
+`json_object`, one step, no tools).
+
+How a worker turn runs:
+1. **Before the first provider contact** (the Gmail or Calendar source read),
+   one `cordis_board_worker_turn_v1` job is admitted. It is owned by the task
+   owner, bound to that owner's live Root and grants, and is a durable child
+   of the attempt root at that root's lease and fence. If the runtime is not
+   ready there, the attempt is blocked as `board_worker_runtime_unavailable`
+   with nothing contacted, and a retry is safe.
+2. Python makes exactly today's source reads and model call: the same
+   principal, `high_risk` context, ledger binding, accounting group, messages,
+   `response_format`, `max_tokens`, timeouts and route-receipt check.
+3. After the route receipt, one `board-workers.startTurn` step may stage only
+   `settlement`, and the fenced settlement commits. Only then does the
+   dispatcher parse the output, re-read the source and stage the draft.
+4. **A refusal at that point** (a stale epoch, a lost lease, a revoked Root
+   or a moved attempt root) blocks the attempt as
+   `board_worker_settlement_refused`: "Inference was spent, no external effect
+   was made; safe to retry." The spend stays on the attempt root's ledger row,
+   and the draft is never adopted. A model timeout or a missing route receipt
+   keeps today's reconcile path.
+
+Both refusals block the attempt root with the code (it is never left
+running), and the Board card shows the code with its recovery text. A legacy
+owner runs today's path holding the drain gate; a Cordis owner that is not
+ready never falls back. The domain is introduced into an existing inventory as
+`legacy@1` at boot and cut over after the presets, like guardian. The cutover
+manifest is registered in one fixed order in `runtime_plugins/cutover.py`
+(presets, agent-loop, guardian, delegation, board-workers), so boot receipts never depend
+on import order.
 
 ### Cordis guardian research (#1008)
 

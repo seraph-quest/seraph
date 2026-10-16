@@ -43,7 +43,10 @@ GUARDIAN_STEP_JOB_KIND = "cordis_guardian_step_v1"
 # #1020 PR2: one child admission per delegating call; the child turn's own job kind.
 DELEGATION_STEP_JOB_KIND = "cordis_delegation_step_v1"
 CHILD_TURN_JOB_KIND = "cordis_child_turn_v1"
-STEP_JOB_KINDS = {"agent_loop": STEP_JOB_KIND, "guardian": GUARDIAN_STEP_JOB_KIND, "delegation": DELEGATION_STEP_JOB_KIND}
+# #1020 WorkBoard draft step: same sealed projection, the board-workers sequencer.
+BOARD_WORKER_STEP_JOB_KIND = "cordis_board_worker_step_v1"
+STEP_JOB_KINDS = {"agent_loop": STEP_JOB_KIND, "guardian": GUARDIAN_STEP_JOB_KIND, "delegation": DELEGATION_STEP_JOB_KIND,
+                  "board_workers": BOARD_WORKER_STEP_JOB_KIND}
 TURN_CONTEXT_TAG = "cordis-turn.v1"
 AGENT_LOOP_DOMAIN = "seraph.agent-loop.v1"
 PRESETS_DOMAIN = "seraph.agent-presets.v1"

@@ -107,11 +107,15 @@ inference/provider spend. Live GitHub usefulness remains
   preset, depth 1, at most 4 children per turn and the parent's deadline less
   its settlement window. Its receipts are derived into the parent's, and
   cancellation cascades to it.
-- **Not yet migrated:** Board worker drafts.
+- **Board worker drafts (part 3):** with the board-workers owner cut over, the
+  Mail reply draft and meeting brief run as worker turns admitted before the
+  first source read; a runtime refusal is retry-safe and a refused settlement
+  adopts nothing (`board_worker_runtime_unavailable`,
+  `board_worker_settlement_refused`).
 - **Memory flushes:** a flush inside an operator's turn is admitted under that
   operator's Root.
 - **Default cutover:** the boot cutover moves the presets owner first, then
-  agent-loop and guardian.
+  agent-loop, guardian, delegation and board-workers.
 - **Verification:** offline, with scripted completions and denied sockets. The
   strategist call also runs through the real broker and ledger behind an
   intercepted provider boundary.

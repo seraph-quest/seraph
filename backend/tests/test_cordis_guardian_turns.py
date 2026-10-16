@@ -505,7 +505,7 @@ async def test_boot_cuts_presets_over_first_and_introduces_new_domains_into_a_10
     from tests.cordis_agent_loop import cutover_agent_loop
     manifest = cutover_manifest()
     assert [entry.domain for entry in manifest] == [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN,
-                                                     "seraph.delegation.v1"]
+                                                     "seraph.delegation.v1", "seraph.board-workers.v1"]
     # Every turn binds the presets, so every later domain waits for them.
     assert all(PRESETS_DOMAIN in entry.prerequisites for entry in manifest[1:])
     async with research_host(durable_job_repository) as host:
@@ -516,7 +516,7 @@ async def test_boot_cuts_presets_over_first_and_introduces_new_domains_into_a_10
             await db.commit()
         receipts = await run_boot_cutover(host)
         assert [item["runtime_domain"] for item in receipts] == [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN,
-                                                                 "seraph.delegation.v1"]
+                                                                 "seraph.delegation.v1", "seraph.board-workers.v1"]
         async with get_session() as db:
             rows = await inventory(db)
             introduced = (await db.execute(select(AuditEvent.details_json).where(

@@ -57,6 +57,7 @@ BLOCKED_METHODS = MappingProxyType({
     "agent-loop.inspectTurn": "native_turn_producer_not_bound",
     "guardian.startTurn": "native_turn_producer_not_bound",
     "delegation.startChild": "native_turn_producer_not_bound",
+    "board-workers.startTurn": "native_turn_producer_not_bound",
     "scheduler.register": "native_scheduler_not_bound",
     "scheduler.disable": "native_scheduler_not_bound",
     "scheduler.dispatchDue": "native_scheduler_not_bound",
@@ -412,6 +413,12 @@ class NativeServiceDispatcher:
             from .guardian_turns import current_guardian_authority
             await current_guardian_authority(db, run, authority)
             return "guardian"
+        if isinstance(authority, dict) and authority.get("authority_type") == "board_worker_turn_v1":
+            # #1020 WorkBoard draft turn: the task owner's Root, the live unsettled
+            # turn and the live attempt root it is a child of.
+            from .board_worker_turns import current_board_worker_authority
+            await current_board_worker_authority(db, run, authority)
+            return "board-worker"
         if run.owner_kind != "user" or not isinstance(authority, dict):
             raise NativeServiceBlocked("native_authority_mode_unsupported")
         await current_operator_root(db, run, authority)
@@ -449,7 +456,7 @@ class NativeServiceDispatcher:
             if scope.binding.native_branch == "governed":
                 from .governed_services import dispatch_governed
                 return await dispatch_governed(self, frame, payload, scope)
-            if scope.binding.native_branch in {"agent_loop", "guardian", "delegation"}:
+            if scope.binding.native_branch in {"agent_loop", "guardian", "delegation", "board_workers"}:
                 from .agent_turns import dispatch_turn_step
                 return await dispatch_turn_step(self, frame, payload, scope)
             if scope.binding.native_branch in {"programme_planning", "programme_discovery"}:

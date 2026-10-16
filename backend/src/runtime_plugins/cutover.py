@@ -77,6 +77,7 @@ register_cutover_domain(PRESETS_DOMAIN)
 register_cutover_domain("seraph.agent-loop.v1", prerequisites=(PRESETS_DOMAIN,))
 register_cutover_domain("seraph.guardian.v1", prerequisites=(PRESETS_DOMAIN,))
 register_cutover_domain("seraph.delegation.v1", prerequisites=(PRESETS_DOMAIN,))
+register_cutover_domain("seraph.board-workers.v1", prerequisites=(PRESETS_DOMAIN,))
 
 
 # ---------------------------------------------------------------- legacy turn gate

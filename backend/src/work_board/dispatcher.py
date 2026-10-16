@@ -1296,6 +1296,8 @@ def _safe_error_code(exc: BaseException) -> str:
 _STABLE_REASON_CODES = frozenset(
     {
         "adapter_blocked",
+        "board_worker_runtime_unavailable",
+        "board_worker_settlement_refused",
         "browser_input_invalid",
         "browser_policy_blocked",
         "browser_runtime_unavailable",
@@ -6675,6 +6677,50 @@ class WorkBoardDispatcher:
         await self._consume_v2_leaf_artifact(task)
         return matching
 
+    async def _begin_board_worker(self, task: WorkBoardTask, job_id: str, projection: Mapping[str, Any],
+                                  preset_id: str, *, timeout_seconds: float):
+        """Route one Board draft through its runtime owner before any provider contact (#1020)."""
+        from src.runtime_plugins.board_worker_turns import begin_board_worker
+        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        deadline = None
+        try:
+            deadline = datetime.fromisoformat(str(projection.get("deadline_at")).replace("Z", "+00:00"))
+            deadline = deadline.replace(tzinfo=deadline.tzinfo or timezone.utc).astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            deadline = None
+        return await begin_board_worker(
+            preset_id, owner_principal_id=task.owner_principal_id, owner_session_id=task.owner_session_id,
+            parent={"job_id": job_id, "owner": _text(lease.get("owner")),
+                    "fence": int(lease.get("fencing_token") or projection.get("fencing_token") or 0),
+                    "deadline": deadline},
+            timeout_seconds=float(timeout_seconds))
+
+    async def _refuse_board_worker(self, job_id: str, exc: BaseException) -> dict[str, Any]:
+        """Close the attempt root on a retry-safe draft runtime refusal (#1020).
+
+        Either nothing was contacted (``board_worker_runtime_unavailable``), or the
+        inference was spent before the settlement was refused and nothing external
+        happened (``board_worker_settlement_refused``). The spend stays on the
+        root's ledger row; the root is blocked with the code, never left running.
+        """
+        code = _text(getattr(exc, "reason_code", None)) or "board_worker_runtime_unavailable"
+        detail = _text(getattr(exc, "detail", None))[:128] or code
+        current = await self.jobs.get_job(job_id)
+        lease = current.get("lease") if isinstance(current, Mapping) and isinstance(current.get("lease"), Mapping) else {}
+        if isinstance(current, Mapping) and _status(current) == "running" and _text(lease.get("owner")):
+            try:
+                await self.jobs.transition_job(
+                    job_id, "blocked", owner=_text(lease.get("owner")),
+                    fencing_token=int(lease.get("fencing_token") or 0), expected_state="running",
+                    expected_revision=int(current.get("revision") or 0), reason=code,
+                    result={"memory_status": "no_learning", "board_worker_detail": detail},
+                    result_summary="Board draft runtime refused before any external effect")
+            except Exception:
+                # A concurrent recovery owns the root; the Board still shows the refusal.
+                logger.info("board worker refusal settlement raced for %s", job_id)
+        return {"job_id": job_id, "status": "blocked", "reason_code": code, "detail": detail,
+                "recovery_action": "retry_after_prerequisite", "admission_only": False}
+
     async def _execute_direct_adapter(
         self,
         task: WorkBoardTask,
@@ -7847,24 +7893,38 @@ class WorkBoardDispatcher:
                 related_sources = await self._related_source_references(task, inputs, original_current_context, related_bindings)
                 return value
 
-            connection, consent, binding, provider_message_id, _lease = await current_context()
-            adapter = GoogleGmailReadonlyAdapter(
-                connection,
-                owner_principal_id=task.owner_principal_id,
-                authority_check=lambda: current_context(),
-                contact_observer=mark_provider_contact,
-            )
-            await assert_mail_source_lease(_lease)
-            first = await adapter.get_message_full(provider_message_id)
-            if first.truncated or len(first.body.encode("utf-8")) > MAX_SOURCE_BODY_BYTES:
-                raise GmailReadError(
-                    "mail_reply_source_too_large",
-                    "The reviewed Mail message body exceeds the bounded reply input",
-                    status_code=409,
-                    recovery_action="review_source_size",
+            # #1020: the draft's runtime owner is resolved before the first
+            # provider contact (the Gmail source read), so a refusal here is
+            # retry-safe with nothing contacted.
+            from src.runtime_plugins.board_worker_turns import BoardWorkerBlocked, output_text
+            try:
+                worker = await self._begin_board_worker(task, job_id, projection, "worker.mail_reply_draft",
+                                                        timeout_seconds=MAIL_RUNTIME_SECONDS)
+            except BoardWorkerBlocked as exc:
+                return await self._refuse_board_worker(job_id, exc)
+            try:
+                connection, consent, binding, provider_message_id, _lease = await current_context()
+                adapter = GoogleGmailReadonlyAdapter(
+                    connection,
+                    owner_principal_id=task.owner_principal_id,
+                    authority_check=lambda: current_context(),
+                    contact_observer=mark_provider_contact,
                 )
-            if first.metadata.message_revision != _text(inputs["expected_message_revision"]):
-                raise GmailReadError("mail_reply_source_drift", "The Mail message changed", status_code=409, recovery_action="reconcile_existing_reply")
+                await assert_mail_source_lease(_lease)
+                first = await adapter.get_message_full(provider_message_id)
+                if first.truncated or len(first.body.encode("utf-8")) > MAX_SOURCE_BODY_BYTES:
+                    raise GmailReadError(
+                        "mail_reply_source_too_large",
+                        "The reviewed Mail message body exceeds the bounded reply input",
+                        status_code=409,
+                        recovery_action="review_source_size",
+                    )
+                if first.metadata.message_revision != _text(inputs["expected_message_revision"]):
+                    raise GmailReadError("mail_reply_source_drift", "The Mail message changed", status_code=409, recovery_action="reconcile_existing_reply")
+            except BaseException:
+                await worker.abandon("board_worker_source_failed")
+                worker.release()
+                raise
 
             effective_route: dict[str, Any] | None = None
 
@@ -7974,7 +8034,17 @@ class WorkBoardDispatcher:
                 finally:
                     reset_runtime_context(tokens)
 
-            raw = await model_call()
+            try:
+                raw = await model_call()
+                # The fenced settlement commits before the output is parsed or staged.
+                await worker.adopt(output_text(raw))
+            except BoardWorkerBlocked as exc:
+                return await self._refuse_board_worker(job_id, exc)
+            except BaseException:
+                await worker.abandon("board_worker_call_failed")
+                raise
+            finally:
+                worker.release()
             draft = parse_model_output(raw)
             connection2, consent2, binding2, provider_message_id2, lease2 = await current_context()
             if provider_message_id2 != provider_message_id:
@@ -8590,6 +8660,16 @@ class WorkBoardDispatcher:
                 related_sources = await self._related_source_references(task, inputs, original_assert_calendar_current, related_bindings)
             await assert_calendar_current()
 
+            # #1020: the draft's runtime owner is resolved before the first
+            # provider contact (the Calendar source read), so a refusal here
+            # is retry-safe with nothing contacted.
+            from src.runtime_plugins.board_worker_turns import BoardWorkerBlocked, output_text
+            try:
+                worker = await self._begin_board_worker(task, job_id, projection, "worker.meeting_prep",
+                                                        timeout_seconds=max(0.001, min(float(runtime_seconds), 180.0)))
+            except BoardWorkerBlocked as exc:
+                return await self._refuse_board_worker(job_id, exc)
+
             adapter = GoogleCalendarReadonlyAdapter(
                 connection,
                 owner_principal_id=task.owner_principal_id,
@@ -8787,16 +8867,30 @@ class WorkBoardDispatcher:
                 finally:
                     reset_runtime_context(tokens)
 
+            async def settled_model_call(event_payload: dict[str, Any]) -> Any:
+                raw = await model_call(event_payload)
+                # The fenced settlement commits before the brief is parsed or staged.
+                await worker.adopt(output_text(raw))
+                return raw
+
             service = MeetingPrepService(adapter)
-            result = await service.prepare(
-                calendar_id,
-                provider_event_id,
-                allowed_fields=set(json.loads(consent.allowed_fields_json or "[]")),
-                expected_event_key=binding.event_key,
-                expected_event_revision=_text(inputs.get("event_revision")),
-                before_boundary=assert_calendar_current,
-                model_call=model_call,
-            )
+            try:
+                result = await service.prepare(
+                    calendar_id,
+                    provider_event_id,
+                    allowed_fields=set(json.loads(consent.allowed_fields_json or "[]")),
+                    expected_event_key=binding.event_key,
+                    expected_event_revision=_text(inputs.get("event_revision")),
+                    before_boundary=assert_calendar_current,
+                    model_call=settled_model_call,
+                )
+            except BoardWorkerBlocked as exc:
+                return await self._refuse_board_worker(job_id, exc)
+            except BaseException:
+                await worker.abandon("board_worker_call_failed")
+                raise
+            finally:
+                worker.release()
             await assert_calendar_current()
             local_output = {**result["output"], **({"related_sources": related_sources} if related_sources else {})}
             output = json.dumps(local_output, ensure_ascii=True, sort_keys=True, separators=(",", ":"))

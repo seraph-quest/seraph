@@ -1467,6 +1467,24 @@ describe("WorkBoardPanel", () => {
     expect(screen.queryByRole("button", { name: /Retry/ })).not.toBeInTheDocument();
   });
 
+  it("explains a retry-safe Board draft runtime refusal", async () => {
+    const refused = task({
+      status: "blocked",
+      title: "Mail reply draft",
+      block_kind: "capability",
+      block_reason: "board_worker_settlement_refused",
+      recovery_action: "retry",
+      latest_attempt: null,
+    });
+    taskResponse(fetchMock, refused);
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Mail reply draft" }));
+
+    expect(within(screen.getByRole("region", { name: "Task details for Mail reply draft" })).getByText(
+      "Blocked: board_worker_settlement_refused · Inference was spent, no external effect was made; safe to retry.")).toBeInTheDocument();
+  });
+
   it("shows review reviewer and evidence without inventing a verdict action", async () => {
     const review = task({
       status: "review",

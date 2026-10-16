@@ -100,6 +100,13 @@ const STATUS_LABELS: Record<WorkBoardStatus, string> = {
   archived: "Archived",
 };
 
+// Retry-safe Board draft runtime refusals (#1020): the code plus what happened and what is safe.
+const BLOCK_REASON_TEXT: Record<string, string> = {
+  board_worker_runtime_unavailable: "board_worker_runtime_unavailable · The draft runtime is unavailable; nothing was contacted, so a retry is safe once it is ready.",
+  board_worker_settlement_refused: "board_worker_settlement_refused · Inference was spent, no external effect was made; safe to retry.",
+};
+const blockReasonText = (reason: string | null | undefined) => (reason ? BLOCK_REASON_TEXT[reason] ?? reason : reason);
+
 const READBACK_LABELS: Record<WorkBoardReadbackStatus, string> = {
   not_started: "Not started",
   pending: "Pending",
@@ -3461,7 +3468,7 @@ function WorkBoardPanel({
                               {status === "ready" && task.dispatch_rank !== null && <div>Server dispatch rank: #{task.dispatch_rank}</div>}
                               {task.dispatch_wait_reason && <div className="text-amber-200">Dispatch waiting: {task.dispatch_wait_reason === "browser_cleanup_required" ? "browser cleanup recovery is required" : task.dispatch_wait_reason}</div>}
                               {status === "running" && <div>Lease: {active ? safeDateTime(latest?.lease_expires_at) : "not active"} · started {formatAge(latest?.started_at)}</div>}
-                              {status === "blocked" && <div className="text-amber-200">Blocked: {task.block_reason || "The server did not provide a safe reason."}</div>}
+                              {status === "blocked" && <div className="text-amber-200">Blocked: {blockReasonText(task.block_reason) || "The server did not provide a safe reason."}</div>}
                               {status === "review" && <div>Reviewer: {task.reviewer_id ?? "Not named"} · Readback: {READBACK_LABELS[task.readback_status]} · Verification: {VERIFICATION_LABELS[task.verification_status]}</div>}
                             </div>
                           </button>
@@ -3648,7 +3655,7 @@ function WorkBoardPanel({
 
               <section className="rounded border border-white/10 p-3">
                 <div className="font-semibold">Actions and recovery</div>
-                <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${selectedTask.block_reason || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>
+                <div className="mt-1">{selectedTask.status === "blocked" ? `Blocked: ${blockReasonText(selectedTask.block_reason) || "No safe reason was supplied."}` : `Current state: ${STATUS_LABELS[selectedTask.status]}`}</div>
                 {selectedTask.recovery_action && <div className="mt-1">Server recovery action: {RECOVERY_LABELS[selectedTask.recovery_action]}</div>}
                 {selectedTask.ownership_access !== "recovered_read_only" && ownerPrincipalId && ownerSessionId && (selectedTask.recovery_action === "approve_existing_run" || (attentionContext?.taskId === selectedTask.task_id && attentionContext.approvalId)) && <TaskApprovalReview
                   task={selectedTask} owner={{ principalId: ownerPrincipalId, sessionId: ownerSessionId }} approvalId={attentionContext?.taskId === selectedTask.task_id ? attentionContext.approvalId : null}

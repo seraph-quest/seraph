@@ -313,7 +313,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1673,
+        1707,
         "_governed_research_chat_completion",
         "client.stream",
         "canonical_adapter",
@@ -322,7 +322,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1616,
+        1650,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -331,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4846,
+        4893,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -380,7 +380,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3926,
+        3973,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -389,7 +389,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4006,
+        4053,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -398,7 +398,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4462,
+        4509,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -407,7 +407,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4541,
+        4588,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",

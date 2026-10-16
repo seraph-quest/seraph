@@ -380,6 +380,9 @@ class NativeServiceDispatcher:
             if scope.binding.native_branch == "governed":
                 from .governed_services import dispatch_governed
                 return await dispatch_governed(self, frame, payload, scope)
+            if scope.binding.native_branch == "agent_loop":
+                from .agent_turns import dispatch_turn_step
+                return await dispatch_turn_step(self, frame, payload, scope)
             if scope.binding.native_branch in {"programme_planning", "programme_discovery"}:
                 # Guardian research callbacks (#1008) have their own Python owner.
                 from .research_dispatch import dispatch_research

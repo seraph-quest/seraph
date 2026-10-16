@@ -75,7 +75,8 @@ class CompositionDependency:
 
 # Finite branch closures. A branch names the methods one original invocation
 # may forward; it never grants the authority those methods check.
-NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow", "programme_planning", "programme_discovery", "governed"})
+NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow", "programme_planning", "programme_discovery", "governed",
+                             "agent_loop"})
 READ_ORIGINS = frozenset({"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"})
 ARTIFACT_CHILDREN = ("artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append")
 WORKFLOW_CHILDREN = ("authority.resolve", "goals.read", "tasks.inspect", "tasks.checkpoint", "tasks.cancel")
@@ -86,6 +87,9 @@ DISCOVERY_CHILDREN = ("artifacts.read", "artifacts.stage", "tasks.inspect", "tas
 # #1018 governed capability/inference services: one Python-originated call,
 # executed by the existing governed owner; the provider forwards only itself.
 GOVERNED_ORIGINS = frozenset({"capabilities.invoke", "inference.request", "connections.invokeBoundAdapter"})
+# #1019 agent-loop step: the sequencer reads its sealed step projection and
+# stages finite decisions; Python executes every effect between steps.
+AGENT_LOOP_CHILDREN = ("artifacts.read", "tasks.checkpoint", "tasks.inspect")
 
 
 def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
@@ -103,6 +107,8 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
         return tuple(sorted({origin_method, *DISCOVERY_CHILDREN}))
     if native_branch == "governed" and origin_method in GOVERNED_ORIGINS:
         return (origin_method,)
+    if native_branch == "agent_loop" and origin_method == "agent-loop.startTurn":
+        return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
     raise CompositionBindingError("composition_branch_unsupported")
 
 

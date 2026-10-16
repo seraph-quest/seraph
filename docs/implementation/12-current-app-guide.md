@@ -1600,9 +1600,36 @@ hint is not a grant or integrity seal against arbitrary direct database edits.
 The stopped workspace CLI accepts the old schema and its sole added private
 hint column for backup/restore and continuity readback. Restore leaves that hint
 NULL; canonical startup migration must classify it before governed accounting
-is ready. Other unexpected columns still fail closed. These bounded specialist
-reads do not bound the existing global `_accounting_rows` baseline, which still
-loads the deployment ledger.
+is ready. Other unexpected columns still fail closed.
+
+**Ledger verification (#1086).** Reserve, contact, settle and status reads no
+longer load or re-hash the deployment ledger. Each reservation stores a private
+derived `ledger_row_digest` of its financial content. The account record holds
+running totals (open bound by state, settled amount by period, per owner, the
+overrun set and rows per period), and the `v2:` account digest covers that
+record plus the ordered root of every stored row digest. A hot writer checks the
+external witness, recomputes that root and the account digest, verifies every
+row it reads or changes against its digest before resealing it, and admits only
+against the sealed totals. Editing ledger history therefore cannot free capacity
+or clear the overrun latch. Deleted, inserted or re-sealed rows, totals edits,
+witness rollback and an older database are refused on the next operation.
+A content-only edit to a row no operation touches is found by full
+verification. That re-validates every row's evidence, key, content digest and
+the totals, and runs on the first accounting writer of each process, on any
+writer once the last full pass is over 20 minutes old, on the rare writers
+(recovery, settings saves, denial quiescence, research funding/rebind/cancel,
+research readback), at startup recovery, every 10 minutes from the
+`inference_ledger_verification` scheduler job (a deferred read that latches
+accounting for the process after an in-lock re-check), and in every workspace
+CLI tool. The scoped reads cannot be emptied either: a general-task group read
+must return exactly the sealed member count for that group, a discovery
+programme read the sealed count of discovery-service rows, and the near-text
+outstanding check reads a sealed per-owner count, so hiding a row by editing its
+lookup key, owner, job, state or runtime path is refused or still counted. Startup recovery
+migrates a v1 ledger forward after its full v1 check (checkpoint with no
+operations); v2 is forward-only, and an older build reports
+`accounting_continuity_unavailable` for a v2 ledger. Restored rows without a
+stored digest are fully verified and backfilled before they are trusted.
 
 Private handoff publication discovers at most twelve distinct specialist
 callback identities from validated original-group reservations, then checks each

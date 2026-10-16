@@ -1991,6 +1991,9 @@ class InferenceAccountingOwner(SQLModel, table=True):
     settings_history_json: str = Field(default="[]")
     revision: int = Field(default=1)
     ledger_digest: str = Field(default="")
+    # Running totals maintained by the sole ledger writer and covered by the
+    # account digest and external witness (#1086). Empty on v1 ledgers.
+    ledger_totals_json: str = Field(default="")
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
 
@@ -1999,7 +2002,10 @@ class InferenceCostReservation(SQLModel, table=True):
     """Accounting evidence for a canonical job, never a second job lifecycle."""
 
     __tablename__ = "inference_cost_reservations"
-    __table_args__ = (Index("ix_inference_cost_reservations_owner_group_lookup", "owner_id", "group_lookup_key"),)
+    __table_args__ = (
+        Index("ix_inference_cost_reservations_owner_group_lookup", "owner_id", "group_lookup_key"),
+        Index("ix_inference_cost_reservations_row_digest", "operation_id", "ledger_row_digest"),
+    )
     operation_id: str = Field(primary_key=True)
     deployment_id: str = Field(index=True)
     job_id: str = Field(index=True)
@@ -2025,6 +2031,9 @@ class InferenceCostReservation(SQLModel, table=True):
     provider_operation_id: Optional[str] = None
     evidence_json: str = Field(default="[]")
     group_lookup_key: Optional[str] = Field(default=None, exclude=True)
+    # Private derived digest of this row's financial content (#1086); never
+    # part of the hashed record itself.
+    ledger_row_digest: Optional[str] = Field(default=None, exclude=True)
     recovery_reason: Optional[str] = None
     revision: int = Field(default=1)
     created_at: datetime = Field(default_factory=_now)

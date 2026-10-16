@@ -85,6 +85,14 @@ fence before promotion; an older database plus older in-root metadata cannot
 authorize egress. Replacement of every trusted store by the host administrator
 is outside this continuity contract.
 
+Ledger verification is bounded (#1086) without weakening this contract:
+admission reads only running totals sealed in the digest- and witness-covered
+account record, so an edit to ledger history cannot create capacity or clear
+the overrun latch. Every row an operation reads or changes is checked against
+its stored content digest, and the whole ledger is fully re-verified per
+process, on staleness, at startup and periodically; see the
+[Current App Guide](../12-current-app-guide.md) for the detection model.
+
 Each reservation records an immutable calendar UTC month (`YYYY-MM`) identity
 and immutable ceiling/settings revision. An explicitly authorized finite ceiling
 revision changes prospective admission only; it never resets settled history,

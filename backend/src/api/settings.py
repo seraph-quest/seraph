@@ -129,6 +129,7 @@ class RepoSandboxSettingsRequest(BaseModel):
     worker_image_digest: str | None = None
     profile: str | None = None
     node_runtime_path: str | None = None
+    require_isolation: bool | None = None
 
 
 # Active screenshot semantic analysis is OpenRouter-only. Retained settings
@@ -398,6 +399,7 @@ def _repo_sandbox_settings_payload(
         "worker_image_digest": value.worker_image_digest,
         "profile": value.profile,
         "node_runtime_path": value.node_runtime_path,
+        "require_isolation": bool(getattr(value, "require_isolation", False)),
         "limits": limits_payload,
         "limits_digest": digest,
         "limits_editable": False,

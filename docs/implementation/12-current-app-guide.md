@@ -2201,11 +2201,38 @@ Only a lost producer or Unknown result stays held. Crash recovery under
 `POST /api/workflows/repo-repair/{id}/source-recovery` returns 503. Ordinary repair
 behavior below is unchanged.
 
-Checks run as `local_host_execution` with no isolation. The tests can use the
-network and read the Seraph user's files (`~/.ssh`, Seraph's database and vault).
-A detached process can outlive "cleanup proven", and diagnostics redaction is
-pattern-based. The inspector and the patch approval state these limitations;
-host isolation is tracked in [#1065](https://github.com/seraph-quest/seraph/issues/1065).
+Checks run as `local_host_execution`. Where the host supports it
+([#1065](https://github.com/seraph-quest/seraph/issues/1065)), every repository
+git/test/build command runs in a bubblewrap OS sandbox: a fresh network
+namespace with only loopback, a cleared environment, no nested user
+namespaces, readable but read-only `/usr`, `/etc` and the exact runtime files
+(the executables plus only their `lib`/npm trees, never a whole `$HOME` or
+`~/.local`; a runtime that would need one reports `runtime_root_unsafe`), a
+private size-bounded `/tmp`, only the job's stage directories visible (never
+`~/.ssh` or Seraph's database, vault key or other workspace files),
+RLIMIT_CPU/AS/FSIZE applied outside and RLIMIT_NPROC inside the new user
+namespace. These are per-process limits: address space and file size are
+bounded per process and per file, not total memory or total disk use. The
+bound runtime paths are listed in the posture (`isolation_runtime_roots`) and
+bound into its digest. Every process the tests start ends with the sandbox's
+pid namespace, so "cleanup proven" then includes detached processes. Preflight
+probes this inside a real sandbox and records the posture
+`isolation_claim=bwrap_userns`, `network_isolation=netns_loopback_only_verified`,
+`resource_enforcement=rlimit_cpu_as_fsize_nproc_and_wall_timeout`,
+`host_access=snapshot_bind_only`; the supervisor re-probes and must match
+before running anything. Plain `unshare` is not used because Ubuntu's AppArmor
+user-namespace restriction denies it, while the distro bubblewrap profile is
+allowed.
+
+When the host cannot provide this (no `bwrap`, user namespaces denied, or a
+failed probe), nothing falls back silently: the posture keeps the previous
+`isolation_claim=none`/`network_isolation=not_verified` values plus
+`isolation_variant=not_isolated` and an `isolation_unavailable_reason`, the
+patch approval begins `NOT ISOLATED (<reason>):`, and the tests can use the
+network and read the Seraph user's files. The posture digest is bound into the
+approval, so a change between variants invalidates earlier approvals. Setting
+`require_isolation` (repository sandbox settings, default off) refuses to run
+instead. Diagnostics redaction is pattern-based either way.
 Approved patches may contain only text sections on allowed paths, and an
 iterative publication must equal the base plus the approved input patch.
 

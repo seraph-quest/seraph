@@ -47,15 +47,20 @@ recovery action stays fail-closed (HTTP 503). New admissions record the
 [ADR-032](./decisions/032-repository-crash-recovery-evidence.md) v4 evidence,
 but that evidence authorizes no recovery yet.
 
-Declared limitation: repository checks run as `local_host_execution` with
-`isolation_claim=none` and `network_isolation=not_verified`. After the exact
-approval, the repository's tests run as the Seraph user. They can use the
-network and read local files, including `~/.ssh` and Seraph's database and
-vault. "Cleanup proven" covers only the supervised process tree (subreaper and
-waitpid); a same-user process that detaches, for example via `systemd-run --user`
-or `at`, can outlive it. Diagnostics redaction is pattern-based, not complete.
-Approve only repositories you trust; host isolation is tracked in
-[#1065](https://github.com/seraph-quest/seraph/issues/1065). Approved patches are limited to text
+Repository command isolation ([#1065](https://github.com/seraph-quest/seraph/issues/1065))
+is **Partial**: on hosts where bubblewrap user namespaces work (verified on Ubuntu
+26.04 x86_64), repository git/test/build commands run in an OS sandbox with no
+network, only the job's stage visible among the operator's files (system files
+such as `/etc` and the runtime stay readable, read-only) and per-process
+CPU/address-space/file-size/process-count limits (not total memory or disk),
+recorded as `isolation_claim=bwrap_userns`. Otherwise the posture says
+`isolation_variant=not_isolated` with a reason, the approval begins "NOT
+ISOLATED (&lt;reason&gt;):" and the previous limitation applies: the repository's
+tests run as the Seraph user, can use the network and read local files
+including `~/.ssh` and Seraph's database and vault, and a same-user process that
+detaches (for example via `systemd-run --user` or `at`) can outlive "cleanup
+proven". `require_isolation` refuses instead. macOS has no sandbox path yet.
+Diagnostics redaction is pattern-based, not complete. Approved patches are limited to text
 sections on allowed paths: binary, rename, copy, mode, symlink and header-less
 sections are rejected by the parent, the worker and git's own numstat and summary.
 Publication of an iterative result must equal the base plus the approved input

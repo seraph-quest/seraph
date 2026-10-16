@@ -2085,11 +2085,17 @@ behavior below is unchanged.
 Checks run as `local_host_execution`. Where the host supports it
 ([#1065](https://github.com/seraph-quest/seraph/issues/1065)), every repository
 git/test/build command runs in a bubblewrap OS sandbox: a fresh network
-namespace with only loopback, a cleared environment, read-only `/usr`, `/etc`
-and runtime prefixes, a private size-bounded `/tmp`, only the job's stage
-directories visible (never `~/.ssh` or Seraph's database, vault key or other
-workspace files), RLIMIT_CPU/AS/FSIZE applied outside and RLIMIT_NPROC inside
-the new user namespace. Every process the tests start ends with the sandbox's
+namespace with only loopback, a cleared environment, no nested user
+namespaces, readable but read-only `/usr`, `/etc` and the exact runtime files
+(the executables plus only their `lib`/npm trees, never a whole `$HOME` or
+`~/.local`; a runtime that would need one reports `runtime_root_unsafe`), a
+private size-bounded `/tmp`, only the job's stage directories visible (never
+`~/.ssh` or Seraph's database, vault key or other workspace files),
+RLIMIT_CPU/AS/FSIZE applied outside and RLIMIT_NPROC inside the new user
+namespace. These are per-process limits: address space and file size are
+bounded per process and per file, not total memory or total disk use. The
+bound runtime paths are listed in the posture (`isolation_runtime_roots`) and
+bound into its digest. Every process the tests start ends with the sandbox's
 pid namespace, so "cleanup proven" then includes detached processes. Preflight
 probes this inside a real sandbox and records the posture
 `isolation_claim=bwrap_userns`, `network_isolation=netns_loopback_only_verified`,

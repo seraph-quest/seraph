@@ -1000,8 +1000,10 @@ REPOSITORY_PATCH_APPROVAL_SUMMARY = (
     "cleanup, and diagnostics redaction is pattern-based.")
 REPOSITORY_PATCH_APPROVAL_SUMMARY_ISOLATED = (
     "Review the exact bounded repository patch. Approving runs the repository's tests in an OS sandbox "
-    "on this host: no network, only the repository snapshot is visible (not ~/.ssh or Seraph's database "
-    "and vault), CPU/address-space/file-size/process limits apply, and every process the tests start ends "
+    "on this host: no network; of your files only the repository snapshot is visible (not ~/.ssh or "
+    "Seraph's database and vault), while system files such as /etc and the language runtime are readable "
+    "but read-only; each process has CPU-time, address-space and per-file size limits plus a process "
+    "count limit (total memory and total disk use are not capped); every process the tests start ends "
     "with the sandbox. Diagnostics redaction is pattern-based.")
 
 

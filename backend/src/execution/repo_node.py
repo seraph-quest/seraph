@@ -84,11 +84,21 @@ def json_regular(root: Path, name: str) -> dict[str, Any]:
 
 
 def hash_file(path: Path) -> str:
+    """Hash a trusted host file (runtime, sources); use hash_regular for repository files."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def hash_regular(root: Path, name: str, limit: int = MAX_DEP_FILE_BYTES) -> str:
+    """Hash a repository file without following links or opening FIFOs/devices.
+
+    Repository commands can replace any workspace path; the trusted reader uses
+    descriptor-relative no-follow, non-blocking, regular-file-only reads.
+    """
+    return hashlib.sha256(read_regular(root, name, limit)).hexdigest()
 
 
 def worker_sources_digest() -> str:
@@ -371,9 +381,9 @@ def execution_plan(root: Path, arguments: Any, allowed: Any, identity: Mapping[s
                 raise RepoSandboxError("TypeScript installed version differs from the reviewed lockfile")
             read_regular(root, compiler, MAX_DEP_FILE_BYTES)
             argv += [compiler, "--project", config_path]
-            configs[config_path] = hash_file(root / config_path)
+            configs[config_path] = hash_regular(root, config_path)
             configs["typescript_version"] = dependency.get("version")
-            configs["typescript_entry_sha256"] = hash_file(root / compiler)
+            configs["typescript_entry_sha256"] = hash_regular(root, compiler)
             paths = []
         else:
             raise RepoSandboxError("Node script is outside the reviewed direct-command grammar")
@@ -697,10 +707,17 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
         except (OSError, ValueError, subprocess.SubprocessError, RepoSandboxError) as exc:
             current=self._read_job_marker(job.job_id) or marker
             self._write_job_marker(job.job_id,{**current,"status":"unknown_external_effect","cleanup_proven":False,"reason":str(exc)[:512]})
-            # Ask the exact supervisor to clean; never kill it and fabricate
-            # descendant cleanup. Missing/dead supervisor retains the slot.
+            # Ask the exact supervisor to clean; never fabricate descendant
+            # cleanup. A supervisor that ignores SIGTERM (e.g. stuck reading a
+            # repository-made /dev/zero link) is killed after a bounded grace;
+            # the job stays unknown with cleanup unproven either way.
             if process is not None and process.poll() is None:
-                exact_signal(process.pid,str(marker.get("pid_start_identity") or ""),signal.SIGTERM)
+                start=str(marker.get("pid_start_identity") or "")
+                exact_signal(process.pid,start,signal.SIGTERM)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    exact_signal(process.pid,start,signal.SIGKILL)
             raise RepoSandboxError(str(exc),phase="cleanup",terminal_status="unknown_external_effect") from exc
         finally:
             current = self._read_job_marker(job.job_id) if job.iteration_binding is not None else None

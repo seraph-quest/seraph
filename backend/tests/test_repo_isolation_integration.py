@@ -9,9 +9,12 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
+
+from tests.repo_isolation_support import isolation_unavailable
 
 from config.settings import RepoSandboxSettings
 from src.execution import repo_isolation
@@ -48,7 +51,7 @@ def _job(runner, repo, patch, allowed, posture_digest, job_id="isolated-job"):
 
 def _isolated(preflight):
     if preflight.posture.get("isolation_variant") != "isolated":
-        pytest.skip("host cannot isolate: " + str(preflight.posture.get("isolation_unavailable_reason")))
+        isolation_unavailable(preflight.posture.get("isolation_unavailable_reason"))
 
 
 PROBING_TEST = '''
@@ -195,7 +198,7 @@ def test_a_command_naming_a_hidden_secret_is_refused(tmp_path, real_repo_isolati
     limits = repo_isolation.IsolationLimits()
     posture = repo_isolation.probe(runtime, limits, hidden_paths=[str(secret.parent)], use_cache=False)
     if not posture.isolated:
-        pytest.skip("host cannot isolate: " + str(posture.reason))
+        isolation_unavailable(posture.reason)
     stage = tmp_path / "stage"
     (stage / "workspace").mkdir(parents=True)
     isolation = repo_isolation.CommandIsolation(posture, runtime, limits, stage, (), (str(secret.parent),))
@@ -217,3 +220,83 @@ async def test_require_isolation_round_trips_through_the_settings_api(client, tm
     assert (await client.get("/api/settings/repo-sandbox")).json()["require_isolation"] is True
     rejected = await client.put("/api/settings/repo-sandbox", json={"require_isolation": "yes please"})
     assert rejected.status_code == 422
+
+
+# ---------------------------------------------------------------- runtime layouts under $HOME (#1065 review P2-1)
+
+def _fake_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".local" / "share" / "keyrings").mkdir(parents=True)
+    (home / ".local" / "share" / "keyrings" / "login.keyring").write_text("KEYRING SECRET")
+    (home / ".config").mkdir()
+    (home / ".config" / "secret.json").write_text("CONFIG SECRET")
+    (home / "notes.txt").write_text("HOME SECRET")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.parametrize("layout", [".local/bin/node", "bin/node", "node"])
+def test_home_node_layouts_bind_only_the_executable_and_npm(tmp_path, monkeypatch, layout, real_repo_isolation):
+    from tests.repo_node_runtime import required_node24_runtime
+    real_node = required_node24_runtime()
+    home = _fake_home(tmp_path, monkeypatch)
+    link = home / layout
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(real_node)
+    if layout == ".local/bin/node":
+        (home / ".local" / "lib" / "node_modules" / "npm").mkdir(parents=True)
+    runtime = repo_isolation.runtime_for([link])
+    bound = set(runtime.read_only_paths)
+    for forbidden in (home, home / ".local", home / ".local" / "share", home / ".config", home / "bin"):
+        assert forbidden not in bound
+    assert link in bound and real_node.resolve() in bound
+    ancestors, trees = repo_isolation.host_forbidden_roots(tmp_path / "workspace")
+    posture = repo_isolation.probe(runtime, repo_isolation.IsolationLimits(), forbidden_ancestors=ancestors,
+                                   forbidden_trees=trees, use_cache=False)
+    if not posture.isolated:
+        isolation_unavailable(posture.reason)
+    assert str(link) in posture.runtime_roots.split(";")
+    stage = tmp_path / "stage"
+    (stage / "workspace").mkdir(parents=True)
+    isolation = repo_isolation.CommandIsolation(posture, runtime, repo_isolation.IsolationLimits(), stage)
+    argv, env = isolation.command([str(link), "-e", (
+        "const fs=require('fs');for(const p of process.argv.slice(1))"
+        "{try{fs.readFileSync(p);console.log('READ '+p)}catch(e){console.log(e.code)}}"),
+        str(home / ".local/share/keyrings/login.keyring"), str(home / ".config/secret.json"),
+        str(home / "notes.txt")], stage / "workspace", {})
+    import subprocess
+    result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["ENOENT", "ENOENT", "ENOENT"]
+
+
+def test_a_runtime_root_that_is_or_contains_home_is_refused(tmp_path, monkeypatch, real_repo_isolation):
+    home = _fake_home(tmp_path, monkeypatch)
+    ancestors, trees = repo_isolation.host_forbidden_roots(tmp_path / "workspace")
+    limits = repo_isolation.IsolationLimits()
+    for unsafe in (home, home / ".local", home.parent, home / ".config" / "secret.json", tmp_path / "workspace"):
+        runtime = repo_isolation.IsolationRuntime(Path(sys.executable), (Path(unsafe),), "unsafe")
+        posture = repo_isolation.probe(runtime, limits, forbidden_ancestors=ancestors, forbidden_trees=trees,
+                                       use_cache=False)
+        assert posture.variant == "not_isolated" and posture.reason == "runtime_root_unsafe", unsafe
+    fields = repo_isolation.executor_posture_fields(repo_isolation._not_isolated("runtime_root_unsafe", limits))
+    assert repo_isolation.valid_posture_fields(fields)
+    assert repository_patch_approval_summary(fields).startswith("NOT ISOLATED (runtime_root_unsafe): ")
+
+
+# ---------------------------------------------------------------- trusted post-run reads (#1065 review P3-1)
+
+@pytest.mark.parametrize("swap", ["dev_zero_symlink", "fifo"])
+def test_node_supervisor_refuses_swapped_package_json_without_hanging(tmp_path, swap):
+    import time
+    from tests import test_repo_node
+    action = ("fs.unlinkSync('package.json');fs.symlinkSync('/dev/zero','package.json');" if swap == "dev_zero_symlink"
+              else "fs.unlinkSync('package.json');require('node:child_process').execFileSync('/usr/bin/mkfifo',['package.json']);")
+    script = ("const fs=require('node:fs');" + action +
+              "const {VALUE}=require('../src/app.js');require('node:assert/strict').equal(VALUE,2);\n")
+    executor, repo, job = test_repo_node.make_fixture(tmp_path, script=script)
+    started = time.monotonic()
+    result = executor.execute_job(job)
+    assert time.monotonic() - started < 25
+    assert result["status"] != "succeeded"
+    assert "node_immutable_input" in str(result), str(result)[:2000]

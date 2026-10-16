@@ -29,13 +29,69 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from typing import Literal, Mapping, Sequence
 
 PROBE_TIMEOUT_SECONDS = 10
+# repo_worker.verify_exported_diff's private mkdtemp prefix.
+VERIFIER_SCRATCH_PREFIX = "seraph-diff-verify-"
 _ENV_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")
 NotIsolatedReason = Literal["bwrap_missing", "prlimit_missing", "userns_denied", "probe_failed",
-                            "probe_mismatch"]
+                            "probe_mismatch", "runtime_root_unsafe"]
+NOT_ISOLATED_REASONS = frozenset({"bwrap_missing", "prlimit_missing", "userns_denied", "probe_failed",
+                                  "probe_mismatch", "runtime_root_unsafe"})
+
+
+def _executable_paths(item: str | os.PathLike) -> set[Path]:
+    """Every hop of the executable's symlink chain plus the resolved file.
+
+    Symlink hops are recreated as symlinks inside the sandbox (``wrap``), so
+    ``$ORIGIN``-relative library lookups still resolve against the real file.
+    """
+    paths: set[Path] = set()
+    current = Path(os.path.normpath(Path(item).absolute()))
+    for _ in range(40):
+        paths.add(current)
+        if not current.is_symlink():
+            break
+        current = Path(os.path.normpath(current.parent / os.readlink(current)))
+    paths.add(Path(item).resolve())
+    return paths
+
+
+def _prefix_library_paths(prefix: Path) -> set[Path]:
+    """Only the library trees an interpreter/runtime prefix needs.
+
+    Python: ``lib``/``lib64`` (stdlib or venv site-packages) and
+    ``pyvenv.cfg``. Node: only ``lib/node_modules/npm``. Never the prefix
+    itself, so a prefix such as ``~/.local`` exposes no sibling data.
+    """
+    paths: set[Path] = set()
+    npm = prefix / "lib" / "node_modules" / "npm"
+    if npm.is_dir():
+        paths.add(npm)
+        return paths
+    if (prefix / "pyvenv.cfg").is_file():
+        paths.add(prefix / "pyvenv.cfg")
+    for name in ("lib", "lib64"):
+        library = prefix / name
+        if library.is_dir() and not library.is_symlink() and any(library.glob("python3*")):
+            paths.add(library)
+    return paths
+
+
+def runtime_root_problem(paths: Sequence[Path], *, forbidden_ancestors: Sequence[str | os.PathLike],
+                         forbidden_trees: Sequence[str | os.PathLike]) -> str | None:
+    """A bound runtime path must not be/contain $HOME, credentials or the workspace."""
+    ancestors = [Path(os.path.normpath(path)) for path in forbidden_ancestors]
+    trees = [Path(os.path.normpath(path)) for path in forbidden_trees]
+    for path in map(Path, paths):
+        if any(path == item or path in item.parents for item in ancestors):
+            return str(path)
+        if any(path == tree or tree in path.parents for tree in trees):
+            return str(path)
+    return None
 
 
 class IsolationUnavailable(RuntimeError):
@@ -70,11 +126,19 @@ class IsolationRuntime:
 
     @classmethod
     def for_python(cls, executable: str | os.PathLike = sys.executable) -> "IsolationRuntime":
-        """The current interpreter, its venv and base prefixes (read-only)."""
+        """The interpreter file plus only its prefixes' library trees (read-only)."""
         executable = Path(executable)
-        paths = {Path(sys.prefix), Path(sys.base_prefix), executable.parent, executable.resolve().parent}
+        paths = set(_executable_paths(executable))
+        for prefix in {Path(sys.prefix), Path(sys.base_prefix)}:
+            paths.update(_prefix_library_paths(prefix))
+        paths = {path for path in paths if not _under_usr(path)}
         identity = _digest({"interpreter": str(executable), "paths": sorted(map(str, paths))})
         return cls(executable, tuple(sorted(paths)), identity)
+
+    @property
+    def roots_text(self) -> str:
+        """Operator-visible list of everything bound from the host runtime."""
+        return ";".join(sorted(map(str, self.read_only_paths)))
 
 
 @dataclass(frozen=True)
@@ -98,6 +162,7 @@ class IsolationPosture:
     prlimit_path: str | None = None
     limits_digest: str = ""
     probe_sha256: str | None = None
+    runtime_roots: str = ""
 
     @property
     def isolated(self) -> bool:
@@ -109,7 +174,8 @@ class IsolationPosture:
                  "network_isolation": self.network_isolation, "resource_enforcement": self.resource_enforcement,
                  "host_access": self.host_access, "limits_digest": self.limits_digest}
         if self.isolated:
-            value.update(bwrap_sha256=self.bwrap_sha256, isolation_probe_sha256=self.probe_sha256)
+            value.update(bwrap_sha256=self.bwrap_sha256, isolation_probe_sha256=self.probe_sha256,
+                         runtime_roots_sha256=hashlib.sha256(self.runtime_roots.encode()).hexdigest())
         else:
             value["isolation_unavailable_reason"] = self.reason
         return value
@@ -164,6 +230,9 @@ def wrap(argv: Sequence[str], stage: StagePaths, runtime: IsolationRuntime, limi
                f"--as={limits.address_space_bytes}:{limits.address_space_bytes}",
                f"--fsize={limits.file_size_bytes}:{limits.file_size_bytes}", "--",
                posture.bwrap_path, "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
+    if _disable_userns_supported(posture.bwrap_path):
+        # No nested user namespaces: removes a large kernel attack surface.
+        command += ["--unshare-user", "--disable-userns", "--assert-userns-disabled"]
     for name, value in sorted(variables.items()):
         command += ["--setenv", name, value]
     command += ["--ro-bind", "/usr", "/usr"]
@@ -173,13 +242,17 @@ def wrap(argv: Sequence[str], stage: StagePaths, runtime: IsolationRuntime, limi
     command += ["--ro-bind", "/etc", "/etc", "--proc", "/proc", "--dev", "/dev",
                 "--size", str(limits.tmp_bytes), "--tmpfs", "/tmp"]
     seen: set[Path] = set()
-    read_only = [_absolute(path) for path in (runtime.interpreter.parent, *runtime.read_only_paths, *stage.read_only)]
+    read_only = [_absolute(path) for path in (*runtime.read_only_paths, *stage.read_only)]
     # Parents before children so nested binds stay visible.
     for path in sorted(set(read_only), key=lambda item: len(item.parts)):
         if _under_usr(path) or path in seen:
             continue
         seen.add(path)
-        command += ["--ro-bind", str(path), str(path)]
+        if path.is_symlink():
+            # Recreate the link itself; its target is bound separately.
+            command += ["--symlink", os.readlink(path), str(path)]
+        else:
+            command += ["--ro-bind", str(path), str(path)]
     for path in sorted({_absolute(path) for path in stage.writable}, key=lambda item: len(item.parts)):
         if _under_usr(path):
             raise ValueError("writable stage paths cannot be under /usr")
@@ -198,20 +271,46 @@ interfaces = sorted(name for _, name in socket.if_nameindex())
 visible = [path for path in checks["hidden"] if os.path.lexists(path)]
 limits = {name: list(resource.getrlimit(getattr(resource, name)))
           for name in ("RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_FSIZE", "RLIMIT_NPROC")}
-print(json.dumps({"interfaces": interfaces, "visible": visible, "limits": limits, "uid": os.getuid()}))
+try:
+    os.unshare(os.CLONE_NEWUSER)
+    nested = "allowed"
+except (OSError, AttributeError):
+    nested = "denied"
+print(json.dumps({"interfaces": interfaces, "visible": visible, "limits": limits, "uid": os.getuid(),
+                  "nested_userns": nested}))
 """
 
 _cache: dict[tuple, IsolationPosture] = {}
+_userns_flag_cache: dict[str, bool] = {}
+
+
+def _disable_userns_supported(bwrap_path: str) -> bool:
+    """bubblewrap >= 0.8 can forbid nested user namespaces."""
+    if bwrap_path not in _userns_flag_cache:
+        try:
+            completed = subprocess.run([bwrap_path, "--help"], capture_output=True, timeout=5,
+                                       env={"PATH": "/usr/bin:/bin"})
+            _userns_flag_cache[bwrap_path] = b"--disable-userns" in completed.stdout + completed.stderr
+        except (OSError, subprocess.SubprocessError):
+            _userns_flag_cache[bwrap_path] = False
+    return _userns_flag_cache[bwrap_path]
 _cache_lock = threading.Lock()
 
 
 def probe(runtime: IsolationRuntime, limits: IsolationLimits, *, hidden_paths: Sequence[str | os.PathLike] = (),
+          forbidden_ancestors: Sequence[str | os.PathLike] = (), forbidden_trees: Sequence[str | os.PathLike] = (),
           use_cache: bool = True) -> IsolationPosture:
     """Verify, inside an actual sandbox, that isolation holds on this host.
 
     ``hidden_paths`` (e.g. ``~/.ssh``, the Seraph database and vault) must not
-    exist inside. No packet is sent: the network check only lists interfaces.
+    exist inside. A runtime path that is or contains a ``forbidden_ancestors``
+    entry ($HOME, ~/.local, ~/.config, the workspace) or lies inside a
+    ``forbidden_trees`` entry (credential directories) is refused, because it
+    would expose more than the snapshot. No packet is sent.
     """
+    if runtime_root_problem(runtime.read_only_paths, forbidden_ancestors=forbidden_ancestors,
+                            forbidden_trees=forbidden_trees):
+        return _not_isolated("runtime_root_unsafe", limits)
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         return _not_isolated("bwrap_missing", limits)
@@ -221,7 +320,7 @@ def probe(runtime: IsolationRuntime, limits: IsolationLimits, *, hidden_paths: S
     bwrap_path = str(Path(bwrap).resolve())
     hidden = sorted(str(_absolute(Path(path))) for path in hidden_paths)
     key = (_file_sha256(Path(bwrap_path)), runtime.identity, str(runtime.interpreter), limits.digest,
-           tuple(hidden), str(Path(prlimit).resolve()))
+           tuple(hidden), str(Path(prlimit).resolve()), _disable_userns_supported(bwrap_path))
     if use_cache:
         with _cache_lock:
             if key in _cache:
@@ -229,7 +328,7 @@ def probe(runtime: IsolationRuntime, limits: IsolationLimits, *, hidden_paths: S
     candidate = IsolationPosture("isolated", "bwrap_userns", "netns_loopback_only_verified",
                                  "rlimit_cpu_as_fsize_nproc_and_wall_timeout", "snapshot_bind_only",
                                  bwrap_path=bwrap_path, bwrap_sha256=key[0], prlimit_path=str(Path(prlimit).resolve()),
-                                 limits_digest=limits.digest)
+                                 limits_digest=limits.digest, runtime_roots=runtime.roots_text)
     argv = wrap([str(runtime.interpreter), "-I", "-S", "-c", _PROBE_SOURCE, json.dumps({"hidden": hidden})],
                 StagePaths(), runtime, limits, candidate)
     try:
@@ -246,7 +345,8 @@ def probe(runtime: IsolationRuntime, limits: IsolationLimits, *, hidden_paths: S
         return _not_isolated("probe_failed", limits)
     expected_limits = {"RLIMIT_CPU": [limits.cpu_seconds] * 2, "RLIMIT_AS": [limits.address_space_bytes] * 2,
                        "RLIMIT_FSIZE": [limits.file_size_bytes] * 2, "RLIMIT_NPROC": [limits.max_processes] * 2}
-    if observed.get("interfaces") != ["lo"] or observed.get("visible") != [] or observed.get("limits") != expected_limits:
+    if (observed.get("interfaces") != ["lo"] or observed.get("visible") != [] or observed.get("limits") != expected_limits
+            or (key[-1] and observed.get("nested_userns") != "denied")):
         return _not_isolated("probe_mismatch", limits)
     posture = IsolationPosture(**{**candidate.__dict__, "probe_sha256": _digest({"source": _PROBE_SOURCE,
                                                                                     "observed": observed})})
@@ -284,23 +384,36 @@ def host_secret_paths(workspace_dir: str | os.PathLike | None = None) -> tuple[s
     return tuple(sorted({str(Path(os.path.normpath(path))) for path in paths}))
 
 
-def runtime_for(files: Sequence[str | os.PathLike], *, interpreter: str | os.PathLike = sys.executable) -> IsolationRuntime:
-    """Read-only roots for the executables a command needs.
+def host_forbidden_roots(workspace_dir: str | os.PathLike | None = None) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(forbidden ancestors, forbidden trees) for runtime bindings on this host."""
+    home = Path.home()
+    ancestors = [home, home / ".local", home / ".config", home / ".ssh", home / ".gnupg"]
+    if workspace_dir is not None:
+        ancestors.append(Path(workspace_dir).expanduser().absolute())
+    trees = [home / ".ssh", home / ".gnupg", home / ".config", home / ".aws", home / ".docker"]
+    if workspace_dir is not None:
+        trees.append(Path(workspace_dir).expanduser().absolute())
+    return (tuple(str(Path(os.path.normpath(path))) for path in ancestors),
+            tuple(str(Path(os.path.normpath(path))) for path in trees))
 
-    Each executable's install root (``<root>/bin/<exe>``) is bound, for both
-    the path as configured and its resolved target, plus the probe interpreter.
+
+def runtime_for(files: Sequence[str | os.PathLike], *, interpreter: str | os.PathLike = sys.executable) -> IsolationRuntime:
+    """Read-only host paths for the executables a command needs.
+
+    Each executable file (as configured and resolved) plus only its install
+    prefix's library tree (Python ``lib``/``pyvenv.cfg``, Node's npm). Parent
+    directories such as ``~/.local`` or ``$HOME`` are never bound wholesale.
     """
-    roots: set[Path] = set()
-    for item in (*files, interpreter):
-        for candidate in (Path(item).absolute(), Path(item).resolve()):
-            root = candidate.parent.parent if candidate.parent.name == "bin" else candidate.parent
-            if not _under_usr(root) and root != Path("/"):
-                roots.add(Path(os.path.normpath(root)))
     base = IsolationRuntime.for_python(interpreter)
-    roots.update(base.read_only_paths)
-    roots = {root for root in roots if not _under_usr(root)}
-    identity = _digest({"interpreter": str(interpreter), "roots": sorted(map(str, roots))})
-    return IsolationRuntime(Path(interpreter), tuple(sorted(roots)), identity)
+    paths: set[Path] = set(base.read_only_paths)
+    for item in files:
+        paths.update(_executable_paths(item))
+        for candidate in (Path(item).absolute(), Path(item).resolve()):
+            prefix = candidate.parent.parent if candidate.parent.name == "bin" else candidate.parent
+            paths.update(_prefix_library_paths(prefix))
+    paths = {Path(os.path.normpath(path)) for path in paths if not _under_usr(path)}
+    identity = _digest({"interpreter": str(interpreter), "paths": sorted(map(str, paths))})
+    return IsolationRuntime(Path(interpreter), tuple(sorted(paths)), identity)
 
 
 def limits_for(config) -> IsolationLimits:
@@ -319,22 +432,25 @@ def executor_posture_fields(posture: IsolationPosture) -> dict:
               "resource_enforcement": posture.resource_enforcement, "host_access": posture.host_access,
               "isolation_variant": posture.variant}
     if posture.isolated:
-        fields.update(isolation_bwrap_sha256=posture.bwrap_sha256, isolation_probe_sha256=posture.probe_sha256)
+        fields.update(isolation_bwrap_sha256=posture.bwrap_sha256, isolation_probe_sha256=posture.probe_sha256,
+                      isolation_runtime_roots=posture.runtime_roots)
     else:
         fields["isolation_unavailable_reason"] = posture.reason
     return fields
 
 
 ISOLATION_FIELDS = frozenset({"isolation_variant", "isolation_bwrap_sha256", "isolation_probe_sha256",
-                              "isolation_unavailable_reason"})
+                              "isolation_runtime_roots", "isolation_unavailable_reason"})
 
 
 def job_spec(posture: IsolationPosture, runtime: IsolationRuntime, limits: IsolationLimits,
-             hidden_paths: Sequence[str]) -> dict:
+             hidden_paths: Sequence[str], forbidden_ancestors: Sequence[str] = (),
+             forbidden_trees: Sequence[str] = ()) -> dict:
     """JSON handoff to the supervisor, which re-probes and must match exactly."""
     return {"payload": posture.payload(), "interpreter": str(runtime.interpreter),
             "read_only_paths": [str(path) for path in runtime.read_only_paths], "identity": runtime.identity,
-            "limits": dict(limits.__dict__), "hidden_paths": list(hidden_paths)}
+            "limits": dict(limits.__dict__), "hidden_paths": list(hidden_paths),
+            "forbidden_ancestors": list(forbidden_ancestors), "forbidden_trees": list(forbidden_trees)}
 
 
 @dataclass(frozen=True)
@@ -357,6 +473,7 @@ class CommandIsolation:
             return list(argv), dict(env)
         writable = (Path(cwd), *(path for path in self.extra_writable if path.exists()))
         named = []
+        scratch_root = Path(tempfile.gettempdir()).resolve()
         for item in argv[1:]:
             path = Path(item)
             if not path.is_absolute() or path.is_symlink() or not path.is_file() or _under_usr(path):
@@ -364,7 +481,10 @@ class CommandIsolation:
             path = Path(os.path.normpath(path))
             if any(path == Path(hidden) or Path(hidden) in path.parents for hidden in self.hidden_paths):
                 raise IsolationUnavailable("a repository command named a hidden host secret")
-            if self.stage_root not in path.parents:
+            # Only the trusted diff verifier's private scratch file is bound;
+            # any other absolute path stays invisible inside the sandbox.
+            if (self.stage_root not in path.parents and path.parent.parent == scratch_root
+                    and path.parent.name.startswith(VERIFIER_SCRATCH_PREFIX)):
                 named.append(path)
         stage = StagePaths(writable=writable, read_only=(self.stage_root, *named), cwd=Path(cwd))
         return (wrap(argv, stage, self.runtime, self.limits, self.posture, env=dict(env)),
@@ -376,7 +496,8 @@ def activate(spec: Mapping, *, stage_root: Path, extra_writable: Sequence[Path] 
     runtime = IsolationRuntime(Path(spec["interpreter"]), tuple(Path(path) for path in spec["read_only_paths"]),
                                str(spec["identity"]))
     limits = IsolationLimits(**spec["limits"])
-    current = probe(runtime, limits, hidden_paths=spec["hidden_paths"])
+    current = probe(runtime, limits, hidden_paths=spec["hidden_paths"],
+                    forbidden_ancestors=spec.get("forbidden_ancestors", ()), forbidden_trees=spec.get("forbidden_trees", ()))
     if current.payload() != spec["payload"]:
         raise IsolationUnavailable("isolation_posture_changed")
     return CommandIsolation(current, runtime, limits, Path(stage_root), tuple(Path(path) for path in extra_writable),
@@ -397,15 +518,17 @@ def valid_posture_fields(posture: Mapping) -> bool:
     variant = posture.get("isolation_variant")
     present = ISOLATION_FIELDS & set(posture)
     if variant == "isolated":
-        expected = {"isolation_variant", "isolation_bwrap_sha256", "isolation_probe_sha256"}
+        expected = {"isolation_variant", "isolation_bwrap_sha256", "isolation_probe_sha256", "isolation_runtime_roots"}
         flat = ("bwrap_userns", "netns_loopback_only_verified", "rlimit_cpu_as_fsize_nproc_and_wall_timeout",
                 "snapshot_bind_only")
         return (present == expected and all(isinstance(posture[key], str)
-                and re.fullmatch(r"[0-9a-f]{64}", posture[key]) for key in expected - {"isolation_variant"})
+                and re.fullmatch(r"[0-9a-f]{64}", posture[key])
+                for key in expected - {"isolation_variant", "isolation_runtime_roots"})
+                and isinstance(posture["isolation_runtime_roots"], str)
+                and all(part.startswith("/") for part in posture["isolation_runtime_roots"].split(";") if part)
                 and tuple(posture.get(key) for key in ("isolation_claim", "network_isolation",
                     "resource_enforcement", "host_access")) == flat)
     if variant == "not_isolated":
         return (present == {"isolation_variant", "isolation_unavailable_reason"}
-                and posture["isolation_unavailable_reason"] in {"bwrap_missing", "prlimit_missing",
-                    "userns_denied", "probe_failed", "probe_mismatch"})
+                and posture["isolation_unavailable_reason"] in NOT_ISOLATED_REASONS)
     return not present

@@ -50,8 +50,10 @@ but that evidence authorizes no recovery yet.
 Repository command isolation ([#1065](https://github.com/seraph-quest/seraph/issues/1065))
 is **Partial**: on hosts where bubblewrap user namespaces work (verified on Ubuntu
 26.04 x86_64), repository git/test/build commands run in an OS sandbox with no
-network, only the job's stage visible and CPU/address-space/file-size/process
-limits, recorded as `isolation_claim=bwrap_userns`. Otherwise the posture says
+network, only the job's stage visible among the operator's files (system files
+such as `/etc` and the runtime stay readable, read-only) and per-process
+CPU/address-space/file-size/process-count limits (not total memory or disk),
+recorded as `isolation_claim=bwrap_userns`. Otherwise the posture says
 `isolation_variant=not_isolated` with a reason, the approval begins "NOT
 ISOLATED (<reason>):" and the previous limitation applies: the repository's
 tests run as the Seraph user, can use the network and read local files

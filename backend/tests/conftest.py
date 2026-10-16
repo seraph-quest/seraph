@@ -268,7 +268,11 @@ def default_repo_isolation_not_isolated(request, monkeypatch):
     files, detached processes), which the real sandbox correctly prevents.
     Tests that request ``real_repo_isolation`` use the actual host probe.
     """
-    if "real_repo_isolation" in request.fixturenames:
+    callspec = getattr(request.node, "callspec", None)
+    if "real_repo_isolation" in request.fixturenames or (
+            callspec is not None and callspec.params.get("repo_isolation") == "real"):
+        from src.execution.repo_isolation import clear_probe_cache
+        clear_probe_cache()
         return
     from src.execution import repo_isolation
 

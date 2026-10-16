@@ -384,6 +384,10 @@ def _descriptor_flags(*, directory: bool = False) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     if directory:
         flags |= getattr(os, "O_DIRECTORY", 0)
+    else:
+        # A FIFO or device swapped in by repository code must not block or
+        # stream into the trusted reader; the caller then requires S_ISREG.
+        flags |= getattr(os, "O_NONBLOCK", 0)
     return flags
 
 
@@ -3247,15 +3251,16 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         Returns the executor-posture fields (bound into the posture digest and
         therefore into every approval) and the supervisor handoff spec.
         """
-        from src.execution.repo_isolation import (executor_posture_fields, host_secret_paths, job_spec,
-            limits_for, probe, runtime_for)
+        from src.execution.repo_isolation import (executor_posture_fields, host_forbidden_roots,
+            host_secret_paths, job_spec, limits_for, probe, runtime_for)
         runtime = runtime_for(runtime_files)
         limits = limits_for(self.config)
         hidden = host_secret_paths(self.workspace_dir)
-        posture = probe(runtime, limits, hidden_paths=hidden)
+        ancestors, trees = host_forbidden_roots(self.workspace_dir)
+        posture = probe(runtime, limits, hidden_paths=hidden, forbidden_ancestors=ancestors, forbidden_trees=trees)
         # A not-isolated posture runs exactly as before; only an isolated one
         # hands a spec to the supervisor, which re-probes and must match.
-        spec = job_spec(posture, runtime, limits, hidden) if posture.isolated else None
+        spec = job_spec(posture, runtime, limits, hidden, ancestors, trees) if posture.isolated else None
         return executor_posture_fields(posture), spec
 
     def _activate_direct_isolation(self, preflight, stage: Path):
@@ -3378,6 +3383,11 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             self._write_job_marker(job.job_id, {**marker, "status": "unknown_external_effect", "cleanup_proven": False})
             if pid_start is not None and process.poll() is None:
                 exact_signal(process.pid, pid_start, signal.SIGTERM)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # A supervisor ignoring SIGTERM is killed; cleanup stays unproven.
+                    exact_signal(process.pid, pid_start, signal.SIGKILL)
             raise RepoSandboxError("Original Python supervisor closure requires reconciliation", terminal_status="unknown_external_effect") from exc
         finally:
             if transport_complete:

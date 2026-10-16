@@ -15,6 +15,8 @@ import uuid
 
 import pytest
 
+from tests.repo_isolation_support import isolation_unavailable
+
 from src.execution.repo_isolation import (
     IsolationLimits, IsolationRuntime, IsolationUnavailable, StagePaths, clear_probe_cache, probe, wrap)
 
@@ -41,7 +43,7 @@ def host(tmp_path, monkeypatch):
     hidden = [home / ".ssh", workspace / "seraph.db", workspace / "vault"]
     posture = probe(RUNTIME, SMALL, hidden_paths=hidden, use_cache=False)
     if not posture.isolated:
-        pytest.skip(f"host cannot isolate: {posture.reason}")
+        isolation_unavailable(posture.reason)
     paths = StagePaths(writable=(stage / "workspace",), read_only=(stage / "input",), cwd=stage / "workspace")
     return {"home": home, "workspace": workspace, "stage": stage, "paths": paths, "posture": posture}
 
@@ -199,7 +201,7 @@ def test_probe_reports_mismatch_when_a_hidden_path_would_be_visible(tmp_path):
     # The runtime prefix is bound read-only, so claiming it hidden must fail.
     posture = probe(RUNTIME, SMALL, hidden_paths=[sys.base_prefix], use_cache=False)
     if posture.reason in {"bwrap_missing", "userns_denied", "prlimit_missing"}:
-        pytest.skip(f"host cannot isolate: {posture.reason}")
+        isolation_unavailable(posture.reason)
     assert posture.variant == "not_isolated" and posture.reason == "probe_mismatch"
 
 

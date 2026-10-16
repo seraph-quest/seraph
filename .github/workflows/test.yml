@@ -100,6 +100,24 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
           uv run playwright install --with-deps chromium
 
+      - name: Enable bubblewrap for repository isolation tests (#1065)
+        timeout-minutes: 3
+        run: |
+          sudo apt-get install -y --no-install-recommends bubblewrap || { sudo apt-get update -q && sudo apt-get install -y --no-install-recommends bubblewrap; }
+          probe() { bwrap --unshare-all --unshare-user --die-with-parent --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 --symlink usr/bin /bin --proc /proc --dev /dev /usr/bin/true; }
+          if ! probe; then
+            # Ubuntu runners may restrict unprivileged user namespaces via
+            # AppArmor. Relax it on this disposable CI runner only, so the
+            # isolated repository path is genuinely exercised here.
+            echo "bwrap user namespace denied; relaxing kernel.apparmor_restrict_unprivileged_userns on this CI runner"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          fi
+          if probe; then
+            echo "SERAPH_REQUIRE_REPO_ISOLATION_TESTS=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::bubblewrap isolation is unavailable on this runner; isolated repository tests will skip"
+          fi
+
       - name: List backend shard
         run: uv run python scripts/backend_test_shards.py --shard-count 10 --shard-index ${{ matrix.shard }}
 

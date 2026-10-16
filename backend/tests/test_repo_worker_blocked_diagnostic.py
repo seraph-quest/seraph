@@ -148,9 +148,9 @@ def test_existing_loaded_library_and_link_helpers_still_reject_unrelated_error()
 def test_original_sandbox_method_and_bootstrap_are_source_pinned():
     root = Path(__file__).resolve().parents[1]
     sandbox = (root / 'src/execution/repo_sandbox.py').read_bytes()
-    assert hashlib.sha256(sandbox).hexdigest() == '64c11fd8fa4bae7c3f90ae4cc34207994ac65768105908421097195c57e50a53'
+    assert hashlib.sha256(sandbox).hexdigest() == '5715e6315be17a3db7732489ff545b0dbaf8b73ebabf992fc7a170877f6d2243'
     assert native._PUBLICATION_ORIGINAL_EXECUTE_CODE is native._PUBLICATION_ORIGINAL_EXECUTE.__code__
-    raises = [node for node in ast.walk(ast.parse(sandbox)) if isinstance(node, ast.Raise) and node.lineno == 3903]
+    raises = [node for node in ast.walk(ast.parse(sandbox)) if isinstance(node, ast.Raise) and node.lineno == 3913]
     assert len(raises) == 1
     assert raises[0].exc.args[0].value == 'local worker was blocked before terminal readback'
     source = (root / 'src/execution/repo_publication_runtime.py').read_bytes()

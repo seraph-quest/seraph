@@ -378,8 +378,8 @@ def main(request_file: Path) -> int:
     signal.signal(signal.SIGINT,cancel)
     # Insert only the server-owned backend, never the staged repository.
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-    from src.execution.repo_node import PROFILE, execution_plan, hash_file, immutable, read_regular, worker_sources_digest, NodeRepoRepairExecutor
-    from src.execution.repo_sandbox import _patch_paths_from_diff, _digest_entries, SnapshotEntry
+    from src.execution.repo_node import PROFILE, execution_plan, hash_file, hash_regular, immutable, read_regular, worker_sources_digest, NodeRepoRepairExecutor
+    from src.execution.repo_sandbox import _patch_paths_from_diff, _digest_entries, RepoSandboxError, SnapshotEntry
     from src.execution.repo_worker import _write_private_output, verify_exported_diff
     descriptor=os.open(request_file,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
     try:
@@ -451,7 +451,13 @@ def main(request_file: Path) -> int:
             # every descendant remains subject to the strict cleanup oracle.
             result=command(["/usr/bin/git","-c","maintenance.auto=false","-c","gc.auto=0",*args])
             if result["exit_code"]!=0:raise ValueError("node_git_stage_failed")
-        before_inputs={path:hash_file(workspace/path) for path in ("package.json","package-lock.json")}
+        def regular_digest(path):
+            # Repository commands may swap these for links, FIFOs or devices.
+            try:
+                return hash_regular(workspace,path)
+            except RepoSandboxError as exc:
+                raise ValueError("node_immutable_input_not_regular") from exc
+        before_inputs={path:regular_digest(path) for path in ("package.json","package-lock.json")}
         for entry in plan["commands"]:
             # Generated test paths must now exist as bounded regular files.
             for path in entry["paths"]:read_regular(workspace,path,job["limits"]["max_file_bytes"])
@@ -463,7 +469,7 @@ def main(request_file: Path) -> int:
                 reason="node_command_failed_or_cancelled_or_timeout_or_descendant";break
         if reason and not job.get("iteration_binding"):
             raise ValueError(reason)
-        if any(hash_file(workspace/path)!=value for path,value in before_inputs.items()):raise ValueError("node_immutable_input_changed")
+        if any(regular_digest(path)!=value for path,value in before_inputs.items()):raise ValueError("node_immutable_input_changed")
         output_dir=plan["output_directory"]
         # Validate every output path and byte through descriptor-safe snapshot;
         # dependency/config changes cannot be adopted as source patch evidence.
@@ -501,7 +507,7 @@ def main(request_file: Path) -> int:
             apply_patch=apply_exported,
             ignore=lambda path:path.startswith("node_modules/") or bool(output_dir and path.startswith(output_dir+"/")))
         _write_private_output(output,"diff.patch",diff)
-    except (ValueError,OSError) as exc:
+    except (ValueError,OSError,RepoSandboxError) as exc:
         reason=str(exc)[:512]
     finally:
         proof=cleanup(deadline)

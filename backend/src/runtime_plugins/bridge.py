@@ -32,10 +32,18 @@ BUILD_REASONS = frozenset({"runtime_package_missing", "runtime_build_stale", "bu
                            "runtime_package_invalid_or_missing", "package_pin_mismatch"})
 
 
+# Docker images build the reviewed package; there the fix is a rebuilt, restarted backend.
+DOCKER_RECOVERY = "Under Docker, rebuild and restart the backend with ./manage.sh -e prod up -d --build."
+
+
 def cordis_recovery(state: str, reason: str | None) -> str | None:
     """The exact operator fix for a host that is not ready; never a fallback."""
     if state == "ready":
         return None
+    return f"{_local_recovery(state, reason)} {DOCKER_RECOVERY}"
+
+
+def _local_recovery(state: str, reason: str | None) -> str:
     if reason in NODE_REASONS:
         return ("Install Node 22.12+ or 24.x and set CORDIS_NODE_PATH to it (or put it first on PATH), "
                 "then run ./manage.sh -e dev cordis build and restart with ./manage.sh -e dev local up.")

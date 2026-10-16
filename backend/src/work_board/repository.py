@@ -1868,9 +1868,11 @@ class WorkBoardRepository:
         request: WorkBoardActionRequest,
         *, accepted_method_stage=None,
     ) -> BoardMutation:
-        if accepted_method_stage is not None:
+        if accepted_method_stage is not None or request.action.value == "promote":
             await _begin_sqlite_immediate(db)
         task = await self._owned_task(db, owner, task_id)
+        if request.action.value == "promote":
+            await db.refresh(task)
         expected = request.expected_revision
         if task.task_revision != expected:
             raise BoardRevisionConflict(task.task_id, expected, task.task_revision)
@@ -2031,6 +2033,10 @@ class WorkBoardRepository:
 
         values["task_revision"] = expected + 1
         values["updated_at"] = _now()
+        if (request.action.value == "promote" and previous is WorkBoardStatus.triage
+            and task.capability_id == "agent.task.v1"):
+            from src.work_board.channel_capture import check_current_captured_task_source
+            await check_current_captured_task_source(db, owner, task)
         await self._cas_task_update(
             db,
             owner,

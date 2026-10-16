@@ -229,11 +229,16 @@ class AudioIngressJob(SQLModel, table=True):
     __tablename__ = "audio_ingress_jobs"
     __table_args__ = (
         Index("ux_audio_ingress_jobs_request_id", "request_id", unique=True),
+        Index("ux_audio_ingress_jobs_workflow_job_id", "workflow_job_id", unique=True),
+        CheckConstraint("revision >= 0", name="ck_audio_ingress_revision_nonnegative"),
     )
 
     id: str = Field(default_factory=_uuid, primary_key=True)
     request_id: str = Field(index=True)
     request_digest: str = Field(index=True)
+    workflow_job_id: Optional[str] = Field(default=None, foreign_key="workflow_run_states.run_identity")
+    execution_binding_digest: Optional[str] = Field(default=None)
+    revision: int = Field(default=0)
     owner_principal_id: str = Field(index=True)
     operator_session_id: Optional[str] = Field(default=None, index=True)
     session_id: str = Field(foreign_key="sessions.id", index=True)
@@ -295,6 +300,8 @@ class AudioConsentGrant(SQLModel, table=True):
     owner_principal_id: str = Field(index=True)
     operator_session_id: str = Field(index=True)
     boundary: str = Field(index=True)  # capture | cloud_upload
+    # Issued only by the canonical paired admission transaction, once.
+    audio_execution_binding_json: Optional[str] = Field(default=None)
     state: str = Field(default="active", index=True)  # active | revoked
     granted_at: datetime = Field(default_factory=_now, index=True)
     expires_at: datetime = Field(index=True)
@@ -304,6 +311,37 @@ class AudioConsentGrant(SQLModel, table=True):
 
 
 # ─── Session Todo ───────────────────────────────────────
+
+class ModelAudioDocumentationAttestationRecord(SQLModel, table=True):
+    """Documentary staging, deliberately separate from empirical route proofs."""
+    __tablename__ = "model_audio_documentation_attestations"
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    original_root_id: str = Field(index=True)
+    profile_hash: str = Field(index=True)
+    revision: int = Field(default=0)
+    state: str = Field(default="staged", index=True)
+    binding_json: str
+    bundle_digest: str = Field(default="")
+    error_code: Optional[str] = Field(default=None)
+    reserved_bytes: int = Field(default=540672)
+    created_at: datetime = Field(default_factory=_now)
+    expires_at: datetime
+
+
+class ModelAudioDocumentationSourceRecord(SQLModel, table=True):
+    __tablename__ = "model_audio_documentation_sources"
+    __table_args__ = (Index("ux_audio_documentation_source_ordinal", "attestation_id", "ordinal", unique=True),)
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    attestation_id: str = Field(foreign_key="model_audio_documentation_attestations.id", index=True)
+    ordinal: int
+    source_id: str
+    source_url: str
+    object_id: str
+    sha256: str
+    size_bytes: int
+    acquired_at: datetime = Field(default_factory=_now)
+
 
 class SessionTodo(SQLModel, table=True):
     __tablename__ = "session_todos"
@@ -1320,6 +1358,8 @@ class WorkBoardTask(SQLModel, table=True):
     # authority for state/digest; this opaque pointer makes owner-scoped task
     # projections and the task/artifact CAS cheap without exposing input bytes.
     input_artifact_id: Optional[str] = Field(default=None, index=True)
+    # Private server-issued channel provenance. Never accepted by Task DTOs.
+    channel_capture_origin_json: Optional[str] = Field(default=None)
     # Metadata-only reviewed proposal binding; the task and durable native
     # job remain execution authority, never the proposal itself.
     pipeline_operation_id: Optional[str] = Field(default=None, index=True)
@@ -2778,6 +2818,7 @@ class TelegramTransportState(SQLModel, table=True):
     transit_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
     model_consent_reference: Optional[str] = Field(default=None, index=True)
     model_consent_expires_at: Optional[datetime] = Field(default=None, index=True)
+    capture_binding_json: Optional[str] = Field(default=None)
     cursor: int = Field(default=0, index=True)
     sequence: int = Field(default=0, index=True)
     rate_events_json: str = Field(default="[]")

@@ -313,11 +313,11 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1733,
-        "_governed_research_chat_completion",
+        1742,
+        "_governed_bounded_chat_transfer",
         "client.stream",
         "canonical_adapter",
-        "Existing readonly_research_child leaf transfers one nonstreaming model response under the governed route, original deadline and fixed byte envelope; HTTP streaming bounds transfer rather than enabling a new inference caller.",
+        "Shared research/audio leaf transfers one nonstreaming response under the existing governed route, original deadline and closed research/audio byte envelope; audio additionally requires its native binding and source-attested endpoint contract. HTTP streaming bounds transfer; no extra client, queue, retry or fallback exists.",
         "Retain as a governed leaf adapter with the existing caller context, current policy fence and accounting ownership.",
     ),
     _review(
@@ -331,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4945,
+        5011,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -370,6 +370,33 @@ _REVIEWED_EXCEPTIONS = (
         "Keep behind the guarded browser source-read contract; reclassify if the endpoint becomes an inference route.",
     ),
     _review(
+        "extensions/telegram_document_transport.py",
+        48,
+        "TelegramDocumentHTTP.acquire",
+        "client.stream",
+        "non_model_transport",
+        "Fixed Telegram getFile metadata read for an already paired, consented channel document; bounded to 8 KiB, redirects and env proxies disabled, token-bearing URLs never logged. It does not request model inference.",
+        "Keep behind the channel document ingest owner; reclassify if this leaf ever contacts a model endpoint.",
+    ),
+    _review(
+        "extensions/telegram_document_transport.py",
+        62,
+        "TelegramDocumentHTTP.acquire",
+        "client.stream",
+        "non_model_transport",
+        "Fixed Telegram file byte read that streams the selected document into C6 quarantine under the caller's size bound; it does not request model inference.",
+        "Keep behind the channel document ingest owner; reclassify if this leaf ever contacts a model endpoint.",
+    ),
+    _review(
+        "model_fabric/audio_documentation.py",
+        274,
+        "metadata_get",
+        "client.stream",
+        "non_model_transport",
+        "Fixed-host, public-IP-pinned OpenRouter key/endpoint metadata GET for the optional audio route documentation; byte-bounded, no redirect or retry, and a separate metadata credential. It never submits inference.",
+        "Keep as metadata-only documentation evidence; any audio inference must go through governed model-fabric admission.",
+    ),
+    _review(
         "browser/downloads.py",
         628,
         "OwnedDownloadTransport._fetch",
@@ -389,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4018,
+        4084,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -398,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4098,
+        4164,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -407,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4554,
+        4620,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -416,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4633,
+        4699,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -425,7 +452,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1519,
+        1595,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -434,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1532,
+        1608,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -443,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1547,
+        1623,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

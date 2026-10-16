@@ -17,10 +17,13 @@ async def lifespan(app):
     service = DocumentService()
     await service.start()
     app.state.document_service = service
+    from src.api.telegram import default_telegram_transport
+    default_telegram_transport.document_service = service
     try:
         yield
     finally:
         await service.stop()
+        default_telegram_transport.document_service = None
         app.state.document_service = None
 
 
@@ -271,12 +274,14 @@ async def propose_preparation(request: Request, body: PreparationCreate):
 async def read_preparation(request: Request, task_id: str):
     from src.api.work_board import dispatcher
     from src.work_board.document_preparation import private_view
+    from src.work_board.channel_capture import staged_captured_source_identity
     operator = _operator(request)
     try:
         if dispatcher.general_tasks is None:
             raise BoardError("document_preparation_unavailable", "Restore the local task service", status_code=503)
-        async with get_session() as db:
-            return await private_view(db, _owner(operator), operator, dispatcher.general_tasks, dispatcher.jobs, task_id)
+        with staged_captured_source_identity():
+            async with get_session() as db:
+                return await private_view(db, _owner(operator), operator, dispatcher.general_tasks, dispatcher.jobs, task_id)
     except BoardError as exc:
         _raise_board_error(exc)
     except (ValueError, OSError):
@@ -372,14 +377,16 @@ async def delete_source(request: Request, identifier: str, expected_revision: in
 
 @router.post("/read")
 async def read_document(request: Request, body: DocumentReadInput):
+    from src.work_board.channel_capture import staged_captured_source_identity
     operator = _operator(request)
     owner = _owner(operator)
     service = getattr(request.app.state, "document_service", None)
     if service is None:
         raise HTTPException(status_code=503, detail={"code": "document_service_inactive"})
     try:
-        async with get_session() as db:
-            return await service.read(db, owner, body, operator=operator)
+        with staged_captured_source_identity():
+            async with get_session() as db:
+                return await service.read(db, owner, body, operator=operator)
     except BoardError as exc:
         _raise_board_error(exc)
     except (ValueError, OSError):

@@ -40,7 +40,9 @@ def _jobs(jobs):
 
 async def admit_service_job(*, operator, origin_method: str, native_branch: str, candidate: dict,
                             idempotency_key: str, reviewed_composition, goal_id: str | None = None,
-                            goal_revision: int | None = None, jobs=None) -> tuple[dict, bool]:
+                            goal_revision: int | None = None, jobs=None,
+                            extra_authority: dict | None = None,
+                            deadline_at: datetime | None = None) -> tuple[dict, bool]:
     """Admit one Cordis-bound job; returns (job, replayed)."""
     from src.auth.ownership import _current_root
     from src.auth.service import authenticate_principal
@@ -69,6 +71,12 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
         if candidate["method"] != origin_method:
             raise NativeServiceBlocked("native_governed_candidate_changed")
         job_kind = GOVERNED_JOB_KIND
+    elif native_branch == "agent_loop":
+        from .agent_turns import STEP_JOB_KIND, validate_step_candidate
+        candidate = validate_step_candidate(candidate)
+        if candidate["method"] != origin_method:
+            raise NativeServiceBlocked("native_turn_candidate_changed")
+        job_kind = STEP_JOB_KIND
     else:
         raise NativeServiceBlocked("native_branch_unsupported")
     job_id = "cordis-svc:" + _digest({"root": operator.session_id, "kind": job_kind, "key": idempotency_key})
@@ -82,11 +90,19 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
                                             goal_bound=goal_id is not None, reviewed_composition=reviewed_composition)
             prior = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))
             deadline = datetime.now(timezone.utc) + SERVICE_TIMEOUT
+            if deadline_at is not None:
+                # A step never outlives the turn that owns it.
+                deadline = min(deadline, deadline_at)
             if prior is not None:
                 # An exact retry carries the original cutoff; it never renews it.
                 deadline = prior.deadline_at.replace(tzinfo=prior.deadline_at.tzinfo or timezone.utc)
         authority = {"principal": operator.principal.principal_id, "owner_kind": "user",
                      "session_id": operator.session_id, "grants": _grants(current.principal)}
+        if extra_authority:
+            if native_branch != "governed" or set(extra_authority) != {"adapter_scope"}:
+                raise NativeServiceBlocked("native_authority_extension_invalid")
+            # Sealed with the job; part of its authority digest, never caller-editable later.
+            authority = {**authority, **extra_authority}
         spec = DurableJobSpec(
             identity=DurableJobIdentity(job_id=job_id, owner_kind="user",
                                         owner_principal_id=operator.principal.principal_id, job_kind=job_kind,

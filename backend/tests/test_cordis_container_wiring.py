@@ -32,7 +32,9 @@ def test_compose_passes_runtime_cordis_as_a_named_build_context():
 
 def test_dockerfile_builds_the_reviewed_package_in_a_pinned_node_stage():
     stages = re.findall(r"^FROM (\S+)(?: AS (\S+))?$", DOCKERFILE, re.M)
-    assert stages[0] == (f"node:{NODE}-bookworm-slim", "cordis-build")
+    # The exact Node tag, pinned by an image digest (#1113) so a re-pushed tag never changes the build.
+    assert re.fullmatch(rf"node:{re.escape(NODE)}-bookworm-slim@sha256:[0-9a-f]{{64}}", stages[0][0]), stages[0]
+    assert stages[0][1] == "cordis-build"
     assert stages[-1][0] == "ghcr.io/astral-sh/uv:python3.12-bookworm-slim" and stages[-1][1] == ""
     build = DOCKERFILE[DOCKERFILE.index("AS cordis-build"):DOCKERFILE.index("FROM ghcr.io/astral-sh/uv")]
     assert f'test "$(node --version)" = "v{NODE}"' in build and f'test "$(npm --version)" = "{NPM_VERSION}"' in build

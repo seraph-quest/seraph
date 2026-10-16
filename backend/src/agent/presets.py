@@ -160,8 +160,9 @@ def require_child(preset_id: str, *, name: str, runtime_path: str | None, temper
                   tool_names: list[str], rule_tools: set[str] | None = None) -> None:
     """A child's actual agent must equal its preset: a preset never widens a specialist.
 
-    ``rule_tools`` is the rule preset's admission-time surface (that server's
-    filtered tools); fixed specialists keep their exact reviewed tool list.
+    ``rule_tools`` is a rule preset's admission-time surface (that server's
+    filtered tools, or the registered workflow tools); fixed specialists keep
+    their exact reviewed tool list.
     """
     value = preset(preset_id)
     if value["kind"] != "child":
@@ -173,9 +174,7 @@ def require_child(preset_id: str, *, name: str, runtime_path: str | None, temper
             or max_steps != preset_max_steps(preset_id)):
         raise PresetError("agent_preset_changed")
     tools = value["tools"]
-    if tools == "rule:workflow_tools":
-        allowed = {item for item in tool_names if item.startswith("workflow_")}
-    elif tools == "rule:mcp_server_filtered_tools":
+    if isinstance(tools, str) and tools.startswith("rule:"):
         allowed = set(rule_tools or ())
     else:
         allowed = set(tools)

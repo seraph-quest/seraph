@@ -368,6 +368,7 @@ async def test_rule_presets_bind_mcp_and_workflow_specialists_to_their_admission
     async with delegation_host(jobs) as host:
         _, turn = await _turn(host, jobs)
         mcp = specialist("mcp_fixture", [tools(call("lookup", {"key": "a"})), final("record a")], [Lookup()])
+        mcp.seraph_mcp_server = "fixture"  # set by create_mcp_specialist: the exact server identity
         agent = orchestrator([delegate("mcp_fixture"), final("Found record a.")], [mcp])
         assert await _run(turn, agent) == "Found record a."
         (child,) = await _runs(jobs, CHILD_TURN_JOB_KIND)
@@ -376,17 +377,90 @@ async def test_rule_presets_bind_mcp_and_workflow_specialists_to_their_admission
         # A tool the server's filtered surface does not offer is outside the rule preset.
         _, turn = await _turn(host, jobs, message_id="m-2")
         widened = specialist("mcp_fixture", [], [Lookup(), ReadFile()])
+        widened.seraph_mcp_server = "fixture"
+        # A specialist that does not name its exact server (sanitized names can collide) has no surface.
+        anonymous = specialist("mcp_fixture", [], [Lookup()])
+        for index, agent_under_test in enumerate((widened, anonymous)):
+            _, turn = await _turn(host, jobs, message_id=f"m-mcp-{index}")
+            with pytest.raises(Exception) as stopped:
+                await _run(turn, orchestrator([delegate("mcp_fixture")], [agent_under_test]))
+            assert turn_failure_reason(stopped.value) == "agent_turn_child_blocked"
+            assert turn.child_block == ("mcp_fixture", "agent_preset_tools_exceeded")
+
+
+class Workflow(Tool):
+    description = "Run a workflow."
+    inputs = {"goal": {"type": "string", "description": "goal"}}
+    output_type = "string"
+
+    def __init__(self, name):
+        self.name = name
+        super().__init__()
+
+    def forward(self, goal):
+        return f"{self.name} ran"
+
+
+async def test_workflow_runner_is_bound_to_the_registered_workflow_tools(accounting_db, real_auth, delegating, monkeypatch):  # noqa: F811
+    """Through the real admission path: a registered workflow runs; an unregistered workflow_ name does not."""
+    from src.workflows.manager import workflow_manager
+    monkeypatch.setattr(workflow_manager, "get_tool_metadata",
+                        lambda name: {"risk_level": "low"} if name == "workflow_daily_review" else None)
+    jobs = DurableJobRepository()
+    async with delegation_host(jobs) as host:
+        _, turn = await _turn(host, jobs)
+        runner = specialist("workflow_runner", [tools(call("workflow_daily_review", {"goal": "today"})),
+                                                final("reviewed")], [Workflow("workflow_daily_review")],
+                            temperature=0.2)
+        assert await _run(turn, orchestrator([delegate("workflow_runner"), final("Done.")], [runner])) == "Done."
+        (child,) = await _runs(jobs, CHILD_TURN_JOB_KIND)
+        assert json.loads(child.checkpoint_context_json)["preset_id"] == "specialist.workflow_runner"
+        _, turn = await _turn(host, jobs, message_id="m-2")
+        smuggled = specialist("workflow_runner", [], [Workflow("workflow_daily_review"),
+                                                      Workflow("workflow_unregistered")], temperature=0.2)
         with pytest.raises(Exception) as stopped:
-            await _run(turn, orchestrator([delegate("mcp_fixture")], [widened]))
+            await _run(turn, orchestrator([delegate("workflow_runner")], [smuggled]))
+        assert turn.child_block == ("workflow_runner", "agent_preset_tools_exceeded")
         assert turn_failure_reason(stopped.value) == "agent_turn_child_blocked"
-        assert turn.child_block == ("mcp_fixture", "agent_preset_tools_exceeded")
-        # workflow_runner's rule: only workflow tools.
-        from src.agent.presets import PresetError, require_child
-        require_child("specialist.workflow_runner", name="workflow_runner", runtime_path="workflow_runner",
-                      temperature=0.2, max_steps=6, tool_names=["workflow_daily_review"])
-        with pytest.raises(PresetError):
-            require_child("specialist.workflow_runner", name="workflow_runner", runtime_path="workflow_runner",
-                          temperature=0.2, max_steps=6, tool_names=["workflow_daily_review", "write_file"])
+
+
+async def test_a_child_that_fails_before_its_first_step_still_counts_toward_the_cap(accounting_db, real_auth, delegating):  # noqa: F811
+    """Every admitted child counts, so a failing specialist cannot be retried without bound."""
+    class Broken(ScriptedModel):
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("provider unavailable")
+    jobs = DurableJobRepository()
+    async with delegation_host(jobs) as host:
+        _, turn = await _turn(host, jobs)
+        worker = specialist("file_worker", [], [ReadFile()])
+        broken = Broken([])
+        broken._runtime_path, broken.kwargs["temperature"] = "file_worker", 0.3
+        worker.model = broken
+        agent = orchestrator([delegate(call_id=f"w{index}") for index in range(5)] + [final("Gave up.")], [worker])
+        assert await _run(turn, agent) == "Gave up."
+        observations = [str(step.observations) for step in agent.memory.steps if getattr(step, "observations", None)]
+        assert sum("Delegation limit reached for this turn (4)" in item for item in observations) == 1
+        children = await _runs(jobs, CHILD_TURN_JOB_KIND)
+        assert len(children) == 4 and all(json.loads(run.checkpoint_context_json)["steps"] == [] for run in children)
+        assert all(run.status == "blocked" for run in children)
+
+
+async def test_an_unsupported_specialist_agent_settles_its_child_and_blocks_the_parent(accounting_db, real_auth, delegating):  # noqa: F811
+    from smolagents import ToolCallingAgent as PlainToolCallingAgent
+    jobs = DurableJobRepository()
+    async with delegation_host(jobs) as host:
+        _, turn = await _turn(host, jobs)
+        model = ScriptedModel([])
+        model._runtime_path, model.kwargs["temperature"] = "file_worker", 0.3
+        plain = PlainToolCallingAgent(tools=[ReadFile()], model=model, name="file_worker", description="plain",
+                                      max_steps=6, verbosity_level=0)
+        with pytest.raises(Exception) as stopped:
+            await _run(turn, orchestrator([delegate()], [plain]))
+        assert turn_failure_reason(stopped.value) == "agent_turn_child_blocked"
+        assert turn.child_block == ("file_worker", "agent_turn_agent_unsupported")
+        (child,) = await _runs(jobs, CHILD_TURN_JOB_KIND)
+        assert child.status == "blocked"
+        assert json.loads(child.checkpoint_context_json)["settlement"]["outcome"] == "blocked"
 
 
 async def test_store_secret_stays_denied_inside_a_delegated_vault_keeper(accounting_db, real_auth, delegating):  # noqa: F811

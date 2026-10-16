@@ -230,7 +230,10 @@ def create_mcp_specialist(
     if not description:
         tool_names = [getattr(t, "name", str(t)) for t in tools]
         description = f"MCP server '{server_name}' with tools: {', '.join(tool_names)}"
-    return create_specialist(name, description, tools, temperature=0.3, max_steps=6)
+    agent = create_specialist(name, description, tools, temperature=0.3, max_steps=6)
+    # The exact server identity, for the Cordis rule preset (#1020): sanitized names can collide.
+    agent.seraph_mcp_server = server_name
+    return agent
 
 
 def list_specialist_descriptors(

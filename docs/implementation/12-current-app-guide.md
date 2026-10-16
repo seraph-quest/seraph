@@ -714,8 +714,9 @@ workspace maintenance fence, and chat stays blocked until then. After the fenced
 (`ready -> draining -> blocked` at a higher epoch with owner `cordis` -> `ready`
 on the running child's boot proof) every chat ingress runs through the Cordis
 agent loop; a Cordis owner that is not ready, a host that is not admitting, or
-`use_delegation=true` (`delegation_pending_1020`) blocks chat visibly with the
-exact fix and never falls back to legacy. Rollback is another higher epoch.
+`use_delegation=true` without a ready Cordis delegation owner
+(`delegation_owner_not_ready`, #1020 part 2) blocks chat visibly with the exact
+fix and never falls back to legacy. Rollback is another higher epoch.
 `/api/runtime/status` reports `chat_runtime {loop, route, owner_epoch, reason,
 recovery}`, the Settings Cordis panel shows it, and the WS status line names the
 loop (`cordis.agent-loop.v1` or `legacy.smolagents`).

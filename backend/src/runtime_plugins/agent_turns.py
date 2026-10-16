@@ -789,7 +789,6 @@ class CordisTurn:
 
     async def _cancel_children(self, reason: str) -> None:
         """Cancel every live delegated child through the durable owner; a mid-call child tool stays unknown."""
-        from src.db.models import WorkflowRunState
         from src.workflows.job_runtime import DurableJobError
         child = self.active_child
         if child is not None:
@@ -797,6 +796,12 @@ class CordisTurn:
             with suppress(TurnBlocked, DurableJobError):
                 await child._write_context(lambda context: None, effects=lambda items: _canonical(
                     _unknown_open_intents(items)))
+        await self._sweep_children(reason)
+
+    async def _sweep_children(self, reason: str) -> None:
+        """Cancel every still-live durable child of this turn through the job owner."""
+        from src.db.models import WorkflowRunState
+        from src.workflows.job_runtime import DurableJobError
         async with self.jobs._session() as db:
             children = (await db.execute(select(WorkflowRunState.run_identity).where(
                 WorkflowRunState.parent_run_identity == self.job_id,
@@ -875,8 +880,10 @@ class CordisTurn:
         """Run one managed-agent call as a durable child turn (from the agent's worker thread).
 
         Refusals before admission (nesting, the per-turn cap, no time left) are observations,
-        exactly as legacy limits are, and do not count toward the cap. A host, epoch or preset
-        failure stops the parent (``agent_turn_child_blocked``) instead of becoming an observation.
+        exactly as legacy limits are, and do not count toward the cap; every admitted child does,
+        even one that fails before its first step, so a failing specialist cannot be retried
+        without bound. A host, epoch or preset failure stops the parent
+        (``agent_turn_child_blocked``) instead of becoming an observation.
         """
         from src.agent.presets import PresetError, require_child, specialist_preset_id
         from src.agent.tool_calling_agent import control_flow_interrupt
@@ -897,7 +904,7 @@ class CordisTurn:
             require_child(preset_id, name=tool_name, runtime_path=getattr(model, "_runtime_path", None),
                           temperature=(getattr(model, "kwargs", None) or {}).get("temperature"),
                           max_steps=int(getattr(managed, "max_steps", 0)), tool_names=tool_names,
-                          rule_tools=_mcp_rule_tools(tool_name) if preset_id == "specialist.mcp" else None)
+                          rule_tools=_rule_tools(preset_id, managed, tool_names))
         except PresetError as exc:
             self.child_block = (tool_name, exc.reason_code)
             raise TurnBlocked("agent_turn_child_blocked") from exc
@@ -910,16 +917,18 @@ class CordisTurn:
             self.run_sync(self.tool_outcome(step_index=step_index, call_index=call_index, tool_name=tool_name,
                                             outcome="no_effect"))
             raise TurnBlocked("agent_turn_child_blocked") from exc
+        # Admitted: the child counts toward the cap from here, whatever happens next.
+        self.children_ran += 1
         self.active_child = child
-        restore = child.attach(managed)
+        restore = None
         try:
             try:
+                restore = child.attach(managed)
                 result = execute(tool_name, arguments)
             finally:
-                restore()
+                if restore is not None:
+                    restore()
                 self.active_child = None
-                if child._steps:
-                    self.children_ran += 1
         except BaseException as exc:
             interrupt = control_flow_interrupt(exc)
             blocked = turn_failure_reason(exc)
@@ -956,6 +965,8 @@ class CordisTurn:
         if child.preset_digest != preset_digest(preset_id):
             self.child_block = (tool_name, "agent_preset_changed")
             raise TurnBlocked("agent_turn_child_blocked")
+        # Defensive: no other child of this turn may outlive the call that admitted it.
+        self.run_sync(self._sweep_children("agent_turn_child_orphaned"))
         return result
 
     def _record_child(self, child: "CordisTurn", tool_name: str, step_index: int, call_index: int) -> None:
@@ -1104,18 +1115,32 @@ def _unknown_open_intents(items: list) -> list:
     return marked
 
 
-def _mcp_rule_tools(name: str) -> set[str]:
-    """The ``specialist.mcp`` rule surface: that server's tools after today's policy filter."""
-    from src.agent.specialists import mcp_specialist_runtime_path
+def _rule_tools(preset_id: str, managed, tool_names: list[str]) -> set[str] | None:
+    """The admission-time surface of a rule preset; ``None`` for a fixed specialist."""
+    if preset_id == "specialist.mcp":
+        return _mcp_rule_tools(getattr(managed, "seraph_mcp_server", None))
+    if preset_id == "specialist.workflow_runner":
+        # Only workflow tools the workflow owner actually built and registered, not any
+        # tool that merely carries the prefix.
+        from src.workflows.manager import workflow_manager
+        return {name for name in tool_names if name.startswith("workflow_")
+                and workflow_manager.get_tool_metadata(name) is not None}
+    return None
+
+
+def _mcp_rule_tools(server_name) -> set[str]:
+    """The ``specialist.mcp`` rule surface: that exact connected server's tools after today's
+    policy filter. The specialist carries the server's own name; sanitized runtime names can
+    collide, so they are never used to find the server."""
     from src.tools.mcp_manager import mcp_manager
     from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
-    for server in mcp_manager.get_config():
-        server_name = str(server.get("name") or "")
-        if server_name and mcp_specialist_runtime_path(server_name) == name and mcp_manager.is_connected(server_name):
-            return {tool.name for tool in filter_tools(mcp_manager.get_server_tools(server_name),
-                                                       get_current_tool_policy_mode(), is_mcp=True,
-                                                       mcp_mode=get_current_mcp_policy_mode())}
-    return set()
+    if type(server_name) is not str or not server_name or not mcp_manager.is_connected(server_name):
+        return set()
+    if [str(server.get("name") or "") for server in mcp_manager.get_config()].count(server_name) != 1:
+        return set()
+    return {tool.name for tool in filter_tools(mcp_manager.get_server_tools(server_name),
+                                               get_current_tool_policy_mode(), is_mcp=True,
+                                               mcp_mode=get_current_mcp_policy_mode())}
 
 
 def turn_failure_reason(exc: BaseException) -> str | None:

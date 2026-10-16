@@ -8,7 +8,7 @@ from typing import AsyncIterator
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from config.settings import settings
 from src.agent.session import session_manager
@@ -64,6 +64,57 @@ async def _interaction_response(call):
         raise HTTPException(409, detail={"code": "browser_durable_job_conflict"}) from None
     except asyncio.TimeoutError:
         raise HTTPException(409, detail={"code": "browser_original_deadline_expired"}) from None
+
+
+class BrowserDownloadRequest(BaseModel):
+    """Exact operator-granted public file URLs (C5.3); uploads are never accepted."""
+    model_config = ConfigDict(extra="forbid")
+    request_key: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+    urls: list[str] = Field(min_length=1, max_length=2)
+    redirect_urls: list[str] = Field(default_factory=list, max_length=6)
+
+
+def _download_owner(request: Request) -> dict:
+    owner = _interaction_owner(request)
+    return {"principal_id": owner.principal_id, "session_id": owner.session_id}
+
+
+_DOWNLOAD_STATUS = {"download_not_found": 404, "browser_native_boot_proof_unavailable": 503,
+                    "browser_interaction_runtime_unavailable": 503, "browser_cleanup_witness_unavailable": 503}
+
+
+@router.post("/browser/downloads")
+async def start_browser_downloads(request: Request, body: BrowserDownloadRequest):
+    from src.browser.downloads import DownloadError, DownloadGrant, run_download_request
+    from src.browser.interaction_contracts import digest
+    owner = _download_owner(request)
+    try:
+        grant = DownloadGrant(urls=body.urls, redirect_urls=body.redirect_urls)
+    except ValueError:
+        raise HTTPException(422, detail={"code": "download_grant_invalid"}) from None
+    job_id = "browser-download-" + digest([owner["principal_id"], owner["session_id"], body.request_key])[:32]
+    try:
+        return await run_download_request(grant, job_id=job_id, owner=owner)
+    except DownloadError as exc:
+        raise HTTPException(_DOWNLOAD_STATUS.get(exc.code, 409), detail={"code": exc.code}) from None
+
+
+@router.get("/browser/downloads/{artifact_id}")
+async def inspect_browser_download(request: Request, artifact_id: str):
+    from src.browser.downloads import DownloadError, DownloadQuarantine
+    try:
+        return DownloadQuarantine().inspect(artifact_id, owner=_download_owner(request))
+    except DownloadError as exc:
+        raise HTTPException(404 if exc.code == "download_not_found" else 409, detail={"code": exc.code}) from None
+
+
+@router.delete("/browser/downloads/{artifact_id}")
+async def revoke_browser_download(request: Request, artifact_id: str):
+    from src.browser.downloads import DownloadError, DownloadQuarantine
+    try:
+        return {"revoked": DownloadQuarantine().revoke(artifact_id, owner=_download_owner(request))}
+    except DownloadError as exc:
+        raise HTTPException(404, detail={"code": exc.code}) from None
 
 
 @router.get("/capabilities/browser-interactions/profiles")

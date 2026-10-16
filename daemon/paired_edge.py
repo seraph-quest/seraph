@@ -21,6 +21,10 @@ try:
     from blocklist import DEFAULT_BLOCKLIST, is_blocked
 except ImportError:  # pragma: no cover - package import fallback
     from .blocklist import DEFAULT_BLOCKLIST, is_blocked
+try:
+    from desktop_drafts import platform_adapter as desktop_draft_adapter
+except ImportError:  # pragma: no cover - package import fallback
+    from .desktop_drafts import platform_adapter as desktop_draft_adapter
 
 
 _SPOOL_SCHEMA = "seraph.paired_edge.spool.v1"
@@ -422,6 +426,7 @@ class PairedEdgeTransport:
         http_client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 10.0,
         allow_insecure_test_transport: bool = False,
+        desktop_adapter: object | None = None,
     ) -> None:
         raw_credential = str(credential or "").strip()
         allow_insecure = bool(allow_insecure_test_transport and not raw_credential)
@@ -447,6 +452,9 @@ class PairedEdgeTransport:
         self._owns_client = http_client is None
         self._lock = asyncio.Lock()
         self.last_result: EdgeTransportResult | None = None
+        # Local, operator-confirmed desktop drafts only (C5.3); the core never
+        # dispatches desktop writes over this transport.
+        self.desktop_adapter = desktop_adapter if desktop_adapter is not None else desktop_draft_adapter()
 
     def _load_sequence(self) -> int:
         try:
@@ -755,6 +763,7 @@ class PairedEdgeTransport:
                 "action_authority": False,
                 "last_status": self.last_result.status if self.last_result else None,
                 "last_reason_code": self.last_result.reason_code if self.last_result else None,
+                "desktop_draft": self.desktop_adapter.probe(),
             }
         )
         return status

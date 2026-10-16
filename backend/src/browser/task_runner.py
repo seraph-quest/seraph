@@ -3175,6 +3175,7 @@ class ProfiledInteractionPage:
         self.nodes = {}
         self.latest = None
         self.actions = 0
+        self.file_chooser_opened = False
         self.lock = asyncio.Lock()
 
     async def start(self):
@@ -3197,6 +3198,9 @@ class ProfiledInteractionPage:
 
         self.resources.context.on("page", reject_page)
         self.page.on("download", lambda download: asyncio.create_task(download.cancel()))
+        # Uploads are unsupported: a file chooser is never answered, and any
+        # later action is refused (C5.3).
+        self.page.on("filechooser", lambda chooser: setattr(self, "file_chooser_opened", True))
         self.transport = ProfiledPreparationTransport(request=self.request, source_digest=self.source_digest)
         await self.transport.install(self.resources.context, self.page,
             authority=self.authority,
@@ -3280,6 +3284,8 @@ class ProfiledInteractionPage:
                 "expected_page_revision": action.expected_page_revision, "phase": "preparation"}
             await self.intent(intent)
             try:
+                if self.file_chooser_opened:
+                    raise InteractionError("browser_upload_unsupported")
                 _, revision = await self._state()
                 if revision != action.expected_page_revision or self.latest is None:
                     raise InteractionError("browser_fresh_snapshot_required")

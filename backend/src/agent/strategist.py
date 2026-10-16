@@ -6,9 +6,8 @@ import json
 import logging
 from dataclasses import dataclass, replace
 
-from smolagents import ToolCallingAgent
-
 from config.settings import settings
+from src.agent.tool_calling_agent import ToolCallingAgent
 from src.approval.runtime import get_current_trust_principal
 from src.guardian.state import GuardianState
 from src.llm_runtime import (

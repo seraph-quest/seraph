@@ -994,11 +994,66 @@ def workspace_backup_dir_for(root: Path) -> Path:
     return root.parent / f"{root.name}.backups"
 
 
-def _lifecycle_cli(tmp_path, environment, *arguments):
+def _cli(tmp_path, environment, *arguments):
     completed = subprocess.run([sys.executable, str(CLI), "--base-dir", str(tmp_path), *arguments],
         env=environment, cwd=ROOT, capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     return json.loads(completed.stdout)
+
+
+def test_background_inference_toggles_survive_backup_and_restore(tmp_path, monkeypatch):
+    from config.settings import settings
+    from src.scheduler import background_inference
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+
+    # An archive taken before any toggle exists still restores, with defaults.
+    before = _cli(tmp_path, environment, "backup", "--archive", "before-toggles.zip")
+    background_inference.write_background_inference_settings({"strategist_tick": False})
+    archive = _cli(tmp_path, environment, "backup", "--archive", "with-toggles.zip")
+    entries = {entry["logical_path"]: entry for entry in canonical_workspace_registry(root).build_manifest()["entries"]}
+    assert entries["background-inference-settings.json"]["state_class"] == "canonical"
+
+    background_inference.write_background_inference_settings({"strategist_tick": True, "daily_briefing": False})
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    restored, error = background_inference.read_background_inference_settings()
+    assert error is None
+    assert restored["strategist_tick"] is False and restored["daily_briefing"] is True
+
+    _cli(tmp_path, environment, "restore", "--archive", before["archive_path"], "--confirm")
+    assert not background_inference.background_inference_settings_path().exists()
+    defaults, error = background_inference.read_background_inference_settings()
+    assert error is None and all(defaults.values())
+
+
+@pytest.mark.parametrize("writer", ["extension-lock", "evolution-state"])
+def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monkeypatch, writer):
+    from config.settings import settings
+    from src.workspace.state_registry import production_workspace_inventory
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+    if writer == "extension-lock":
+        from src.api.extensions import _extension_effect_guard
+        with _extension_effect_guard():
+            pass
+        assert (root / ".seraph-extension-lifecycle.lock").exists()
+    else:
+        from src.evolution.runtime import EvolutionRuntime
+        runtime = EvolutionRuntime(EvolutionRuntime.default_path(root))
+        with runtime._locked():
+            runtime.state_path.write_text('{"schema_version": 1, "proposals": {}}\n', encoding="utf-8")
+        assert (root / "evolution" / "runtime-state.json").exists()
+    assert production_workspace_inventory(root)["status"] != "blocked"
+    archive = _cli(tmp_path, environment, "backup", "--archive", f"{writer}.zip")
+    if writer == "evolution-state":
+        (root / "evolution" / "runtime-state.json").write_text("changed\n", encoding="utf-8")
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    if writer == "evolution-state":
+        # Operator evolution state is canonical and round-trips.
+        assert (root / "evolution" / "runtime-state.json").read_text(encoding="utf-8").startswith('{"schema_version"')
+    _cli(tmp_path, environment, "backup", "--archive", f"{writer}-after.zip")
 
 
 @pytest.mark.parametrize("with_object", [False, True], ids=["empty", "with-object"])
@@ -1022,14 +1077,14 @@ def test_audio_documentation_objects_never_block_backup_restore_or_inventory(tmp
     assert inventory["status"] != "blocked", inventory
     entries = {entry["logical_path"]: entry for entry in canonical_workspace_registry(root).build_manifest()["entries"]}
     assert entries[".model-fabric"]["state_class"] == "cache"
-    archive = _lifecycle_cli(tmp_path, environment, "backup", "--archive", "audio-docs.zip")
+    archive = _cli(tmp_path, environment, "backup", "--archive", "audio-docs.zip")
     import zipfile
     with zipfile.ZipFile(archive["archive_path"]) as bundle:
         # Rebuildable objects are never archived.
         assert not any(".model-fabric" in name and name.endswith(".source") for name in bundle.namelist())
-    _lifecycle_cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
     assert production_workspace_inventory(root)["status"] != "blocked"
-    _lifecycle_cli(tmp_path, environment, "backup", "--archive", "after-restore.zip")
+    _cli(tmp_path, environment, "backup", "--archive", "after-restore.zip")
     # The canonical attestation row survives in seraph.db while its object is
     # rebuildable: a missing object fails closed with a typed reason.
     object_path = root / ".model-fabric" / "audio-documentation" / "objects" / source.object_id

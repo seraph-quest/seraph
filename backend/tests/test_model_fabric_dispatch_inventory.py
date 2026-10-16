@@ -313,7 +313,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1682,
+        1742,
         "_governed_bounded_chat_transfer",
         "client.stream",
         "canonical_adapter",
@@ -322,7 +322,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1616,
+        1676,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -331,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4912,
+        5011,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -397,6 +397,15 @@ _REVIEWED_EXCEPTIONS = (
         "Keep as metadata-only documentation evidence; any audio inference must go through governed model-fabric admission.",
     ),
     _review(
+        "browser/downloads.py",
+        628,
+        "OwnedDownloadTransport._fetch",
+        "client.stream",
+        "non_model_transport",
+        "Granted public HTTPS file download for the quarantined browser download lane; pins the resolved address, checks every redirect against the grant and streams bounded bytes. It does not request model inference.",
+        "Keep behind the browser download grant and quarantine contract; reclassify if the endpoint becomes an inference route.",
+    ),
+    _review(
         "security/http_transport.py",
         442,
         "_request_pinned_https",
@@ -407,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3992,
+        4084,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -416,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4072,
+        4164,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -425,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4528,
+        4620,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -434,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4607,
+        4699,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",

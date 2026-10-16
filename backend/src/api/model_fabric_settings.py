@@ -101,7 +101,7 @@ from src.security.trust_contract import (
 
 
 router = APIRouter()
-_CANARY_VERSION = "seraph.manual-canary.v1"
+_CANARY_VERSION = "seraph.manual-canary.v2"
 _MANUAL_CANARY_LOCK = threading.Lock()
 _MAX_CANARY_TIMEOUT_SECONDS = 180
 _DEFAULT_PROOF_TTL_SECONDS = 3600
@@ -1647,7 +1647,9 @@ def _chat_canary_payload(model: str, capability: str, *, options=None, output_to
         additional_fields["response_format"] = {"type": "json_object"}
     elif capability == ModelCapability.TOOL_USE.value:
         additional_fields["tools"] = [{"type": "function", "function": {"name": "canary_ok", "description": "Canary", "parameters": {"type": "object", "properties": {}}}}]
-        additional_fields["tool_choice"] = {"type": "function", "function": {"name": "canary_ok"}}
+        # The form agent turns send (smolagents' LiteLLMModel default), so the
+        # proof covers what tool-calling chat actually requests (#1107).
+        additional_fields["tool_choice"] = "required"
     elif capability == ModelCapability.VISION.value:
         messages = [{"role": "user", "content": [{"type": "text", "text": "Describe this canary image."}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(_ONE_PIXEL_PNG).decode()}"}}]}]
     elif capability == ModelCapability.STREAMING.value:

@@ -211,6 +211,8 @@ class TestE2EConversation:
             _close_sync_client_with_db(patches, stack)
 
     def test_high_risk_tool_sends_approval_required_message(self):
+        # A mocked agent.run hides how a real agent loop treats tool exceptions;
+        # tests/test_agent_control_flow_propagation.py drives a real agent (#1107).
         client, patches, stack = _make_sync_client_with_db()
         try:
             mock_agent = MagicMock()
@@ -256,6 +258,7 @@ class TestE2EConversation:
             _close_sync_client_with_db(patches, stack)
 
     def test_missing_input_sends_clarification_required_message(self):
+        # Mocked agent.run; the real-agent path is in test_agent_control_flow_propagation.py (#1107).
         client, patches, stack = _make_sync_client_with_db()
         try:
             mock_agent = MagicMock()

@@ -213,7 +213,7 @@ Wave 1 covers the runtime-parity slices from the capability import program:
 
 - status: complete
 - validation:
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+  - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
   - `cd frontend && npm test`
   - `cd frontend && npm run build`
   - `cd docs && npm run build`

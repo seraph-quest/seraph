@@ -22,8 +22,14 @@ from typing import Any
 from urllib.parse import urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
-from smolagents import LiteLLMModel as BaseLiteLLMModel
-from smolagents.models import ChatMessage, MessageRole
+from smolagents import LiteLLMModel as BaseLiteLLMModel, Tool
+from smolagents.models import (
+    ChatMessage,
+    MessageRole,
+    get_clean_message_list,
+    get_tool_json_schema,
+    tool_role_conversions,
+)
 
 from config.settings import settings
 from src.agent.prompt_compaction import compact_messages_for_local_runtime
@@ -66,6 +72,8 @@ from src.vlm_runtime import (
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
+# Monotonic deadlines of registered requests whose caller waits with a timeout.
+_runtime_request_deadlines: dict[str, float] = {}
 # Request ids whose turn reached a provider transport at least once.
 _runtime_request_contacts: set[str] = set()
 _target_health_lock = Lock()
@@ -1528,6 +1536,52 @@ def _openai_message_payload(message: Any) -> dict[str, Any]:
     return result
 
 
+_SMOLAGENTS_MEMORY_ROLES = frozenset({MessageRole.TOOL_CALL.value, MessageRole.TOOL_RESPONSE.value})
+
+
+def _role_value(message: Any) -> str:
+    role = _message_value(message, "role", "")
+    return str(getattr(role, "value", role))
+
+
+def _is_agent_memory(messages: list[Any]) -> bool:
+    """smolagents agent memory: ``ChatMessage`` objects or smolagents-only roles."""
+    return any(
+        isinstance(message, ChatMessage) or _role_value(message) in _SMOLAGENTS_MEMORY_ROLES
+        for message in messages
+    )
+
+
+def _provider_chat_messages(
+    messages: list[Any],
+    *,
+    role_conversions: dict[str, str] | None,
+    flatten_messages_as_text: bool,
+) -> list[dict[str, Any]]:
+    """Agent memory exactly as smolagents' ``LiteLLMModel`` would send it.
+
+    Agent memory uses smolagents roles (``tool-call``, ``tool-response``) that
+    no OpenAI-compatible provider accepts; ``LiteLLMModel`` maps them to
+    ``assistant``/``user`` and merges consecutive turns of one role. The
+    governed transport sends the result with plain string roles (#1107).
+    Plain string content is wrapped as one text part first, because the
+    smolagents cleaner assumes part lists.
+    """
+    parts = []
+    for message in messages:
+        content = _message_value(message, "content")
+        if isinstance(content, str):
+            message = {"role": _role_value(message), "content": [{"type": "text", "text": content}]}
+        parts.append(message)
+    cleaned = get_clean_message_list(
+        parts,
+        role_conversions=role_conversions or tool_role_conversions,
+        convert_images_to_image_urls=True,
+        flatten_messages_as_text=flatten_messages_as_text,
+    )
+    return [{**message, "role": str(getattr(message["role"], "value", message["role"]))} for message in cleaned]
+
+
 def _transport_json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -1535,6 +1589,12 @@ def _transport_json_value(value: Any) -> Any:
         return {str(key): _transport_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_transport_json_value(item) for item in value]
+    if isinstance(value, Tool):
+        # The tool-calling schema actually sent to the provider. ``Tool.to_dict``
+        # is smolagents' save-to-source export: it validates the class as a
+        # standalone tool and refuses Seraph's wrapper tools, which failed every
+        # canonical agent turn that offered tools (#1107).
+        return get_tool_json_schema(value)
     for method_name in ("model_dump", "to_dict", "dict"):
         method = getattr(value, method_name, None)
         if callable(method):
@@ -3499,6 +3559,13 @@ def _register_request(request_id: str) -> None:
         _runtime_requests[request_id] = False
 
 
+def _start_request_deadline(request_id: str, timeout_seconds: float) -> None:
+    """Record the caller's deadline at the instant its own timeout starts."""
+    with _runtime_request_lock:
+        if request_id in _runtime_requests:
+            _runtime_request_deadlines[request_id] = monotonic() + max(float(timeout_seconds), 0.0)
+
+
 def _mark_request_timed_out(request_id: str) -> None:
     with _runtime_request_lock:
         if request_id in _runtime_requests:
@@ -3508,6 +3575,7 @@ def _mark_request_timed_out(request_id: str) -> None:
 def _finish_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests.pop(request_id, None)
+        _runtime_request_deadlines.pop(request_id, None)
         _runtime_request_contacts.discard(request_id)
 
 
@@ -3555,9 +3623,12 @@ def _can_log_request(request_id: str | None) -> bool:
         return True
     with _runtime_request_lock:
         timed_out = _runtime_requests.get(request_id)
+        deadline = _runtime_request_deadlines.get(request_id)
     if timed_out is None:
         return False
-    return not timed_out
+    # The worker thread judges lateness against the caller's own deadline: the
+    # caller's loop may mark the timeout only after the worker has returned.
+    return not timed_out and (deadline is None or monotonic() < deadline)
 
 
 def set_current_llm_request_id(request_id: str) -> contextvars.Token[str | None]:
@@ -3710,6 +3781,24 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         self._fallback_models = tuple(fallback_models)
         self._fallback_model = self._fallback_models[0] if self._fallback_models else None
 
+    def _provider_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+        """The governed body's messages.
+
+        Agent memory is prepared as smolagents' ``LiteLLMModel`` would send it.
+        Plain OpenAI-style message dicts from direct callers (mail reply,
+        calendar, repository iteration) are sent unchanged, byte for byte.
+        """
+        if not _is_agent_memory(messages):
+            return [_openai_message_payload(message) for message in messages]
+        return [
+            _openai_message_payload(message)
+            for message in _provider_chat_messages(
+                messages,
+                role_conversions=self.custom_role_conversions,
+                flatten_messages_as_text=bool(self.flatten_messages_as_text),
+            )
+        ]
+
     def prepare_repository_iteration_transport(self, messages, *, response_format, max_tokens):
         """Prepare the fixed primary strategist body without contacting a provider.
 
@@ -3734,7 +3823,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             runtime_path="strategist_agent", reserved_output_tokens=output_limit)
         body = finalized_openai_compatible_body(
             model_id=_target_transport_model(target),
-            messages=[_openai_message_payload(message) for message in target_messages],
+            messages=self._provider_messages(target_messages),
             options=_transport_json_value(target["options"]),
             temperature=float(controls["temperature"]), max_tokens=output_limit,
             additional_fields={"response_format": _transport_json_value(response_format)},
@@ -3928,9 +4017,12 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     additional_fields["response_format"] = _transport_json_value(response_format)
                 if tools_to_call_from:
                     additional_fields["tools"] = _transport_json_value(tools_to_call_from)
+                    # As smolagents' LiteLLMModel: a tool-calling agent turn must
+                    # answer with a tool call (``final_answer`` included).
+                    additional_fields["tool_choice"] = "required"
                 transport_body = finalized_openai_compatible_body(
                     model_id=_target_transport_model(target),
-                    messages=[_openai_message_payload(message) for message in target_messages],
+                    messages=self._provider_messages(target_messages),
                     options=_transport_json_value(dict(target.get("options") or {})),
                     temperature=effective_temperature,
                     max_tokens=reserved_output_tokens,
@@ -4817,6 +4909,13 @@ async def completion_with_fallback(
     try:
         if timeout is None:
             return await coro
+        # The worker starts only when awaited here, so its lateness is judged
+        # from the same instant wait_for starts its timer. Separately, if the
+        # loop stalls past the deadline, the thread's result can be delivered
+        # before the timeout callback runs and wait_for then returns normally;
+        # that pre-existing asyncio race returns a result the provider did
+        # produce, and the worker logged it only if it finished in time.
+        _start_request_deadline(request_id, timeout)
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
         _mark_request_timed_out(request_id)

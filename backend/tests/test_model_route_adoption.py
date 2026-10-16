@@ -56,6 +56,8 @@ EXPECTED_CANONICAL_ROUTES = {
     "workflow_runner",
     "readonly_research_child",
     "audio_transcription",
+    "cordis_interactive_inference",
+    "cordis_background_inference",
 }
 
 

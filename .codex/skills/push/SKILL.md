@@ -24,7 +24,7 @@ description:
 Run the narrowest required validation before each push:
 
 - Backend changes:
-  `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run pytest -v`
+  `cd backend && OPENROUTER_API_KEY=test-key uv run pytest -v`
 - Frontend changes:
   `cd frontend && npm test`
 - Docs changes:

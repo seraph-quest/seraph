@@ -309,7 +309,12 @@ LOCAL_FRONTEND_PORT=3100 LOCAL_BACKEND_PORT=8100 ./manage.sh -e dev local up
 ./manage.sh -e dev up -d
 ```
 
-This starts four containers:
+This starts four containers. Published ports bind to host loopback
+(`127.0.0.1`) only, so the backend and the Vite dev server are not reachable
+from other machines on your network. The frontend container listens on all of
+its own interfaces through `SERAPH_DEV_SERVER_HOST=0.0.0.0`; outside Docker the
+Vite dev server binds `127.0.0.1` unless you set that variable.
+
 - **backend-dev** (`localhost:8004`) — FastAPI + uvicorn
 - **sandbox-dev** — snekbox (sandboxed shell execution)
 - **http-mcp** — FastMCP HTTP request tool server (internal network only)

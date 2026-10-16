@@ -22,11 +22,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import re
 
 from .contracts import succeeded
 from .dispatch import NativeServiceBlocked, _append_receipt, _canonical, _digest, _run_candidate, _writer, cas_run, read_context
 
+logger = logging.getLogger(__name__)
 OPERATIONS = {"gmail.read_message": "gmail_readonly", "calendar.read_events": "calendar_readonly",
               "gmail.send_reviewed_reply": None}
 SEND_OPERATION = "gmail.send_reviewed_reply"
@@ -36,8 +38,12 @@ MAX_RESULT_BYTES = 64 * 1024
 _TEXT_FIELDS = ("summary", "location", "description", "attendees")
 _REF = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 _REASON = re.compile(r"[a-z0-9_]{1,96}\Z")
-# Plaintext handoff to the Python caller of this exact governed job, popped once.
-_handoff: dict[str, dict] = {}
+# Plaintext handoff to the Python caller of this exact governed job, popped once
+# (also on failure) and dropped after HANDOFF_TTL if no caller ever takes it.
+_handoff: dict[str, tuple[float, dict]] = {}
+HANDOFF_TTL_SECONDS = 300.0
+PURGE_SCAN_LIMIT = 500
+PURGED_EVENT = "cordis_adapter_result_purged"
 
 
 def owner_errors() -> tuple[type[BaseException], ...]:
@@ -239,6 +245,7 @@ def cap_events(events: list[dict]) -> tuple[list[dict], bool]:
                 limit = budget // len(_TEXT_FIELDS)
                 item[name] = value.encode()[:limit].decode("utf-8", errors="ignore") + " [truncated]"
             elif isinstance(value, list):
+                # Attendees share the event budget: at most 8 names of 64 characters.
                 item[name] = [str(entry)[:64] for entry in value[:8]]
         capped.append(item)
     while size(capped) > MAX_RESULT_BYTES - 2048 and capped:
@@ -285,6 +292,10 @@ async def execute(dispatcher, scope, run, candidate) -> tuple[dict, dict]:
             items = [_provenance("calendar:" + event["event_key"], event, {
                 **event, "prompt_injection": _injection(" ".join(str(event.get(name) or "") for name in _TEXT_FIELDS))})
                      for event in events]
+            # The cap holds for the labelled items too: drop whole trailing items, never fail.
+            while items and len(_canonical(items).encode()) > MAX_RESULT_BYTES:
+                items.pop()
+                capped = True
             result = {"operation": operation, "items": items, "truncated": bool(payload["truncated"] or capped),
                       "consent_id": arguments["calendar_consent_id"], "inner_job_id": None,
                       "selection_published": False}
@@ -309,6 +320,9 @@ async def _send(run, arguments, outer_check) -> tuple[dict, dict]:
     try:
         await runtime.run_owned(operator, ident, lambda: runtime.execute(operator, ident, report=report))
     except Exception as exc:
+        if report.get("intent_claimed"):
+            # After the send-once intent a failure is ambiguous: the message may have gone.
+            raise NativeServiceBlocked("mail_reply_send_in_doubt") from exc
         raise _blocked(exc) from exc
     async with runtime.session() as db:
         reply = await runtime.get_run(operator, ident, db=db)
@@ -394,64 +408,112 @@ async def dispatch_adapter(dispatcher, frame, payload, scope):
         await cas_run(db, run, checkpoint_context_json=_canonical(context),
                       effect_receipts_json=_canonical([*effects, readback]))
         await db.commit()
-    _handoff[run.run_identity] = plaintext
+    _expire_handoff()
+    import time as _time
+    _handoff[run.run_identity] = (_time.monotonic(), plaintext)
     return result
 
 
+def _expire_handoff() -> None:
+    import time as _time
+    cutoff = _time.monotonic() - HANDOFF_TTL_SECONDS
+    for job_id in [key for key, (stored, _value) in _handoff.items() if stored < cutoff]:
+        _handoff.pop(job_id, None)
+
+
 def take_result(job_id: str) -> dict | None:
-    return _handoff.pop(job_id, None)
+    _expire_handoff()
+    entry = _handoff.pop(job_id, None)
+    return entry[1] if entry else None
 
 
 # ---------------------------------------------------------------- retention
 
+def inner_job_id(run_identity: str, owner_principal_id: str, operator_session_id: str, connection_ref: str) -> str:
+    """The deterministic mail source control job of a Cordis read (``request_uuid = cordis:<run>``)."""
+    from src.integrations.gmail_controls import MailSourceRequest
+    return MailSourceRequest(operation="mail_message_read", owner_principal_id=owner_principal_id,
+                             owner_session_id=operator_session_id, connection_id=connection_ref, connection_revision=0,
+                             request_uuid="cordis:" + run_identity, request_digest="").job_id
+
+
 async def purge_cordis_mail_results(*, owner=None, consent_id: str | None = None, now: datetime | None = None) -> int:
     """Delete the encrypted owner artifacts of Cordis-originated Gmail reads once their
-    consent is revoked or expired, or after the TTL; mark the governed context purged."""
+    consent is revoked or expired, or after the TTL, whatever the read's outcome.
+
+    The inner control job id is derived from the governed run, so a read that
+    failed after the owner published its artifact is purged too. Each purge is an
+    audit event; the scan is bounded and newest-first."""
     from sqlalchemy import select, update
     from src.api.mail import _cleanup_mail_artifacts
     from src.db.engine import get_session
-    from src.db.models import MailReadConsent, WorkflowRunState
+    from src.db.models import AuditEvent, MailReadConsent, WorkflowRunState
     from src.work_board.contracts import WorkBoardOwner
     from .governed_services import GOVERNED_JOB_KIND
     observed = now or datetime.now(timezone.utc)
     async with get_session() as db:
-        query = select(WorkflowRunState).where(WorkflowRunState.job_kind == GOVERNED_JOB_KIND,
-                                               WorkflowRunState.status == "succeeded")
+        done = {json.loads(raw or "{}").get("job_id") for raw in (await db.execute(
+            select(AuditEvent.details_json).where(AuditEvent.event_type == PURGED_EVENT))).scalars()}
+        query = select(WorkflowRunState).where(
+            WorkflowRunState.job_kind == GOVERNED_JOB_KIND,
+            WorkflowRunState.status.not_in(("accepted", "queued", "running")))
         if owner is not None:
             query = query.where(WorkflowRunState.owner_principal_id == owner.principal_id,
                                 WorkflowRunState.operator_session_id == owner.session_id)
-        rows = (await db.execute(query)).scalars().all()
+        rows = (await db.execute(query.order_by(WorkflowRunState.updated_at.desc()).limit(PURGE_SCAN_LIMIT))).scalars().all()
         due: list[tuple] = []
         for run in rows:
+            if run.run_identity in done:
+                continue
             try:
-                outcome = (read_context(run)["result"] or {}).get("outcome") or {}
+                candidate = read_context(run)["candidate"]
             except NativeServiceBlocked:
                 continue
-            if outcome.get("operation") != "gmail.read_message" or outcome.get("purged") or not outcome.get("inner_job_id"):
+            if candidate.get("operation") != "gmail.read_message":
                 continue
-            consent = await db.get(MailReadConsent, outcome["consent_id"])
-            sealed_at = datetime.fromisoformat(outcome["sealed_at"])
+            arguments = candidate["arguments"]
+            consent = await db.get(MailReadConsent, arguments["mail_consent_id"])
+            started = run.started_at.replace(tzinfo=run.started_at.tzinfo or timezone.utc)
             expired = (consent is None or consent.state != "active"
                        or consent.expires_at.replace(tzinfo=consent.expires_at.tzinfo or timezone.utc) <= observed)
-            if consent_id == outcome["consent_id"] or expired or observed - sealed_at >= RESULT_TTL:
-                due.append((run.run_identity, run.revision, run.owner_principal_id, run.operator_session_id,
-                            outcome["inner_job_id"]))
+            if consent_id == arguments["mail_consent_id"] or expired or observed - started >= RESULT_TTL:
+                due.append((run.run_identity, run.owner_principal_id, run.operator_session_id,
+                            inner_job_id(run.run_identity, run.owner_principal_id, run.operator_session_id,
+                                         arguments["connection_ref"])))
     purged = 0
-    for job_id, revision, principal_id, session_id, inner_job_id in due:
+    for job_id, principal_id, session_id, inner in due:
         complete = await _cleanup_mail_artifacts(WorkBoardOwner(principal_id=principal_id, session_id=session_id),
-                                                 lambda run_id, _inputs, target=inner_job_id: run_id == target,
+                                                 lambda run_id, _inputs, target=inner: run_id == target,
                                                  require_live_session=False)
         if not complete:
-            continue
+            continue  # An active or ambiguous owner job stays for the next sweep.
         async with get_session() as db:
             run = (await db.execute(select(WorkflowRunState).where(
                 WorkflowRunState.run_identity == job_id))).scalar_one_or_none()
-            if run is None or run.revision != revision:
-                continue
-            context = json.loads(run.checkpoint_context_json)
-            context["result"]["outcome"].update(purged=True, purged_at=observed.isoformat())
-            await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == job_id,
-                                                            WorkflowRunState.revision == revision)
-                             .values(checkpoint_context_json=_canonical(context), revision=revision + 1))
+            if run is not None and run.checkpoint_context_json:
+                context = json.loads(run.checkpoint_context_json)
+                outcome = (context.get("result") or {}).get("outcome")
+                if isinstance(outcome, dict):
+                    outcome.update(purged=True, purged_at=observed.isoformat())
+                    await db.execute(update(WorkflowRunState).where(
+                        WorkflowRunState.run_identity == job_id, WorkflowRunState.revision == run.revision)
+                        .values(checkpoint_context_json=_canonical(context), revision=run.revision + 1))
+            await _audit_purge(db, job_id, inner, observed)
         purged += 1
     return purged
+
+
+async def _audit_purge(db, job_id: str, inner: str, observed: datetime) -> None:
+    from src.db.models import AuditEvent
+    db.add(AuditEvent(session_id=None, actor="runtime", event_type=PURGED_EVENT,
+                      summary="Cordis mail result retention purge",
+                      details_json=json.dumps({"job_id": job_id, "inner_job_id": inner,
+                                               "purged_at": observed.isoformat()}, sort_keys=True)))
+
+
+async def run_cordis_mail_retention() -> None:
+    """Scheduler entry: periodic retention, so an idle server never keeps bodies past the TTL."""
+    try:
+        await purge_cordis_mail_results()
+    except Exception:
+        logger.warning("Cordis mail result retention sweep failed", exc_info=True)

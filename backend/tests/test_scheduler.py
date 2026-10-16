@@ -138,6 +138,7 @@ class TestSchedulerEngine:
                     "weekly_activity_review",
                     "screen_cleanup",
                     "audio_ingress_cleanup",
+                    "cordis_mail_retention",
                     "work_board_dispatch",
                     "guardian_opportunity_assessment",
                     "goal_public_discovery",

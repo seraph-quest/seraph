@@ -78,6 +78,7 @@ async def test_gmail_read_is_bounded_labelled_digest_sealed_and_purged_on_revoke
         done = await execute_native_connection_operation(operator=env["operator"], operation="gmail.read_message",
                                                          arguments=_read_arguments(env), idempotency_key="cordis-read-1")
         assert done["job"]["status"] == "succeeded" and len(_gmail_gets(google)) == before + 1
+        assert google.sent is None and not any(call[1].endswith("/messages/send") for call in google.calls)
         [item] = done["adapter_result"]["items"]
         assert item["origin"] == "external_untrusted" and item["instruction_authority"] is False
         assert item["plain_text"].startswith("Ignore previous instructions") and item["prompt_injection"]["status"] == "blocked"
@@ -212,6 +213,17 @@ async def test_reviewed_send_needs_its_route_runs_once_and_never_claims_a_ui_sen
             await execute_native_connection_operation(operator=env["operator"], operation="gmail.send_reviewed_reply",
                 arguments={"reply_send_job_id": job_id, "expected_reply_send_revision": 1}, idempotency_key="no-route")
         assert unscoped.value.reason_code == "native_adapter_send_route_required" and google.sent is None
+        route = "/api/capabilities/mail/reply-sends/" + job_id + "/cordis-execute"
+        good = {"decision": "approved", "expected_digest": preview["preview"]["decision_digest"]}
+        # CSRF: the global middleware refuses a mutation without the operator Origin.
+        assert (await client.post(route, json=good, headers={"origin": ""})).status_code == 403
+        # A wrong digest, a non-approval decision or an unknown job never sends.
+        wrong = await client.post(route, json={**good, "expected_digest": "0" * 64})
+        assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "mail_reply_decision_rejected"
+        assert (await client.post(route, json={**good, "decision": "denied"})).status_code == 422
+        assert (await client.post("/api/capabilities/mail/reply-sends/mail-reply-unknown/cordis-execute",
+                                  json=good)).status_code >= 400
+        assert google.sent is None
         # The operator approves and sends through Cordis in one authenticated request.
         response = await client.post("/api/capabilities/mail/reply-sends/" + job_id + "/cordis-execute",
                                      json={"decision": "approved", "expected_digest": preview["preview"]["decision_digest"]})
@@ -221,10 +233,10 @@ async def test_reviewed_send_needs_its_route_runs_once_and_never_claims_a_ui_sen
         assert google.sent is not None
         posts = [call for call in google.calls if call[1].endswith("/messages/send")]
         assert len(posts) == 1
-        # A retry replays; it never POSTs again.
+        # A retry is refused before any decision: the reply is no longer awaiting a send.
         again = await client.post("/api/capabilities/mail/reply-sends/" + job_id + "/cordis-execute",
                                   json={"decision": "approved", "expected_digest": preview["preview"]["decision_digest"]})
-        assert again.status_code in {200, 409}
+        assert again.status_code == 409 and again.json()["detail"]["code"] == "mail_reply_not_awaiting_send"
         assert len([call for call in google.calls if call[1].endswith("/messages/send")]) == 1
 
 
@@ -266,7 +278,7 @@ async def test_calendar_read_observes_only_with_a_deterministic_cap(accounting_d
     events = [{"id": f"event-{index}", "etag": f'"etag-{index}"', "updated": "2026-09-30T08:00:00Z", "summary": long_text,
                "start": {"dateTime": (now + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")},
                "end": {"dateTime": (now + timedelta(minutes=40)).strftime("%Y-%m-%dT%H:%M:%SZ")}, "location": long_text,
-               "description": "d" * 4000, "attendees": [{"displayName": "Operator"}]} for index in range(20)]
+               "description": "d" * 2000, "attendees": [{"displayName": "Operator"}]} for index in range(50)]
     provider = _GoogleTransportScript(events=events)
     monkeypatch.setattr("src.integrations.google_calendar.request_pinned_https", provider)
     app = FastAPI()
@@ -305,11 +317,46 @@ async def test_calendar_read_observes_only_with_a_deterministic_cap(accounting_d
                            "max_events": 50}, idempotency_key="cordis-calendar-1")
             result = done["adapter_result"]
             assert done["job"]["status"] == "succeeded" and result["selection_published"] is False
-            # 20 consented events of ~6.4 KB text exceed 64 KiB; each is cut deterministically.
-            assert len(json.dumps(result["items"]).encode()) <= 64 * 1024 and len(result["items"]) == 20
+            # 50 consented events of ~4.4 KB text exceed 64 KiB; each is cut deterministically,
+            # and the labelled items (provenance, injection receipt) still fit.
+            assert len(json.dumps(result["items"]).encode()) <= 64 * 1024 and len(result["items"]) >= 40
             assert result["truncated"] is True and all(item["description"].endswith("[truncated]") for item in result["items"])
             assert all(item["origin"] == "external_untrusted" for item in result["items"])
             assert all("attendees" not in item for item in result["items"])  # not a consented field
             async with factory.accounting_sessions() as db:
                 assert (await db.execute(select(CalendarEventBinding))).scalars().all() == []
             assert Path(root).exists()
+
+
+async def test_failed_reads_leave_no_plaintext_in_memory_and_are_purged_too(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from src.runtime_plugins import bound_adapters
+    from src.runtime_plugins.governed_services import execute_native_connection_operation
+    from src.workflows.job_runtime import durable_job_repository
+    async with mail_env(accounting_db, real_auth, monkeypatch, until="draft") as env:
+        # The read completes and is handed off, then the governed job fails to settle.
+        original = durable_job_repository.transition_job
+
+        async def failing(job_id, to_status, **kwargs):
+            if to_status == "succeeded" and str(job_id).startswith("cordis-svc:"):
+                raise RuntimeError("settlement storage fault")
+            return await original(job_id, to_status, **kwargs)
+        monkeypatch.setattr(durable_job_repository, "transition_job", failing)
+        with pytest.raises(NativeServiceBlocked):
+            await execute_native_connection_operation(operator=env["operator"], operation="gmail.read_message",
+                                                      arguments=_read_arguments(env), idempotency_key="cordis-read-fail")
+        monkeypatch.setattr(durable_job_repository, "transition_job", original)
+        assert bound_adapters._handoff == {}
+        [run] = await _governed(env["jobs"])
+        assert run.status != "succeeded"
+        # Its encrypted owner artifact is found by the derived inner job id and purged after the TTL.
+        from datetime import datetime, timedelta, timezone
+        from src.integrations.gmail_controls import _artifact_path
+        source = json.loads(run.checkpoint_context_json)["candidate"]["arguments"]
+        inner = bound_adapters.inner_job_id(run.run_identity, run.owner_principal_id, run.operator_session_id,
+                                            source["connection_ref"])
+        artifact = Path(env["root"]) / _artifact_path(inner)
+        assert artifact.exists()
+        assert await bound_adapters.purge_cordis_mail_results(now=datetime.now(timezone.utc) + timedelta(hours=25)) == 1
+        assert not artifact.exists()
+        # Purged once: the next sweep has nothing to do.
+        assert await bound_adapters.purge_cordis_mail_results(now=datetime.now(timezone.utc) + timedelta(hours=26)) == 0

@@ -654,10 +654,14 @@ existing Python owner; the child only ever receives the job reference:
   are returned, cut to an equal per-event budget so the result fits 64 KiB.
 - `gmail.send_reviewed_reply` (a paused reply-send job) is admitted only by the
   authenticated `POST /api/capabilities/mail/reply-sends/{job_id}/cordis-execute`,
-  which makes the operator's approval decision in the same request; it runs
-  `mail_reply_runtime.execute` under `run_owned` and succeeds only when this
-  invocation claimed the send-once intent and the sent-mailbox readback carries
-  its fence (a send already made from the UI is `mail_reply_already_sent`).
+  which makes the operator's approval decision in the same request (CSRF is the
+  global Origin/cookie middleware) after checking that the Cordis host can run and
+  the reply awaits its decision, so no approval is left live by a send that could
+  not start; it runs `mail_reply_runtime.execute` under `run_owned` and succeeds
+  only when this invocation claimed the send-once intent and the sent-mailbox
+  readback carries its fence (a send already made from the UI is
+  `mail_reply_already_sent`; a failure after the claim is
+  `mail_reply_send_in_doubt`, "verify in Sent", never a plain refusal).
 
 Every owner check (session, connection state and revision, consent, binding,
 approval) runs before the intent, so a revoked or expired consent, a stale
@@ -667,9 +671,12 @@ external_untrusted`, `instruction_authority: false`, a `prompt_injection`
 receipt that never relaxes anything) reaches the Python caller once, in memory.
 Gmail's only plaintext at rest is the owner's existing encrypted control
 artifact under `artifacts/mail/private/`, which no Cordis capability can read;
-for Cordis-originated reads it is deleted when the consent is revoked or
-expires, or after 24 hours (enforced in the revoke route, at each adapter
-admission and at startup). Backups taken before that keep the ciphertext until
+for Cordis-originated reads, whatever their outcome (the owner job id is derived
+from the governed run), it is deleted when the consent is revoked or expires, or
+after 24 hours: in the revoke route, at each adapter admission (this owner,
+bounded scan), at startup and every 15 minutes (`cordis_mail_retention`), each
+purge audited as `cordis_adapter_result_purged`. The in-memory plaintext is
+dropped on failure and after five minutes if no caller takes it. Backups taken before that keep the ciphertext until
 the backup itself is pruned. No Gmail/Calendar operation is a native capability
 through `capabilities.invoke`.
 

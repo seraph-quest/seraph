@@ -15,6 +15,7 @@ import asyncio
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 import time
 
@@ -525,6 +526,11 @@ async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, 
     except Exception as exc:
         await _block(jobs, scope, "native_governed_failed")
         raise NativeServiceBlocked("native_governed_failed") from exc
+    finally:
+        if method == "connections.invokeBoundAdapter":
+            # A failed adapter call never leaves its plaintext behind in memory.
+            from .bound_adapters import take_result
+            take_result(job["job_id"])
 
 
 async def execute_native_capability(*, operator, capability_id: str, arguments: dict, idempotency_key: str,
@@ -548,12 +554,12 @@ async def execute_native_connection_operation(*, operator, operation: str, argum
                                    else "native_adapter_scope_changed")
     arguments = validate_adapter_arguments(operation, arguments)
     try:
-        # Lazy retention sweep: expired, revoked or TTL-elapsed Cordis mail results go first.
+        # Lazy retention sweep (bounded, this owner only); the scheduler sweeps periodically too.
         from src.work_board.contracts import WorkBoardOwner
         await purge_cordis_mail_results(owner=WorkBoardOwner(principal_id=operator.principal.principal_id,
                                                              session_id=operator.session_id))
     except Exception:
-        pass
+        logging.getLogger(__name__).warning("Cordis mail result retention sweep deferred", exc_info=True)
     candidate = {"schema_version": 1, "method": "connections.invokeBoundAdapter", "operation": operation,
                  "arguments": arguments, "arguments_digest": _digest(arguments)}
     return await _execute_governed(operator=operator, candidate=candidate, idempotency_key=idempotency_key, host=host,

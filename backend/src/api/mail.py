@@ -3086,23 +3086,57 @@ class ReplyCordisExecute(_Strict):
 
 @router.post("/capabilities/mail/reply-sends/{job_id}/cordis-execute")
 async def cordis_execute_reply_send(request: Request, job_id: str):
-    """The only admission of ``gmail.send_reviewed_reply`` (#1092): the operator's
-    approval decision and the Cordis send are one authenticated, CSRF-checked request."""
+    """The only admission of ``gmail.send_reviewed_reply`` (#1092).
+
+    The operator's approval decision and the Cordis send are one authenticated
+    request; CSRF protection is the global ``OperatorAuthMiddleware`` Origin and
+    session-cookie check, as for every mutating route. The route checks that the
+    Cordis host can run and the send is awaiting its decision BEFORE deciding, so
+    an approval is never left live by a send that could not start.
+    """
     from src.integrations import mail_reply_runtime as runtime
+    from src.integrations.mail_reply_send import state
+    from src.runtime_plugins.bridge import cordis_host
     from src.runtime_plugins.dispatch import NativeServiceBlocked
     from src.runtime_plugins.governed_services import execute_native_connection_operation
     operator = _operator(request)
     body = await _json_body(request, ReplyCordisExecute)
+    if not cordis_host.admitting or cordis_host.reviewed is None:
+        raise HTTPException(status_code=503, detail={"code": "cordis_host_unavailable",
+                                                     "message": "The Cordis runtime is not ready; nothing was approved.",
+                                                     "recovery_action": "restore_cordis_runtime"})
     try:
-        await runtime.decide(operator, job_id, decision=body.decision, expected_digest=body.expected_digest)
         reply = await runtime.get_run(operator, job_id)
+        if reply.status != "paused" or not isinstance(state(reply).get("preview"), dict) or state(reply).get("intent"):
+            raise HTTPException(status_code=409, detail={"code": "mail_reply_not_awaiting_send",
+                                                         "message": "This reply is not awaiting a send decision.",
+                                                         "recovery_action": "reload_reply_send"})
+        try:
+            await runtime.decide(operator, job_id, decision=body.decision, expected_digest=body.expected_digest)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail={"code": "mail_reply_decision_rejected",
+                                                         "message": "The approval decision did not match the preview.",
+                                                         "recovery_action": "reload_reply_send"}) from exc
+        reply = await runtime.get_run(operator, job_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _error(exc) from exc
+    try:
         done = await execute_native_connection_operation(
             operator=operator, operation="gmail.send_reviewed_reply",
             arguments={"reply_send_job_id": job_id, "expected_reply_send_revision": int(reply.revision)},
             idempotency_key="mail-reply-cordis:" + job_id, admitted_by="mail_reply_cordis_execute_route")
     except NativeServiceBlocked as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.reason_code, "message": "The Cordis send was refused",
-                                                     "recovery_action": "reload_reply_send"}) from exc
+        if exc.reason_code == "mail_reply_send_in_doubt":
+            raise HTTPException(status_code=409, detail={
+                "code": exc.reason_code,
+                "message": "The send outcome is in doubt: it may have been sent. Verify in your Sent folder before retrying.",
+                "recovery_action": "observe_reply_send"}) from exc
+        raise HTTPException(status_code=409, detail={
+            "code": exc.reason_code,
+            "message": "Approved, but the Cordis send did not start or did not complete; no retry was made.",
+            "recovery_action": "reload_reply_send"}) from exc
     except Exception as exc:
         raise _error(exc) from exc
     return {"job": done["job"], "result": done.get("adapter_result"), "replayed": done["replayed"]}

@@ -152,6 +152,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
     from src.scheduler.jobs.audio_ingress_cleanup import run_audio_ingress_cleanup
+    from src.runtime_plugins.bound_adapters import run_cordis_mail_retention
 
     jobs = [
         {
@@ -297,6 +298,15 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "name": "Audio ingress retention cleanup",
             "next_run_time": _startup_next_run(True, delay_seconds=60),
             "misfire_grace_time": 120,
+        },
+        {
+            # #1092: an idle server still deletes Cordis mail results past their retention.
+            "func": _async_job_wrapper(run_cordis_mail_retention, loop, job_id="cordis_mail_retention"),
+            "trigger": IntervalTrigger(minutes=15),
+            "id": "cordis_mail_retention",
+            "name": "Cordis mail result retention",
+            "next_run_time": _startup_next_run(True, delay_seconds=120),
+            "misfire_grace_time": 900,
         },
     ]
 

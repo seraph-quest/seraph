@@ -3,6 +3,8 @@ import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { AudioDocumentationControls } from "./AudioDocumentationControls";
 import {
+  dollarsToMicrousd,
+  microusdToDollars,
   normalizeModelFabricSettings,
   type ModelFabricSettingsStatus,
   type OpenRouterOptionalPurpose,
@@ -18,6 +20,23 @@ const CAPABILITIES = {
   embedding: ["embedding"],
   audio: ["text", "audio_input"],
 };
+// Direct chat streams, agent turns call tools and planners need structured
+// output, so a new text route declares all of them by default.
+const DEFAULT_CAPABILITIES: Record<OpenRouterOptionalPurpose, string[]> = {
+  text: ["text", "tool_use", "structured_output", "streaming"],
+  vision: ["text", "vision", "structured_output"],
+  embedding: ["embedding"],
+  audio: ["text", "audio_input"],
+};
+// The bound is a per-call reservation, not a provider-side price cap: a call
+// billed above it pauses every OpenRouter call until the overrun is reviewed.
+// $0.50 covers a full default window on a typical mid-range model.
+const DEFAULT_REQUEST_BOUND_DOLLARS = "0.50";
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 65536;
+// Reference prices ($ per million tokens) for the "bound looks small" warning
+// when the operator has not entered the model's own prices.
+const REFERENCE_INPUT_PRICE_PER_M = 3;
+const REFERENCE_OUTPUT_PRICE_PER_M = 15;
 interface RouteDraft {
   enabled: boolean;
   modelId: string;
@@ -27,14 +46,19 @@ interface RouteDraft {
   timeoutSeconds: string;
   allowedUpstreams: string;
   zeroDataRetention: boolean;
-  requestCostBoundMicrousd: string;
+  requestCostBoundDollars: string;
+  /** Empty keeps the backend default prompt window. */
+  contextWindowTokens: string;
+  /** Preview-only model prices ($ per million tokens); never saved. */
+  inputPricePerM: string;
+  outputPricePerM: string;
 }
 interface SetupDraft {
   routes: Record<OpenRouterOptionalPurpose, RouteDraft>;
   audioSetup: boolean;
   egressClass: string;
   cloudEgressAcknowledged: boolean;
-  spendCeilingMicrousd: string;
+  spendCeilingDollars: string;
   maxQueued: string;
   maxOutstandingPerOwner: string;
   maxRetries: string;
@@ -50,13 +74,16 @@ function routeDraft(route: OpenRouterRouteValue | null | undefined, slot: OpenRo
   return {
     enabled: route?.enabled ?? false,
     modelId: route?.model_id ?? "",
-    capabilities: route ? [...route.capabilities] : slot === "audio" ? ["text", "audio_input"] : slot === "vision" ? ["text", "vision", "structured_output"] : slot === "embedding" ? ["embedding"] : ["text", "structured_output"],
+    capabilities: route ? [...route.capabilities] : [...DEFAULT_CAPABILITIES[slot]],
     temperature: String(route?.temperature ?? 0.7),
     maxOutputTokens: String(route?.max_output_tokens ?? 4096),
     timeoutSeconds: String(route?.timeout_seconds ?? (slot === "audio" ? 60 : 120)),
     allowedUpstreams: route?.allowed_upstreams.join(", ") ?? "",
     zeroDataRetention: route?.zero_data_retention ?? (slot === "audio"),
-    requestCostBoundMicrousd: route ? String(route.request_cost_bound_microusd) : "",
+    requestCostBoundDollars: route ? microusdToDollars(route.request_cost_bound_microusd) : DEFAULT_REQUEST_BOUND_DOLLARS,
+    contextWindowTokens: route?.context_window_tokens ? String(route.context_window_tokens) : "",
+    inputPricePerM: "",
+    outputPricePerM: "",
   };
 }
 function draftFromSetup(setup: OpenRouterSetupStatus | null | undefined, revoked = false): SetupDraft {
@@ -65,7 +92,7 @@ function draftFromSetup(setup: OpenRouterSetupStatus | null | undefined, revoked
     audioSetup: setup?.schema_version === "seraph.openrouter.setup.v3",
     egressClass: setup?.egress_class ?? "cloud_allowed_full",
     cloudEgressAcknowledged: !revoked && (setup?.cloud_egress_acknowledged ?? false),
-    spendCeilingMicrousd: setup?.spend_ceiling_microusd == null ? "" : String(setup.spend_ceiling_microusd),
+    spendCeilingDollars: setup?.spend_ceiling_microusd == null ? "" : microusdToDollars(setup.spend_ceiling_microusd),
     maxQueued: String(setup?.max_queued ?? 64),
     maxOutstandingPerOwner: String(setup?.max_outstanding_per_owner ?? 16),
     maxRetries: String(setup?.max_retries ?? 2),
@@ -80,6 +107,56 @@ function boundedNumber(value: string, label: string, min: number, max: number, i
     throw new Error(label + " must be a finite value between " + min + " and " + max + (integer ? " (whole number)." : "."));
   }
   return parsed;
+}
+/** Dollar input to integer micro-USD within [min, max] micro-USD. */
+function boundedDollars(value: string, label: string, minMicrousd: number, maxMicrousd: number): number {
+  const micro = dollarsToMicrousd(value);
+  if (micro === null || micro < minMicrousd || micro > maxMicrousd) {
+    throw new Error(label + " must be a dollar amount between $" + microusdToDollars(minMicrousd) + " and $" + microusdToDollars(maxMicrousd) + ".");
+  }
+  return micro;
+}
+function dollarPreview(value: string): string {
+  const micro = dollarsToMicrousd(value);
+  return micro === null ? "enter dollars, e.g. 0.50" : "= " + micro.toLocaleString("en-US") + " µUSD";
+}
+function pricePerM(value: string): number | null {
+  const parsed = Number(value);
+  return value.trim() && Number.isFinite(parsed) && parsed >= 0 && parsed <= 10_000 ? parsed : null;
+}
+/**
+ * Worst-case charge for one call: the whole declared prompt window plus the
+ * output cap. With per-token prices micro-USD = tokens x ($ per million).
+ */
+function worstCaseCallMicrousd(promptTokens: number, outputTokens: number, inputPerM: number, outputPerM: number): number {
+  return Math.ceil(promptTokens * inputPerM + outputTokens * outputPerM);
+}
+function WorstCasePreview({ draft, slot }: { draft: RouteDraft; slot: OpenRouterOptionalPurpose }) {
+  const windowTokens = Number(draft.contextWindowTokens.trim() || DEFAULT_CONTEXT_WINDOW_TOKENS);
+  // Embeddings bill input only.
+  const outputTokens = slot === "embedding" ? 0 : Number(draft.maxOutputTokens);
+  if (!Number.isSafeInteger(windowTokens) || !Number.isSafeInteger(outputTokens)) return null;
+  const bound = dollarsToMicrousd(draft.requestCostBoundDollars);
+  const inputPrice = pricePerM(draft.inputPricePerM);
+  const outputPrice = slot === "embedding" ? 0 : pricePerM(draft.outputPricePerM);
+  const entered = inputPrice !== null && outputPrice !== null;
+  const worst = worstCaseCallMicrousd(windowTokens, outputTokens,
+    entered ? inputPrice : REFERENCE_INPUT_PRICE_PER_M, entered ? outputPrice : REFERENCE_OUTPUT_PRICE_PER_M);
+  const tokens = "Worst case per call: " + windowTokens.toLocaleString("en-US") + " prompt"
+    + (outputTokens ? " + " + outputTokens.toLocaleString("en-US") + " output" : "") + " tokens";
+  const priced = entered
+    ? " ≈ $" + microusdToDollars(worst) + " at the prices entered."
+    : " ≈ $" + microusdToDollars(worst) + " at a reference $" + REFERENCE_INPUT_PRICE_PER_M + "/M input, $" + REFERENCE_OUTPUT_PRICE_PER_M + "/M output; enter the model's prices for an exact preview.";
+  return (
+    <div className="col-span-2" data-testid={"openrouter-" + slot + "-worst-case"}>
+      <div className="text-retro-text/50">{tokens}{priced}</div>
+      {bound !== null && bound < worst && (
+        <div data-testid={"openrouter-" + slot + "-bound-warning"} className="text-yellow-400">
+          The request bound is below this worst case{entered ? "" : " (reference prices)"}. A call billed above the bound pauses every OpenRouter call until you review the overrun; raise the bound or lower the context window.
+        </div>
+      )}
+    </div>
+  );
 }
 function routeValue(draft: RouteDraft, slot: OpenRouterOptionalPurpose, ceiling: number): OpenRouterRouteValue | null {
   // An untouched absent purpose stays absent and does not block saving text.
@@ -99,7 +176,10 @@ function routeValue(draft: RouteDraft, slot: OpenRouterOptionalPurpose, ceiling:
     max_output_tokens: boundedNumber(draft.maxOutputTokens, slot + " max output tokens", 1, slot === "audio" ? 8192 : 131072, true),
     timeout_seconds: boundedNumber(draft.timeoutSeconds, slot + " timeout", 1, slot === "audio" ? 60 : 120),
     zero_data_retention: draft.zeroDataRetention,
-    request_cost_bound_microusd: boundedNumber(draft.requestCostBoundMicrousd, slot + " request cost bound", 1, ceiling, true),
+    request_cost_bound_microusd: boundedDollars(draft.requestCostBoundDollars, slot + " request cost bound", 1, ceiling),
+    ...(draft.contextWindowTokens.trim()
+      ? { context_window_tokens: boundedNumber(draft.contextWindowTokens, slot + " context window", 1024, 2097152, true) }
+      : {}),
   };
 }
 function unchangedRoute(draft: RouteDraft, route: OpenRouterRouteValue | null | undefined): boolean {
@@ -109,7 +189,8 @@ function unchangedRoute(draft: RouteDraft, route: OpenRouterRouteValue | null | 
     && sameList(draft.capabilities, route.capabilities) && sameList(splitList(draft.allowedUpstreams), route.allowed_upstreams)
     && Number(draft.temperature) === route.temperature && Number(draft.maxOutputTokens) === route.max_output_tokens
     && Number(draft.timeoutSeconds) === route.timeout_seconds && draft.zeroDataRetention === route.zero_data_retention
-    && Number(draft.requestCostBoundMicrousd) === route.request_cost_bound_microusd;
+    && dollarsToMicrousd(draft.requestCostBoundDollars) === route.request_cost_bound_microusd
+    && (draft.contextWindowTokens.trim() ? Number(draft.contextWindowTokens) : null) === (route.context_window_tokens ?? null);
 }
 const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-40";
 
@@ -154,9 +235,12 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
     setPurposeAcks({ vision: false, embedding: false, audio: false });
   }
   function updateRoute<K extends keyof RouteDraft>(slot: OpenRouterOptionalPurpose, field: K, value: RouteDraft[K]) {
-    dirty.current = true;
+    // Preview-only prices are never saved, so they neither mark the setup
+    // edited nor reset a purpose acknowledgment.
+    const previewOnly = field === "inputPricePerM" || field === "outputPricePerM";
+    if (!previewOnly) dirty.current = true;
     setDraft((current) => ({ ...current, routes: { ...current.routes, [slot]: { ...current.routes[slot], [field]: value } } }));
-    if (slot !== "text") setPurposeAcks((current) => ({ ...current, [slot]: false }));
+    if (slot !== "text" && !previewOnly) setPurposeAcks((current) => ({ ...current, [slot]: false }));
   }
   function needsAck(slot: "vision" | "embedding" | "audio"): boolean {
     return draft.routes[slot].enabled && (revoked || metadata?.slot_statuses[slot]?.error_code === "purpose_consent_stale"
@@ -203,7 +287,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
     setError(null);
     try {
       if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) throw new Error("Refresh current settings to obtain the policy revision before saving.");
-      const ceiling = boundedNumber(draft.spendCeilingMicrousd, "Spend ceiling", 1, 1_000_000_000, true);
+      const ceiling = boundedDollars(draft.spendCeilingDollars, "Spend ceiling", 1, 1_000_000_000);
       if (!draft.cloudEgressAcknowledged) throw new Error("Acknowledge cloud egress before saving.");
       const routes: OpenRouterSetupValue["routes"] = { text: routeValue(draft.routes.text, "text", ceiling), vision: routeValue(draft.routes.vision, "vision", ceiling), embedding: routeValue(draft.routes.embedding, "embedding", ceiling), ...(draft.audioSetup ? { audio: routeValue(draft.routes.audio, "audio", ceiling) } : {}) };
       for (const slot of ["vision", "embedding", ...(draft.audioSetup ? ["audio" as const] : [])] as const) {
@@ -247,7 +331,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
         <div className="text-[9px] text-retro-text/60">{metadataRetained ? "stale retained" : (metadata?.status ?? "configuration_required").replace(/_/g, " ")}</div>
       </div>
       <div className="mb-2 text-[9px] text-retro-text/50">
-        Fixed route https://openrouter.ai/api/v1 · save and status never call a provider. Manual canary remains explicit.
+        Fixed route https://openrouter.ai/api/v1 · save and status never call a provider. Proving a route runs explicit, billed canaries.
         All purposes share one deployment ceiling and one in-flight request. Readiness reflects capability proof only.
       </div>
       {metadata?.error_code && <div className="mb-1 text-[9px] text-red-400">{metadata.error_code}</div>}
@@ -262,7 +346,7 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
           <fieldset key={slot} className="mb-2 border border-retro-text/10 px-2 py-1 text-[9px]" aria-label={"OpenRouter " + slot + " route"}>
             <legend className="text-retro-text uppercase">{slot}</legend>
             <div data-testid={"openrouter-" + slot + "-status"} className={status.status === "ready" ? "text-green-400" : "text-yellow-400"}>
-              {status.status.replace(/_/g, " ")}{status.error_code ? " · " + status.error_code : ""}{status.proof_expires_at ? " · proof expires " + status.proof_expires_at : ""}
+              {status.status.replace(/_/g, " ")}{status.error_code ? " · " + status.error_code : ""}{status.proof_reason ? " · " + status.proof_reason + " (Prove route below)" : ""}{status.proof_expires_at ? " · proof expires " + status.proof_expires_at : ""}
             </div>
             <label className="flex items-center gap-1 my-1 text-retro-text/70">
               <input type="checkbox" aria-label={"Enable OpenRouter " + slot + " route"} checked={route.enabled} onChange={(event) => updateRoute(slot, "enabled", event.target.checked)} /> enable {slot}
@@ -282,13 +366,29 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
                 ["temperature", "Temperature", 0, 2],
                 ["maxOutputTokens", "Max output tokens", 1, 131072],
                 ["timeoutSeconds", "Timeout seconds", 1, 120],
-                ["requestCostBoundMicrousd", "Request cost bound", 1, 1000000000],
               ] as const).map(([field, label, min, max]) => (
                 <div key={field} className="contents">
                   <label htmlFor={"openrouter-" + slot + "-" + field} className="text-retro-text/40">{label}</label>
                   <input id={"openrouter-" + slot + "-" + field} aria-label={"OpenRouter " + slot + " " + label.toLowerCase()} type="number" min={min} max={max} step={field === "temperature" ? "0.1" : "1"} value={route[field]} onChange={(event) => updateRoute(slot, field, event.target.value)} className={inputClass} />
                 </div>
               ))}
+              <label htmlFor={"openrouter-" + slot + "-context"} className="text-retro-text/40">Context window tokens</label>
+              <input id={"openrouter-" + slot + "-context"} aria-label={"OpenRouter " + slot + " context window tokens"} type="number" min="1024" max="2097152" step="1" value={route.contextWindowTokens} placeholder={"default " + DEFAULT_CONTEXT_WINDOW_TOKENS + " · separate from output cap"} onChange={(event) => updateRoute(slot, "contextWindowTokens", event.target.value)} className={inputClass} />
+              <label htmlFor={"openrouter-" + slot + "-bound"} className="text-retro-text/40">Request cost bound ($)</label>
+              <div className="flex min-w-0 items-center gap-1">
+                <input id={"openrouter-" + slot + "-bound"} aria-label={"OpenRouter " + slot + " request cost bound (USD)"} inputMode="decimal" value={route.requestCostBoundDollars} onChange={(event) => updateRoute(slot, "requestCostBoundDollars", event.target.value)} className={inputClass + " w-20"} />
+                <span className="text-retro-text/40">{dollarPreview(route.requestCostBoundDollars)} reserved per call</span>
+              </div>
+              <div className="col-span-2 text-retro-text/40">
+                The bound is reserved per call; OpenRouter does not cap the charge at it. If a call is billed above the bound, Seraph records the overrun and blocks every further OpenRouter call until you review it: raise the bound to at least the billed charge shown under Inference accounting and save this setup, then press Prove route again (a new bound changes the route, and canaries are billed).
+              </div>
+              <label htmlFor={"openrouter-" + slot + "-input-price"} className="text-retro-text/40">Model prices ($/M, preview only)</label>
+              <div className="flex min-w-0 items-center gap-1">
+                <input id={"openrouter-" + slot + "-input-price"} aria-label={"OpenRouter " + slot + " input price per million tokens (preview only)"} inputMode="decimal" value={route.inputPricePerM} placeholder="input" onChange={(event) => updateRoute(slot, "inputPricePerM", event.target.value)} className={inputClass + " w-16"} />
+                {slot !== "embedding" && <input aria-label={"OpenRouter " + slot + " output price per million tokens (preview only)"} inputMode="decimal" value={route.outputPricePerM} placeholder="output" onChange={(event) => updateRoute(slot, "outputPricePerM", event.target.value)} className={inputClass + " w-16"} />}
+                <span className="text-retro-text/40">not saved</span>
+              </div>
+              <WorstCasePreview draft={route} slot={slot} />
               <div className="text-retro-text/40">Retention</div>
               <label className="flex items-center gap-1 text-retro-text/70">
                 <input type="checkbox" aria-label={"Enable OpenRouter " + slot + " zero data retention"} checked={route.zeroDataRetention} onChange={(event) => updateRoute(slot, "zeroDataRetention", event.target.checked)} />zero data retention{slot !== "text" ? " (required when enabled)" : ""}
@@ -311,8 +411,11 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
         </select>
         <div className="text-retro-text/40">Cloud consent</div>
         <label className="flex items-center gap-1 text-retro-text/70"><input type="checkbox" aria-label="Acknowledge OpenRouter cloud egress" checked={draft.cloudEgressAcknowledged} onChange={(event) => update("cloudEgressAcknowledged", event.target.checked)} />acknowledge cloud egress</label>
-        <label htmlFor="openrouter-spend" className="text-retro-text/40">Monthly ceiling (micro USD)</label>
-        <input id="openrouter-spend" aria-label="OpenRouter spend ceiling" type="number" min="1" max="1000000000" value={draft.spendCeilingMicrousd} onChange={(event) => update("spendCeilingMicrousd", event.target.value)} className={inputClass} />
+        <label htmlFor="openrouter-spend" className="text-retro-text/40">Monthly ceiling ($)</label>
+        <div className="flex min-w-0 items-center gap-1">
+          <input id="openrouter-spend" aria-label="OpenRouter spend ceiling (USD)" inputMode="decimal" value={draft.spendCeilingDollars} onChange={(event) => update("spendCeilingDollars", event.target.value)} className={inputClass + " w-20"} placeholder="e.g. 5" />
+          <span className="text-retro-text/40">{draft.spendCeilingDollars.trim() ? dollarPreview(draft.spendCeilingDollars) : "required"}</span>
+        </div>
         <div className="text-retro-text/40">Shared queue bounds</div>
         <div className="grid grid-cols-4 gap-1">
           <input aria-label="OpenRouter max queued" title="max queued" type="number" min="1" max="64" value={draft.maxQueued} onChange={(event) => update("maxQueued", event.target.value)} className={inputClass} />

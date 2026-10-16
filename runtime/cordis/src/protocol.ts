@@ -2,16 +2,18 @@
 import { TextDecoder } from 'node:util';
 import type { Readable, Writable } from 'node:stream';
 import { Resources } from './resources.js';
+import { isServiceMethod, validateInput, validateResult, type ServiceMethod } from './contracts/methods.js';
 
 export const MAX_FRAME = 1_048_576;
 export const CONTROL_TIMEOUT_MS = 5_000;
+export const ORDINARY_TIMEOUT_MS = 30_000;
 export const MAX_PENDING = 32;
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export type Method = 'bootstrap.hello' | 'runtime.ready' | 'runtime.status' | 'runtime.quiesce' | 'runtime.shutdown' | 'invocation.cancel';
+export type Method = 'bootstrap.hello' | 'runtime.ready' | 'runtime.status' | 'runtime.quiesce' | 'runtime.shutdown' | 'invocation.cancel' | ServiceMethod;
 export interface Frame {
   protocol: 1; boot_nonce: string; request_id: string; seq: number;
   kind: 'request' | 'response'; method: Method; invocation_ref: string | null;
-  composition_epoch: null; composition_digest: string; package_digest: string;
+  composition_epoch: number | null; composition_digest: string; package_digest: string;
   deadline_at: number; payload: Record<string, Json>;
 }
 export class ProtocolError extends Error {}
@@ -19,6 +21,22 @@ const fields = ['protocol', 'boot_nonce', 'request_id', 'seq', 'kind', 'method',
 const methods = new Set<string>(['bootstrap.hello', 'runtime.ready', 'runtime.status', 'runtime.quiesce', 'runtime.shutdown', 'invocation.cancel']);
 const hex64 = /^[0-9a-f]{64}$/;
 const token = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+/** The trusted Python owner seals inference purpose before this initial frame.
+ * Child service calls and responses must retain that original exact cutoff. */
+export function validateIncomingDeadline(frame: Frame, now = Date.now()): void {
+  integer(now, 1);
+  integer(frame.deadline_at, 1);
+  if (frame.deadline_at <= now) throw new ProtocolError('deadline expired');
+  if (frame.kind !== 'request') return; // Pending identity verifies response echo.
+  if (methods.has(frame.method)) {
+    if (frame.deadline_at - now > CONTROL_TIMEOUT_MS) throw new ProtocolError('control deadline exceeded');
+  } else if (isServiceMethod(frame.method)) {
+    if (frame.method !== 'inference.request' && frame.deadline_at - now > ORDINARY_TIMEOUT_MS) {
+      throw new ProtocolError('ordinary deadline exceeded');
+    }
+  } else throw new ProtocolError('unknown deadline method');
+}
 
 export function integer(value: Json | undefined, min = 0, max = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) throw new ProtocolError('invalid integer');
@@ -92,7 +110,7 @@ export function decodeJson(data: Uint8Array): Json {
     offset += number.length;
     const value = Number(number);
     if (!Number.isFinite(value)) throw new ProtocolError('nonfinite number');
-    if (key && ['protocol', 'seq', 'deadline_at', 'composition_epoch', 'resources_remaining'].includes(key)) {
+    if (key && ['protocol', 'seq', 'deadline_at', 'composition_epoch', 'resources_remaining', 'limit', 'max_bytes', 'expected_revision', 'revision', 'source_slot', 'first_line', 'last_line', 'size_bytes'].includes(key)) {
       if (!/^-?(?:0|[1-9][0-9]*)$/.test(number)) throw new ProtocolError('integer used float syntax');
       if (!Number.isSafeInteger(value)) throw new ProtocolError('unsafe integer');
     }
@@ -107,7 +125,8 @@ function plugins(value: Json | undefined): void {
   if (!Array.isArray(value) || value.length > 64) throw new ProtocolError('invalid plugins');
   const seen = new Set<string>();
   for (const item of value) {
-    const plugin = closed(item, ['id', 'state', 'reason']);
+    const plugin = closed(item, ['id', 'state', 'reason', 'digest']);
+    if (typeof plugin.digest !== 'string' || !hex64.test(plugin.digest)) throw new ProtocolError('invalid plugin digest');
     if (typeof plugin.id !== 'string' || plugin.id.length < 1 || plugin.id.length > 128 || seen.has(plugin.id)) throw new ProtocolError('invalid plugin identity');
     seen.add(plugin.id);
     if (typeof plugin.state !== 'string' || !['ready', 'blocked', 'stopped'].includes(plugin.state) || (plugin.reason !== null && (typeof plugin.reason !== 'string' || plugin.reason.length > 256))) throw new ProtocolError('invalid plugin state');
@@ -118,7 +137,14 @@ export function validateFrame(value: Json): Frame {
   integer(frame.protocol, 1, 1); integer(frame.seq, 1); integer(frame.deadline_at, 1);
   for (const key of ['boot_nonce', 'composition_digest', 'package_digest']) if (typeof frame[key] !== 'string' || !hex64.test(frame[key])) throw new ProtocolError('invalid boot identity');
   if (typeof frame.request_id !== 'string' || !token.test(frame.request_id)) throw new ProtocolError('invalid request identity');
-  if (typeof frame.method !== 'string' || !methods.has(frame.method) || (frame.kind !== 'request' && frame.kind !== 'response')) throw new ProtocolError('unknown method or kind');
+  if (typeof frame.method !== 'string' || (!methods.has(frame.method) && !isServiceMethod(frame.method)) || (frame.kind !== 'request' && frame.kind !== 'response')) throw new ProtocolError('unknown method or kind');
+  if (isServiceMethod(frame.method)) {
+    integer(frame.composition_epoch, 1);
+    if (typeof frame.invocation_ref !== 'string' || !token.test(frame.invocation_ref)) throw new ProtocolError('invalid native invocation');
+    if (frame.kind === 'request') validateInput(frame.method, frame.payload);
+    else validateResult(frame.method, frame.payload);
+    return frame as unknown as Frame;
+  }
   if (frame.composition_epoch !== null) throw new ProtocolError('A1.1 controls have no ownership epoch');
   if (frame.method === 'invocation.cancel') {
     if (typeof frame.invocation_ref !== 'string' || !token.test(frame.invocation_ref)) throw new ProtocolError('invalid invocation reference');

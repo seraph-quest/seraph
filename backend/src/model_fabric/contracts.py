@@ -53,8 +53,12 @@ PROVIDER_CREDENTIAL_REFS: dict[str, frozenset[str]] = {
 class NoCompliantModelRouteError(RuntimeError):
     code = "no_compliant_route"
 
-    def __init__(self) -> None:
+    def __init__(self, reason_codes: tuple[str, ...] = ()) -> None:
         super().__init__(self.code)
+        # Bounded selector rejection codes (for example ``proof_expired:health``)
+        # let operator surfaces name the actual recovery without exposing
+        # provider detail. ``str(error)`` stays the stable public code.
+        self.reason_codes = tuple(str(code)[:128] for code in reason_codes[:16] if code)
 
 
 class EndpointClass(str, Enum):

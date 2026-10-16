@@ -85,12 +85,16 @@ export interface OpenRouterRouteValue {
   timeout_seconds: number;
   zero_data_retention: boolean;
   request_cost_bound_microusd: number;
+  /** Prompt window, independent of max_output_tokens; null uses the backend default. */
+  context_window_tokens?: number | null;
 }
 
 export interface OpenRouterSlotStatus {
   status: "configuration_required" | "blocked" | "ready";
   error_code: string | null;
   proof_expires_at: string | null;
+  /** First capability to (re-)prove, e.g. proof_expired:health. */
+  proof_reason?: string | null;
 }
 
 export interface OpenRouterRouteStatus extends OpenRouterRouteValue, OpenRouterSlotStatus {}
@@ -193,6 +197,8 @@ export interface ModelFabricSettingsStatus {
   }>;
   defaults: { egress_class: string; fallback_allowed: boolean };
   canary_endpoint: string;
+  /** Selectable canary proof lifetime; the backend rejects values above max_seconds. */
+  canary_proof_ttl: { default_seconds: number; max_seconds: number };
   openrouter_setup?: OpenRouterSetupStatus | null;
   near_text?: NearTextSetupStatus | null;
   /** Local metadata failure marker; unrelated settings remain usable. */
@@ -219,6 +225,12 @@ export interface InferenceAccountingStatus {
   remaining_microusd?: number | null;
   operations_truncated?: boolean;
   operation_count?: number;
+  /** Largest unreviewed settled charge; a saved request bound must cover it. */
+  overrun_max_cost_microusd?: number;
+  unreviewed_overruns?: Array<{
+    operation_id: string; job_id: string; runtime_path: string; period_id: string;
+    bound_microusd: number; actual_cost_microusd: number;
+  }>;
   operations: Array<{
     operation_id: string; job_id: string; owner_id: string; runtime_path: string;
     state: string; revision: number; bound_microusd: number; period_id: string;
@@ -254,6 +266,16 @@ export function normalizeInferenceAccounting(value: unknown): InferenceAccountin
     remaining_microusd: typeof record.remaining_microusd === "number" ? record.remaining_microusd : null,
     operations_truncated: record.operations_truncated === true,
     operation_count: typeof record.operation_count === "number" ? record.operation_count : undefined,
+    overrun_max_cost_microusd: typeof record.overrun_max_cost_microusd === "number" && Number.isSafeInteger(record.overrun_max_cost_microusd)
+      && record.overrun_max_cost_microusd >= 0 ? record.overrun_max_cost_microusd : undefined,
+    unreviewed_overruns: Array.isArray(record.unreviewed_overruns) ? record.unreviewed_overruns.slice(0, 16).flatMap((item) => {
+      const row = recordOf(item);
+      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string"
+        || !Number.isSafeInteger(row.bound_microusd) || !Number.isSafeInteger(row.actual_cost_microusd)) return [];
+      return [{ operation_id: row.operation_id, job_id: row.job_id, runtime_path: String(row.runtime_path ?? ""),
+        period_id: String(row.period_id ?? ""), bound_microusd: row.bound_microusd as number,
+        actual_cost_microusd: row.actual_cost_microusd as number }];
+    }) : [],
     operations: operations.flatMap((item) => {
       const row = recordOf(item);
       if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string" || typeof row.revision !== "number" || typeof row.bound_microusd !== "number") return [];
@@ -381,6 +403,7 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
       status: rawState?.status === "ready" || rawState?.status === "configuration_required" ? rawState.status : "blocked",
       error_code: typeof rawState?.error_code === "string" ? rawState.error_code : rawState ? null : "slot_metadata_unavailable",
       proof_expires_at: typeof rawState?.proof_expires_at === "string" ? rawState.proof_expires_at : null,
+      proof_reason: typeof rawState?.proof_reason === "string" ? rawState.proof_reason : null,
     };
     slot_statuses[slot] = state;
     routes[slot] = route ? {
@@ -393,6 +416,9 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
       timeout_seconds: route.timeout_seconds as number,
       zero_data_retention: route.zero_data_retention as boolean,
       request_cost_bound_microusd: route.request_cost_bound_microusd as number,
+      context_window_tokens: typeof route.context_window_tokens === "number" && Number.isSafeInteger(route.context_window_tokens)
+        ? route.context_window_tokens
+        : null,
       ...state,
     } : null;
   }
@@ -588,6 +614,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     canary_endpoint: typeof record.canary_endpoint === "string"
       ? record.canary_endpoint
       : "/api/settings/model-fabric/canary",
+    canary_proof_ttl: normalizeProofTtl(record.canary_proof_ttl),
     openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
     near_text: nearText,
     near_text_metadata_unavailable: record.near_text_metadata_unavailable === true || (record.near_text != null && !nearText),
@@ -595,6 +622,59 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
     egress_revoked: record.egress_revoked === true,
   };
+}
+
+/**
+ * Compact chat-route proof posture for the composer meta line, e.g.
+ * "PROOFS 5H LEFT", "PROOF EXPIRED: HEALTH" or "PROOF FAILED: TOOL USE". Null when no text-route proof
+ * metadata exists (legacy or unconfigured deployments).
+ */
+export function textRouteProofLabel(runtime: ModelFabricRuntimeStatus | null | undefined, now = Date.now()): string | null {
+  const proofs = runtime?.proofs.filter((proof) => proof.profile_id === "openrouter.text") ?? [];
+  if (!proofs.length) return null;
+  const capability = (value: string) => value.replace(/_/g, " ").toUpperCase();
+  // A failed canary needs a different fix than a missing one (check the
+  // model, upstream or timeout before proving again), so name it.
+  const failed = proofs.find((proof) => proof.status === "failed");
+  if (failed) return "PROOF FAILED: " + capability(failed.capability);
+  const expired = proofs.find((proof) => proof.status === "stale");
+  if (expired) return "PROOF EXPIRED: " + capability(expired.capability);
+  const missing = proofs.find((proof) => proof.status !== "fresh");
+  if (missing) return "PROOF MISSING: " + capability(missing.capability);
+  const expiries = proofs.map((proof) => (proof.expires_at ? Date.parse(proof.expires_at) : Number.NaN)).filter(Number.isFinite);
+  if (!expiries.length) return null;
+  const remainingMs = Math.min(...expiries) - now;
+  if (remainingMs <= 0) return "PROOF EXPIRED";
+  const minutes = Math.floor(remainingMs / 60_000);
+  return "PROOFS " + (minutes >= 60 ? Math.floor(minutes / 60) + "H" : Math.max(minutes, 1) + "M") + " LEFT";
+}
+
+export const DEFAULT_PROOF_TTL_SECONDS = 3600;
+export const MAX_PROOF_TTL_SECONDS = 86_400;
+
+function normalizeProofTtl(value: unknown): { default_seconds: number; max_seconds: number } {
+  const record = recordOf(value);
+  const max = typeof record?.max_seconds === "number" && Number.isSafeInteger(record.max_seconds)
+    && record.max_seconds >= 60 && record.max_seconds <= MAX_PROOF_TTL_SECONDS ? record.max_seconds : DEFAULT_PROOF_TTL_SECONDS;
+  const fallback = Math.min(DEFAULT_PROOF_TTL_SECONDS, max);
+  const preferred = typeof record?.default_seconds === "number" && Number.isSafeInteger(record.default_seconds)
+    && record.default_seconds >= 60 && record.default_seconds <= max ? record.default_seconds : fallback;
+  return { default_seconds: preferred, max_seconds: max };
+}
+
+/** Whole-dollar or cent input to integer micro-USD; null when invalid. */
+export function dollarsToMicrousd(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(trimmed)) return null;
+  const [whole, fraction = ""] = trimmed.split(".");
+  const micro = Number(whole) * 1_000_000 + Number(fraction.padEnd(6, "0"));
+  return Number.isSafeInteger(micro) ? micro : null;
+}
+
+export function microusdToDollars(value: number): string {
+  const whole = Math.trunc(value / 1_000_000);
+  const fraction = String(value % 1_000_000).padStart(6, "0").replace(/0+$/, "");
+  return fraction ? whole + "." + fraction : String(whole);
 }
 
 export function normalizeModelFabricCanary(value: unknown): ModelFabricCanaryResult | null {

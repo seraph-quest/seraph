@@ -136,6 +136,7 @@ def test_no_contact_readback_cannot_prove_task_output():
 
 # Independent current topology coverage; shared fixture belongs to this test lane.
 from tests.test_general_task_approval import approval_journey, create_and_pause
+from tests.test_document_build_native_capacity import build_admission_lifecycle
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 
 

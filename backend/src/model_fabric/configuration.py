@@ -49,6 +49,11 @@ _SAFE_OPENROUTER_UPSTREAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
 _MAX_OPENROUTER_MODELS = 8
 _MAX_OPENROUTER_OUTPUT_TOKENS = 131_072
+# The prompt window is independent of the output cap. Routes saved before the
+# explicit field existed use this default the next time their profile is built.
+DEFAULT_OPENROUTER_CONTEXT_WINDOW_TOKENS = 65_536
+_MIN_OPENROUTER_CONTEXT_WINDOW_TOKENS = 1_024
+_MAX_OPENROUTER_CONTEXT_WINDOW_TOKENS = 2_097_152
 _MAX_OPENROUTER_TIMEOUT_SECONDS = 120.0
 _MAX_OPENROUTER_QUEUE = 64
 _MAX_OPENROUTER_OWNER_OUTSTANDING = 16
@@ -87,6 +92,10 @@ class OpenRouterRoute:
     timeout_seconds: float
     zero_data_retention: bool
     request_cost_bound_microusd: int
+    context_window_tokens: int | None = None
+
+
+_OPENROUTER_ROUTE_OPTIONAL_FIELDS = frozenset({"context_window_tokens"})
 
 
 @dataclass(frozen=True)
@@ -123,6 +132,7 @@ class OpenRouterSetup:
     schema_version: str = OPENROUTER_SETUP_SCHEMA_VERSION
     routes: dict[str, OpenRouterRoute | None] | None = None
     purpose_consents: dict[str, int] | None = None
+    context_window_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -638,7 +648,8 @@ def _legacy_setup_for_route(setup: OpenRouterSetup, route: OpenRouterRoute) -> O
         allowed_upstreams=route.allowed_upstreams, temperature=route.temperature,
         max_output_tokens=route.max_output_tokens, timeout_seconds=route.timeout_seconds,
         zero_data_retention=route.zero_data_retention,
-        request_cost_bound_microusd=route.request_cost_bound_microusd)
+        request_cost_bound_microusd=route.request_cost_bound_microusd,
+        context_window_tokens=route.context_window_tokens)
 
 
 def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRouterRoute, *, allow_unconsented: bool = False) -> None:
@@ -682,7 +693,8 @@ def migrate_openrouter_setup_v1_to_v2(setup: OpenRouterSetup, *, egress_revision
         capabilities=setup.capabilities, allowed_upstreams=setup.allowed_upstreams,
         temperature=setup.temperature, max_output_tokens=setup.max_output_tokens,
         timeout_seconds=setup.timeout_seconds, zero_data_retention=setup.zero_data_retention,
-        request_cost_bound_microusd=setup.request_cost_bound_microusd or setup.spend_ceiling_microusd)
+        request_cost_bound_microusd=setup.request_cost_bound_microusd or setup.spend_ceiling_microusd,
+        context_window_tokens=setup.context_window_tokens)
     routes = {slot: None for slot in OPENROUTER_ROUTE_SLOTS}
     consents = {}
     if setup.capabilities == ("embedding",):
@@ -695,7 +707,7 @@ def migrate_openrouter_setup_v1_to_v2(setup: OpenRouterSetup, *, egress_revision
             consents["vision"] = egress_revision
     return replace(setup, schema_version=OPENROUTER_SETUP_V2_SCHEMA_VERSION,
         model_ids=(), capabilities=(), allowed_upstreams=(), routes=routes,
-        purpose_consents=consents)
+        purpose_consents=consents, context_window_tokens=None)
 
 
 def openrouter_profiles_for_setup(setup: OpenRouterSetup, *, existing: tuple[ProviderProfile, ...] = ()) -> tuple[ProviderProfile, ...]:
@@ -814,6 +826,9 @@ def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool
         raise ValueError("OpenRouter credential reference must use the trusted vault or env reference")
     if setup.credential_fingerprint is not None and re.fullmatch(r"[0-9a-f]{12}", setup.credential_fingerprint) is None:
         raise ValueError("OpenRouter credential fingerprint is invalid")
+    window = setup.context_window_tokens
+    if window is not None and (type(window) is not int or not _MIN_OPENROUTER_CONTEXT_WINDOW_TOKENS <= window <= _MAX_OPENROUTER_CONTEXT_WINDOW_TOKENS):
+        raise ValueError("OpenRouter context window must be between 1024 and 2097152 tokens")
 
 
 def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool = False) -> OpenRouterSetup:
@@ -836,7 +851,8 @@ def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool =
             if raw is None:
                 routes[slot] = None
                 continue
-            if not isinstance(raw, dict) or set(raw) != set(OpenRouterRoute.__dataclass_fields__):
+            declared = set(OpenRouterRoute.__dataclass_fields__)
+            if not isinstance(raw, dict) or not declared - _OPENROUTER_ROUTE_OPTIONAL_FIELDS <= set(raw) <= declared:
                 raise ValueError("OpenRouter route must contain exactly the declared fields")
             raw = dict(raw)
             for field in ("capabilities", "allowed_upstreams"):
@@ -873,11 +889,29 @@ def _openrouter_setup_payload(setup: OpenRouterSetup) -> dict[str, object]:
     if setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
         payload.pop("routes", None)
         payload.pop("purpose_consents", None)
+        if setup.context_window_tokens is None:
+            payload.pop("context_window_tokens", None)
     else:
-        for field in ("model_ids", "capabilities", "temperature", "max_output_tokens", "timeout_seconds", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd"):
+        for field in ("model_ids", "capabilities", "temperature", "max_output_tokens", "timeout_seconds", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd", "context_window_tokens"):
             payload.pop(field, None)
-        payload["routes"] = {slot: asdict(route) if route is not None else None for slot, route in (setup.routes or {}).items()}
+        payload["routes"] = {slot: _openrouter_route_payload(route) if route is not None else None for slot, route in (setup.routes or {}).items()}
     return payload
+
+
+def _openrouter_route_payload(route: OpenRouterRoute) -> dict[str, object]:
+    # Omit an unset optional field so previously persisted routes keep their
+    # exact serialized form (and policy-continuity digests) until re-saved.
+    payload = asdict(route)
+    if route.context_window_tokens is None:
+        payload.pop("context_window_tokens")
+    return payload
+
+
+def openrouter_context_window_tokens(setup: OpenRouterSetup) -> int:
+    """Return the declared prompt window, independent of the output cap."""
+    if setup.context_window_tokens is not None:
+        return int(setup.context_window_tokens)
+    return max(DEFAULT_OPENROUTER_CONTEXT_WINDOW_TOKENS, int(setup.max_output_tokens))
 
 
 def openrouter_profile_for_setup(setup: OpenRouterSetup) -> ProviderProfile:
@@ -939,7 +973,7 @@ def _profile_for_validated_setup(setup: OpenRouterSetup) -> ProviderProfile:
             if setup.capabilities == (ModelCapability.EMBEDDING.value,)
             else "openai_compatible_chat"
         ),
-        context_window_tokens=max(setup.max_output_tokens, 4096),
+        context_window_tokens=openrouter_context_window_tokens(setup),
         max_output_tokens=setup.max_output_tokens,
         cost_microusd=setup.spend_ceiling_microusd,
         cost_source="operator_spend_ceiling",

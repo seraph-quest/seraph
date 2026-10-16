@@ -66,6 +66,8 @@ from src.vlm_runtime import (
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
+# Request ids whose turn reached a provider transport at least once.
+_runtime_request_contacts: set[str] = set()
 _target_health_lock = Lock()
 _unhealthy_targets: dict[tuple[str, str | None, str | None], float] = {}
 _target_feedback_lock = Lock()
@@ -3506,6 +3508,46 @@ def _mark_request_timed_out(request_id: str) -> None:
 def _finish_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests.pop(request_id, None)
+        _runtime_request_contacts.discard(request_id)
+
+
+def _note_provider_contact() -> None:
+    """Record that the bound chat request is about to reach a provider transport."""
+    request_id = _current_llm_request_id()
+    if request_id is None:
+        return
+    with _runtime_request_lock:
+        if request_id in _runtime_requests:
+            _runtime_request_contacts.add(request_id)
+
+
+def request_provider_contacted(request_id: str | None) -> bool:
+    """Return whether any model call of this registered request reached a transport.
+
+    A later route denial in the same agent turn is then a mid-turn block, not a
+    preflight refusal with no provider contact.
+    """
+    if request_id is None:
+        return False
+    with _runtime_request_lock:
+        return request_id in _runtime_request_contacts
+
+
+def _route_denial_error(denial_reasons: list[str], last_error: Exception) -> NoCompliantModelRouteError:
+    """Build the zero-contact denial, keeping an accounting refusal's reason.
+
+    Accounting refuses before the transport callback runs, so the attempt is
+    still a no-contact denial; carrying its code lets operator surfaces name the
+    actual recovery (for example an unreviewed provider overrun).
+    """
+    from src.workflows.inference_accounting import InferenceAccountingError
+
+    reasons = tuple(denial_reasons)
+    if not reasons and isinstance(last_error, InferenceAccountingError):
+        error = NoCompliantModelRouteError((last_error.code,))
+        error.__cause__ = last_error
+        return error
+    return NoCompliantModelRouteError(reasons)
 
 
 def _can_log_request(request_id: str | None) -> bool:
@@ -3895,6 +3937,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                             )
                             route_attempt_started = True
                         governed_attempted = request_context is not None
+                        _note_provider_contact()
                         if governed_context is not None:
                             governed_response, raw_payload = _governed_openai_chat_completion(
                                 decision=route_decision,
@@ -3974,6 +4017,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         )
                         route_attempt_started = True
                     governed_attempted = request_context is not None
+                    _note_provider_contact()
                     if governed_context is not None:
                         governed_response, raw_payload = _governed_openai_chat_completion(
                             decision=route_decision,
@@ -4130,7 +4174,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 denied_decision,
                 tuple(denial_reasons or ("no_compliant_route",)),
             )
-            last_error = NoCompliantModelRouteError()
+            last_error = _route_denial_error(denial_reasons, last_error)
         if receipt_session is not None and governed_attempted:
             _finalize_route_receipt_sync(
                 receipt_session,
@@ -4428,6 +4472,7 @@ def completion_with_fallback_sync(
                             )
                             route_attempt_started = True
                         governed_attempted = request_context is not None
+                        _note_provider_contact()
                         if governed_context is not None:
                             return _governed_openai_chat_completion(
                                 decision=route_decision,
@@ -4507,6 +4552,7 @@ def completion_with_fallback_sync(
                         )
                         route_attempt_started = True
                     governed_attempted = request_context is not None
+                    _note_provider_contact()
                     if governed_context is not None:
                         return _governed_openai_chat_completion(
                             decision=route_decision,
@@ -4644,7 +4690,7 @@ def completion_with_fallback_sync(
                 denied_decision,
                 tuple(denial_reasons or ("no_compliant_route",)),
             )
-            last_error = NoCompliantModelRouteError()
+            last_error = _route_denial_error(denial_reasons, last_error)
         if receipt_session is not None and governed_attempted:
             _finalize_route_receipt_sync(
                 receipt_session,

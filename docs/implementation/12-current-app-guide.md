@@ -107,9 +107,9 @@ Only `bootstrap.hello`, `runtime.ready`, `runtime.status`, `runtime.quiesce`,
 `runtime.shutdown` and `invocation.cancel` are admitted here. Lifecycle controls
 have null invocation reference and null composition epoch. Cancellation requires
 a bounded nonempty invocation reference and returns false for an unknown
-invocation. Service methods and streams are absent until their separately owned
-typed-service contract is implemented; no ownership epoch, second authority,
-job queue, inference lane or agent loop is created by the host.
+invocation. Typed service frames are described in the
+[service bridge section](#cordis-typed-service-bridge-1007); the host itself
+creates no second authority, job queue, inference lane or agent loop.
 
 Admission closes before shutdown. The parent drains/cancels within 10 seconds or
 the original earlier deadline, then uses TERM, a 2-second wait, KILL and positive
@@ -137,6 +137,96 @@ IPv4/IPv6 socket creation denied. This is Linux-host lifecycle/security proof,
 not a native macOS receipt or inference/provider proof. macOS remains a peer
 core-host target; unsupported optional native proofs do not block independent
 core operation.
+
+### Cordis typed service bridge (#1007)
+
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) adds fourteen typed
+service plugins to the reviewed profile: `seraph.authority.v1`, `goals`,
+`tasks`, `capabilities`, `inference`, `memory`, `artifacts`, `audit`,
+`research`, `conversation`, `scheduler`, `connections`, `agent-loop` and
+`source-extraction` (Context keys `seraphAuthority` through
+`seraphSourceExtraction`). Contracts live in `runtime/cordis/src/contracts/` and
+providers in `runtime/cordis/src/plugins/`. Providers carry no state or policy:
+a provider call is a callback inside the one original invocation Python sent,
+carrying that invocation's reference, composition epoch and original deadline
+(ordinary calls are capped at 30 seconds and never renewed). Python admits a
+callback only for a method in that invocation's frozen reviewed closure
+(at most 16 callbacks per call); other methods get a typed `blocked` result.
+Profile entries use the literal registry order with a closed per-plugin
+configuration schema (currently empty); the host plugin is required, service
+providers may be marked optional or omitted, and an absent provider's methods
+return `service_provider_not_composed`. Each reported plugin state carries a
+digest of its plugin ID, required flag, configuration and reviewed build-file
+hashes; Python recomputes it from the verified build manifest and fences the
+boot on any mismatch, so jobs can pin provider/config identity.
+
+Service frames carry a positive `composition_epoch` and canonical
+`invocation_ref`; payloads use closed schemas of canonical references, never
+paths, SQL, URLs or plugin-asserted authority. Python's
+`runtime_plugins/dispatch.py` admits a call only for a job it admitted itself
+with a server-derived composition binding, after writing a protected invocation
+witness under that job's live lease. Every call re-resolves, in one immediate
+SQLite writer: the witness, attempt, lease owner, fencing token, deadline, the
+bound composition owners and authority. `operator-root` requires the original
+live, unrevoked Root session and unchanged grants; `goal-programme` validates the
+current programme/grant/goal binding through the existing programme owner and
+ignores issuing-browser expiry. A failed check returns a typed `blocked` result
+before private bytes or effects.
+
+`runtime_composition_states` holds one row per runtime domain (owner
+`legacy`/`cordis`, monotonic epoch, digest, `ready`/`draining`/`blocked`,
+recovery audit receipt). Startup seeds `legacy` epoch 1 only into an empty
+table; a partial inventory stays partial so missing owners keep denying calls.
+Cordis-bound jobs persist `composition_binding_json`, and the canonical job CAS
+repeats it, so a draining, changed or missing owner fences claims, heartbeats,
+checkpoints, artifacts, effects and successful completion. Stopping transitions
+(`failed`/`cancelled`) and stale-job recovery are not composition-fenced, so an
+old-epoch job can still be stopped. Owner transitions require the workspace
+maintenance fence: `ready -> draining` stops admission; a strictly higher-epoch
+`blocked` state follows only when no leased attempt is bound to the old owner,
+and it marks accepted/queued jobs bound to that owner `blocked`
+(`composition_owner_changed`, listed in the recovery receipt). `ready` requires a
+boot proof: the fixed legacy digest, or for `cordis` the currently admitting
+host whose verified build reports exactly that domain's plugin digest and whose
+child reports that provider running. Rollback
+is a new epoch and never revives blocked jobs.
+
+Native owners in this slice: `authority.resolve`, `goals.read`, `tasks.admit`
+(reports the idempotent admission and whether it was replayed),
+`tasks.inspect`, `tasks.checkpoint` (only admission-sealed checkpoint refs),
+`tasks.cancel`, `capabilities.list`/`describe`, `connections.inspect`,
+`memory.retrieve` (owner list-safe redacted summaries only), and
+`artifacts.stage`/`adopt`/`read` plus `audit.append` for the temporary read
+journey. That journey admits one `runtime_service_read_v1` job, performs the
+read, stages the sealed result as a private 0600 workspace file (intent before
+effect), adopts and reads it back, appends one `runtime_service_observed` audit
+event and settles the job with explicit `no_learning`. The child's answer to
+each call must equal the result Python sealed for it (task answers must equal
+the value Python builds from the durable job row, including the checkpoint
+receipt's recorded revision); any difference blocks the job with
+`native_child_result_mismatch`, and only Python-owned values are returned. An
+exact retry reuses the same job and never re-executes; an interrupted stage
+stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle`,
+`capabilities.invoke`, `inference.request`, `memory.propose`,
+`memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
+`agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
+`source-extraction.extract`) return a typed `blocked` reason, also listed in
+the runtime status `native_services` block. No HTTP route yet exposes the bridge
+to the browser, and the Memory composition-snapshot accounting amendments
+recorded on #1007 are not implemented. The acceptance tests deny every Python
+socket connection/DNS lookup and give the child no network configuration, but
+they do not OS-sandbox the Node child's own network access. Transient SQLite
+contention inside one callback (`database is locked`/busy, connection-pool
+timeout) is a typed per-call `blocked` result, `native_owner_storage_busy`: the
+owner writer rolled back with no partial effect, the read journey blocks only
+that job with that reason, the boot keeps admitting, and the runtime status
+`native_services` block counts `transient_failures` (cumulative for the backend
+process, across host boots). Contention after `artifacts.stage` wrote its file
+is not reported as busy: the stage stays an unresolved intent with
+`native_artifact_owner_operation_unproven` and is never re-executed. If the job
+cannot even be marked blocked under persistent contention, it is left for
+stale-lease recovery. Other storage faults and
+any protocol, digest or authority violation still fence the whole host boot.
 
 ## Task conversation continuity
 
@@ -690,7 +780,8 @@ is missing.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 
-Open the Settings panel's **OpenRouter setup** section to save the fixed
+Open **Settings → Models & OpenRouter** (formerly the Screenshot/VLM tab) and
+use its **OpenRouter setup** section to save the fixed
 `https://openrouter.ai/api/v1` route without editing an environment file. Enter
 one qualified `provider/model` ID and explicit upstream allow-list for each
 enabled purpose: text, vision, and embedding. Each purpose has its own
@@ -739,6 +830,82 @@ or manufacturing proofs. A projection incompatible with a v2 slot is visibly
 blocked until explicit reviewed save; stored v2 rejects legacy writes with
 HTTP409. Local tests intercept provider transport; real availability, quality,
 costs, and embedding usefulness remain externally unverified.
+
+#### Daily-use readiness (#1068)
+
+- **Text-route defaults.** A new text route proposes `text`, `tool_use`,
+  `structured_output` and `streaming`: direct chat adds `streaming`, agent
+  turns with tools add `tool_use`, and planners use `structured_output`.
+  Routes saved earlier keep their declared capabilities until re-saved.
+- **Context window.** Each route has an optional `context_window_tokens`
+  (1,024–2,097,152). When unset, the generated profile declares 65,536 tokens
+  instead of `max(max_output_tokens, 4096)`. Stored routes without the field
+  keep their exact serialized form; the new default applies when the setup is
+  next saved, which also requires proving the route again. The window is an
+  operator assertion: it is not checked against the model's real context
+  length, so a value above the model's limit fails at the provider instead.
+- **Dollar inputs.** The monthly ceiling and per-call request bound are entered
+  in dollars with a micro-USD preview; the request bound is prefilled at $0.50.
+- **Request bound and overrun latch.** The bound is a per-call reservation, not
+  a provider price cap (OpenRouter's `max_price` is a per-token price filter,
+  not a per-request limit, and is not sent; `max_tokens` already caps output at
+  the route's max output tokens). A settled charge above the bound is an
+  unreviewed overrun, and accounting then refuses every further OpenRouter
+  call with `provider_charge_exceeded_reservation` until the operator saves a
+  setup whose bound covers the charge (`request_reserve_review`). The panel
+  shows the worst case per call (declared window + output cap) in tokens, in
+  dollars when the operator enters preview-only $/M prices (otherwise at a
+  $3/$15 reference), and warns when the bound is below it. Chat and agent turns
+  report the latch with `recovery_action: review_cost_overrun` and the minimum
+  bound that reviews it (`minimum_request_bound_microusd`, the snapshot's
+  `overrun_max_cost_microusd`). **Inference accounting** lists up to 16
+  `unreviewed_overruns` (operation, job, runtime path, charge and held bound in
+  $ and µUSD) and the minimum bound. A save whose largest enabled bound is below
+  that minimum is refused before any policy, credential or accounting change
+  with HTTP 409 `request_bound_below_overrun`. A new bound changes the route
+  contract, so Prove route (billed canaries) must run again after the review.
+- **Proof lifetime and Prove route.** The canary section offers a 1-, 8- or
+  24-hour proof lifetime (the backend maximum, published as
+  `canary_proof_ttl.max_seconds`). **Prove route** runs one canary per required
+  capability plus `health` and `latency_ms`, in order, and stops at the first
+  failure. Each canary is a real, billed provider call. The chat composer meta
+  line shows `PROOFS nH LEFT`, `PROOF EXPIRED: <capability>`,
+  `PROOF FAILED: <capability>` or `PROOF MISSING: <capability>` from
+  `/api/runtime/status`.
+- **Specific blocked reasons.** A route denial carries the selector code, and an
+  exactly bound proof that aged out is reported as `proof_expired:<capability>`
+  rather than `proof_missing:<capability>`. WebSocket and REST chat (including
+  agent turns wrapped by the agent framework) name the capability and the
+  recovery, e.g. Prove route, declare a capability, or raise the context window.
+  REST responses add `route_reason` and `recovery_action` beside the stable
+  `no_compliant_route` code. Slot status adds `proof_reason`. A denial is
+  reported as a preflight block ("No model call was made",
+  `remote_outcome: not_contacted`) only when no call of that chat request
+  reached a provider transport; an agent turn denied after an earlier step
+  called the model is a mid-turn block (`failure_stage: mid_turn_route`,
+  `remote_outcome: contacted_before_block`) whose message says earlier calls
+  may be billed and their tool actions stand. Only explicit exception causes
+  are unwrapped, never an earlier handled route error.
+- **Background inference.** `GET/PUT /api/settings/background-inference` and
+  the **Background inference** panel list the scheduled jobs that may call the
+  text route (strategist tick, memory consolidation, daily briefing, evening
+  review, activity digest, weekly review, end-of-day report analysis,
+  screenshot observation digest) with approximate calls/day. All default ON.
+  A switched-off job makes no model call and records `skipped` with reason
+  `disabled_by_operator` in the scheduler audit and the panel; end-of-day
+  reports still run deterministically without analysis. Toggles persist in
+  `background-inference-settings.json` in the workspace. An unreadable file
+  pauses scheduled model calls and reports
+  `background_inference_settings_unreadable`; a single-toggle save is then
+  refused (HTTP 409) and the panel asks for every job's value plus an explicit
+  confirmation (`replace_unreadable: true`). The `memory_consolidation` toggle
+  gates every consolidation trigger (scheduled catch-up, post-response,
+  workflow completion, pre-compaction and session end). Explicitly outside the
+  toggles: `guardian_opportunity_assessment` (runs only for operator-queued
+  opportunities with their own funded reservation), chat title generation
+  (one text call per new conversation, chat-triggered) and
+  `screenshot_folder_analysis` (vision route, gated by its purpose consent and
+  source settings).
 
 ### Local cockpit interaction boundaries
 
@@ -915,8 +1082,9 @@ those omissions never become a superiority claim.
 
 The bounded #920 profile adds **Send neutral Telegram notice** in the current
 task's inspector, available with the installed reviewed program revision.
-Pair the operator/chat and grant Telegram transit consent in Settings
-first. Explicit status review sends enum metadata; exact denial and cancellation
+Pair the operator/chat and grant Telegram transit consent in
+**Settings → Telegram** first (numeric user and chat IDs, write-only bot token,
+grant/revoke transit consent, unpair over the existing `/api/telegram` API). Explicit status review sends enum metadata; exact denial and cancellation
 use current canonical authority. Sensitive approval and recovery remain in the
 cockpit. Unknown delivery requires visible outbox recovery or an explicit fresh
 notice that retires old controls. The provider-free adapter is **Partial** and
@@ -995,6 +1163,18 @@ provider usefulness remains externally unverified.
 operator receipts. They expose the effective OpenRouter route, consent,
 allow-list, budget, admission state, and disabled local-runtime reason. A
 configured key or model is not evidence that a live provider route is healthy.
+
+Cockpit reads do not queue behind another SQLite writer (#702). Every
+authenticated request still checks revocation and both session expiries; the
+sliding idle-expiry touch and the expiry-revocation write wait at most 250 ms
+and are otherwise deferred (touches then pause for 2 s), so the session is not
+extended that time and an expired session still fails closed. Other storage
+contention during authentication answers a retryable 503 `auth_storage_busy`
+(a WebSocket handshake closes with 1013), not a 500 or a login-forcing 401. `/api/runtime/status` reads the accounting ledger without
+the writer lock and takes it only to persist a newly observed accounting
+period; admission still re-checks the ledger under that lock. Native
+notification reads write only when an expiry or binding transition is due and,
+while the lock is held, present that transition as terminal until it persists.
 
 ## Current Capability Summary
 

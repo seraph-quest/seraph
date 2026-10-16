@@ -10,6 +10,7 @@ import { appEventBus } from "../../lib/appEventBus";
 import {
   isSuccessfulModelFabricOutcome,
   normalizeModelFabricRuntime,
+  textRouteProofLabel,
   type ModelFabricRuntimeStatus,
 } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
@@ -10443,7 +10444,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       `${operatorContinuityGraph.summary.edge_count} edges`,
     ].join(" · ")
     : null;
-  const workspaceTelemetryLeft = `${runtimeProviderLabel} · ${runtimeModelLabel}`;
+  const runtimeProofLabel = textRouteProofLabel(runtimeStatus?.model_fabric);
+  const workspaceTelemetryLeft = [runtimeProviderLabel, runtimeModelLabel, runtimeProofLabel].filter(Boolean).join(" · ");
   const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
   const workspaceTelemetryRight = effectiveConnectionStatus === "connected"
     ? `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`

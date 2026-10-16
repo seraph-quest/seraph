@@ -313,7 +313,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1680,
+        1682,
         "_governed_bounded_chat_transfer",
         "client.stream",
         "canonical_adapter",
@@ -322,7 +322,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1614,
+        1616,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -331,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        4822,
+        4868,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -370,6 +370,33 @@ _REVIEWED_EXCEPTIONS = (
         "Keep behind the guarded browser source-read contract; reclassify if the endpoint becomes an inference route.",
     ),
     _review(
+        "extensions/telegram_document_transport.py",
+        34,
+        "TelegramDocumentHTTP.acquire",
+        "client.stream",
+        "non_model_transport",
+        "Fixed Telegram getFile metadata read for an already paired, consented channel document; bounded to 8 KiB, redirects and env proxies disabled, token-bearing URLs never logged. It does not request model inference.",
+        "Keep behind the channel document ingest owner; reclassify if this leaf ever contacts a model endpoint.",
+    ),
+    _review(
+        "extensions/telegram_document_transport.py",
+        48,
+        "TelegramDocumentHTTP.acquire",
+        "client.stream",
+        "non_model_transport",
+        "Fixed Telegram file byte read that streams the selected document into C6 quarantine under the caller's size bound; it does not request model inference.",
+        "Keep behind the channel document ingest owner; reclassify if this leaf ever contacts a model endpoint.",
+    ),
+    _review(
+        "model_fabric/audio_documentation.py",
+        274,
+        "metadata_get",
+        "client.stream",
+        "non_model_transport",
+        "Fixed-host, public-IP-pinned OpenRouter key/endpoint metadata GET for the optional audio route documentation; byte-bounded, no redirect or retry, and a separate metadata credential. It never submits inference.",
+        "Keep as metadata-only documentation evidence; any audio inference must go through governed model-fabric admission.",
+    ),
+    _review(
         "security/http_transport.py",
         442,
         "_request_pinned_https",
@@ -380,7 +407,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3914,
+        3957,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -389,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        3993,
+        4037,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -398,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4439,
+        4484,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -407,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4517,
+        4563,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -416,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1486,
+        1595,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -425,7 +452,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1499,
+        1608,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -434,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1514,
+        1623,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

@@ -22,6 +22,11 @@ MAX_CALLBACKS = 16
 BRANCH_CALLBACKS = {"programme_discovery": 64}
 
 
+def _callback_budget(native_binding: Any) -> int:
+    original = getattr(native_binding, "original", native_binding)
+    return BRANCH_CALLBACKS.get(getattr(getattr(original, "binding", None), "native_branch", None), MAX_CALLBACKS)
+
+
 NODE_REASONS = frozenset({"node_missing", "node_unavailable", "node_unsupported"})
 BUILD_REASONS = frozenset({"runtime_package_missing", "runtime_build_stale", "build_receipt_invalid",
                            "runtime_package_invalid_or_missing", "build_dependencies_missing", "package_pin_mismatch"})
@@ -240,8 +245,7 @@ class CordisHost:
                         raise ProtocolError("unadmitted native service request")
                     originals = [entry for entry in self._pending.values()
                                  if entry.native_binding is not None and not entry.future.done()
-                                 and entry.native_callbacks < BRANCH_CALLBACKS.get(
-                                     entry.native_binding.original.binding.native_branch, MAX_CALLBACKS)
+                                 and entry.native_callbacks < _callback_budget(entry.native_binding)
                                  and all(entry.frame[key] == frame[key] for key in (
                                      "invocation_ref", "composition_epoch", "deadline_at",
                                      "boot_nonce", "package_digest", "composition_digest"))]

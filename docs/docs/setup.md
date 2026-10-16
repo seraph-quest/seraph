@@ -68,16 +68,19 @@ governed route.
 Once the text route is ready, scheduled jobs may call it: strategist tick
 (about 96 calls/day at the default 15-minute interval), memory consolidation,
 daily briefing, evening review, activity digest, weekly review, end-of-day
-report analysis and the screenshot observation digest. They are on by default.
+report analysis, the screenshot observation digest, guardian opportunity
+assessment (one call per queued opportunity, at most 16 per tick) and
+screenshot folder analysis (one vision call per pending screenshot). They are on
+by default.
 **Settings → Models & OpenRouter → Background inference** lists each job with
 its approximate calls/day and lets you switch it off; a switched-off job makes
 no model call and shows `skipped: disabled by operator`. The memory
 consolidation switch also stops the consolidation that otherwise runs after a
 reply, after a workflow, before context compaction and when a session is
-deleted. Not covered by these switches: guardian opportunity assessment (runs
-only for an opportunity you queued, with its own funded reservation), chat
-title generation (one text call per new conversation) and screenshot folder
-analysis (vision route, gated by its own consent and source settings). If the
+deleted. With guardian opportunity assessment off, queued opportunities stay
+visible with the reason until their deadline, then close as expired. Not
+covered by these switches: chat title generation (one text call per new
+conversation). If the
 stored switches become unreadable, every scheduled model call pauses and the
 panel asks you to set every job and confirm before replacing them.
 `SCHEDULER_ENABLED=false` still stops all scheduled work, including Work

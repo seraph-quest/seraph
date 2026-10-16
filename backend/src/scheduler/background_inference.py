@@ -51,7 +51,13 @@ BACKGROUND_INFERENCE_JOBS: tuple[BackgroundInferenceJob, ...] = (
         "one call per report; the deterministic report still runs when off"),
     BackgroundInferenceJob("screenshot_observation_digest", "Screenshot observation digest", "job",
         "one call per run when new observations exist"),
+    BackgroundInferenceJob("guardian_opportunity_assessment", "Guardian opportunity assessment", "llm_only",
+        "one call per queued opportunity, at most 16 per tick; queued candidates stay visible until their deadline when off"),
+    BackgroundInferenceJob("screenshot_folder_analysis", "Screenshot folder analysis (vision route)", "job",
+        "one vision call per pending screenshot, within the configured limit and concurrency"),
 )
+# Event-driven jobs: their call count follows queued work, not a fixed cadence.
+_EVENT_DRIVEN_JOBS = frozenset({"guardian_opportunity_assessment", "screenshot_folder_analysis"})
 _JOBS = {job.job_id: job for job in BACKGROUND_INFERENCE_JOBS}
 
 
@@ -68,8 +74,13 @@ def _interval_runs_per_day(name: str, default: int) -> float:
     return round(1440 / max(minutes, 1), 2)
 
 
-def approximate_calls_per_day(job_id: str) -> float:
-    """Return a conservative upper-bound estimate from the configured cadence."""
+def approximate_calls_per_day(job_id: str) -> float | None:
+    """Return a conservative upper-bound estimate from the configured cadence.
+
+    ``None`` means the job is event-driven and its basis text is the estimate.
+    """
+    if job_id in _EVENT_DRIVEN_JOBS:
+        return None
     if job_id == "strategist_tick":
         return _interval_runs_per_day("strategist_interval_min", 15)
     if job_id == "memory_consolidation":
@@ -148,6 +159,14 @@ def background_inference_job_enabled(job_id: str) -> bool:
         return True
     enabled, _error = read_background_inference_settings()
     return enabled[job_id]
+
+
+def background_inference_skip_reason(job_id: str) -> str | None:
+    """Return why a toggled job may not make its model call now, or ``None``."""
+    if background_inference_job_enabled(job_id):
+        return None
+    _enabled, error = read_background_inference_settings()
+    return SETTINGS_UNREADABLE if error else DISABLED_BY_OPERATOR
 
 
 def is_whole_job_toggle(job_id: str) -> bool:

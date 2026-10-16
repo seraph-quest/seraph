@@ -27,7 +27,7 @@ describe("BackgroundInferencePanel", () => {
     expect(strategist).toBeChecked();
     expect(screen.getByText(/~96\/day/)).toBeInTheDocument();
     expect(screen.getByText(/~1\/week/)).toBeInTheDocument();
-    expect(screen.getByText(/up to ~97 text-route calls\/day enabled/)).toBeInTheDocument();
+    expect(screen.getByText(/up to ~97 scheduled calls\/day enabled/)).toBeInTheDocument();
     fireEvent.click(strategist);
     await waitFor(() => expect(screen.getByLabelText("Background inference: strategist tick")).not.toBeChecked());
     const put = fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
@@ -72,5 +72,34 @@ describe("BackgroundInferencePanel", () => {
     expect(JSON.parse(String(put[1]?.body))).toEqual({
       jobs: { strategist_tick: false, daily_briefing: true, weekly_activity_review: false }, replace_unreadable: true,
     });
+  });
+
+  it("shows the opportunity and screenshot analysis rows as per-item toggles that persist a switch-off", async () => {
+    const eventDriven = (job_id: string, label: string, scope: string, enabled: boolean, basis: string) => ({
+      job_id, label, enabled, scope, approx_calls_per_day: null, estimate_basis: basis,
+      last_skip: enabled ? null : { status: "skipped", reason: "disabled_by_operator", at: "2026-10-16T12:00:00+00:00" } });
+    const rows = (enabled: boolean) => [job("daily_briefing", true, 1),
+      eventDriven("guardian_opportunity_assessment", "Guardian opportunity assessment", "llm_only", enabled,
+        "one call per queued opportunity, at most 16 per tick; queued candidates stay visible until their deadline when off"),
+      eventDriven("screenshot_folder_analysis", "Screenshot folder analysis (vision route)", "job", true,
+        "one vision call per pending screenshot, within the configured limit and concurrency")];
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => response({
+      ...payload(true), jobs: rows(init?.method !== "PUT") }));
+    vi.stubGlobal("fetch", fetch);
+    render(<BackgroundInferencePanel />);
+    const opportunity = await screen.findByLabelText("Background inference: Guardian opportunity assessment");
+    expect(opportunity).toBeChecked();
+    expect(screen.getByLabelText("Background inference: Screenshot folder analysis (vision route)")).toBeChecked();
+    expect(screen.getAllByText(/per queued item/)).toHaveLength(2);
+    expect(screen.getByText(/at most 16 per tick/)).toBeInTheDocument();
+    expect(screen.getByText(/up to ~1 scheduled calls\/day enabled plus per-item jobs/)).toBeInTheDocument();
+    // Both are now real toggles, so they are no longer listed as excluded.
+    expect(screen.queryByText(/Not covered by these toggles:.*Guardian opportunity/)).toBeNull();
+    expect(screen.queryByText(/Not covered by these toggles:.*Screenshot folder analysis/)).toBeNull();
+    fireEvent.click(opportunity);
+    await waitFor(() => expect(screen.getByLabelText("Background inference: Guardian opportunity assessment")).not.toBeChecked());
+    const put = fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
+    expect(JSON.parse(String(put[1]?.body))).toEqual({ jobs: { guardian_opportunity_assessment: false } });
+    expect(screen.getByText(/skipped: disabled by operator · 2026-10-16/)).toBeInTheDocument();
   });
 });

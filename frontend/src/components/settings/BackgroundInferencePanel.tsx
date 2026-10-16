@@ -7,7 +7,8 @@ export interface BackgroundInferenceJob {
   label: string;
   enabled: boolean;
   scope: "job" | "llm_only";
-  approx_calls_per_day: number;
+  /** Null for event-driven jobs: the basis text is the estimate. */
+  approx_calls_per_day: number | null;
   estimate_basis: string;
   last_skip: { status: string; reason: string; at: string } | null;
 }
@@ -22,9 +23,7 @@ const ENDPOINT = "/api/settings/background-inference";
 
 /** Model callers deliberately outside these toggles, with where each is gated. */
 export const EXCLUDED_MODEL_CALLERS: ReadonlyArray<{ label: string; reason: string }> = [
-  { label: "Guardian opportunity assessment", reason: "runs only for an opportunity you queued, with its own funded cost reservation" },
   { label: "Chat title generation", reason: "one text call per new conversation, triggered by chat rather than the scheduler" },
-  { label: "Screenshot folder analysis", reason: "uses the vision route, gated by its own purpose consent and the screenshot source settings" },
 ];
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -43,7 +42,7 @@ export function normalizeBackgroundInference(value: unknown): BackgroundInferenc
       label: typeof job.label === "string" ? job.label : job.job_id,
       enabled: job.enabled,
       scope: job.scope === "llm_only" ? "llm_only" : "job",
-      approx_calls_per_day: typeof job.approx_calls_per_day === "number" && Number.isFinite(job.approx_calls_per_day) ? job.approx_calls_per_day : 0,
+      approx_calls_per_day: typeof job.approx_calls_per_day === "number" && Number.isFinite(job.approx_calls_per_day) ? job.approx_calls_per_day : null,
       estimate_basis: typeof job.estimate_basis === "string" ? job.estimate_basis : "",
       last_skip: skip && typeof skip.reason === "string" && typeof skip.at === "string"
         ? { status: typeof skip.status === "string" ? skip.status : "skipped", reason: skip.reason, at: skip.at }
@@ -57,7 +56,8 @@ export function normalizeBackgroundInference(value: unknown): BackgroundInferenc
   };
 }
 
-function callsLabel(value: number): string {
+function callsLabel(value: number | null): string {
+  if (value === null) return "per queued item";
   if (value > 0 && value < 1) return "~" + Math.round(value * 7) + "/week";
   return "~" + (Number.isInteger(value) ? value : value.toFixed(1)) + "/day";
 }
@@ -145,13 +145,14 @@ export function BackgroundInferencePanel() {
     void save("replace", { jobs, replace_unreadable: true });
   }
 
-  const enabledCalls = status?.jobs.filter((job) => job.enabled).reduce((total, job) => total + job.approx_calls_per_day, 0) ?? 0;
+  const enabledCalls = status?.jobs.filter((job) => job.enabled).reduce((total, job) => total + (job.approx_calls_per_day ?? 0), 0) ?? 0;
+  const eventDriven = status?.jobs.some((job) => job.enabled && job.approx_calls_per_day === null) ?? false;
 
   return (
     <div className="mt-2 border border-retro-text/10 px-2 py-2 text-[9px]" data-testid="background-inference-panel">
       <div className="flex items-center justify-between gap-2 mb-1">
         <div className="text-[10px] text-retro-text">Background inference</div>
-        <div className="text-retro-text/60">{status ? `up to ~${Math.round(enabledCalls)} text-route calls/day enabled` : "loading"}{stale ? " · stale retained" : ""}</div>
+        <div className="text-retro-text/60">{status ? `up to ~${Math.round(enabledCalls)} scheduled calls/day enabled${eventDriven ? " plus per-item jobs" : ""}` : "loading"}{stale ? " · stale retained" : ""}</div>
       </div>
       <div className="mb-1 text-retro-text/50">
         Scheduled jobs that may call the OpenRouter text route once it is ready. Each call is billed.

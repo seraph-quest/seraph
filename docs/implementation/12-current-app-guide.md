@@ -994,12 +994,17 @@ costs, and embedding usefulness remain externally unverified.
   refused (HTTP 409) and the panel asks for every job's value plus an explicit
   confirmation (`replace_unreadable: true`). The `memory_consolidation` toggle
   gates every consolidation trigger (scheduled catch-up, post-response,
-  workflow completion, pre-compaction and session end). Explicitly outside the
-  toggles: `guardian_opportunity_assessment` (runs only for operator-queued
-  opportunities with their own funded reservation), chat title generation
-  (one text call per new conversation, chat-triggered) and
-  `screenshot_folder_analysis` (vision route, gated by its purpose consent and
-  source settings).
+  workflow completion, pre-compaction and session end).
+  `guardian_opportunity_assessment` (#1112) is an analysis-only toggle: off,
+  its tick still closes expired candidates, adopts already-contacted results
+  and keeps Unknown handling, but starts no assessment or second attempt; a
+  queued candidate keeps `reason_code` `disabled_by_operator` (or
+  `background_inference_settings_unreadable`) until its deadline, then closes
+  as `assessment_deadline_expired`. `screenshot_folder_analysis` (#1112, vision
+  route) is a whole-job toggle; pending screenshots wait until it is on again.
+  Both are event-driven, so the panel shows their basis ("per queued item")
+  instead of a calls/day figure. Explicitly outside the toggles: chat title
+  generation (one text call per new conversation, chat-triggered).
 
 ### Local cockpit interaction boundaries
 

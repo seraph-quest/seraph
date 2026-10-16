@@ -354,6 +354,48 @@ def clear_ambient_screenshot_analysis_provider():
 @pytest.fixture(autouse=True)
 def ensure_test_workspace_dir():
     Path(os.environ["WORKSPACE_DIR"]).mkdir(parents=True, exist_ok=True)
+
+
+_HOST_PROCESS_SANDBOX: list = []
+
+
+@pytest.fixture(autouse=True)
+def skip_agent_commands_without_the_process_sandbox(monkeypatch):
+    """Agent commands always run in the OS sandbox (#1103).
+
+    On a host that cannot provide it, a test that reaches a real launch skips
+    with the typed reason (or fails under SERAPH_REQUIRE_REPO_ISOLATION_TESTS=1)
+    instead of failing on the product's blocked result; argument validation
+    still runs, because it precedes the launch.
+    """
+    from src.tools import process_tools
+
+    if not _HOST_PROCESS_SANDBOX:
+        try:
+            _HOST_PROCESS_SANDBOX.append(process_tools._sandbox_posture())
+        except Exception as exc:  # a broken probe must not break unrelated tests
+            from src.execution.process_isolation import ProcessIsolationPosture
+
+            _HOST_PROCESS_SANDBOX.append(ProcessIsolationPosture("unavailable", reason=f"probe_error_{type(exc).__name__}"))
+    posture = _HOST_PROCESS_SANDBOX[0]
+    if posture.isolated:
+        yield
+        return
+    from tests.repo_isolation_support import isolation_unavailable
+
+    original = process_tools._require_sandbox_posture
+
+    def require_or_skip():
+        try:
+            current = process_tools._sandbox_posture()
+        except Exception:
+            current = posture
+        if current == posture:
+            isolation_unavailable(f"agent process sandbox: {posture.code}")
+        return original()
+
+    monkeypatch.setattr(process_tools, "_require_sandbox_posture", require_or_skip)
+    yield
 @pytest.fixture
 def mocked_canonical_inference_context(monkeypatch):
     """Keep legacy caller tests focused while adoption tests exercise real identity binding."""

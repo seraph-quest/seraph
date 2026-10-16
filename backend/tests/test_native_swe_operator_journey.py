@@ -452,8 +452,11 @@ def identity(pid):
 
 
 def test_add_returns_the_sum():
-    descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
     root = Path(__file__).resolve().parents[1]
+    heartbeat = str(root / 'descendant-heartbeat')
+    descendant = subprocess.Popen([sys.executable, '-c',
+        'import sys, time\\nwhile True:\\n    open(sys.argv[1], "w").write(str(time.monotonic()))\\n    time.sleep(0.05)',
+        heartbeat])
     temporary = root / 'test-process-started.tmp'
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as stream:
@@ -520,10 +523,16 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     assert started_path.exists(), "the genuine test process did not launch its descendant"
     started = json.loads(started_path.read_text(encoding="utf-8"))
     assert all(observed["pid"] > 0 for observed in started.values())
-    if started["leader"]["pgid"] is not None:
+    # Process tools run in an OS sandbox with its own pid namespace (#1103):
+    # the observed pids are namespace-local and the managed group's leader
+    # (the sandbox monitor) is outside it, so the group reads as 0.
+    sandboxed = started["leader"]["pgid"] == 0
+    if sandboxed:
+        assert started["descendant"]["pgid"] == 0
+    elif started["leader"]["pgid"] is not None:
         assert started["leader"]["pgid"] == started["leader"]["pid"]
         assert started["descendant"]["pgid"] == started["leader"]["pgid"]
-    if sys.platform == "linux" and Path("/proc").is_dir():
+    if sys.platform == "linux" and Path("/proc").is_dir() and not sandboxed:
         for observed in started.values():
             assert observed["start_time"] is not None
             current = process_tools._read_process_identity(observed["pid"])
@@ -545,7 +554,17 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     assert cancelled["cancellation"]["success_eligible"] is False
     assert cancelled["process_cleanup"]["cleanup_status"] in {"stopped", "unknown", "failed"}
     assert not (job_root / "artifacts" / "readback.json").exists()
-    if sys.platform == "linux" and Path("/proc").is_dir():
+    if sandboxed:
+        # Namespace-local pids cannot be read back on the host; killing the
+        # leader tears the whole namespace down, so the descendant's
+        # heartbeat must stop.
+        assert cancelled["process_cleanup"]["cleanup_status"] == "stopped"
+        heartbeat = started_path.with_name("descendant-heartbeat")
+        assert heartbeat.is_file(), "the descendant never ran"
+        first = heartbeat.read_text(encoding="utf-8")
+        await asyncio.sleep(0.5)
+        assert heartbeat.read_text(encoding="utf-8") == first, "a sandboxed descendant outlived the cancel"
+    elif sys.platform == "linux" and Path("/proc").is_dir():
         for observed in started.values():
             current = process_tools._read_process_stat(observed["pid"])
             same_live_process = current is not None and current.start_time == observed["start_time"] and current.state != "Z"

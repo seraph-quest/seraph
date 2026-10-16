@@ -169,6 +169,7 @@ The following architecture decisions are normative:
 32. [ADR-032: Repository crash recovery evidence](./decisions/032-repository-crash-recovery-evidence.md) (supersedes selected ADR-030 recovery clauses)
 33. [ADR-033: Optional governed OpenRouter audio transcription](./decisions/033-governed-optional-audio-route.md)
 34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
+36. [ADR-036: OS-enforced workspace view for agent commands](./decisions/036-agent-process-sandbox.md)
 
 ADR-033 extends only the versioned setup.v3 target with one optional disabled
 audio route. Existing setup.v1/v2 and text, vision and embedding contracts stay

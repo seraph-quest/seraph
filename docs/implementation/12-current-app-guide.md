@@ -999,6 +999,21 @@ container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
 and the container preflight fails closed before startup when the bind evidence
 is missing.
 
+### Agent commands and Docker (#1103)
+
+Agent command tools (`run_command`, `start_process`) need the native host
+install. Run Seraph with `./manage.sh -e dev local up`, or the equivalent
+production host install
+([ADR-036](./decisions/036-agent-process-sandbox.md#deployment-posture)).
+
+In the Docker Compose deployments the backend and every other capability run
+normally. The agent command tools return
+`process_isolation_unavailable:container_unsupported`, which tells you to
+run Seraph on the host, and the backend logs this once at startup. Running
+the sandbox inside the container would need custom seccomp and AppArmor
+profiles, an unmasked `/proc` and a non-root image; that work is tracked in
+[#1135](https://github.com/seraph-quest/seraph/issues/1135).
+
 ### Configure the OpenRouter route (Epic #736/#775)
 
 Open **Settings → Models & OpenRouter** (formerly the Screenshot/VLM tab) and
@@ -2340,6 +2355,61 @@ approval, so a change between variants invalidates earlier approvals. Setting
 instead. Diagnostics redaction is pattern-based either way.
 Approved patches may contain only text sections on allowed paths, and an
 iterative publication must equal the base plus the approved input patch.
+
+#### Agent command tools (#1103)
+
+`run_command` and `start_process` always run in an OS sandbox built from the
+same bubblewrap probe machinery
+([ADR-036](./decisions/036-agent-process-sandbox.md)). The command sees the
+workspace through a kernel-enforced view:
+
+- **DENIED state:** an unopenable placeholder. This covers `.vault-key`,
+  `seraph.db` and sidecars, `mcp-servers.json`, `stdio-proxies.json`,
+  `google_calendar_token.json`, `artifacts/mail/private` and
+  `.seraph-workspace-maintenance.lock`.
+- **READ_ONLY state:** read-only. This covers `extensions/`,
+  `extensions-state.json`, caches and derived state.
+- **Read-only levels:** the workspace top level, `artifacts/` and
+  `artifacts/mail/` are read-only, so commands cannot create, rename or
+  delete entries there (for example `sed -i soul.md`, or `./out.txt` with
+  `cwd` at the root). In-place writes to existing files work. A failed
+  command that hit this gets a hint line.
+- **Everything else:** subfolders such as `notes/`, `plans/` and projects are
+  unchanged.
+
+This holds whatever the script does: python and node file opens, `sed w`,
+`sed -i` and shell redirection are all refused by the kernel. The agent file
+tools are unaffected.
+
+`run_command` has a loopback-only network. `start_process` shares the host
+network, and its approval says it can reach localhost services, including
+Seraph's own API. Every launch drops all capabilities and hides host files
+outside the workspace and runtime; hard-coded `/tmp` writes go to a private
+tmpfs. A stop, timeout, cancel or exit tears down the command's pid
+namespace, so double-forked children cannot outlive it. Background
+processes also end when the backend process exits, never when the tool
+call that started them returns. A signal death is reported as exit code
+128 + signal. The per-process address-space limit is now 8 GiB (it was
+512 MiB, under which `node` and `npm` could not start). It bounds virtual
+reservations, not resident memory.
+
+A top-level file is bound by inode at launch. If Seraph replaces it by rename
+while a command runs, the command keeps the old file. Workspace restore,
+recovery and rollback refuse new agent commands for the whole operation and
+stop process-tool children before the first root swap, and so does backend
+shutdown.
+
+On a host without the sandbox (no `bwrap`, user namespaces denied, macOS,
+Windows, or any container: see the Docker note above), these tools return
+`process_isolation_unavailable:<reason>` before any approval is created.
+There is no unprotected mode. A launch is also blocked, with
+`workspace_view_unsafe:<reason>`, when:
+- a top-level symlink points outside the workspace;
+- a DENIED file has another hard link;
+- there are more than 512 entries at a level.
+
+The approval binds the sandbox posture digest, so a posture change requires a
+new approval (`process_isolation_posture_changed`).
 
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)

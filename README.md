@@ -86,6 +86,11 @@ backend starts the host. Without it, core startup continues and
 discovery shows as blocked with the exact fix in Settings and the discovery
 panel; `./manage.sh -e dev cordis build` repeats the build.
 
+Agent commands (`run_command`, `start_process`) need this host install with
+[bubblewrap](https://github.com/containers/bubblewrap) on Linux; in Docker they
+are blocked with a typed reason
+([#1135](https://github.com/seraph-quest/seraph/issues/1135)).
+
 Use `./manage.sh -e dev local run` for a foreground session, particularly in
 managed development shells. Stop with `./manage.sh -e dev local down`.
 Preserve your existing `.env.dev` when returning to an installed workspace.

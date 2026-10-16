@@ -36,7 +36,11 @@ from src.tools.process_tools import (
 
 
 @pytest.fixture(autouse=True)
-def reset_process_runtime():
+def reset_process_runtime(tmp_path_factory, monkeypatch):
+    # Commands run against an OS-enforced view of the whole workspace top
+    # level (#1103), so one test's stray root-level link must not leak into
+    # the next: every test gets a private workspace.
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path_factory.mktemp("workspace").resolve()))
     process_runtime_manager.reset_for_tests()
     yield
     process_runtime_manager.reset_for_tests()
@@ -255,9 +259,10 @@ def test_run_command_success():
 
 
 def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
-    # The child intentionally calls setsid and escapes the managed group. This
-    # bounds the caller but documents the residual: a general sandbox/tree
-    # kill for detached sessions is outside this process-tool contract.
+    # The child intentionally calls setsid and escapes the managed group.  The
+    # OS sandbox (#1103) runs every command in its own pid namespace, so
+    # killing the leader tears the namespace down and the detached child dies
+    # with it: cleanup is complete rather than unknown.
     script_name = _write_script(
         "wave_process_orphaned_pipe.py",
         """
@@ -283,16 +288,14 @@ def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
     )
 
     assert result["timed_out"] is True
-    assert result["cleanup_status"] == "unknown"
-    retained_worker_root = Path(result["worker_root"])
-    assert retained_worker_root.exists()
+    assert result["cleanup_status"] == "stopped"
+    assert result["worker_root"] is None
     assert time.monotonic() - started < 4
-    time.sleep(2.2)
-    assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
 
 
-def test_run_command_reports_unknown_after_parent_exits_before_cleanup():
-    """A vanished leader leaves its descendant group recoverable but unverifiable."""
+def test_run_command_descendant_dies_when_the_parent_exits():
+    """The pid namespace ends with its command: no orphan outlives the leader (#1103)."""
+    (Path(settings.workspace_dir) / "state").mkdir()
     script_name = _write_script(
         "wave_process_parent_exits_same_group.py",
         """
@@ -304,36 +307,30 @@ def test_run_command_reports_unknown_after_parent_exits_before_cleanup():
             [
                 sys.executable,
                 "-c",
-                "import pathlib,time; time.sleep(2); pathlib.Path('same-group-survivor.marker').write_text('survived')",
+                "import pathlib,time; time.sleep(2); pathlib.Path('state/same-group-survivor.marker').write_text('survived')",
             ],
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
-        pathlib.Path("parent-exited.marker").write_text("parent-exited")
+        pathlib.Path("state/parent-exited.marker").write_text("parent-exited")
         """,
     )
-    workspace = Path(settings.workspace_dir)
+    workspace = Path(settings.workspace_dir) / "state"
     survivor_marker = workspace / "same-group-survivor.marker"
     parent_marker = workspace / "parent-exited.marker"
-    survivor_marker.unlink(missing_ok=True)
-    parent_marker.unlink(missing_ok=True)
     started = time.monotonic()
 
     result = process_runtime_manager.run_command(
         command="python3",
         args_json=f'["{script_name}"]',
-        timeout_seconds=1,
+        timeout_seconds=5,
     )
 
-    assert result["timed_out"] is True
-    assert result["cleanup_status"] == "unknown"
-    retained_worker_root = Path(result["worker_root"])
-    assert retained_worker_root.exists()
+    assert result["timed_out"] is False and result["exit_code"] == 0
     assert parent_marker.is_file()
     assert time.monotonic() - started < 4
     time.sleep(2.2)
-    assert survivor_marker.read_text(encoding="utf-8") == "survived"
-    assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
+    assert not survivor_marker.exists()
 
 
 def test_run_command_cancel_event_kills_in_flight_process_within_bound(tmp_path, monkeypatch):
@@ -343,10 +340,11 @@ def test_run_command_cancel_event_kills_in_flight_process_within_bound(tmp_path,
         """
         import pathlib
         import time
-        pathlib.Path("cancel-child-ready").write_text("ready")
+        pathlib.Path("state/cancel-child-ready").write_text("ready")
         time.sleep(30)
         """,
     )
+    (Path(settings.workspace_dir) / "state").mkdir()
     cancel_event = threading.Event()
     result_holder = {}
 
@@ -361,7 +359,7 @@ def test_run_command_cancel_event_kills_in_flight_process_within_bound(tmp_path,
     worker = threading.Thread(target=run)
     worker.start()
     try:
-        marker = Path(settings.workspace_dir) / "cancel-child-ready"
+        marker = Path(settings.workspace_dir) / "state" / "cancel-child-ready"
         deadline = time.monotonic() + 3
         while not marker.is_file() and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -413,7 +411,9 @@ def test_process_bootstrap_preserves_limits_arguments_environment_and_identity(t
         assert "preexec_fn" not in kwargs
         assert argv[:4] == [process_tools_module.sys.executable, "-I", "-S", "-B"]
         assert Path(argv[4]).is_absolute()
-        assert argv[9] == "--"
+        assert argv[5] == "--sandbox-monitor" and argv[10] == "--"
+        # The bootstrap execs bubblewrap, which runs the guard and the target.
+        assert Path(argv[11]).name == "bwrap" and argv[12] == "--args"
         process = original_popen(argv, **kwargs)
         launched.append((process, process_tools_module._read_process_identity(process.pid)))
         return process
@@ -432,6 +432,9 @@ def test_process_bootstrap_preserves_limits_arguments_environment_and_identity(t
         payload = json.loads(output)
         process, identity = launched[0]
         assert process_tools_module._read_process_identity(process.pid) == identity
+        # Host-side, every sandbox process stays in the leader's process group.
+        descendants = process_tools_module._snapshot_process_descendants(process, identity)
+        assert descendants and all(item.process_group_id == process.pid for item in descendants)
         stopped = process_runtime_manager.stop_process(process_id, force=True)
         assert stopped["cleanup_status"] == "stopped"
     else:
@@ -440,8 +443,11 @@ def test_process_bootstrap_preserves_limits_arguments_environment_and_identity(t
         payload = json.loads(result["stdout"])
         process, identity = launched[0]
     assert len(launched) == 1 and identity is not None
-    assert payload["pid"] == process.pid == identity.pid
-    assert payload["pgid"] == process.pid == identity.process_group_id
+    # The leader is the bwrap monitor (the bootstrap's PID, session and
+    # group); the target runs in a fresh pid namespace whose group leader is
+    # outside it, so it sees its own small pid and a hidden group (0).
+    assert process.pid == identity.pid == identity.process_group_id
+    assert payload["pid"] != process.pid and payload["pgid"] == 0
     assert payload["cwd"] == str(tmp_path)
     assert payload["arguments"] == args[1:]
     assert payload["secret_absent"] is True and payload["sandbox_env"] == "allowlisted"
@@ -529,8 +535,9 @@ def test_process_bootstrap_preserves_native_sigpipe_default(tmp_path, monkeypatc
     monkeypatch.setattr(process_tools_module.subprocess, "Popen", close_parent_reader)
     result = process_runtime_manager.run_command(command="cat", args_json='["finite-input.txt"]', timeout_seconds=3)
     assert result["ok"] is False and result["timed_out"] is False
-    assert result["exit_code"] == -signal.SIGPIPE
-    assert len(launched) == 1 and launched[0].poll() == -signal.SIGPIPE
+    # The sandbox monitor reports a signal death as 128 + signal number.
+    assert result["exit_code"] == 128 + signal.SIGPIPE
+    assert len(launched) == 1 and launched[0].poll() == 128 + signal.SIGPIPE
     assert process_tools_module._read_process_identity(launched[0].pid) is None
 
 
@@ -1161,6 +1168,7 @@ def test_start_list_read_and_stop_process():
     )
 
     started = start_process(command="python3", args_json=f'["{script_name}"]')
+    assert "process=" in started, started
     process_id = started.split("process=")[1].split(",")[0]
 
     for _ in range(20):
@@ -1204,15 +1212,16 @@ def test_start_list_read_and_stop_process():
     assert not worker_root.exists()
 
 
-def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monkeypatch):
-    survivor_marker = Path(settings.workspace_dir) / "process-stop-survivor.marker"
-    child_ready_marker = Path(settings.workspace_dir) / "process-stop-child-ready.marker"
-    child_pid_marker = Path(settings.workspace_dir) / "process-stop-child.pid"
-    parent_marker = Path(settings.workspace_dir) / "process-stop-parent.marker"
-    survivor_marker.unlink(missing_ok=True)
-    child_ready_marker.unlink(missing_ok=True)
-    child_pid_marker.unlink(missing_ok=True)
-    parent_marker.unlink(missing_ok=True)
+def test_stop_process_after_parent_exit_finds_the_sandbox_torn_down():
+    """A leader that exits takes its pid namespace with it (#1103).
+
+    Before the OS sandbox a same-group descendant could outlive the leader
+    and leave cleanup ``unknown``; inside the sandbox the namespace's init
+    exits with the command and the kernel kills every remaining process, so
+    the stop reconciles to ``stopped`` without signalling anything.
+    """
+    state = Path(settings.workspace_dir) / "state"
+    state.mkdir()
     script_name = _write_script(
         "wave_process_stop_parent_exit.py",
         """
@@ -1225,63 +1234,34 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monk
             [
                 sys.executable,
                 "-c",
-                "import os,pathlib,time; pathlib.Path('process-stop-child.pid').write_text(str(os.getpid())); pathlib.Path('process-stop-child-ready.marker').write_text('ready'); pathlib.Path('process-stop-survivor.marker').write_text('survived'); time.sleep(5)",
+                "import pathlib,time; pathlib.Path('state/child-ready.marker').write_text('ready'); time.sleep(3); pathlib.Path('state/survivor.marker').write_text('survived')",
             ],
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
-        for _ in range(100):
-            if pathlib.Path("process-stop-child-ready.marker").is_file():
+        for _ in range(200):
+            if pathlib.Path("state/child-ready.marker").is_file():
                 break
             time.sleep(0.01)
-        pathlib.Path("process-stop-parent.marker").write_text("parent-exited")
-        time.sleep(2)
+        pathlib.Path("state/parent.marker").write_text("parent-exited")
         """,
     )
 
-    original_snapshot = process_tools_module._snapshot_process_descendants
-
-    def snapshot_live_child(process, leader_identity):
-        if process.poll() is None and child_pid_marker.is_file():
-            try:
-                child_pid = int(child_pid_marker.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                child_pid = None
-            if child_pid is not None:
-                child_identity = process_tools_module._read_process_identity(child_pid)
-                if child_identity is not None:
-                    return (
-                        _ProcessDescendantIdentity(
-                            pid=child_identity.pid,
-                            process_group_id=child_identity.process_group_id,
-                            start_time=child_identity.start_time,
-                        ),
-                    )
-        return original_snapshot(process, leader_identity)
-
-    monkeypatch.setattr(process_tools_module, "_snapshot_process_descendants", snapshot_live_child)
     started = start_process(command="python3", args_json=f'["{script_name}"]')
     process_id = started.split("process=")[1].split(",")[0]
     managed = process_runtime_manager._processes[process_id]
     for _ in range(100):
-        process_runtime_manager.list_processes()
-        if managed.descendant_identities:
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError("live descendant snapshot was not persisted")
-    persisted_descendant = managed.descendant_identities
-    assert persisted_descendant
-    for _ in range(100):
         listed = process_runtime_manager.list_processes()
-        if parent_marker.is_file() and any(
+        if (state / "parent.marker").is_file() and any(
             process["process_id"] == process_id and process["status"] == "exited"
             for process in listed
         ):
             break
         time.sleep(0.05)
     else:
-        raise AssertionError("parent did not exit while its descendant remained in the group")
+        raise AssertionError("parent did not exit")
+    assert (state / "child-ready.marker").is_file()
+    assert process_tools_module._remaining_process_descendants(managed.descendant_identities or ()) == 0
 
     managed_payload = next(process for process in listed if process["process_id"] == process_id)
     output_path = Path(managed_payload["output_path"])
@@ -1289,35 +1269,11 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monk
     stopped = process_runtime_manager.stop_process(process_id=process_id)
 
     assert stopped is not None
-    assert stopped["stopped"] is False
-    assert stopped["cleanup_status"] == "unknown"
-    assert stopped["remaining_descendants"] is not None
-    assert stopped["remaining_descendants"] >= 1
-    assert stopped["registry_removed"] is False
-    assert stopped["artifacts_removed"] is False
-    assert any(
-        process["process_id"] == process_id
-        for process in process_runtime_manager.list_processes()
-    )
-    assert output_path.exists()
-    assert worker_root.exists()
-    child_identity = persisted_descendant[0]
-    assert survivor_marker.read_text(encoding="utf-8") == "survived"
-    os.kill(child_identity.pid, signal.SIGKILL)
-    reconciled = None
-    for _ in range(8):
-        time.sleep(0.1)
-        reconciled = process_runtime_manager.stop_process(process_id=process_id)
-        if reconciled is not None and reconciled["cleanup_status"] == "stopped":
-            break
-    assert reconciled is not None
-    assert reconciled["cleanup_status"] == "stopped"
-    assert reconciled["stopped"] is True
-    assert reconciled["registry_removed"] is True
-    assert reconciled["artifacts_removed"] is True
-    assert survivor_marker.read_text(encoding="utf-8") == "survived"
-    assert not output_path.exists()
-    assert not worker_root.exists()
+    assert stopped["cleanup_status"] == "stopped" and stopped["stopped"] is True
+    assert stopped["registry_removed"] is True and stopped["artifacts_removed"] is True
+    assert not output_path.exists() and not worker_root.exists()
+    time.sleep(3.2)
+    assert not (state / "survivor.marker").exists()
 
 
 def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatch):

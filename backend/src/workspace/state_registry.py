@@ -1835,6 +1835,20 @@ class AgentAccessIndex:
         return _strictest_agent_access(matched)
 
 
+def agent_workspace_view_policy(
+    root: str | os.PathLike[str],
+) -> tuple[Path, tuple[tuple[str, AgentWorkspaceAccess], ...], Any]:
+    """(canonical root, protected paths, per-path classifier) for the process view.
+
+    The OS process sandbox (#1103) classifies each entry at a synthetic level
+    with exactly the registry rules agent file tools use.  Raises
+    ``WorkspaceStateError`` when the registry cannot bind the root.
+    """
+    resolved = canonical_workspace_root(root)
+    registry = _agent_access_registry(str(resolved))
+    return resolved, _agent_protected_paths(str(resolved)), registry.agent_workspace_access
+
+
 def canonical_agent_workspace_access(
     root: str | os.PathLike[str],
     resolved_path: str | os.PathLike[str],

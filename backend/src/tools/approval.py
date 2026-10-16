@@ -63,6 +63,24 @@ def _canonical_metadata_digest(value: Any) -> str:
     return canonical_digest(normalized)
 
 
+def _tool_preflight_error(tool: Tool, arguments: dict[str, Any]) -> str | None:
+    """A typed refusal to return before any approval is created, if the tool has one.
+
+    Walks wrapper chains (audit/secret-ref) so a wrapped tool's precondition,
+    such as an unavailable OS sandbox, never turns into an approval prompt.
+    """
+    current: object | None = tool
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        hook = getattr(current, "get_approval_preflight_error", None)
+        if callable(hook):
+            result = hook(arguments)
+            return result if isinstance(result, str) and result else None
+        current = getattr(current, "wrapped_tool", None)
+    return None
+
+
 def _tool_approval_context(tool: Tool, arguments: dict[str, Any]) -> dict[str, Any] | None:
     hook = getattr(tool, "get_approval_context", None)
     if not callable(hook):
@@ -352,6 +370,9 @@ class ApprovalTool(Tool):
                 session_id=session_id,
             )
 
+        preflight_error = _tool_preflight_error(self.wrapped_tool, arguments)
+        if preflight_error is not None:
+            return preflight_error
         approval_context = _tool_approval_context(self.wrapped_tool, arguments)
         # A workflow approval must be tied to the durable run that will
         # consume it.  The runtime principal carries that identity while a
@@ -411,6 +432,9 @@ class ApprovalTool(Tool):
             )
 
         summary = format_tool_call_summary(self.name, arguments, set())
+        notes = (approval_context or {}).get("approval_notes")
+        if isinstance(notes, list) and all(isinstance(note, str) for note in notes) and notes:
+            summary = f"{summary} | " + " ".join(notes)
         risk_level = self.risk_level_override or get_tool_risk_level(self.name, is_mcp=self.is_mcp)
         # Pending approvals are durable capabilities, so they need a bounded
         # decision window even when the wrapped tool did not provide one.

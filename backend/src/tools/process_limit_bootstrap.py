@@ -32,6 +32,12 @@ def apply_process_limits(ceilings):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    # The process sandbox (#1103) execs bubblewrap here.  Its monitor must
+    # survive a group SIGTERM so the target can stop gracefully; the
+    # in-sandbox guard restores SIGTERM to the default before exec.
+    sandbox_monitor = bool(argv) and argv[0] == "--sandbox-monitor"
+    if sandbox_monitor:
+        argv = argv[1:]
     try:
         if len(argv) < 6 or argv[4] != "--" or not argv[5]:
             raise ValueError
@@ -47,6 +53,8 @@ def main(argv=None):
     for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), signal.SIG_DFL)
+    if sandbox_monitor:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
         os.execvpe(argv[5], argv[5:], os.environ)
     except OSError:

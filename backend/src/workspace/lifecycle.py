@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
 import os
@@ -351,6 +352,54 @@ def _assert_root_identity(
     ):
         raise WorkspaceLifecycleError(f"{label} identity changed")
     return actual_identity
+
+
+@contextmanager
+def _agent_processes_fenced(*, strict: bool):
+    """Hold workspace swaps under a launch-blocked, process-free runtime (#1103).
+
+    Process-tool commands see the workspace through binds taken at launch; a
+    command still running across a root swap would keep writing into the
+    replaced generation.  New launches are refused for the whole operation,
+    in-flight launches are awaited, and every child is stopped and reaped
+    once, before the first rename.  A restore (``strict``) refuses to start
+    if that cannot be proven; recovery and rollback are the repair
+    primitives, so they log the failure and continue rather than strand a
+    half-moved workspace.  Only a process that has launched process tools
+    owns any (the module is imported lazily), so maintenance CLIs never
+    import the runtime.
+    """
+    import logging
+    import sys
+
+    module = sys.modules.get("src.tools.process_tools")
+    if module is None:
+        yield
+        return
+    manager = module.process_runtime_manager
+    with manager.launches_blocked() as idle:
+        receipt = manager.stop_all_processes()
+        if not idle or receipt.get("unknown") or receipt.get("failed") or receipt.get("conflict"):
+            if strict:
+                raise WorkspaceLifecycleError("agent processes could not be stopped before the workspace swap")
+            logging.getLogger(__name__).warning(
+                "Agent processes not proven stopped before a workspace recovery swap: idle=%s receipt=%s",
+                idle,
+                receipt,
+            )
+        yield
+
+
+def _agent_process_fence(*, strict: bool):
+    def decorate(function):
+        @functools.wraps(function)
+        def fenced(*args, **kwargs):
+            with _agent_processes_fenced(strict=strict):
+                return function(*args, **kwargs)
+
+        return fenced
+
+    return decorate
 
 
 def _replace_root(
@@ -1647,6 +1696,7 @@ def _validate_recovery_root_bindings(
     )
 
 
+@_agent_process_fence(strict=True)
 def restore_workspace(
     root: str | os.PathLike[str],
     archive_path: str | os.PathLike[str],
@@ -1808,6 +1858,7 @@ def restore_workspace(
         raise
 
 
+@_agent_process_fence(strict=False)
 def recover_interrupted_restore(
     root: str | os.PathLike[str],
     *,
@@ -2213,6 +2264,7 @@ def recover_interrupted_restore(
     return {"status": "recovered" if recovered else "clean", "recovered": recovered}
 
 
+@_agent_process_fence(strict=False)
 def rollback_workspace(
     root: str | os.PathLike[str],
     restore_id: str,

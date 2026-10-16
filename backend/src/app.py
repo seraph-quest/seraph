@@ -342,6 +342,17 @@ def _augment_inference_readiness(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     workspace_owner = None
+    from src.execution.process_isolation import CONTAINER_REMEDY, in_container
+
+    if in_container():
+        # The native host is the supported runtime for agent commands (#1103,
+        # ADR-036); inside a container they are blocked with a typed reason
+        # and everything else runs. Say so once at startup.
+        logging.getLogger(__name__).warning(
+            "Agent command tools are blocked in this container "
+            "(process_isolation_unavailable:container_unsupported): %s",
+            CONTAINER_REMEDY,
+        )
     if settings.deployment_environment.strip().lower() in {"prod", "production"}:
         # The container preflight proves the /app/data bind.  Hold the same
         # lock inode for the whole backend lifetime so host backup/restore
@@ -573,6 +584,19 @@ async def lifespan(app: FastAPI):
         shutdown_error = exc
     finally:
         await close_db()
+    # Agent commands run in sandboxes that die with this process; stop and
+    # reap them before the workspace owner lease is released (#1103), so a
+    # maintenance command can never observe a live command's writes.
+    try:
+        import sys
+
+        process_tools = sys.modules.get("src.tools.process_tools")
+        if process_tools is not None:
+            manager = process_tools.process_runtime_manager
+            with manager.launches_blocked():
+                manager.stop_all_processes()
+    except Exception:
+        logging.getLogger(__name__).exception("Process-tool shutdown cleanup failed")
     if workspace_owner is not None:
         workspace_owner.__exit__(None, None, None)
     if shutdown_error is not None:

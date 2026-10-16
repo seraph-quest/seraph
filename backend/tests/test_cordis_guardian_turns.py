@@ -391,3 +391,43 @@ async def test_existing_chat_turn_ids_survive_the_presets_upgrade(accounting_db,
 
 
 from tests.test_research_native_vertical import real_auth  # noqa: E402,F401
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_daily_briefing_parity_on_the_legacy_and_cordis_guardian_owners(  # noqa: F811
+        accounting_db, monkeypatch, mocked_canonical_inference_context):
+    """One scripted completion, two owners: the same provider request and the same delivered briefing."""
+    deny_sockets(monkeypatch)
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from src.observer.context import CurrentContext
+    from src.scheduler.jobs.daily_briefing import run_daily_briefing
+    from tests.test_daily_briefing import _hybrid_memories, _mock_litellm_response
+    runs = {}
+    async with guardian_host(cordis=False) as host:
+        monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
+        for owner in ("legacy", "cordis"):
+            if owner == "cordis":
+                await cutover(host, GUARDIAN_DOMAIN)
+            requests, delivered = [], AsyncMock()
+
+            def completion(**kwargs):
+                requests.append({key: kwargs.get(key) for key in ("messages", "temperature", "max_tokens")})
+                return _mock_litellm_response("Good morning, Hero! Here's your briefing...")
+            context = MagicMock()
+            context.refresh = AsyncMock(return_value=CurrentContext(time_of_day="morning", day_of_week="Monday",
+                                                                    is_working_hours=True,
+                                                                    active_goals_summary="3 active goals"))
+            with (patch("src.observer.manager.context_manager", context),
+                  patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+                  patch("src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+                        new=AsyncMock(return_value=_hybrid_memories(("User likes mornings",)))),
+                  patch("litellm.completion", side_effect=completion),
+                  patch("src.observer.delivery.deliver_or_queue", delivered)):
+                await run_daily_briefing()
+            delivered.assert_called_once()
+            runs[owner] = (requests, delivered.call_args[0][0].content, delivered.call_args[1])
+    assert runs["legacy"] == runs["cordis"]
+    assert len(runs["cordis"][0]) == 1
+    turns = await _jobs_of_kind("cordis_guardian_turn_v1")
+    assert [turn["status"] for turn in turns] == ["succeeded"]  # only the Cordis-owned run made a turn

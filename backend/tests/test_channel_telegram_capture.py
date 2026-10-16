@@ -9,6 +9,7 @@ from sqlalchemy import select
 from src.db.models import WorkBoardTask, WorkflowRunState, TelegramInboundUpdate
 from src.extensions.telegram_transport import TelegramTransportAdapter
 from src.work_board.general_task import GeneralTaskService
+from src.work_board.repository import BoardError
 from tests.test_general_task_contract import Registry
 from tests.test_first_result_setup import authenticated_setup_operator, setup_workspace
 from tests.test_telegram_task_controls import SyntheticTelegramHTTP
@@ -147,6 +148,14 @@ async def test_captured_origin_tampering_and_missing_source_deny_before_private_
     monkeypatch.setattr("src.work_board.dispatcher._parse_typed_input", private_read_trap)
     copied = await client.get(f"/api/work-board/tasks/{second_id}/plan")
     assert copied.status_code == 409, copied.text
+    # An origin MAC'd under a different signing key (an earlier key source or a
+    # rotated vault key) is never re-signed: it fails closed with its typed
+    # reason and needs operator recovery.
+    from config.settings import settings
+    with monkeypatch.context() as rotated:
+        rotated.setattr(settings, "capability_journal_secret", "a-different-server-key")
+        stale = await client.get(f"/api/work-board/tasks/{task_id}/plan")
+    assert stale.status_code == 409 and "channel_capture_origin_changed" in stale.text, stale.text
     changed = json.loads(original)
     changed["origin"]["source_id"] = "different-event"
     for marker in (None, "{}", json.dumps(changed)):
@@ -599,4 +608,23 @@ async def test_unpaired_sender_or_chat_and_replayed_event_create_no_work(client,
         assert not (await db.execute(select(WorkflowRunState))).scalars().all()
     # Nothing was sent back to any sender for the denied events.
     assert boundary.messages == []
+    await boundary.http.aclose()
+
+
+async def test_telegram_button_control_board_error_is_operator_visible(client, async_db, setup_workspace, monkeypatch):
+    """A Telegram button has no reply channel for a canonical 409, so its typed
+    code is returned to the ingestion caller and kept in Telegram status."""
+    from src.extensions.telegram_task_controls import TelegramTaskControls
+    adapter, boundary, chosen, service = await selected_pair(client, monkeypatch)
+
+    async def origin_changed(self, payload, **_kwargs):
+        raise BoardError("channel_capture_origin_changed", "Original captured source needs operator recovery",
+                         status_code=409)
+    monkeypatch.setattr(TelegramTaskControls, "callback", origin_changed)
+    pressed = await client.post("/api/telegram/updates", json={"update_id": 91, "callback_query": {
+        "id": "cb-91", "from": {"id": 42}, "message": {"message_id": 191, "chat": {"id": 77}},
+        "data": "sc1.synthetic"}})
+    assert pressed.status_code >= 400 and pressed.json()["detail"]["code"] == "telegram_canonical_control_unavailable"
+    status = (await client.get("/api/telegram/status")).json()
+    assert status["last_error"] == "telegram_control_blocked:channel_capture_origin_changed"
     await boundary.http.aclose()

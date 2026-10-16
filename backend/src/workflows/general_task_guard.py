@@ -1358,7 +1358,7 @@ async def _current_original_sql(jobs, db, parent_id, *, manifest=None):
     return parent, task, attempt, selected
 
 
-async def _current(jobs, db, parent_id, *, manifest=None):
+async def _current(jobs, db, parent_id, *, manifest=None, staged_artifacts=()):
     from src.work_board.channel_capture import check_current_captured_task_source
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.general_task_runtime_artifacts import _verify_native_manifest_data
@@ -1381,8 +1381,10 @@ async def _current(jobs, db, parent_id, *, manifest=None):
             attempt.fencing_token, parent.revision, parent.fencing_token, source.model_dump_json(),
             journal.envelope.model_dump_json())):
         raise DurableJobLeaseError('original staged positive envelope changed')
+    # A proposed manifest may reference this writer's own newly staged
+    # artifacts (a plan revision) besides the retained ones.
     envelope = await _verify_native_manifest_data(parent, task, attempt, selected, journal.envelope,
-        _staged_artifacts=journal.staged_receipts)
+        _staged_artifacts=(*journal.staged_receipts, *staged_artifacts))
     if envelope.strategy.status == "active":
         from src.memory.task_methods import current_method
         from src.work_board.contracts import WorkBoardOwner
@@ -2903,7 +2905,8 @@ async def replace_manifest(jobs, job_id, *, manifest, owner, fencing_token, expe
         await stage_positive_parent(jobs, db, job_id, manifest=manifest)
         await db.rollback()
         await _begin_sqlite_immediate(db)
-        parent, task, attempt, _selected, _envelope = await _current(jobs, db, job_id, manifest=manifest)
+        parent, task, attempt, _selected, _envelope = await _current(jobs, db, job_id, manifest=manifest,
+            staged_artifacts=staged_artifacts)
         previous = read_manifest(parent)
         jobs._assert_lease(parent, owner=owner, fencing_token=fencing_token)
         if (parent.status != "running" or parent.revision != expected_revision
@@ -3179,9 +3182,10 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
             expected_manifest_revision=expected_manifest_revision,
             authority_check=authority_check, authority_commit=authority_commit)
     async with jobs._session() as db:
-        preflight_children = list((await db.execute(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == parent_id))).scalars().all())
-        for preflight_child in preflight_children:
-            await stage_native_journal(db, preflight_child)
+        # Stage the parent's retained receipts once. Closed children admitted
+        # under an earlier plan revision are not phase-current, so staging
+        # through each child would refuse a valid pause.
+        await stage_positive_parent(jobs, db, parent_id)
         await db.rollback()
         await _begin_sqlite_immediate(db)
         if authority_check is not None:

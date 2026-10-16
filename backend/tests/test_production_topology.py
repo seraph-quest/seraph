@@ -76,6 +76,27 @@ def test_production_core_requires_exactly_one_server_side_auth_credential(tmp_pa
     assert auth_check["detail"] == "operator PBKDF2 hash has invalid shape"
 
 
+def test_stock_hash_only_production_env_resolves_the_channel_signing_key(tmp_path):
+    def channel_check(env):
+        report = build_preflight_report(env)
+        return report, next(check for check in report["core"]["checks"] if check["name"] == "channel_signing_key")
+    stock = _production_env(tmp_path)
+    stock["OPERATOR_AUTH_SECRET"] = ""
+    stock["OPERATOR_AUTH_SECRET_HASH"] = "pbkdf2_sha256$600000$" + "A" * 22 + "==$" + "B" * 43 + "="
+    report, check = channel_check(stock)
+    assert report["core"]["status"] == "ready", report["core"]
+    assert check == {"name": "channel_signing_key", "status": "ready",
+                     "detail": "derived from the workspace vault key, generated on first use"}
+    (tmp_path / ".vault-key").write_text("vault\n", encoding="utf-8")
+    assert channel_check(stock)[1]["detail"] == "derived from the workspace vault key"
+    (tmp_path / ".vault-key").unlink()
+    (tmp_path / ".vault-key").mkdir()
+    report, check = channel_check(stock)
+    assert check["status"] == "invalid" and report["core"]["status"] == "invalid"
+    stock["CAPABILITY_JOURNAL_SECRET"] = "dedicated-server-secret"
+    assert channel_check(stock)[1]["detail"] == "explicit server secret signs channel origins and links"
+
+
 def test_complete_openrouter_config_remains_unverified_without_live_probe(tmp_path):
     env = _production_env(tmp_path)
     env.update(

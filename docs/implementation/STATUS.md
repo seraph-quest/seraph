@@ -740,7 +740,10 @@ voice is an explicit "Voice route unavailable" state under
 endpoint, codec and pricing proof exists (tracked follow-up). Transcript
 correction updates the unexecuted intent through one corrected canonical Message
 and a separate fresh Goal/Task action, tested with a scripted transcription; it
-never replays the original call or transfers audio liability. Live Telegram,
+never replays the original call or transfers audio liability. Channel origins
+and output links are signed with a key derived from the workspace vault key
+(explicit `CAPABILITY_JOURNAL_SECRET`/`OPERATOR_AUTH_SECRET` overrides), so stock
+deployments need no new setting. Live Telegram,
 provider and native capture operation remain unverified. See the
 [current app guide](./12-current-app-guide.md#local-cockpit-interaction-boundaries).
 

@@ -1117,15 +1117,29 @@ class ChannelOutputHandleV1(BaseModel):
 
 
 def _output_signing_key():
-    import hashlib
+    """HMAC root for capture origins and output handles.
+
+    An explicit raw server secret (CAPABILITY_JOURNAL_SECRET, then
+    OPERATOR_AUTH_SECRET) overrides; otherwise the key derives from the vault
+    master key every workspace has, so a stock deployment needs no new
+    setting. A stored password hash is verification data, not a MAC key, so
+    it never signs. Changing the source invalidates earlier origins/handles,
+    which then fail closed with their typed reasons.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from config.settings import settings
-    # Raw server secret material only. A stored password hash is verification
-    # data, not a MAC key, so it never signs capture origins or output handles.
-    value = str(settings.capability_journal_secret or settings.operator_auth_secret or "").strip()
-    if not value:
+    override = str(settings.capability_journal_secret or settings.operator_auth_secret or "").strip()
+    try:
+        if override:
+            material = override.encode("utf-8")
+        else:
+            from src.vault.crypto import vault_key_material
+            material = vault_key_material()
+    except (OSError, RuntimeError, TypeError, ValueError):
         raise BoardError("channel_output_signer_unavailable",
-            "Set CAPABILITY_JOURNAL_SECRET (server MAC material) to issue channel handles", status_code=409)
-    return hashlib.sha256(("seraph.channel-output.v1:" + value).encode()).digest()
+            "Channel signing key unavailable: the workspace vault key cannot be read", status_code=409) from None
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"seraph.channel-capture.v1").derive(material)
 
 
 def issue_output_handle(owner, output):

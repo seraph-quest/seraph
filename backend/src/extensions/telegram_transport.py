@@ -1031,6 +1031,21 @@ class TelegramTransportAdapter:
             return {"task_id": task_id, "task_revision": revision,
                 "idempotent_replay": mutation.idempotent_replay, "no_learning": True}
 
+    async def _record_control_failure(self, owner_principal_id: str, operator_session_id: str, code: str) -> None:
+        """Best effort: the typed control error is still raised to the caller."""
+        try:
+            owner, session = _owner(owner_principal_id), _session(operator_session_id)
+            async with self._lock:
+                async with db_engine.get_session() as db:
+                    row = await self._state(db)
+                    if row is not None and row.owner_principal_id == owner and row.operator_session_id == session:
+                        row.last_error = ("telegram_control_blocked:" + str(code))[:128]
+                        row.updated_at = _now()
+                        db.add(row)
+        except Exception as exc:  # noqa: BLE001 - never replace the original control error
+            import logging
+            logging.getLogger(__name__).warning("telegram control failure was not recorded: %s", type(exc).__name__)
+
     async def _ingest_update(
         self,
         payload: dict[str, Any],
@@ -1048,6 +1063,10 @@ class TelegramTransportAdapter:
                     owner_principal_id=owner_principal_id, operator_session_id=operator_session_id)
                 return receipt
             except (BoardError, ValueError) as exc:
+                # The Telegram button has no reply channel for the reason, so
+                # the typed code stays operator-visible in Telegram status.
+                await self._record_control_failure(owner_principal_id, operator_session_id,
+                    exc.code if isinstance(exc, BoardError) else "telegram_callback_invalid")
                 raise TelegramTransportError("telegram_canonical_control_unavailable",
                     "Task control unavailable. Review the current task in the cockpit.") from exc
             finally:

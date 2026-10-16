@@ -1029,6 +1029,20 @@ is **Partial**:
   are never archived. Their canonical attestation rows stay in `seraph.db`; after
   a restore, a missing object fails closed with
   `audio_documentation_source_missing` until the documentation is staged again.
+- **Channel signing.** Capture origins and cockpit output links are HMAC-signed
+  with a key derived (HKDF, `seraph.channel-capture.v1`) from the workspace vault
+  key, so a stock production deployment with only `OPERATOR_AUTH_SECRET_HASH`
+  needs no new setting. `CAPABILITY_JOURNAL_SECRET`, then `OPERATOR_AUTH_SECRET`,
+  overrides that source when set; the stored password hash is never used. An
+  unreadable vault key fails closed with `channel_output_signer_unavailable`, and
+  `production_preflight.py` reports it as `channel_signing_key`. Changing the
+  source (setting or removing an override, or replacing the vault key) is not
+  migrated: earlier capture origins fail closed with
+  `channel_capture_origin_changed` and need operator recovery, and earlier output
+  links (valid for at most five minutes) fail with
+  `channel_output_handle_invalid`. A failed Telegram button control returns
+  `telegram_canonical_control_unavailable` and keeps its typed cause in Telegram
+  status (`last_error`, shown in Settings → Telegram).
 
 Live Telegram delivery, provider operation and native macOS/Safari capture remain
 unverified by these provider-free checks.

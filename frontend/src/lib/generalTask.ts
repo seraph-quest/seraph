@@ -99,12 +99,25 @@ export interface GeneralTaskCreateRequest {
 export class GeneralTaskError extends Error {
   constructor(message: string, public status: number) { super(message); }
 }
+// Captured-channel blocks are not stale revisions: a refresh cannot clear them.
+const CHANNEL_RECOVERY: Record<string, string> = {
+  channel_capture_origin_changed: "This task's captured channel source no longer verifies (changed provenance or signing key). It needs operator recovery; refreshing will not clear it.",
+  channel_output_signer_unavailable: "Channel signing is unavailable because the workspace vault key cannot be read. Restore the workspace vault key, then refresh.",
+};
+
 export async function generalTaskRequest(path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
   const response = await apiFetch(`${API_URL}/api/work-board${path}`, {
     signal, ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   });
   if (!response.ok) {
     if ([401, 403].includes(response.status)) throw new GeneralTaskError("Current operator authority is unavailable. Sign in with the original task owner or recover ownership through Work, then refresh.", response.status);
+    let code: unknown = null;
+    try {
+      const value: unknown = await response.json();
+      const detail = record(value) ? value.detail : null;
+      code = record(detail) ? detail.code : null;
+    } catch { code = null; }
+    if (typeof code === "string" && code in CHANNEL_RECOVERY) throw new GeneralTaskError(CHANNEL_RECOVERY[code], response.status);
     throw new GeneralTaskError(response.status === 409
       ? "The task, goal, plan or tool revision changed. Refresh the current plan and review again."
       : `Task service blocked (${response.status}). Inspect current consent, budget and capability settings, then refresh Work.`, response.status);

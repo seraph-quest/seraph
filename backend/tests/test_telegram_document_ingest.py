@@ -581,15 +581,44 @@ def test_token_redaction_is_scoped_to_records_containing_the_token():
     assert token not in private.getMessage() and "[redacted]" in private.getMessage()
 
 
-def test_channel_handles_never_use_a_password_hash_as_mac_key(monkeypatch):
+def test_channel_signing_key_needs_no_new_setting_and_never_uses_a_password_hash(monkeypatch, tmp_path):
+    """A stock production env (only OPERATOR_AUTH_SECRET_HASH) still signs
+    capture origins and output handles: the key derives from the vault key."""
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from config.settings import settings
-    from src.work_board.channel_capture import _output_signing_key
+    from src.work_board.channel_capture import _origin_mac, _output_signing_key
     from src.work_board.repository import BoardError
+
+    def hkdf(material):
+        return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"seraph.channel-capture.v1").derive(material)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "vault_encryption_key", "")
     monkeypatch.setattr(settings, "capability_journal_secret", "")
     monkeypatch.setattr(settings, "operator_auth_secret", "")
-    monkeypatch.setattr(settings, "operator_auth_secret_hash", "pbkdf2_sha256$stored-verification-hash")
+    password_hash = "pbkdf2_sha256$stored-verification-hash"
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", password_hash)
+    vault_key = Fernet.generate_key()
+    (workspace / ".vault-key").write_bytes(vault_key + b"\n")
+    key = _output_signing_key()
+    assert key == hkdf(vault_key) and key == _output_signing_key()
+    assert key != hkdf(password_hash.encode())
+    assert len(_origin_mac({"task_id": "t"})) == 64
+    # An absent key file is generated once, exactly as the vault itself does.
+    (workspace / ".vault-key").unlink()
+    generated = _output_signing_key()
+    assert (workspace / ".vault-key").stat().st_mode & 0o777 == 0o600
+    assert generated == hkdf((workspace / ".vault-key").read_bytes().strip()) == _output_signing_key()
+    # An explicit raw server secret overrides the vault-derived key.
+    monkeypatch.setattr(settings, "capability_journal_secret", "dedicated-server-mac-material")
+    assert _output_signing_key() == hkdf(b"dedicated-server-mac-material") != generated
+    # Unreadable or malformed vault material fails closed with a typed reason.
+    monkeypatch.setattr(settings, "capability_journal_secret", "")
+    (workspace / ".vault-key").write_text("not-a-vault-key\n")
     with pytest.raises(BoardError) as unavailable:
         _output_signing_key()
     assert unavailable.value.code == "channel_output_signer_unavailable"
-    monkeypatch.setattr(settings, "capability_journal_secret", "dedicated-server-mac-material")
-    assert len(_output_signing_key()) == 32
+    assert unavailable.value.status_code == 409

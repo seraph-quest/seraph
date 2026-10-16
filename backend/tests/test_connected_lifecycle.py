@@ -13,8 +13,8 @@ async def test_combined_lifecycle_keeps_native_owners_and_exact_pointer_fenced(a
     from config.settings import settings
     monkeypatch.setattr(settings, 'workspace_dir', str(tmp_path))
     monkeypatch.setattr(settings, 'deployment_environment', 'test')
-    monkeypatch.setattr(application, 'init_db', AsyncMock())
-    monkeypatch.setattr(application, 'close_db', AsyncMock())
+    monkeypatch.setattr('src.runtime_plugins.worker.init_db', AsyncMock())
+    monkeypatch.setattr('src.runtime_plugins.worker.close_db', AsyncMock())
     monkeypatch.setattr(application, 'init_scheduler', lambda: None)
     monkeypatch.setattr(application, 'shutdown_scheduler', lambda: None)
     monkeypatch.setattr(application, 'sync_scheduled_jobs', AsyncMock())

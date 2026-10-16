@@ -386,8 +386,11 @@ def _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
+    for name in ("sync_scheduled_jobs", "drain_tracked_tasks"):
         monkeypatch.setattr(app_module, name, AsyncMock())
+    # The state provider owns init_db/close_db (#1024).
+    for name in ("init_db", "close_db"):
+        monkeypatch.setattr("src.runtime_plugins.worker." + name, AsyncMock())
     for name in ("ensure_soul_exists", "init_llm_logging", "init_scheduler", "shutdown_scheduler"):
         monkeypatch.setattr(app_module, name, Mock())
     for manager, methods in [(app_module.mcp_manager, ("load_config", "disconnect_all")),
@@ -538,8 +541,11 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
     monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
     # Isolate unrelated startup owners; Cordis start/status/stop remain actual.
-    for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
+    for name in ("sync_scheduled_jobs", "drain_tracked_tasks"):
         monkeypatch.setattr(app_module, name, AsyncMock())
+    # The state provider owns init_db/close_db (#1024).
+    for name in ("init_db", "close_db"):
+        monkeypatch.setattr("src.runtime_plugins.worker." + name, AsyncMock())
     for name in ("ensure_soul_exists", "init_llm_logging", "init_scheduler", "shutdown_scheduler"):
         monkeypatch.setattr(app_module, name, Mock())
     for manager, methods in [(app_module.mcp_manager, ("load_config", "disconnect_all")),
@@ -558,7 +564,7 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
         monkeypatch.setattr(target, AsyncMock(return_value=[]))
     profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
-    monkeypatch.setattr(app_module, "close_db", AsyncMock(side_effect=close_after_source_cleanup))
+    monkeypatch.setattr("src.runtime_plugins.worker.close_db", AsyncMock(side_effect=close_after_source_cleanup))
     assert (await client.get("/api/runtime/status")).status_code == 401
     login = await client.post("/api/auth/login", json={"password":"isolated-cordis-auth-fixture"},
                               headers={"origin":"http://localhost:3001"})
@@ -751,8 +757,10 @@ async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db,
 
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     monkeypatch.setattr(settings, "deployment_environment", "test")
-    for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
+    for name in ("sync_scheduled_jobs", "drain_tracked_tasks"):
         monkeypatch.setattr(application, name, AsyncMock())
+    for name in ("init_db", "close_db"):
+        monkeypatch.setattr("src.runtime_plugins.worker." + name, AsyncMock())
     for name in ("ensure_soul_exists", "init_llm_logging", "init_scheduler", "shutdown_scheduler"):
         monkeypatch.setattr(application, name, Mock())
     for manager, methods in [(application.mcp_manager, ("load_config", "disconnect_all")),

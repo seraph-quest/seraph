@@ -1743,8 +1743,8 @@ def _make_sync_client_with_db():
             await engine.dispose()
 
     patches = [patch(target, _get_session) for target in EVAL_SYNC_CLIENT_DB_PATCH_TARGETS]
-    patches.append(patch("src.app.init_db", _test_init_db))
-    patches.append(patch("src.app.close_db", _test_close_db))
+    patches.append(patch("src.runtime_plugins.worker.init_db", _test_init_db))
+    patches.append(patch("src.runtime_plugins.worker.close_db", _test_close_db))
     patches.append(patch("src.app.init_scheduler", return_value=None))
     patches.append(patch("src.app.shutdown_scheduler"))
     patches.append(patch.object(settings, "workspace_dir", tmpdir))

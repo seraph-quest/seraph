@@ -11,7 +11,6 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config.settings import settings
-from src.db import init_db, close_db
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.llm_runtime import effective_runtime_model_id, provider_profile_statuses, provider_profiles, resolve_runtime_profile
@@ -352,16 +351,54 @@ def _augment_inference_readiness(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    workspace_owner = None
-    if settings.deployment_environment.strip().lower() in {"prod", "production"}:
-        # The container preflight proves the /app/data bind.  Hold the same
-        # lock inode for the whole backend lifetime so host backup/restore
-        # cannot observe or replace a live workspace generation.
-        from src.workspace.production import runtime_workspace_owner
+    # Python hosts the mandatory providers (#1024): the worker takes the
+    # workspace owner lease (production: the container preflight proves the
+    # /app/data bind, and the same lock inode is held for the whole backend
+    # lifetime so host backup/restore cannot observe or replace a live
+    # generation), then activates state, authority, audit and tasks or aborts.
+    from src.runtime_plugins.worker import ProviderWorker, attach
 
-        workspace_owner = runtime_workspace_owner(settings.workspace_dir)
-        workspace_owner.__enter__()
-    await init_db()
+    worker = attach(ProviderWorker(
+        hold_workspace_lock=settings.deployment_environment.strip().lower() in {"prod", "production"}))
+    app.state.provider_worker = worker
+    shutdown_error: Exception | None = None
+    try:
+        worker.acquire_workspace()
+    except BaseException:
+        worker.detach()
+        raise
+    # One outer try/finally from here: every failure point releases the lock,
+    # disposes the engine and disconnects MCP.
+    try:
+        await worker.activate()
+        async with _services_lifespan(app):
+            yield
+    finally:
+        try:
+            mcp_manager.disconnect_all()
+        finally:
+            try:
+                await drain_tracked_tasks(timeout_seconds=5.0)
+            except Exception as exc:
+                shutdown_error = exc
+            finally:
+                try:
+                    worker.close_gate()
+                finally:
+                    try:
+                        await worker.close_state()
+                    finally:
+                        try:
+                            worker.release_workspace()
+                        finally:
+                            worker.detach()
+    if shutdown_error is not None:
+        raise shutdown_error
+
+
+@asynccontextmanager
+async def _services_lifespan(app: FastAPI):
+    """Start and stop the services; their ``.stop()`` calls run with the gate open."""
     from src.conversation.task_context import TaskContinuityService
     from src.work_board.repository import WorkBoardRepository
     from src.agent.session import session_manager
@@ -563,18 +600,6 @@ async def lifespan(app: FastAPI):
                             _dispatcher.connection_sync_runtime = None
                     finally:
                         shutdown_scheduler()
-    mcp_manager.disconnect_all()
-    shutdown_error: Exception | None = None
-    try:
-        await drain_tracked_tasks(timeout_seconds=5.0)
-    except Exception as exc:
-        shutdown_error = exc
-    finally:
-        await close_db()
-    if workspace_owner is not None:
-        workspace_owner.__exit__(None, None, None)
-    if shutdown_error is not None:
-        raise shutdown_error
 
 
 def create_app() -> FastAPI:

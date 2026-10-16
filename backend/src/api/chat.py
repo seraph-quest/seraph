@@ -617,6 +617,44 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             status_code=422,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
+    # The agent-loop owner row decides the loop; a blocked Cordis owner never falls back.
+    # Readiness, the direct-route preflight and turn admission precede the user-row
+    # reservation, so a refused message is never a duplicate on retry.
+    chat_status = await chat_runtime_status()
+    chat_loop = chat_route(chat_status)
+    if chat_loop == "blocked":
+        raise HTTPException(status_code=503, detail={"code": chat_status["reason"],
+                                                     "message": chat_runtime_unavailable_message(chat_status)})
+    cordis_turn: CordisTurn | None = None
+    if chat_loop == "cordis":
+        admit_profile = await get_or_create_profile()
+        admit_onboarding = not admit_profile.onboarding_completed
+        admit_path = "onboarding_agent" if admit_onboarding else "chat_agent"
+        admit_direct = should_use_direct_local_chat(request.message, runtime_path=admit_path,
+                                                    is_onboarding=admit_onboarding)
+        if admit_direct and (route_error := await direct_local_chat_route_error(runtime_path=admit_path)):
+            safe_detail = await redact_secrets_in_text(route_error)
+            await log_agent_run_event(
+                session_id=session.id, transport="rest", is_onboarding=admit_onboarding, outcome="failed",
+                policy_mode=get_current_tool_policy_mode(),
+                details={"duration_ms": 0, "message_length": len(request.message), "error": safe_detail,
+                         "runtime": "direct-openrouter-chat", "failure_stage": "route_preflight"},
+            )
+            raise HTTPException(status_code=503, detail=safe_detail)
+        try:
+            # A replayed message returns no turn; the reservation below answers the duplicate.
+            cordis_turn, _replayed = await CordisTurn.admit(
+                operator=operator, conversation_session_id=session.id, message_id=ingress.message_id,
+                profile="direct" if admit_direct else ("onboarding" if admit_onboarding else "agent"),
+                timeout_seconds=min(settings.agent_chat_timeout, 60) if admit_direct else settings.agent_chat_timeout)
+        except TurnBlocked as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.reason_code,
+                                                         "message": turn_blocked_message(exc.reason_code)}) from exc
+
+    async def cordis_blocked(reason: str) -> None:
+        if cordis_turn is not None:
+            await cordis_turn.settle("blocked", reason=reason)
+
     try:
         _ingress_message, duplicate = await session_manager.reserve_ingress_message(
             session.id,
@@ -626,6 +664,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             attachment_refs=request.attachments,
         )
     except MessageIngressConflictError as exc:
+        await cordis_blocked("chat_message_identity_conflict")
         await log_chat_ingress_event(
             session_id=session.id,
             envelope=ingress,
@@ -640,6 +679,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             ),
         ) from exc
     if duplicate:
+        await cordis_blocked("chat_message_duplicate")
         await log_chat_ingress_event(
             session_id=session.id,
             envelope=ingress,
@@ -658,31 +698,10 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         envelope=ingress,
         status="accepted",
     )
-
-    # The agent-loop owner row decides the loop; a blocked Cordis owner never falls back.
-    chat_status = await chat_runtime_status()
-    chat_loop = chat_route(chat_status)
-    if chat_loop == "blocked":
-        raise HTTPException(status_code=503, detail={"code": chat_status["reason"],
-                                                     "message": chat_runtime_unavailable_message(chat_status)})
-    cordis_turn: CordisTurn | None = None
-
-    async def admit_cordis_turn(profile_name: str, timeout_seconds: float) -> CordisTurn:
-        try:
-            turn, _replayed = await CordisTurn.admit(
-                operator=operator, conversation_session_id=session.id, message_id=ingress.message_id,
-                profile=profile_name, timeout_seconds=timeout_seconds)
-        except TurnBlocked as exc:
-            raise HTTPException(status_code=503, detail={"code": exc.reason_code,
-                                                         "message": turn_blocked_message(exc.reason_code)}) from exc
-        if turn is None:
-            raise HTTPException(status_code=409, detail=chat_ingress_rejection_detail(
-                ingress, code="chat_message_duplicate", message="This message was already accepted for this session."))
-        return turn
-
-    async def cordis_blocked(reason: str) -> None:
-        if cordis_turn is not None:
-            await cordis_turn.settle("blocked", reason=reason)
+    if chat_loop == "cordis" and cordis_turn is None:
+        # The turn exists but its user row did not (an interrupted earlier attempt).
+        raise HTTPException(status_code=409, detail={"code": "agent_turn_replayed",
+                                                     "message": turn_blocked_message("agent_turn_replayed")})
 
     async def settle_cordis(content: str, message_id: str, metadata_json: str | None, *, outcome="succeeded",
                             reason=None, direct=False) -> None:
@@ -708,6 +727,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
 
         reject_removed_external_agent_route(runtime_path=direct_runtime_path)
     except ExternalAgentRuntimeRemovedError as exc:
+        await cordis_blocked("external_agent_runtime_removed")
         raise HTTPException(status_code=410, detail=exc.payload()) from exc
     if should_use_direct_local_chat(
         request.message,
@@ -715,7 +735,13 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         is_onboarding=is_onboarding,
     ):
         started_at = perf_counter()
-        route_error = await direct_local_chat_route_error(runtime_path=direct_runtime_path)
+        if cordis_turn is not None and cordis_turn.profile != "direct":
+            await cordis_blocked("agent_turn_profile_changed")
+            raise HTTPException(status_code=503, detail={"code": "agent_turn_profile_changed",
+                                                         "message": turn_blocked_message("agent_turn_profile_changed")})
+        # The Cordis route ran this preflight before admission.
+        route_error = (None if cordis_turn is not None
+                       else await direct_local_chat_route_error(runtime_path=direct_runtime_path))
         if route_error:
             safe_detail = await redact_secrets_in_text(route_error)
             await log_agent_run_event(
@@ -733,8 +759,6 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 },
             )
             raise HTTPException(status_code=503, detail=safe_detail)
-        if chat_loop == "cordis":
-            cordis_turn = await admit_cordis_turn("direct", min(settings.agent_chat_timeout, 60))
         llm_request_id = f"direct-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
         auth_tokens = set_runtime_context(
@@ -905,8 +929,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 exc_info=True,
             )
             agent = build_agent()
-    if chat_loop == "cordis":
-        cordis_turn = await admit_cordis_turn("onboarding" if is_onboarding else "agent", settings.agent_chat_timeout)
+    if cordis_turn is not None:
+        if cordis_turn.profile != ("onboarding" if is_onboarding else "agent"):
+            await cordis_blocked("agent_turn_profile_changed")
+            raise HTTPException(status_code=503, detail={"code": "agent_turn_profile_changed",
+                                                         "message": turn_blocked_message("agent_turn_profile_changed")})
         cordis_turn.attach(agent)
 
     revocation_scope = None

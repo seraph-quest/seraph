@@ -269,6 +269,12 @@ def test_rest_tool_turn_matches_legacy_and_blocked_owner_never_falls_back(tmp_pa
                                    headers=ORIGIN)
         assert response.status_code == 503 and response.json()["detail"]["code"].startswith("cordis_")
         assert "Chat is unavailable" in response.json()["detail"]["message"] and env.model.calls == []
+        # The refusal came before the user row was reserved: a retry after the fix is not a duplicate.
+        assert env.client.portal.call(env.host.start)
+        retried = env.client.post("/api/chat", json={"message": "what do my notes say?", "message_id": "r-2"},
+                                  headers=ORIGIN)
+        assert retried.status_code == 200 and retried.json()["response"] == "never"
+        assert env.turns() == [("succeeded", None)]
 
 
 def test_ws_disconnect_cancels_the_turn_and_writes_one_fenced_interrupted_row(tmp_path, monkeypatch, real_auth):  # noqa: F811

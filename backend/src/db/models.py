@@ -1047,6 +1047,8 @@ class ProjectSourceLink(SQLModel, table=True):
     finding_kind: str
     link_kind: str = Field(index=True)
     target_id: str = Field(index=True)
+    # The local owner a link hangs from: a publication's repair root.
+    parent_target_id: Optional[str] = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=_now, index=True)
 
 

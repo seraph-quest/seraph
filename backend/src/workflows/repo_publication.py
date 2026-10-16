@@ -198,7 +198,7 @@ class RepoPublicationService:
             "scan_limit_reached": len(identities) > 20 and offset >= 2000,
             "rejected_count": rejected}
 
-    async def repair(self, request, principal, session, *, _with_source_witness=False):
+    async def repair(self, request, principal, session, *, _with_source_witness=False, _refresh_project_source=None):
         await self.live(principal, session)
         root = await jobs.get_job(request.repair_job_id)
         if not root or root.get("job_kind") != "engineering.repo-repair.v1" or root.get("owner", {}).get("principal_id") != principal or root.get("operator_session_id") != session:
@@ -286,12 +286,38 @@ class RepoPublicationService:
             try:
                 binding["project_source"] = await project_source_publication_binding(self.adapter, link=link,
                     principal=principal, session=session, connection=await self.adapter._get_connection_row(principal),
-                    acknowledged_digest=acknowledged, refresh=_with_source_witness)
+                    acknowledged_digest=acknowledged,
+                    refresh=_with_source_witness if _refresh_project_source is None else _refresh_project_source)
             except GitHubFollowthroughError as exc:
                 raise PublicationError(exc.code, status_code=exc.status_code) from exc
         elif acknowledged is not None:
             raise PublicationError("project_source_not_linked", status_code=422)
         return (binding, tested, patch, source_witness) if _with_source_witness else (binding, tested, patch)
+
+    async def refresh_project_source(self, preview, principal, session):
+        """Re-read the linked project item before an external action.
+
+        A no-op for an unlinked repair. Otherwise the current item must still
+        equal the exact revision bound into this approval (the task's, or the
+        one the operator explicitly accepted), or nothing is written.
+        """
+        expected = preview["repair_binding"].get("project_source")
+        if expected is None:
+            return
+        from src.extensions.github_followthrough import GitHubFollowthroughError
+        from src.integrations.project_source import project_link_for_repair, project_source_publication_binding
+        link = await project_link_for_repair(preview["repair_binding"]["repair_job_id"], principal)
+        if link is None:
+            raise PublicationError("project_source_link_missing")
+        try:
+            current = await project_source_publication_binding(self.adapter, link=link, principal=principal,
+                session=session, connection=await self.adapter._get_connection_row(principal),
+                acknowledged_digest=expected["accepted_digest"] if expected["operator_accepted_new_revision"] else None,
+                refresh=True)
+        except GitHubFollowthroughError as exc:
+            raise PublicationError(exc.code, status_code=exc.status_code) from exc
+        if current != expected:
+            raise PublicationError("project_source_changed_decision_required")
 
     async def tested_runtime_current(self, binding, tested):
         from src.execution.repo_sandbox import build_repo_repair_executor
@@ -402,7 +428,7 @@ class RepoPublicationService:
         if "project_source" in binding:
             from src.integrations.project_source import project_link_for_repair, record_project_link
             await record_project_link(source=await project_link_for_repair(request.repair_job_id, principal),
-                link_kind="publication", target_id=job_id)
+                link_kind="publication", target_id=job_id, parent_target_id=request.repair_job_id)
         return await self.view(current)
 
     @staticmethod
@@ -536,8 +562,13 @@ class RepoPublicationService:
             source_bound = await repository_publication_source_present(jobs, preview["request"]["repair_job_id"])
             if source_bound:
                 from src.model_fabric.effective_policy import configuration_mutation_lock
+                # The linked project item's network read stays outside the
+                # configuration lock; the binding inside it is compared without
+                # another read, and the item is read again before the first write.
+                await self.refresh_project_source(preview, principal, session)
                 async with configuration_mutation_lock:
-                    binding, tested, _patch, witness = await self.repair(PrepareRequest(**preview["request"]), principal, session, _with_source_witness=True)
+                    binding, tested, _patch, witness = await self.repair(PrepareRequest(**preview["request"]), principal, session,
+                        _with_source_witness=True, _refresh_project_source=False)
                     if binding != preview["repair_binding"] or tested != preview["tested_input"]:
                         raise PublicationError("publication_source_or_posture_changed")
                     await self.tested_runtime_current(binding, tested)
@@ -624,6 +655,8 @@ class RepoPublicationService:
             remote_base = await self.request(current, preview, prefix + "/git/ref/heads/" + preview["base_branch"])
             self.require(remote_base.get("object", {}).get("sha") == preview["base_commit"], "remote_base_changed")
             await self.verify_tree(current, preview, preview["base_commit"], preview["base_tree"], preview["tested_input"]["base_files"])
+            # Last read of the linked project item before the first GitHub write.
+            await self.refresh_project_source(preview, principal, session)
             for item in produced["files"]:
                 if item["path"] not in produced["changed_paths"]:
                     continue

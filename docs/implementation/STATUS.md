@@ -75,14 +75,17 @@ its tested patch publishes through the existing exact PR publication. One
 lineage links the source revision, the task, the repository root, each
 iteration's patch digest, the publication and the verified PR.
 
-The publication approval binds the accepted source revision, and the item is
-re-read before the external action. A changed or closed item, another
-repository, a moved base or a changed patch stops the unstarted publication
-before any GitHub write. Completed local work is kept. A changed revision
-needs an explicit operator acceptance and a fresh approval. Synced items can
-also be written as workspace text that an ordinary source watch reads. A watch
-change then prepares a blocker or review comment through the existing exact
-GitHub follow-through. The comment awaits its own approval and is not posted.
+The publication approval binds the accepted source revision. The item is read
+again at prepare, when the approval resumes, and immediately before the first
+GitHub write. A changed title, body, state or labels, a closed item, another
+repository, a moved base or a changed patch stops the publication before any
+GitHub write. Comment activity alone, including Seraph's own prepared comment,
+does not. Completed local work is kept. A changed revision needs an explicit
+operator acceptance and a fresh approval. Synced items can also be written as
+workspace text that an ordinary source watch reads. That watch's verified
+packet, bound to the exact snapshot it observed, then prepares a blocker or
+review comment through the existing exact GitHub follow-through. The comment
+awaits its own approval and is not posted.
 Lost connection, repository or credential access blocks new reads and keeps
 local artifacts. The status endpoint lists the connection's actual
 limitations. Verified with offline local GitHub fixtures and zero

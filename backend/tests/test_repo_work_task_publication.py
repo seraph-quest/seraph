@@ -639,9 +639,20 @@ async def test_actual_source_unknown_model_cost_retains_original_capacity(accoun
         unknown_model_cost=True)
 
 
-def _repository_cost_rows():
-    """Repository iteration reservations; a reviewed planner proposal (if any) is separate."""
-    return select(InferenceCostReservation).where(InferenceCostReservation.runtime_path != "general_task_planner")
+def _repository_cost_rows(planned):
+    """Repository iteration reservations. Only a journey that starts from a
+    reviewed planner proposal (``create``) also holds that planner's own row."""
+    query = select(InferenceCostReservation)
+    return query.where(InferenceCostReservation.runtime_path != "general_task_planner") if planned else query
+
+
+async def _assert_one_scripted_planner_row(db):
+    rows = list((await db.scalars(select(InferenceCostReservation).where(
+        InferenceCostReservation.runtime_path == "general_task_planner"))).all())
+    # The scripted planner transport reports a zero cost for its one proposal.
+    assert len(rows) == 1, rows
+    assert rows[0].state == "settled" and rows[0].actual_cost_microusd == 0
+    assert rows[0].contact_started_at is not None
 
 
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
@@ -657,6 +668,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         accounting_db, monkeypatch, goal_capacity=goal_capacity, claim_child=False, language=language, node_build=node_build,
         publication_profile=publication_profile, task_limits=task_limits, work_limits=work_limits, create=create)
     operator = await authenticate_session(owner.session_id, touch=False)
+    planned = create is not None
     prepared = await prepare_repository_native_source(service, jobs, binding,
         child_owner='actual-consent-callback-worker', principal=operator.principal)
     root_id = prepared['repository_job_id']
@@ -719,7 +731,9 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             general_task_service=service, principal=operator.principal)
     assert contacted == []
     async with factory() as db:
-        assert list((await db.scalars(_repository_cost_rows())).all()) == []
+        assert list((await db.scalars(_repository_cost_rows(planned))).all()) == []
+        if planned:
+            await _assert_one_scripted_planner_row(db)
     assert (await jobs.get_job(binding.invocation_id))['lease'] == before_child['lease']
     if unknown_model_cost:
         with pytest.raises(Exception):
@@ -728,7 +742,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 principal=operator.principal)
         assert len(contacted) == 1
         async with factory() as db:
-            rows = list((await db.scalars(_repository_cost_rows())).all())
+            rows = list((await db.scalars(_repository_cost_rows(planned))).all())
             assert len(rows) == 1 and rows[0].state == 'unknown'
             assert rows[0].contact_started_at is not None
             assert rows[0].actual_cost_microusd is None
@@ -766,7 +780,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     assert after_child['lease']['revision'] == before_child['lease']['revision'] + 1
     assert after_child['attempt_count'] == 1
     async with factory() as db:
-        rows = list((await db.scalars(_repository_cost_rows())).all())
+        rows = list((await db.scalars(_repository_cost_rows(planned))).all())
         assert len(rows) == 1 and rows[0].state == 'settled'
         assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == actual_model_cost_microusd
         assert rows[0].job_id == root_id
@@ -960,7 +974,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             assert jobs._repo_repair_reservation_state(root)['status'] == 'released'
             terminal = _repository_record(root, 'repository:terminal:v1')
             assert terminal['closure']['limit_evidence']['cause'] == stop_at
-            rows = list((await db.scalars(_repository_cost_rows())).all())
+            rows = list((await db.scalars(_repository_cost_rows(planned))).all())
             assert len(rows) == 1 and rows[0].state == 'settled'
             assert rows[0].actual_cost_microusd == actual_model_cost_microusd
         return {'factory': factory, 'owner': owner, 'service': service, 'jobs': jobs, 'root_id': root_id}
@@ -1063,7 +1077,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 assert root_id not in service.repository_source_service._iterative_lanes
                 assert len(contacted) == 3
                 async with factory() as db:
-                    rows = list((await db.scalars(_repository_cost_rows())).all())
+                    rows = list((await db.scalars(_repository_cost_rows(planned))).all())
                     assert len(rows) == 3 and all(row.state == 'settled' for row in rows)
                 return
             if index == 2:
@@ -1074,7 +1088,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 assert current_child['lease']['fencing_token'] == original_child['lease']['fencing_token']
                 assert current_child['lease']['owner'] is None and current_child['lease']['expires_at'] is None
         async with factory() as db:
-            costs = list((await db.scalars(_repository_cost_rows())).all())
+            costs = list((await db.scalars(_repository_cost_rows(planned))).all())
             assert len(costs) == 3 and all(row.state == 'settled' for row in costs)
             assert len({row.operation_id for row in costs}) == 3
         assert (accounting_db[0] / 'example' / original_path).read_text() == original_bytes

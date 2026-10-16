@@ -8,6 +8,7 @@ one navigable chain, and a changed source revision, repository, branch or
 patch invalidates the exact publication approval before any write.
 """
 from datetime import datetime, timezone
+import json
 import subprocess
 import uuid
 
@@ -203,3 +204,40 @@ async def test_operator_can_accept_a_changed_source_revision_with_a_fresh_approv
     binding = prepared["preview"]["repair_binding"]["project_source"]
     assert binding["accepted_digest"] == changed and binding["task_bound_digest"] == case["ref"].digest
     assert binding["operator_accepted_new_revision"] is True and github.posts == []
+
+
+@pytest.mark.asyncio
+async def test_comment_activity_on_the_issue_does_not_invalidate_the_publication_approval(
+        accounting_db, monkeypatch, repository_admission_signer):
+    """Seraph's own prepared response (or any comment) only moves ``updated_at``."""
+    case = await approved_publication(accounting_db, monkeypatch)
+    owner, github = case["flow"]["owner"], case["github"]
+    (original,) = github.issues.items
+    github.issues.items = [{**original, "updated_at": "2026-10-16T09:30:00+00:00", "comments": 1}]
+    result = await case["publisher"].execute(case["prepared"]["job_id"], owner.principal_id, owner.session_id)
+    assert result["status"] == "succeeded", result
+    assert github.posts.count(f"/repos/{REPOSITORY}/pulls") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_item_is_read_again_immediately_before_the_first_github_write(
+        accounting_db, monkeypatch, repository_admission_signer):
+    case = await approved_publication(accounting_db, monkeypatch)
+    flow, owner, github = case["flow"], case["flow"]["owner"], case["github"]
+    # Reads: 1 at prepare, 2 when the approval resumes, 3 just before the first POST.
+    assert github.issues.item_reads == 1
+    def edit_before_the_write(count):
+        if count == 3:
+            github.issues.items = [github_item(42, body=BUG + " Scope changed.", labels=("bug",),
+                updated="2026-10-16T09:00:00+00:00")]
+    github.issues.on_item_read = edit_before_the_write
+    # The claimed attempt refuses before any write: blocked, not unknown.
+    result = await case["publisher"].execute(case["prepared"]["job_id"], owner.principal_id, owner.session_id)
+    assert result["status"] == "blocked", result
+    assert github.issues.item_reads == 3 and github.posts == []
+    assert [path for method, path in github.methods if method == "GET" and "/issues/" in path] == [
+        f"/repos/{REPOSITORY}/issues/42"] * 3
+    current = await flow["jobs"].get_job(case["prepared"]["job_id"])
+    assert current["status"] == "blocked" and "project_source_changed_decision_required" in json.dumps(current)
+    root = await flow["jobs"].get_job(flow["root_id"])
+    assert root["status"] == "succeeded"  # Completed local work is kept.

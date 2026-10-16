@@ -60,7 +60,7 @@ async def test_project_watch_prepares_a_review_response_awaiting_approval_withou
         assert view.status_code == 200, view.text
         return synced.json(), view.json()
 
-    _, view = await sync_view()
+    first, view = await sync_view()
     created = await client.post("/api/capabilities/source-watches", json={"goal_id": goal.id, "expected_goal_revision": 1,
         "sources": [{"source_key": "project", "kind": "workspace_text", "target": view["path"]}],
         "criteria": {"min_changed_lines": 1, "min_changed_chars": 1},
@@ -92,11 +92,21 @@ async def test_project_watch_prepares_a_review_response_awaiting_approval_withou
     ref = ProjectSourceRef.model_validate(next(item["source_ref"] for item in synced["items"] if item["number"] == 7))
     assert ref.kind == "pull_request"
 
-    async def prepare(key):
-        return await client.post(base + "/responses", json={"source_ref": ref.model_dump(mode="json"),
-            "kind": "review_request", "goal_id": goal.id, "goal_revision": 1,
-            "dossier_artifact_id": packet.dossier_artifact_id, "dossier_sha256": packet.dossier_sha256,
-            "body": "Draft review: the fix looks right; please add a float test.", "idempotency_key": key}, headers=ORIGIN)
+    async def prepare(key, *, source_ref=None, **extra):
+        return await client.post(base + "/responses", json={"source_ref": (source_ref or ref).model_dump(mode="json"),
+            "kind": "review_request", "packet_id": packet.id,
+            "body": "Draft review: the fix looks right; please add a float test.", "idempotency_key": key, **extra},
+            headers=ORIGIN)
+
+    # The dossier is the watch packet's own: a caller cannot name one.
+    forged = await prepare(str(uuid.uuid4()), dossier_artifact_id=packet.dossier_artifact_id,
+        dossier_sha256=packet.dossier_sha256)
+    assert forged.status_code == 422, forged.text
+    # The packet observed the second snapshot's view; the baseline snapshot's
+    # reference (same item absent there) or another snapshot is not bound to it.
+    baseline_ref = ProjectSourceRef.model_validate(first["items"][0]["source_ref"])
+    unbound = await prepare(str(uuid.uuid4()), source_ref=baseline_ref)
+    assert unbound.status_code == 409 and unbound.json()["detail"]["code"] == "project_response_packet_not_bound", unbound.text
 
     # A changed item stops the response for a decision instead of preparing it.
     original = list(issues.items)

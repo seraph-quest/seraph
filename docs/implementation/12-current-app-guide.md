@@ -2248,29 +2248,40 @@ adds no new write authority. Routes live under
   a missing credential, a disabled connection or reconcile-only mode.
 - `POST /sync` (`ProjectSourceScope`) reads the selected repository only, by
   default 50 items over 3 pages. It stores an immutable snapshot whose items each
-  carry a revision and digest. Another repository is refused. Lost access
-  blocks the read and keeps earlier snapshots and local artifacts.
+  carry a revision (`updated_at`) and a content digest over the title, body,
+  state and labels. Comment activity moves the revision but not the digest.
+  Another repository is refused. Lost access blocks the read and keeps earlier
+  snapshots and local artifacts.
 - `POST /findings` (`ProjectFinding`) turns one snapshot item into an inert
-  Triage task. The item is quoted as untrusted data and gives no authority.
+  Triage task. The item is quoted as untrusted data between a fence derived
+  from the item digest and request key; any `<<<`/`>>>` run in the source is
+  split, so the source cannot end the quote. It gives no authority.
   Planning egress needs an explicit acknowledgement, and the snapshot is
   checked for drift first.
 - `POST /watch-view` writes a snapshot as workspace text under `project-watch/`.
   An ordinary `workspace_text` source watch on that file produces its own
   reviewed decision packet and verified dossier.
 - `POST /responses` prepares a `blocker` or `review_request` comment on the exact
-  issue or PR through the existing GitHub follow-through `prepare`, bound to
-  that dossier. The item is re-read first, and a changed revision stops with
+  issue or PR through the existing GitHub follow-through `prepare`. The caller
+  names only the watch `packet_id`; the goal and dossier are the packet's own.
+  The packet must be verified, owned by this session, and come from a watch on
+  this repository's view whose observed text is exactly the referenced
+  snapshot's view (`project_response_packet_not_bound` otherwise). The item is
+  re-read first, and a changed revision stops with
   `project_source_changed_decision_required`. The comment waits for its own
   approval and is never posted here.
 - `GET /lineage/{task_id}` reads the chain from each owner: the source revision,
-  the task, the repository roots and each iteration's patch digest, the
-  publications with approval state, the approved and tested patch digests, the
-  bound source revision and the verified PR.
+  the task, the repository roots and each iteration's patch digest, and only
+  this task's publications (those of its own repair roots) with approval state,
+  the approved and tested patch digests, the bound source revision and the
+  verified PR. An unreadable unrelated root is counted, never fatal.
 
 When an accepted change task's repair is published, the preview binds
-`project_source` (the task-bound and accepted digests). Prepare and execute
-re-read the item before any GitHub write. A changed or closed item stops the
-unstarted publication and keeps the completed repair. The operator can accept
+`project_source` (the task-bound and accepted digests). The item is read again
+at prepare, when the approval resumes (outside the configuration lock), and
+immediately before the first GitHub write. A changed or closed item stops the
+publication before any write (`awaiting_approval` at resume, `blocked` before
+the first write) and keeps the completed repair. The operator can accept
 the new revision with `acknowledged_project_source_digest` on a fresh prepare,
 and that needs a fresh approval. A connection pointing at another repository
 refuses with `project_source_repository_changed`. A moved base or a changed

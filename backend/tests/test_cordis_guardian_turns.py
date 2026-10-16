@@ -389,6 +389,36 @@ async def test_existing_chat_turn_ids_survive_the_presets_upgrade(accounting_db,
         presets = [item for item in binding.dependency_vector if item.runtime_domain == PRESETS_DOMAIN]
         assert [(item.owner_kind, item.epoch) for item in presets] == [("legacy", 1)]
         assert after.preset_id == "chat.agent" and after.preset_digest == preset_digest("chat.agent")
+        # A turn admitted by #1019 bound no presets owner: it is still read, validated and
+        # recovered exactly as written, and no new admission can produce that shape.
+        legacy_shape = RuntimeCompositionBinding(
+            binding.runtime_domain, binding.origin_method, binding.native_branch, binding.allowed_child_methods,
+            tuple(item for item in binding.dependency_vector if item.runtime_domain != PRESETS_DOMAIN),
+            binding.host_package_digest, binding.host_composition_digest, binding.goal_bound)
+        assert legacy_shape.presets_bound is False and binding.presets_bound is True
+        from src.db.models import WorkflowRunState
+        from sqlalchemy import update
+        async with get_session() as db:
+            await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == before.job_id)
+                             .values(composition_binding_json=legacy_shape.to_json()))
+            await db.commit()
+        from src.runtime_plugins.ownership import CompositionBindingError, validate_invocation
+        async with get_session() as db:
+            run = await durable_job_repository._fetch(db, before.job_id)
+            read = RuntimeCompositionBinding.from_json(run.composition_binding_json)
+            await validate_invocation(db, read)
+        assert read == legacy_shape
+        from datetime import datetime, timedelta, timezone
+        recovered = await durable_job_repository.recover_stale_job(
+            before.job_id, now=datetime.now(timezone.utc) + timedelta(hours=1))
+        assert recovered["status"] in {"failed", "blocked", "unknown_external_effect"}
+        # The pre-presets shape is the chat step's alone: a guardian step without presets is invalid.
+        from src.runtime_plugins.ownership import closure_dependencies, method_closure
+        guardian_vector = tuple(item for item in legacy_shape.dependency_vector
+                                if item.runtime_domain in closure_dependencies("guardian.startTurn", "guardian"))
+        with pytest.raises(CompositionBindingError):
+            RuntimeCompositionBinding(GUARDIAN_DOMAIN, "guardian.startTurn", "guardian",
+                                      method_closure("guardian.startTurn", "guardian"), guardian_vector)
 
 
 from tests.test_research_native_vertical import real_auth  # noqa: E402,F401

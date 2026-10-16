@@ -120,7 +120,13 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
     raise CompositionBindingError("composition_branch_unsupported")
 
 
-def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, ...]:
+# A chat step admitted before #1020 bound no presets owner. Such a binding is
+# read (inspect, recovery, the job CAS) exactly as it was written; every new
+# admission binds the presets.
+PRE_PRESETS_ORIGINS = frozenset({"agent-loop.startTurn"})
+
+
+def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool = True) -> tuple[str, ...]:
     """Mandatory owners of one method; a missing owner denies the call."""
     domain = METHOD_DOMAINS.get(method)
     if domain is None or type(goal_bound) is not bool:
@@ -135,7 +141,7 @@ def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, 
     if method in GOVERNED_ORIGINS:
         # Governed effects need the artifact and audit owners explicitly (#1018).
         names.update({"seraph.artifacts.v1", "seraph.audit.v1"})
-    if method in {"agent-loop.startTurn", "guardian.startTurn"}:
+    if method in {"agent-loop.startTurn", "guardian.startTurn"} and (presets or method not in PRE_PRESETS_ORIGINS):
         # Every turn step is checked against the reviewed presets (#1020).
         names.add(PRESETS_DOMAIN)
     if method == "research.executeAccepted":
@@ -144,18 +150,20 @@ def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, 
     return tuple(sorted(names))
 
 
-def closure_dependencies(origin_method: str, native_branch: str, *, goal_bound: bool = False) -> tuple[str, ...]:
+def closure_dependencies(origin_method: str, native_branch: str, *, goal_bound: bool = False,
+                         presets: bool = True) -> tuple[str, ...]:
     domains: set[str] = set()
     for method in method_closure(origin_method, native_branch):
-        domains.update(method_dependencies(method, goal_bound=goal_bound))
+        domains.update(method_dependencies(method, goal_bound=goal_bound, presets=presets))
     return tuple(sorted(domains))
 
 
-def method_manifest_digest(origin_method: str, native_branch: str) -> str:
+def method_manifest_digest(origin_method: str, native_branch: str, *, presets: bool = True) -> str:
     methods = method_closure(origin_method, native_branch)
     source = {"schema_version": MANIFEST_VERSION, "origin_method": origin_method,
               "native_branch": native_branch, "allowed_child_methods": list(methods),
-              "child_dependencies": [[method, list(method_dependencies(method))] for method in methods]}
+              "child_dependencies": [[method, list(method_dependencies(method, presets=presets))]
+                                     for method in methods]}
     return hashlib.sha256(_canonical(source).encode()).hexdigest()
 
 
@@ -179,12 +187,19 @@ class RuntimeCompositionBinding:
                 or self.native_branch not in NATIVE_BRANCHES
                 or self.allowed_child_methods != method_closure(self.origin_method, self.native_branch)
                 or keys != tuple(sorted(set(keys)))
-                or keys != closure_dependencies(self.origin_method, self.native_branch, goal_bound=self.goal_bound)):
+                or keys != closure_dependencies(self.origin_method, self.native_branch, goal_bound=self.goal_bound,
+                                                presets=self.presets_bound)):
             raise CompositionBindingError("composition_binding_invalid")
         if (self.host_package_digest is None) != (self.host_composition_digest is None) or any(
                 value is not None and (type(value) is not str or _SHA.fullmatch(value) is None)
                 for value in (self.host_package_digest, self.host_composition_digest)):
             raise CompositionBindingError("composition_host_binding_invalid")
+
+    @property
+    def presets_bound(self) -> bool:
+        """False only for a chat step binding written before #1020 introduced the presets owner."""
+        return (self.origin_method not in PRE_PRESETS_ORIGINS
+                or any(item.runtime_domain == PRESETS_DOMAIN for item in self.dependency_vector))
 
     def allows(self, method: str) -> bool:
         return method in self.allowed_child_methods
@@ -199,7 +214,8 @@ class RuntimeCompositionBinding:
         return dict(schema_version=1, runtime_domain=self.runtime_domain, origin_method=self.origin_method,
                     native_branch=self.native_branch, allowed_child_methods=list(self.allowed_child_methods),
                     method_manifest_version=MANIFEST_VERSION,
-                    method_manifest_digest=method_manifest_digest(self.origin_method, self.native_branch),
+                    method_manifest_digest=method_manifest_digest(self.origin_method, self.native_branch,
+                                                                  presets=self.presets_bound),
                     host_package_digest=self.host_package_digest,
                     host_composition_digest=self.host_composition_digest, goal_bound=self.goal_bound,
                     dependency_vector=[item.payload() for item in self.dependency_vector])
@@ -242,7 +258,8 @@ class RuntimeCompositionBinding:
                          value["host_package_digest"], value["host_composition_digest"],
                          value["goal_bound"], value["schema_version"])
             if (value["method_manifest_version"] != MANIFEST_VERSION
-                    or value["method_manifest_digest"] != method_manifest_digest(result.origin_method, result.native_branch)
+                    or value["method_manifest_digest"] != method_manifest_digest(
+                        result.origin_method, result.native_branch, presets=result.presets_bound)
                     or value["binding_digest"] != result.binding_digest):
                 raise ValueError("digest")
             return result

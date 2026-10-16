@@ -6,13 +6,60 @@ import asyncio
 from dataclasses import replace
 import hashlib
 import json
+import threading
 
 from fastapi import HTTPException
 
 from .configuration import _configuration_payload, read_model_fabric_configuration, write_model_fabric_configuration
 
 
-configuration_mutation_lock = asyncio.Lock()
+class LoopAgnosticLock:
+    """Process-wide async mutex that excludes across event loops and threads.
+
+    ``asyncio.Lock`` binds to the first loop that contends for it, but the
+    sync inference path resolves accounting coroutines with ``asyncio.run`` on
+    another thread. This lock wraps a ``threading.Lock`` and polls for it
+    without blocking the loop, so a waiter on any loop or thread is excluded
+    the same way and a cancelled waiter never leaves it held. It is not
+    reentrant, like the ``asyncio.Lock`` it replaces.
+    """
+
+    _MAX_POLL_SECONDS = 0.025
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._holder: int | None = None
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> bool:
+        delay = 0.001
+        while not self._lock.acquire(blocking=False):
+            holder = self._holder
+            if holder is not None:
+                from .execution import sync_bridge_blocked_callers
+                if holder in sync_bridge_blocked_callers():
+                    # The holder is blocked joining this bridge chain and can
+                    # never release: fail instead of deadlocking.
+                    raise RuntimeError("configuration_mutation_lock is held by the caller blocked on this sync bridge")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, self._MAX_POLL_SECONDS)
+        self._holder = threading.get_ident()
+        return True
+
+    def release(self) -> None:
+        self._holder = None
+        self._lock.release()
+
+    async def __aenter__(self) -> None:
+        await self.acquire()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.release()
+
+
+configuration_mutation_lock = LoopAgnosticLock()
 
 
 def current_near_text_policy() -> tuple[object, str]:

@@ -259,16 +259,15 @@ def reset_process_singletons(monkeypatch):
     MCP, approval, interruption) and a wall-clock-derived user state; a prior
     test's refresh or mode change otherwise leaks into later tests (e.g. an
     evening refresh makes delivery "quiet", a safe tool mode hides workflow
-    tools). Module-level asyncio locks bind to the first loop that contends
-    them; pytest-asyncio gives each test a new loop, the app runs one.
+    tools). The configuration mutation lock is loop-agnostic, but a fresh
+    instance keeps a test that leaks it held from blocking later tests.
     """
-    import asyncio
     from src.model_fabric import effective_policy
     from src.observer.manager import ContextManager, context_manager
     fresh = ContextManager()
     # Reset in place: many modules hold a reference to this exact object.
     context_manager.__dict__.update(fresh.__dict__)
-    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", asyncio.Lock())
+    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", effective_policy.LoopAgnosticLock())
     # Contention backoffs from #702/#1074: a prior test's deferred touch or
     # audited empty poll must not suppress the next test's.
     from src.api import observer as observer_api

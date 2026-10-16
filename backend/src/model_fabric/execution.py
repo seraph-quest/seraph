@@ -343,7 +343,7 @@ async def execute_streaming(
     if repository is not None:
         denied_kwargs["repository"] = repository
     await persist_denied_route(**denied_kwargs)
-    raise NoCompliantModelRouteError()
+    raise NoCompliantModelRouteError(tuple(denial_reasons))
 
 
 async def run_preflighted_adapter(
@@ -367,7 +367,7 @@ async def run_preflighted_adapter(
         if repository is not None:
             denied_kwargs["repository"] = repository
         await persist_denied_route(**denied_kwargs)
-        raise NoCompliantModelRouteError()
+        raise NoCompliantModelRouteError(denied_kwargs["reason_codes"])
     admission_request = GpuAdmissionRequest.from_inference_context(
         context,
         priority=admission_priority,
@@ -471,7 +471,9 @@ def execute_sync_adapter(
             )
         )
         _require_persisted_receipt(persistence)
-        raise NoCompliantModelRouteError()
+        raise NoCompliantModelRouteError(
+            tuple(rejection.reason_code for rejection in decision.rejections)
+        )
 
     session = RouteReceiptSession(
         context=context,

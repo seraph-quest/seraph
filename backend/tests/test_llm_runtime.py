@@ -163,17 +163,18 @@ def clear_ambient_runtime_profile_preferences(monkeypatch):
     from src.model_fabric import caller_context
 
     monkeypatch.setattr(caller_context, "is_canonical_inference_route", lambda _path: False)
-    with (
-        patch.object(settings, "runtime_profile_preferences", ""),
-        patch.object(settings, "local_runtime_paths", ""),
-        patch.object(settings, "seraph_vlm_api_key", ""),
-        patch.object(settings, "local_vlm_api_key", ""),
-        # These tests exercise the historical provider-matrix and routing
-        # compatibility contract.  Active OpenRouter-only behavior has
-        # dedicated focused coverage in test_model_fabric_openrouter_policy.
-        patch.object(settings, "openrouter_provider_only", False),
-    ):
-        yield
+    # Use the same monkeypatch as the per-test opt-in fixtures below: mixing a
+    # ``patch.object`` context with a later ``monkeypatch.setattr`` of the same
+    # attribute restored them out of order and leaked ``False`` process-wide.
+    monkeypatch.setattr(settings, "runtime_profile_preferences", "")
+    monkeypatch.setattr(settings, "local_runtime_paths", "")
+    monkeypatch.setattr(settings, "seraph_vlm_api_key", "")
+    monkeypatch.setattr(settings, "local_vlm_api_key", "")
+    # These tests exercise the historical provider-matrix and routing
+    # compatibility contract.  Active OpenRouter-only behavior has
+    # dedicated focused coverage in test_model_fabric_openrouter_policy.
+    monkeypatch.setattr(settings, "openrouter_provider_only", False)
+    yield
 
 
 @pytest.fixture

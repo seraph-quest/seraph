@@ -424,14 +424,22 @@ def _directory_contains_secret_like_workspace_path(path: Path) -> bool:
     # ancestors were already classified by the caller, and this top-down walk
     # classifies every directory before entering it, so each entry needs only
     # its own name and inode checked; the first refused entry ends the scan.
+    # Directory symlinks are followed to their resolved target, because
+    # ``grep -R``, ``rg -L`` and ``find -L`` follow them: the scan must see
+    # what the command will read.  Visited directory inodes bound cycles.
     index = AgentAccessIndex(workspace)
-    pending = [path]
+    pending = [path.resolve()]
+    visited: set[tuple[int, int]] = set()
     while pending:
         directory = pending.pop()
         try:
+            metadata = directory.stat()
             entries = list(os.scandir(directory))
         except OSError:
             return True
+        if (metadata.st_dev, metadata.st_ino) in visited:
+            continue
+        visited.add((metadata.st_dev, metadata.st_ino))
         for entry in entries:
             candidate = Path(entry.path)
             try:
@@ -443,8 +451,8 @@ def _directory_contains_secret_like_workspace_path(path: Path) -> bool:
             if _is_secret_like_workspace_path(resolved, index, include_ancestors=is_symlink):
                 return True
             try:
-                if not is_symlink and entry.is_dir(follow_symlinks=False):
-                    pending.append(candidate)
+                if entry.is_dir(follow_symlinks=True):
+                    pending.append(resolved)
             except OSError:
                 return True
     return False
@@ -493,7 +501,10 @@ def _normalize_command(command: str) -> str:
         raise ValueError(f"command '{normalized}' is not allowed in the process runtime.")
     if lowered in {"python", "python3"}:
         return sys.executable
-    return normalized
+    # Return the canonical allowlisted name: a case variant such as ``SED``
+    # would otherwise skip every per-command validator and the sed sandbox
+    # while still resolving on a case-insensitive filesystem.
+    return lowered
 
 
 def _parse_args_json(raw_args_json: str | None) -> list[str]:
@@ -813,21 +824,41 @@ def _validate_git_workspace_args(args: list[str], cwd: Path) -> None:
         index += 1
 
 
+_SED_VALUE_LONG_OPTIONS = ("expression", "file", "line-length")
+
+
+def _sed_long_option_takes_value(arg: str) -> bool:
+    # getopt accepts any unambiguous prefix of a long option name.
+    name = arg[2:]
+    return bool(name) and "=" not in name and any(option.startswith(name) for option in _SED_VALUE_LONG_OPTIONS)
+
+
 def _sed_in_place_requested(args: list[str]) -> bool:
-    for arg in args:
+    """Detect -i in any spelling sed's getopt accepts before ``--``."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
         if arg == "--":
             return False
         if arg.startswith("--"):
-            if arg == "--in-place" or arg.startswith("--in-place="):
+            # ``--in-place`` is the only long option starting with "i", so
+            # every abbreviation (``--i``, ``--in``, ``--in-pla``) selects it.
+            if arg[2:3] == "i":
                 return True
+            if _sed_long_option_takes_value(arg):
+                index += 1
             continue
         if not arg.startswith("-") or arg == "-":
             continue
-        for flag in arg[1:]:
+        for position, flag in enumerate(arg[1:], start=1):
             if flag == "i":
                 return True
             if flag in {"e", "f", "l"}:
-                # The rest of the cluster is this option's argument.
+                # The rest of the cluster, or else the next argument, is this
+                # option's value and never another option.
+                if position == len(arg) - 1:
+                    index += 1
                 break
     return False
 
@@ -837,10 +868,12 @@ def _sed_sandboxed_args(executable: str, args: list[str]) -> list[str]:
     s///w and s///e flags.
 
     Those commands name files or shell commands inside the script text, where
-    the path-argument checks cannot see them.  A sed without ``--sandbox``
-    fails to start rather than running unsandboxed.
+    the path-argument checks cannot see them.  The runtime always prepends
+    ``--sandbox`` as the first option, so no later argument (an operand after
+    ``--``, an option value, a duplicate) can stand in for it.  A sed without
+    ``--sandbox`` fails to start rather than running unsandboxed.
     """
-    if Path(executable).name != "sed" or "--sandbox" in args:
+    if Path(executable).name != "sed":
         return args
     return ["--sandbox", *args]
 
@@ -914,6 +947,8 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             index += 1
         return
 
+    if command_name == "sed" and "--sandbox" in args:
+        raise ValueError("sed --sandbox is applied by the process runtime; do not pass it.")
     if command_name == "sed" and _sed_in_place_requested(args):
         raise ValueError(
             "sed in-place editing is blocked in the process runtime; use apply_workspace_patch for workspace edits."

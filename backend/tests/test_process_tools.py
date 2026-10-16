@@ -811,6 +811,108 @@ def test_run_command_blocks_sed_in_place_editing(isolated_workspace, args):
     assert (isolated_workspace / "notes" / "a.md").read_text(encoding="utf-8") == "a\n"
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-n", "-e", "p", "-e", "w notes/out2", "--", "notes/a.md", "--sandbox"],
+        ["--sandbox", "w notes/out2", "notes/a.md"],
+        ["-n", "--sandbox", "--sandbox", "1e echo EXEC", "notes/a.md"],
+    ],
+)
+def test_run_command_rejects_user_supplied_sed_sandbox_flag(isolated_workspace, args):
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command="sed", args_json=json.dumps(args))
+
+    assert result == "Error: sed --sandbox is applied by the process runtime; do not pass it."
+    assert not (isolated_workspace / "notes" / "out2").exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-n", "-e", "p", "-e", "w notes/out2", "--", "notes/a.md"],
+        ["-e", "r .vault-key", "--", "notes/a.md"],
+        ["-n", "-e", "1e echo EXEC", "--", "notes/a.md"],
+    ],
+)
+def test_sed_sandbox_is_always_the_first_option(isolated_workspace, args):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+
+    _executable, launched, _cwd = process_tools_module._normalize_command_invocation(
+        command="sed", args_json=json.dumps(args)
+    )
+    result = run_command(command="sed", args_json=json.dumps(args))
+
+    assert launched == ["--sandbox", *args]
+    assert "disabled in sandbox mode" in result
+    assert "SERAPH_TEST_SECRET" not in result and "EXEC" not in result
+    assert not (isolated_workspace / "notes" / "out2").exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--in", "s/a/CHANGED/", "notes/a.md"],
+        ["--in-pla", "s/a/CHANGED/", "notes/a.md"],
+        ["--i", "s/a/CHANGED/", "notes/a.md"],
+        ["--in=.bak", "s/a/CHANGED/", "notes/a.md"],
+        ["-e", "--", "--in-place", "notes/a.md"],
+        ["--expression", "--", "--in", "notes/a.md"],
+        ["--exp", "--", "--in", "notes/a.md"],
+        ["-ne", "--", "-i", "notes/a.md"],
+    ],
+)
+def test_run_command_blocks_sed_in_place_abbreviations(isolated_workspace, args):
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command="sed", args_json=json.dumps(args))
+
+    assert result.startswith("Error: sed in-place editing is blocked")
+    assert (isolated_workspace / "notes" / "a.md").read_text(encoding="utf-8") == "a\n"
+
+
+@pytest.mark.parametrize("command", ["SED", "Sed", "sEd"])
+def test_command_case_variants_get_the_canonical_validators(isolated_workspace, command):
+    _write_workspace_file("notes/a.md", "a\n")
+
+    assert process_tools_module._normalize_command(command) == "sed"
+    result = run_command(command=command, args_json='["w copied.txt","notes/a.md"]')
+
+    assert "disabled in sandbox mode" in result
+    assert not (isolated_workspace / "copied.txt").exists()
+    assert run_command(command=command, args_json='["-i","s/a/b/","notes/a.md"]').startswith(
+        "Error: sed in-place editing is blocked"
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("grep", ["-R", "SERAPH_TEST_SECRET", "notes"]),
+        ("rg", ["-L", "SERAPH_TEST_SECRET", "notes"]),
+        ("find", ["-L", "notes", "-name", "*"]),
+    ],
+)
+def test_recursive_scans_follow_directory_symlinks_to_protected_state(isolated_workspace, command, args):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+    (isolated_workspace / "notes" / "up").symlink_to("..", target_is_directory=True)
+
+    result = run_command(command=command, args_json=json.dumps(args))
+
+    assert "SERAPH_TEST_SECRET" not in result
+    assert "cannot recursively search" in result
+
+
+def test_recursive_scan_survives_symlink_cycles(isolated_workspace):
+    _write_workspace_file("notes/a.md", "ordinary\n")
+    (isolated_workspace / "notes" / "loop").symlink_to(".", target_is_directory=True)
+
+    assert process_tools_module._directory_contains_secret_like_workspace_path(isolated_workspace / "notes") is False
+
+
 def test_run_command_still_runs_ordinary_sed_scripts(isolated_workspace):
     _write_workspace_file("notes/a.md", "alpha\nbeta\n")
 

@@ -2236,6 +2236,47 @@ and Docker resource enforcement remain **external-unverified**. The original
 repository is not claimed changed,
 and this capability remains Partial within those explicit proof limits.
 
+### Project issues and pull requests (C4.3 #1017) {#project-issues-and-pull-requests-1017}
+
+Project follow-through is **Partial**. It uses the existing GitHub connection and
+adds no new write authority. Routes live under
+`/api/capabilities/github/project-source`:
+
+- `GET` returns the sync status and the connection's actual limitations: selected
+  repository only, a bounded read window, polling only, unverified token scope,
+  bodies truncated at 6000 bytes, and no comments or reviews read. It also names
+  a missing credential, a disabled connection or reconcile-only mode.
+- `POST /sync` (`ProjectSourceScope`) reads the selected repository only, by
+  default 50 items over 3 pages. It stores an immutable snapshot whose items each
+  carry a revision and digest. Another repository is refused. Lost access
+  blocks the read and keeps earlier snapshots and local artifacts.
+- `POST /findings` (`ProjectFinding`) turns one snapshot item into an inert
+  Triage task. The item is quoted as untrusted data and gives no authority.
+  Planning egress needs an explicit acknowledgement, and the snapshot is
+  checked for drift first.
+- `POST /watch-view` writes a snapshot as workspace text under `project-watch/`.
+  An ordinary `workspace_text` source watch on that file produces its own
+  reviewed decision packet and verified dossier.
+- `POST /responses` prepares a `blocker` or `review_request` comment on the exact
+  issue or PR through the existing GitHub follow-through `prepare`, bound to
+  that dossier. The item is re-read first, and a changed revision stops with
+  `project_source_changed_decision_required`. The comment waits for its own
+  approval and is never posted here.
+- `GET /lineage/{task_id}` reads the chain from each owner: the source revision,
+  the task, the repository roots and each iteration's patch digest, the
+  publications with approval state, the approved and tested patch digests, the
+  bound source revision and the verified PR.
+
+When an accepted change task's repair is published, the preview binds
+`project_source` (the task-bound and accepted digests). Prepare and execute
+re-read the item before any GitHub write. A changed or closed item stops the
+unstarted publication and keeps the completed repair. The operator can accept
+the new revision with `acknowledged_project_source_digest` on a fresh prepare,
+and that needs a fresh approval. A connection pointing at another repository
+refuses with `project_source_repository_changed`. A moved base or a changed
+patch is refused by the existing Source and publication checks. An unknown
+publication outcome uses the existing readback reconcile and never a second PR.
+
 ### Reviewed public evidence pipelines (#914) {#reviewed-public-evidence-pipelines-914-branch-local-target}
 
 The existing task inspector offers a reviewed, fixed chain from

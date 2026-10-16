@@ -244,7 +244,7 @@ async def test_runtime_status_names_the_actual_loop_and_route(accounting_db, rea
         epoch = await cutover_agent_loop(host)
         status = await chat_runtime_status(host)
         assert status == {"loop": "cordis.agent-loop.v1", "route": "chat_agent", "owner_epoch": epoch, "reason": None,
-                          "recovery": None}
+                          "recovery": None, "owner_kind": "cordis"}
     # The host stopped: Cordis chat is blocked with the exact fix, never legacy.
     status = await chat_runtime_status(host)
     assert status["loop"] == "blocked" and status["reason"].startswith("cordis_") and status["recovery"]

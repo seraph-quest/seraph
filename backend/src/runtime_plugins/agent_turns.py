@@ -129,36 +129,45 @@ async def chat_runtime_status(host=None) -> dict:
             if row is not None:
                 _checked_row(row)
     except CompositionBindingError:
-        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": None,
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": None, "owner_kind": None,
                 "reason": "agent_loop_inventory_invalid",
                 "recovery": "Repair the runtime composition inventory (a malformed owner row fails closed)."}
     if not rows:
         # Only an entirely unseeded inventory has never been cut over; startup seeds
         # every legacy owner row and only a fenced transition writes a Cordis owner.
-        return {"loop": LOOP_NAMES["legacy"], "route": "chat_agent", "owner_epoch": None, "reason": None,
+        return {"loop": LOOP_NAMES["legacy"], "route": "chat_agent", "owner_epoch": None, "owner_kind": None, "reason": None,
                 "recovery": None}
     if row is None:
-        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": None,
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": None, "owner_kind": None,
                 "reason": "agent_loop_owner_missing",
                 "recovery": "Restore the seraph.agent-loop.v1 owner row with a fenced owner transition."}
     if row.state != "ready":
+        if row.owner_kind == "cordis" and (not host.admitting or host.reviewed is None):
+            # Cut over to Cordis but the runtime is not built or not running: the host's exact fix.
+            snapshot = host.snapshot()
+            return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch,
+                    "owner_kind": row.owner_kind,
+                    "reason": "cordis_" + str(snapshot.get("reason") or "host_unavailable"),
+                    "recovery": snapshot.get("recovery") or cordis_recovery("blocked", snapshot.get("reason"))}
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch,
-                "reason": f"agent_loop_owner_{row.state}",
-                "recovery": "Finish the agent-loop owner transition (cutover or rollback) at a higher epoch."}
+                "owner_kind": row.owner_kind, "reason": f"agent_loop_owner_{row.state}",
+                "recovery": ("Restart Seraph with ./manage.sh -e dev local up to finish the Cordis cutover, or roll "
+                             "chat back to the legacy loop from Settings.") if row.owner_kind == "cordis"
+                else "Finish the agent-loop owner transition (cutover or rollback) from Settings."}
     if row.owner_kind == "legacy":
         return {"loop": LOOP_NAMES["legacy"], "route": "chat_agent", "owner_epoch": row.epoch, "reason": None,
-                "recovery": None}
+                "recovery": None, "owner_kind": "legacy"}
     if not host.admitting or host.reviewed is None:
         snapshot = host.snapshot()
-        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch,
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
                 "reason": "cordis_" + str(snapshot.get("reason") or "host_unavailable"),
                 "recovery": snapshot.get("recovery") or cordis_recovery("blocked", snapshot.get("reason"))}
     from config.settings import settings
     if settings.use_delegation:
-        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch,
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
                 "reason": "delegation_pending_1020", "recovery": turn_blocked_message("delegation_pending_1020")}
     return {"loop": LOOP_NAMES["cordis"], "route": "chat_agent", "owner_epoch": row.epoch, "reason": None,
-            "recovery": None}
+            "recovery": None, "owner_kind": "cordis"}
 
 
 def chat_route(status: dict) -> str:
@@ -177,7 +186,7 @@ def chat_runtime_status_text(loop: str) -> str:
 
 
 def chat_runtime_unavailable_message(status: dict) -> str:
-    return ("Chat is unavailable: the Cordis agent loop is not ready "
+    return ("Chat is unavailable: the agent loop is not ready "
             f"({status['reason']}). {status.get('recovery') or ''}").strip()
 
 

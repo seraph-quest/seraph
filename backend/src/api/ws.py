@@ -66,7 +66,9 @@ from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
-from src.runtime_plugins.agent_turns import (CordisTurn, TurnBlocked, chat_route, chat_runtime_status,
+from src.runtime_plugins.cutover import legacy_turns
+from src.runtime_plugins.ownership import CompositionBindingError
+from src.runtime_plugins.agent_turns import (AGENT_LOOP_DOMAIN, CordisTurn, TurnBlocked, chat_route, chat_runtime_status,
                                              chat_runtime_status_text, chat_runtime_unavailable_message,
                                              turn_blocked_message, turn_failure_reason)
 from src.work_board.repository import BoardError
@@ -585,6 +587,8 @@ async def websocket_chat(websocket: WebSocket):
     active_turn_completed = True
     # The Cordis turn owner of the active ingress (#1019); None on the legacy loop.
     active_cordis_turn: CordisTurn | None = None
+    # A legacy turn holds the agent-loop drain gate until it ends (#1019 cutover).
+    legacy_turn_held = False
     revocation_guard_token = None
 
     def _next_seq() -> int:
@@ -652,6 +656,9 @@ async def websocket_chat(websocket: WebSocket):
 
     try:
         while True:
+            if legacy_turn_held:
+                legacy_turns.leave(AGENT_LOOP_DOMAIN)
+                legacy_turn_held = False
             await _ensure_operator_active()
             raw = await websocket.receive_text()
             if auth_session_id:
@@ -792,6 +799,14 @@ async def websocket_chat(websocket: WebSocket):
             chat_status = await chat_runtime_status()
             chat_loop = chat_route(chat_status)
             active_cordis_turn = None
+            if chat_loop == "legacy":
+                try:
+                    legacy_turns.enter(AGENT_LOOP_DOMAIN)
+                    legacy_turn_held = True
+                except CompositionBindingError:
+                    chat_loop, chat_status = "blocked", {
+                        "reason": "composition_transition_in_progress",
+                        "recovery": "The chat loop owner is changing; send the message again in a moment."}
             if chat_loop == "blocked":
                 active_turn_completed = True
                 await websocket.send_text(
@@ -1769,6 +1784,8 @@ async def websocket_chat(websocket: WebSocket):
             return
         raise
     finally:
+        if legacy_turn_held:
+            legacy_turns.leave(AGENT_LOOP_DOMAIN)
         if not revocation_task.done():
             revocation_task.cancel()
             with suppress(asyncio.CancelledError):

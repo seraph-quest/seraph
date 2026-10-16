@@ -63,7 +63,9 @@ from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
-from src.runtime_plugins.agent_turns import (CordisTurn, TurnBlocked, chat_route, chat_runtime_status,
+from src.runtime_plugins.cutover import legacy_turns
+from src.runtime_plugins.ownership import CompositionBindingError
+from src.runtime_plugins.agent_turns import (AGENT_LOOP_DOMAIN, CordisTurn, TurnBlocked, chat_route, chat_runtime_status,
                                              chat_runtime_unavailable_message, turn_blocked_message,
                                              turn_failure_reason)
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
@@ -622,6 +624,16 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
     # reservation, so a refused message is never a duplicate on retry.
     chat_status = await chat_runtime_status()
     chat_loop = chat_route(chat_status)
+    legacy_turn_held = False
+    if chat_loop == "legacy":
+        # A legacy turn holds the agent-loop drain gate until it ends (#1019 cutover).
+        try:
+            legacy_turns.enter(AGENT_LOOP_DOMAIN)
+            legacy_turn_held = True
+        except CompositionBindingError:
+            chat_loop, chat_status = "blocked", {
+                "reason": "composition_transition_in_progress",
+                "recovery": "The chat loop owner is changing; send the message again in a moment."}
     if chat_loop == "blocked":
         raise HTTPException(status_code=503, detail={"code": chat_status["reason"],
                                                      "message": chat_runtime_unavailable_message(chat_status)})
@@ -1220,4 +1232,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 cordis_turn.cancel()
             await asyncio.shield(cordis_blocked("agent_turn_cancelled" if cancelled else "agent_turn_failed"))
         raise
+    finally:
+        if legacy_turn_held:
+            legacy_turns.leave(AGENT_LOOP_DOMAIN)
 

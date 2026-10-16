@@ -3430,10 +3430,15 @@ def _messages_for_local_target(
     return compacted
 
 
-def _register_request(request_id: str, *, timeout_seconds: float | None = None) -> None:
+def _register_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests[request_id] = False
-        if timeout_seconds is not None:
+
+
+def _start_request_deadline(request_id: str, timeout_seconds: float) -> None:
+    """Record the caller's deadline at the instant its own timeout starts."""
+    with _runtime_request_lock:
+        if request_id in _runtime_requests:
             _runtime_request_deadlines[request_id] = monotonic() + max(float(timeout_seconds), 0.0)
 
 
@@ -4698,7 +4703,7 @@ async def completion_with_fallback(
 ):
     """Async wrapper around the shared completion fallback flow."""
     request_id = uuid4().hex
-    _register_request(request_id, timeout_seconds=timeout)
+    _register_request(request_id)
     resolved_profile = resolve_runtime_profile(runtime_path=runtime_path, profile=profile)
     coro = asyncio.to_thread(
         completion_with_fallback_sync,
@@ -4715,6 +4720,13 @@ async def completion_with_fallback(
     try:
         if timeout is None:
             return await coro
+        # The worker starts only when awaited here, so its lateness is judged
+        # from the same instant wait_for starts its timer. Separately, if the
+        # loop stalls past the deadline, the thread's result can be delivered
+        # before the timeout callback runs and wait_for then returns normally;
+        # that pre-existing asyncio race returns a result the provider did
+        # produce, and the worker logged it only if it finished in time.
+        _start_request_deadline(request_id, timeout)
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
         _mark_request_timed_out(request_id)

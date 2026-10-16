@@ -95,8 +95,9 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   const [issueIndex, setIssueIndex] = useState("1");
   const [title, setTitle] = useState("");
   // Each acknowledgment records the exact authority it was given against and
-  // lapses in the same render that authority changes. A reset effect ran
-  // after the commit and could erase a click made against the new state.
+  // is cleared in the same render that authority changes, so it never comes
+  // back when the authority later returns to an earlier value. A reset effect
+  // ran after the commit and could erase a click made against the new state.
   const [readAckFor, setReadAckFor] = useState<string | null>(null);
   const [exactAckFor, setExactAckFor] = useState<string | null>(null);
   const [recoveryAckFor, setRecoveryAckFor] = useState<string | null>(null);
@@ -108,6 +109,11 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   const selectedGoal = goals.find(value => value.id === goalId);
   const ackBinding = JSON.stringify([scope, connection?.revision, connection?.read_consent_revision, goalId,
     selectedGoal?.revision, job?.job_id, job?.revision]);
+  const [ackBindingSeen, setAckBindingSeen] = useState(ackBinding);
+  if (ackBindingSeen !== ackBinding) {
+    setAckBindingSeen(ackBinding);
+    setReadAckFor(null); setExactAckFor(null); setRecoveryAckFor(null);
+  }
   const readAck = readAckFor === ackBinding, exactAck = exactAckFor === ackBinding, recoveryAck = recoveryAckFor === ackBinding;
   const setReadAck = (value: boolean) => setReadAckFor(value ? ackBinding : null);
   const setExactAck = (value: boolean) => setExactAckFor(value ? ackBinding : null);

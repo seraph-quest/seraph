@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from sqlalchemy import exists, func
+from sqlalchemy import bindparam, exists, func, insert, text, update
 from sqlmodel import col, select
 
 from src.db.engine import get_session
@@ -378,7 +380,18 @@ def _anchor_tokens(text: str) -> set[str]:
     return set(tokens[:4])
 
 
-def _shares_entity(memory: Memory, peer: Memory) -> bool:
+@dataclass(frozen=True)
+class _ContradictionFeatures:
+    anchors: frozenset[str]
+    polarity: int
+
+
+def _contradiction_features(memory) -> _ContradictionFeatures:
+    text = _normalized_text(memory)
+    return _ContradictionFeatures(frozenset(_anchor_tokens(text)), _cue_polarity(text))
+
+
+def _shares_entity(memory, peer) -> bool:
     return (
         memory.subject_entity_id
         and memory.subject_entity_id == peer.subject_entity_id
@@ -388,7 +401,8 @@ def _shares_entity(memory: Memory, peer: Memory) -> bool:
     )
 
 
-def _comparable(memory: Memory, peer: Memory) -> bool:
+def _contradictory(memory, features: _ContradictionFeatures, peer, peer_features: _ContradictionFeatures) -> bool:
+    """Whether two active memories contradict, from features computed once each."""
     if memory.id == peer.id:
         return False
     if memory.kind != peer.kind or memory.kind not in _COMPARABLE_KINDS:
@@ -408,35 +422,27 @@ def _comparable(memory: Memory, peer: Memory) -> bool:
     ):
         return False
     shared_entity = _shares_entity(memory, peer)
-    if shared_entity:
-        return True
-    return len(_anchor_tokens(_normalized_text(memory)) & _anchor_tokens(_normalized_text(peer))) >= 2
-
-
-def _contradictory(memory: Memory, peer: Memory) -> bool:
-    if not _comparable(memory, peer):
+    overlap = len(features.anchors & peer_features.anchors)
+    if not shared_entity and overlap < 2:
         return False
-    left_text = _normalized_text(memory)
-    right_text = _normalized_text(peer)
-    left_anchors = _anchor_tokens(left_text)
-    right_anchors = _anchor_tokens(right_text)
-    overlap = len(left_anchors & right_anchors)
     required_overlap = 2
     if (
-        _shares_entity(memory, peer)
+        shared_entity
         and memory.kind in _SHORT_ENTITY_CONTRADICTION_KINDS
-        and len(left_anchors) == 1
-        and len(right_anchors) == 1
+        and len(features.anchors) == 1
+        and len(peer_features.anchors) == 1
     ):
         required_overlap = 1
     if overlap < required_overlap:
         return False
-    left_polarity = _cue_polarity(left_text)
-    right_polarity = _cue_polarity(right_text)
-    return left_polarity != 0 and right_polarity != 0 and left_polarity != right_polarity
+    return (
+        features.polarity != 0
+        and peer_features.polarity != 0
+        and features.polarity != peer_features.polarity
+    )
 
 
-def _priority(memory: Memory) -> tuple[float, float]:
+def _priority(memory) -> tuple[float, float]:
     anchor = _memory_age_anchor(memory)
     recency = anchor.timestamp()
     score = (
@@ -447,7 +453,7 @@ def _priority(memory: Memory) -> tuple[float, float]:
     return score, recency
 
 
-def _staleness_step(memory: Memory, *, now: datetime) -> tuple[int, int]:
+def _staleness_step(memory, *, now: datetime) -> tuple[int, int]:
     anchor = _memory_age_anchor(memory)
     age_days = max(0, int((now - anchor).total_seconds() // 86_400))
     window = _STALE_WINDOWS_DAYS.get(memory.kind, 180)
@@ -462,125 +468,251 @@ def _staleness_step(memory: Memory, *, now: datetime) -> tuple[int, int]:
     return 4, age_days
 
 
+# Columns decay rewrites. With the text they are also the per-row
+# compare-and-set witness between planning and applying (#1085): any edit
+# through the repository changes at least ``updated_at``, and the deletion
+# marker depends only on these columns.
+_DECAY_COLUMNS = ("status", "confidence", "reinforcement", "metadata_json", "updated_at")
+_WITNESS_COLUMNS = (*_DECAY_COLUMNS, "content", "summary")
+
+
+@dataclass
+class _DecayRow:
+    """Detached copy of one active memory, safe to plan on a worker thread."""
+
+    id: str
+    kind: MemoryKind
+    subject_entity_id: str | None
+    project_entity_id: str | None
+    summary: str | None
+    content: str
+    confidence: float
+    importance: float
+    reinforcement: float
+    status: MemoryStatus
+    metadata_json: str | None
+    created_at: datetime | None
+    updated_at: datetime | None
+    last_confirmed_at: datetime | None
+
+    @classmethod
+    def of(cls, memory: Memory) -> "_DecayRow":
+        return cls(**{name: getattr(memory, name) for name in cls.__dataclass_fields__})
+
+
+@dataclass
+class _DecayPlan:
+    supersedes: list[tuple[str, str]] = field(default_factory=list)
+    before: dict[str, tuple] = field(default_factory=dict)
+    after: dict[str, dict[str, object]] = field(default_factory=dict)
+    decayed: set[str] = field(default_factory=set)
+    archived: set[str] = field(default_factory=set)
+    edges: list[dict[str, object]] = field(default_factory=list)
+
+
+def _plan_memory_decay(rows: list[_DecayRow], now: datetime) -> _DecayPlan:
+    """Pure decay plan: the pre-#1085 pairwise algorithm, without its n² scan.
+
+    Rows must arrive in (kind, created_at) order. A pair can only contradict
+    when both are in a comparable kind, have opposite non-zero cue polarity
+    and share an anchor token, so an inverted index over those features finds
+    every candidate. Candidates are visited in the original pair order, and
+    statuses still change as the scan goes, so the greedy outcome (who
+    supersedes whom) is identical.
+    """
+    plan = _DecayPlan()
+    witness = {row.id: tuple(getattr(row, name) for name in _WITNESS_COLUMNS) for row in rows}
+    features = [_contradiction_features(row) for row in rows]
+    postings: dict[tuple[MemoryKind, str], list[int]] = {}
+    for index, row in enumerate(rows):
+        if row.kind in _COMPARABLE_KINDS and features[index].polarity != 0:
+            for token in features[index].anchors:
+                postings.setdefault((row.kind, token), []).append(index)
+
+    for index, memory in enumerate(rows):
+        if (
+            memory.status != MemoryStatus.active
+            or memory.kind not in _COMPARABLE_KINDS
+            or features[index].polarity == 0
+        ):
+            continue
+        candidates = sorted({
+            peer_index
+            for token in features[index].anchors
+            for peer_index in postings.get((memory.kind, token), ())
+            if peer_index > index
+        })
+        for peer_index in candidates:
+            peer = rows[peer_index]
+            if peer.status != MemoryStatus.active or not _contradictory(
+                memory, features[index], peer, features[peer_index]
+            ):
+                continue
+            winner, loser = (memory, peer)
+            if _priority(peer) > _priority(memory):
+                winner, loser = peer, memory
+            loser.status = MemoryStatus.superseded
+            loser.updated_at = now
+            loser_metadata = json.loads(loser.metadata_json or "{}")
+            loser_metadata["contradicted_by_memory_id"] = winner.id
+            loser_metadata["superseded_by_memory_id"] = winner.id
+            loser_metadata["superseded_reason"] = "contradiction"
+            loser.metadata_json = json.dumps(loser_metadata, sort_keys=True)
+            plan.supersedes.append((winner.id, loser.id))
+
+    for memory in rows:
+        if memory.status != MemoryStatus.active:
+            continue
+        step, age_days = _staleness_step(memory, now=now)
+        metadata = json.loads(memory.metadata_json or "{}")
+        prior_step = int(metadata.get("decay_step", 0) or 0)
+        delta = 0
+        if step > prior_step:
+            delta = step - prior_step
+        elif step >= 4:
+            # Terminal stale rows keep decaying across later maintenance runs until they archive.
+            delta = 1
+
+        if delta > 0:
+            memory.confidence = max(0.15, float(memory.confidence or 0.0) - (0.08 * delta))
+            memory.reinforcement = max(
+                0.0,
+                float(memory.reinforcement or 0.0) - (0.25 * delta),
+            )
+            metadata["decay_step"] = step
+            metadata["decay_age_days"] = age_days
+            memory.metadata_json = json.dumps(metadata, sort_keys=True)
+            memory.updated_at = now
+            plan.decayed.add(memory.id)
+
+        if step >= 4 and (
+            float(memory.confidence or 0.0) <= 0.35
+            or float(memory.reinforcement or 0.0) <= 0.2
+        ):
+            metadata = json.loads(memory.metadata_json or "{}")
+            metadata["archived_reason"] = "stale"
+            metadata["archived_at"] = now.isoformat()
+            memory.metadata_json = json.dumps(metadata, sort_keys=True)
+            memory.status = MemoryStatus.archived
+            memory.updated_at = now
+            plan.archived.add(memory.id)
+
+    for row in rows:
+        current = tuple(getattr(row, name) for name in _WITNESS_COLUMNS)
+        if current != witness[row.id]:
+            plan.before[row.id] = witness[row.id]
+            plan.after[row.id] = {name: getattr(row, name) for name in _DECAY_COLUMNS}
+    created_at = _now()
+    for winner_id, loser_id in plan.supersedes:
+        for edge_type in (MemoryEdgeType.contradicts, MemoryEdgeType.supersedes):
+            plan.edges.append({
+                "id": uuid.uuid4().hex,
+                "from_memory_id": winner_id,
+                "to_memory_id": loser_id,
+                "edge_type": edge_type,
+                "weight": 1.0,
+                "metadata_json": json.dumps({"writer": "memory_decay"}, sort_keys=True),
+                "created_at": created_at,
+            })
+    return plan
+
+
+def _plan_from_records(records: list, now: datetime) -> _DecayPlan:
+    rows = [
+        _DecayRow.of(record)
+        for record in records
+        if _canonical_memory_deletion_marker(record) is None
+    ]
+    return _plan_memory_decay(rows, now)
+
+
+# Rows applied per writer transaction: inside SQLite's bound-parameter limit
+# and short enough (~tens of ms) that other writers interleave (#1085).
+_DECAY_APPLY_CHUNK = 500
+
+
 async def apply_memory_decay_policies(
     *,
     now: datetime | None = None,
 ) -> DecayMaintenanceResult:
+    """Supersede contradicted memories and decay or archive stale ones.
+
+    #1085: the scan used to run inside ``BEGIN IMMEDIATE`` on the event loop
+    and compared every pair (16s of writer lock and loop stall at 5,000
+    memories). It now plans from a deferred snapshot on a worker thread and
+    takes the writer lock only to apply the plan; a row edited since it was
+    read is left untouched for the next run.
+    """
     resolved_now = _normalize_timestamp(now) or _now()
-    contradiction_count = 0
-    superseded_count = 0
-    decayed_count = 0
-    archived_count = 0
 
+    table = Memory.__table__
     async with get_session() as db:
-        await _begin_canonical_write(db)
-        active_memories = (
+        await db.execute(text("BEGIN"))
+        records = (
             await db.execute(
-                select(Memory)
-                .where(Memory.status == MemoryStatus.active)
+                select(*(table.c[name] for name in _DecayRow.__dataclass_fields__))
+                .where(table.c.status == MemoryStatus.active)
                 .where(_canonical_memory_without_tombstone_clause())
-                .order_by(
-                    col(Memory.kind).asc(),
-                    col(Memory.created_at).asc(),
-                )
+                .order_by(table.c.kind.asc(), table.c.created_at.asc())
             )
-        ).scalars().all()
-        active_memories = [
-            memory
-            for memory in active_memories
-            if _canonical_memory_deletion_marker(memory) is None
-        ]
+        ).all()
+    plan = await asyncio.to_thread(_plan_from_records, records, resolved_now)
+    if not plan.after:
+        return DecayMaintenanceResult()
 
-        for index, memory in enumerate(active_memories):
-            if memory.status != MemoryStatus.active:
+    applied: set[str] = set()
+    edges_by_loser: dict[str, list[dict[str, object]]] = {}
+    for edge in plan.edges:
+        edges_by_loser.setdefault(str(edge["to_memory_id"]), []).append(edge)
+    ids = list(plan.after)
+    witness_columns = [table.c.id, *(table.c[name] for name in _WITNESS_COLUMNS)]
+    for start in range(0, len(ids), _DECAY_APPLY_CHUNK):
+        # Each chunk is its own short writer transaction: rows are
+        # independent compare-and-set updates, and a superseded row commits
+        # together with its edges, so other writers interleave between chunks.
+        chunk = ids[start:start + _DECAY_APPLY_CHUNK]
+        async with get_session() as db:
+            await _begin_canonical_write(db)
+            current = await db.execute(
+                select(*witness_columns)
+                .where(table.c.id.in_(chunk))
+                .where(_canonical_memory_without_tombstone_clause())
+            )
+            chunk_applied = [row[0] for row in current if tuple(row[1:]) == plan.before[row[0]]]
+            if not chunk_applied:
                 continue
-            for peer in active_memories[index + 1 :]:
-                if peer.status != MemoryStatus.active or not _contradictory(memory, peer):
-                    continue
-                winner, loser = (memory, peer)
-                if _priority(peer) > _priority(memory):
-                    winner, loser = peer, memory
-
-                loser.status = MemoryStatus.superseded
-                loser.updated_at = resolved_now
-                loser_metadata = json.loads(loser.metadata_json or "{}")
-                loser_metadata["contradicted_by_memory_id"] = winner.id
-                loser_metadata["superseded_by_memory_id"] = winner.id
-                loser_metadata["superseded_reason"] = "contradiction"
-                loser.metadata_json = json.dumps(loser_metadata, sort_keys=True)
-                db.add(loser)
-
-                contradiction_count += 1
-                superseded_count += 1
-
-                for edge_type in (MemoryEdgeType.contradicts, MemoryEdgeType.supersedes):
-                    existing_edge = (
-                        await db.execute(
-                            select(MemoryEdge)
-                            .where(MemoryEdge.from_memory_id == winner.id)
-                            .where(MemoryEdge.to_memory_id == loser.id)
-                            .where(MemoryEdge.edge_type == edge_type)
-                        )
-                    ).scalars().first()
-                    if existing_edge is not None:
-                        continue
-                    db.add(
-                        MemoryEdge(
-                            from_memory_id=winner.id,
-                            to_memory_id=loser.id,
-                            edge_type=edge_type,
-                            weight=1.0,
-                            metadata_json=json.dumps(
-                                {"writer": "memory_decay"},
-                                sort_keys=True,
-                            ),
-                        )
+            await db.execute(
+                update(table)
+                .where(table.c.id == bindparam("target_id"))
+                .values({name: bindparam(f"new_{name}") for name in _DECAY_COLUMNS}),
+                [
+                    {"target_id": memory_id, **{f"new_{name}": value for name, value in plan.after[memory_id].items()}}
+                    for memory_id in chunk_applied
+                ],
+            )
+            applied.update(chunk_applied)
+            losers = [memory_id for memory_id in chunk_applied if memory_id in edges_by_loser]
+            if losers:
+                existing_edges = {
+                    (row[0], row[1], MemoryEdgeType(row[2]))
+                    for row in await db.execute(
+                        select(MemoryEdge.from_memory_id, MemoryEdge.to_memory_id, MemoryEdge.edge_type)
+                        .where(col(MemoryEdge.to_memory_id).in_(losers))
                     )
-
-        for memory in active_memories:
-            if memory.status != MemoryStatus.active:
-                continue
-            step, age_days = _staleness_step(memory, now=resolved_now)
-            metadata = json.loads(memory.metadata_json or "{}")
-            prior_step = int(metadata.get("decay_step", 0) or 0)
-            delta = 0
-            if step > prior_step:
-                delta = step - prior_step
-            elif step >= 4:
-                # Terminal stale rows keep decaying across later maintenance runs until they archive.
-                delta = 1
-
-            if delta > 0:
-                memory.confidence = max(0.15, float(memory.confidence or 0.0) - (0.08 * delta))
-                memory.reinforcement = max(
-                    0.0,
-                    float(memory.reinforcement or 0.0) - (0.25 * delta),
-                )
-                metadata["decay_step"] = step
-                metadata["decay_age_days"] = age_days
-                memory.metadata_json = json.dumps(metadata, sort_keys=True)
-                memory.updated_at = resolved_now
-                db.add(memory)
-                decayed_count += 1
-
-            if step >= 4 and (
-                float(memory.confidence or 0.0) <= 0.35
-                or float(memory.reinforcement or 0.0) <= 0.2
-            ):
-                metadata = json.loads(memory.metadata_json or "{}")
-                metadata["archived_reason"] = "stale"
-                metadata["archived_at"] = resolved_now.isoformat()
-                memory.metadata_json = json.dumps(metadata, sort_keys=True)
-                memory.status = MemoryStatus.archived
-                memory.updated_at = resolved_now
-                db.add(memory)
-                archived_count += 1
-
-        await db.flush()
+                }
+                new_edges = [
+                    edge
+                    for loser in losers
+                    for edge in edges_by_loser[loser]
+                    if (edge["from_memory_id"], edge["to_memory_id"], edge["edge_type"]) not in existing_edges
+                ]
+                if new_edges:
+                    await db.execute(insert(MemoryEdge.__table__), new_edges)
+    contradiction_count = sum(1 for _winner, loser in plan.supersedes if loser in applied)
 
     return DecayMaintenanceResult(
         contradiction_count=contradiction_count,
-        superseded_count=superseded_count,
-        decayed_count=decayed_count,
-        archived_count=archived_count,
+        superseded_count=contradiction_count,
+        decayed_count=len(plan.decayed & applied),
+        archived_count=len(plan.archived & applied),
     )

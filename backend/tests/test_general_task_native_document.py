@@ -1,6 +1,7 @@
 """Actual private CSV adoption and fixed native document child, no inference."""
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import httpx
@@ -81,7 +82,12 @@ async def test_actual_document_child_private_readback_and_precontact_denials(acc
     owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
     await build_admission_lifecycle.start()
     workspace, _, factory = accounting_db
-    sessions = factory.accounting_sessions
+    from src.work_board.channel_capture import staged_captured_source_identity
+    @asynccontextmanager
+    async def sessions():
+        with staged_captured_source_identity():
+            async with factory.accounting_sessions() as db:
+                yield db
     monkeypatch.setattr(crypto, "_fernet", None)
     monkeypatch.setattr(settings, "vault_encryption_key", "")
     monkeypatch.setattr(documents, "get_session", sessions)

@@ -146,7 +146,11 @@ _V4_STATIC_FIELDS = {
 # pre-column state: it is checked, then left out of every static digest so
 # stored v1-v4 Stop snapshots keep their exact meaning. Any non-NULL value,
 # and any other new column, still fails closed as a changed inventory.
-_NULL_ONLY_FIELDS = {"WorkflowRunState": frozenset(("composition_binding_json",))}
+# Channel-captured Tasks (#1022) are planless review intents and can never
+# carry a repository_work plan, so an original repository Task row always has
+# a NULL channel_capture_origin_json.
+_NULL_ONLY_FIELDS = {"WorkflowRunState": frozenset(("composition_binding_json",)),
+    "WorkBoardTask": frozenset(("channel_capture_origin_json",))}
 
 
 def _without_null_only_fields(values, model_name):

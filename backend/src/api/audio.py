@@ -9,7 +9,7 @@ from typing import Literal
 from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from src.guardian.audio_worker import (
     AudioConfirmationConflict,
@@ -18,6 +18,7 @@ from src.guardian.audio_worker import (
     default_audio_worker,
 )
 from src.security.trust_contract import AuthorityGrant
+from src.work_board.contracts import GeneralTaskCreate
 
 
 router = APIRouter()
@@ -46,7 +47,40 @@ class TranscriptConfirmationBody(BaseModel):
 
 
 class AudioConsentGrantBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     boundary: Literal["capture", "cloud_upload", "model"]
+    original_audio_selection: "OriginalAudioSelectionV1 | None" = None
+    pre_capture_model_consent_reference: str | None = Field(default=None, min_length=1, max_length=128)
+    expected_pre_capture_selection_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class OriginalAudioSelectionV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: Literal["select_one_original_audio_call"]
+    conversation_session_id: str = Field(min_length=1, max_length=256)
+    audio_budget_microusd: int = Field(ge=1, le=1_000_000_000)
+    max_calls: int = Field(strict=True, ge=1, le=1)
+    expected_audio_profile_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    documentation_attestation_ref: str = Field(min_length=1, max_length=128)
+    expected_documentation_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AudioExecutionReviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    max_calls: int = Field(strict=True, ge=1, le=1)
+    expected_audio_revision: int = Field(ge=0)
+
+
+class AudioExecutionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    audio_budget_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    max_calls: int = Field(default=1, strict=True, ge=1, le=1)
+
+
+class AudioTaskCaptureBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed_transcript_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    task: GeneralTaskCreate
 
 
 def _operator(request: Request) -> tuple[str, str, object]:
@@ -180,6 +214,22 @@ async def issue_audio_consent(body: AudioConsentGrantBody, request: Request) -> 
     owner, operator_session_id, operator = _operator(request)
     if body.boundary in {"cloud_upload", "model"} and not _has_model_inference_grant(operator):
         raise HTTPException(status_code=403, detail={"code": "audio_model_inference_forbidden"})
+    if body.boundary in {"cloud_upload", "model"} and body.original_audio_selection is None:
+        raise HTTPException(status_code=422, detail={"code": "audio_original_selection_required"})
+    if body.original_audio_selection is not None:
+        from src.model_fabric.repository import model_fabric_repository
+        from src.model_fabric.audio_documentation import DocumentationError
+        if body.boundary not in {"model", "cloud_upload"}:
+            raise HTTPException(status_code=422, detail={"code":"audio_selection_boundary_invalid"})
+        try:
+            await model_fabric_repository.require_audio_execution_documentation(operator,
+                body.original_audio_selection.documentation_attestation_ref,
+                body.original_audio_selection.expected_documentation_digest)
+        except DocumentationError as exc:
+            # Missing exact facts cannot issue a model grant or preselection.
+            raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
+    if body.pre_capture_model_consent_reference is not None or body.expected_pre_capture_selection_digest is not None:
+        raise HTTPException(status_code=409, detail={"code":"audio_pre_capture_selection_unavailable"})
     try:
         grant = await default_audio_worker.issue_consent_grant(
             owner_principal_id=owner,
@@ -268,16 +318,36 @@ async def _owned_job(request_id: str, request: Request, *, require_model: bool =
 @router.get("/audio/ptt/{request_id}")
 @router.get("/audio/ingress/{request_id}")
 async def get_audio(request_id: str, request: Request) -> dict:
-    snapshot, owner, operator_session_id, _ = await _owned_job(request_id, request)
-    return _operator_payload(
+    snapshot, owner, operator_session_id, operator = await _owned_job(request_id, request)
+    payload = _operator_payload(
         snapshot,
         owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
+    if snapshot.status == "confirmed" and snapshot.workflow_job_id:
+        from src.api.work_board import _owner
+        from src.db.engine import get_session
+        from src.workflows.job_runtime import durable_job_repository as jobs, DurableJobError
+        source_owner = _owner(operator)
+        try:
+            async with jobs.confirmed_audio_task_source_scope(owner=source_owner,
+                request_id=request_id, message_id=snapshot.message_id,
+                confirmed_digest=snapshot.confirmed_transcript_digest):
+                async with get_session() as db:
+                    _, message = await jobs.check_confirmed_audio_task_source(db, owner=source_owner,
+                        request_id=request_id, message_id=snapshot.message_id,
+                        confirmed_digest=snapshot.confirmed_transcript_digest)
+                    payload["transcript"] = {"text": message.content,
+                        "digest": snapshot.confirmed_transcript_digest,
+                        "confirmed_digest": snapshot.confirmed_transcript_digest,
+                        "review_only": True}
+        except DurableJobError:
+            raise HTTPException(status_code=409, detail={"code": "audio_confirmed_source_changed"})
+    return payload
 
 
 @router.post("/audio/ptt/{request_id}/process")
-async def process_audio(request_id: str, request: Request) -> dict:
+async def process_audio(request_id: str, request: Request, body: AudioExecutionBody | None = None) -> dict:
     snapshot, owner, operator_session_id, operator = await _owned_job(request_id, request, require_model=True)
     try:
         result = await default_audio_worker.process(
@@ -285,6 +355,7 @@ async def process_audio(request_id: str, request: Request) -> dict:
             owner_principal_id=owner,
             operator_session_id=operator_session_id,
             authority_principal=getattr(operator, "principal", None),
+            audio_budget_microusd=body.audio_budget_microusd if body else None,
         )
     except AudioWorkerError as exc:
         raise _error(exc) from exc
@@ -293,6 +364,20 @@ async def process_audio(request_id: str, request: Request) -> dict:
         owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
+
+
+@router.post("/audio/ptt/{request_id}/execution-review")
+async def review_original_audio_execution(request_id: str, body: AudioExecutionReviewBody, request: Request):
+    snapshot, _, _, operator = await _owned_job(request_id, request, require_model=True)
+    row = await default_audio_worker._job(snapshot.request_id)
+    if row.revision != body.expected_audio_revision:
+        raise HTTPException(status_code=409, detail={"code":"audio_revision_changed"})
+    from src.model_fabric.repository import model_fabric_repository
+    from src.model_fabric.audio_documentation import DocumentationError
+    try:
+        await model_fabric_repository.require_audio_execution_documentation(operator, None, None)
+    except DocumentationError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
 
 
 @router.post("/audio/ptt/{request_id}/confirm")
@@ -332,3 +417,35 @@ async def cancel_audio(request_id: str, request: Request) -> dict:
         owner_principal_id=owner,
         operator_session_id=operator_session_id,
     )
+
+
+@router.post("/audio/ptt/{request_id}/task")
+async def capture_audio_task(request_id: str, body: AudioTaskCaptureBody, request: Request) -> dict:
+    """Explicit fresh Goal/C1 allowance after exact corrected confirmation."""
+    from src.api.work_board import dispatcher, _safe_task_payload, _owner, _raise_board_error
+    from src.db.engine import get_session
+    from src.work_board.channel_capture import reserve_confirmed_audio_capture
+    from src.work_board.repository import BoardError
+    from src.workflows.job_runtime import durable_job_repository, DurableJobError
+    snapshot, _owner_id, _root_id, operator = await _owned_job(request_id, request)
+    if snapshot.status != "confirmed":
+        raise HTTPException(status_code=409, detail={"code": "audio_confirmed_native_source_required"})
+    service = dispatcher.general_tasks
+    if service is None:
+        raise HTTPException(status_code=503, detail={"code": "general_task_inactive"})
+    if body.task.input.limits.max_cost_microusd <= 0 or body.task.input.limits.max_inference_calls <= 0:
+        raise HTTPException(status_code=422, detail={"code": "channel_capture_positive_task_allowance_required"})
+    try:
+        async with get_session() as db:
+            owner = _owner(operator)
+            capture = await reserve_confirmed_audio_capture(db, owner, body.task, service=service,
+                jobs=durable_job_repository, request_id=request_id, message_id=snapshot.message_id,
+                confirmed_digest=body.confirmed_transcript_digest)
+            mutation = await service.capture_intent(db, owner, body.task, capture=capture)
+            return {"task": await _safe_task_payload(mutation.task, db=db),
+                "idempotent_replay": mutation.idempotent_replay,
+                "audio_budget_transferred": False, "audio_workflow_job_id": snapshot.workflow_job_id}
+    except BoardError as exc:
+        _raise_board_error(exc)
+    except (DurableJobError, ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "audio_task_capture_source_changed"}) from exc

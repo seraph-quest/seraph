@@ -41,6 +41,7 @@ def _jobs(jobs):
 async def admit_service_job(*, operator, origin_method: str, native_branch: str, candidate: dict,
                             idempotency_key: str, reviewed_composition, goal_id: str | None = None,
                             goal_revision: int | None = None, jobs=None,
+                            extra_authority: dict | None = None,
                             deadline_at: datetime | None = None) -> tuple[dict, bool]:
     """Admit one Cordis-bound job; returns (job, replayed)."""
     from src.auth.ownership import _current_root
@@ -97,6 +98,11 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
                 deadline = prior.deadline_at.replace(tzinfo=prior.deadline_at.tzinfo or timezone.utc)
         authority = {"principal": operator.principal.principal_id, "owner_kind": "user",
                      "session_id": operator.session_id, "grants": _grants(current.principal)}
+        if extra_authority:
+            if native_branch != "governed" or set(extra_authority) != {"adapter_scope"}:
+                raise NativeServiceBlocked("native_authority_extension_invalid")
+            # Sealed with the job; part of its authority digest, never caller-editable later.
+            authority = {**authority, **extra_authority}
         spec = DurableJobSpec(
             identity=DurableJobIdentity(job_id=job_id, owner_kind="user",
                                         owner_principal_id=operator.principal.principal_id, job_kind=job_kind,

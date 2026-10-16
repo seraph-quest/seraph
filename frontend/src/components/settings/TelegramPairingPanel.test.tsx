@@ -58,4 +58,11 @@ describe("TelegramPairingPanel", () => {
     expect(await screen.findByText(/403 · telegram_authority_mismatch/)).toBeInTheDocument();
     expect(screen.getByText(/fingerprint 0123456789ab/)).toBeInTheDocument();
   });
+
+  it("shows the last typed Telegram control error from status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response({ ...paired, last_error: "telegram_control_blocked:channel_capture_origin_changed" })));
+    render(<TelegramPairingPanel />);
+    expect(await screen.findByTestId("telegram-last-error")).toHaveTextContent(
+      "Last Telegram error: telegram control blocked:channel capture origin changed. Review the affected task in Work.");
+  });
 });

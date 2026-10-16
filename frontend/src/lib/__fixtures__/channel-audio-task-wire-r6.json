@@ -1,0 +1,130 @@
+{
+  "receipt": {
+    "audio_budget_transferred": false,
+    "audio_workflow_job_id": "audio-transcription:f3ff6c8296d891369eba76c077778689ed1ac9fc",
+    "idempotent_replay": false,
+    "task": {
+      "archived_at": null,
+      "artifact_refs": [],
+      "assignee_id": null,
+      "block_kind": null,
+      "block_reason": null,
+      "block_source_status": null,
+      "body": "General registered-tool task",
+      "cancel_requested_at": null,
+      "capability_id": "agent.task.v1",
+      "completed_at": null,
+      "completed_dependency_count": 0,
+      "created_at": "2026-10-09T05:50:42.631109Z",
+      "creation_sequence": 1,
+      "dependency_count": 0,
+      "dispatch_rank": null,
+      "dispatch_wait_reason": null,
+      "executor_id": null,
+      "goal_id": "0080fae6",
+      "goal_revision": 1,
+      "idempotency_key": "api-confirmed-original",
+      "idempotency_scope": "general-task",
+      "input_artifact_id": "3f3538bf-192b-57a0-8999-602b48d61213",
+      "latest_attempt": null,
+      "origin_session_id": "api-native-conversation",
+      "origin_thread_id": null,
+      "owner_principal_id": "operator:root:4d7c2a37cb2540ada2eee8c5010d8037",
+      "owner_session_id": "1e7cdec282494e8eb50a83a0fad2c8ba",
+      "pipeline_operation_id": null,
+      "pipeline_slot": null,
+      "priority": 50,
+      "readback_status": "not_started",
+      "recovery_action": null,
+      "requires_review": true,
+      "result_refs": [],
+      "review_expires_at": null,
+      "reviewer_id": "operator:root:4d7c2a37cb2540ada2eee8c5010d8037",
+      "scheduled_at": null,
+      "status": "triage",
+      "task_id": "a4fd562ff3224c2c99251e887609cc92",
+      "task_revision": 1,
+      "title": "Explicit corrected API intent",
+      "typed_input_digest": "c574527b20edd75f693ac4f8f9d8f770d038044491c6f02986e3a11a4cd7f220",
+      "typed_input_ref": "workspace-json:artifacts/work-board/inputs/3f3538bf-192b-57a0-8999-602b48d61213-c574527b20edd75f693ac4f8f9d8f770d038044491c6f02986e3a11a4cd7f220.json",
+      "updated_at": "2026-10-09T05:50:42.631127Z",
+      "verification_status": "not_started"
+    }
+  },
+  "request": {
+    "confirmed_transcript_digest": "616285ad93c78c0a07ededf823a49355f03b0c3f8a475fe2889def05251b7300",
+    "task": {
+      "goal_revision": 1,
+      "idempotency_key": "api-confirmed-original",
+      "input": {
+        "goal_ref": "0080fae6",
+        "inference_egress_acknowledged": true,
+        "intent": "Explicit corrected API intent",
+        "limits": {
+          "max_cost_microusd": 500,
+          "max_inference_calls": 2
+        },
+        "requested_output": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "source": {
+    "admission_operation_id": "remote:audio-transcription:f3ff6c8296d891369eba76c077778689ed1ac9fc",
+    "attachment_id": "1f94f0d5a72554feaaf629bef5f98d24",
+    "capture": {
+      "audio_payload_digest": "d99efdd40c446d59ceb89f79a685571971eac4e2a5aff8c76af74ef3720ff04b",
+      "audio_size_bytes": 1004,
+      "channels": 1,
+      "codec": "pcm_s16le",
+      "container": "wav",
+      "decoded_duration_seconds": 0.03,
+      "duration_seconds": 0.03,
+      "media_type": "audio/wav",
+      "normalized_wav_size_bytes": 1004,
+      "raw_audio_retention_deadline": "2026-10-09T06:05:42.001812+00:00",
+      "sample_rate_hz": 16000
+    },
+    "cleanup": {
+      "retryable": false,
+      "status": "complete"
+    },
+    "consent": {
+      "capture_reference": "audio-consent:capture:9ade78a119574f8397dc249255fd7a27",
+      "model_reference": "audio-consent:cloud_upload:8b07bd6086d346d3afa7aaf0c72f8c71"
+    },
+    "duplicate": false,
+    "error_code": null,
+    "id": "37c644ddde3747fd8598943887da8106",
+    "message_id": "2812be2a479e559ca6ea4572f5530a81",
+    "operator_session_id": "1e7cdec282494e8eb50a83a0fad2c8ba",
+    "owner_principal_id": "operator:root:4d7c2a37cb2540ada2eee8c5010d8037",
+    "privacy": {
+      "raw_audio_in_receipt": false,
+      "raw_audio_persisted_after_cleanup": false,
+      "transcript_in_receipt": false
+    },
+    "provider": {
+      "live_provider_call_claimed": false,
+      "local_model_fallback_claimed": false,
+      "provider_status": "verified",
+      "transport": "settled"
+    },
+    "request_digest": "d071c040f3f39ef92ce0acf164e58f59aba6a0df66df4822414b372bfaef3f57",
+    "request_id": "67f71a884d86580c95cd1dc87a9f6c67",
+    "requested_capability": "chat",
+    "result_digest": "4716970286b079771c2f7ebcf89af2a1e07aae0f7f954eebb18f7cabab64f625",
+    "revision": 11,
+    "schema_version": "seraph.guardian.audio-worker.v1",
+    "session_id": "api-native-conversation",
+    "status": "confirmed",
+    "transcript": {
+      "confirmed_digest": "616285ad93c78c0a07ededf823a49355f03b0c3f8a475fe2889def05251b7300",
+      "digest": "616285ad93c78c0a07ededf823a49355f03b0c3f8a475fe2889def05251b7300",
+      "review_only": true,
+      "text": "Explicit corrected API intent"
+    },
+    "workflow_job_id": "audio-transcription:f3ff6c8296d891369eba76c077778689ed1ac9fc"
+  }
+}

@@ -362,3 +362,34 @@ async def test_unloading_withdraws_registration_but_keeps_in_flight_recovery(acc
 
 async def _contacted(model, tag):
     return tag in model.calls
+
+
+# ---------------------------------------------------------------- connections
+
+async def test_bound_adapter_requires_a_current_connection_and_finite_operation_then_fails_closed(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from src.db.engine import get_session
+    from src.db.models import GoogleServiceConnection
+    from src.runtime_plugins.governed_services import execute_native_connection_operation
+    async with governed(accounting_db, monkeypatch) as env:
+        operator = env["operator"]
+        async with get_session() as db:
+            db.add(GoogleServiceConnection(connection_id="conn-1018", owner_principal_id=operator.principal.principal_id,
+                owner_session_id=operator.session_id, service="calendar_readonly", vault_secret_key="vault-conn-1018",
+                state="ready", revision=2))
+        for kwargs, reason in (
+                ({"expected_connection_revision": 2, "operation": "calendar.read_events"}, "native_adapter_operation_not_composed"),
+                ({"expected_connection_revision": 1, "operation": "calendar.read_events"}, "native_connection_candidate_changed"),
+                ({"expected_connection_revision": 2, "operation": "gmail.read_messages"}, "native_adapter_operation_unknown")):
+            with pytest.raises(NativeServiceBlocked) as blocked:
+                await execute_native_connection_operation(operator=operator, connection_ref="conn-1018", host=env["host"],
+                    idempotency_key="conn-" + str(kwargs["expected_connection_revision"]) + kwargs["operation"], **kwargs)
+            assert blocked.value.reason_code == reason
+            job = (await _governed_jobs(env["jobs"]))[-1]
+            # The block is durable and operator-visible; no credential or effect was touched.
+            assert job["status"] == "blocked" and job["failure_reason"] == reason and job["effects"] == []
+        assert [method for method, _ in env["frames"]] == ["connections.invokeBoundAdapter"] * 3
+        assert env["frames"][0][1] == {"operation_ref": (await _governed_jobs(env["jobs"]))[0]["job_id"]}
+        with pytest.raises(NativeServiceBlocked) as unknown:
+            await execute_native_connection_operation(operator=operator, connection_ref="conn-1018", expected_connection_revision=2,
+                                                      operation="calendar.delete_everything", idempotency_key="conn-x", host=env["host"])
+        assert unknown.value.reason_code == "native_adapter_operation_unknown" and len(env["frames"]) == 3

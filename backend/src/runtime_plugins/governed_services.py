@@ -32,6 +32,11 @@ MAX_INFERENCE_TOKENS = 1024
 READ_ONLY_CAPABILITIES = frozenset({"read_file", "list_processes", "read_process_output", "preview_workspace_patch"})
 # Tools that return or manage Vault material are never Cordis capabilities.
 SECRET_TOOLS = frozenset({"get_secret", "get_secret_ref", "list_secrets", "store_secret", "delete_secret"})
+# Finite adapter operations per connection service. None is composed yet: a
+# valid current request fails closed with ADAPTER_NOT_COMPOSED (follow-up).
+ADAPTER_OPERATIONS = {"calendar_readonly": frozenset({"calendar.read_events"}),
+                      "gmail_readonly": frozenset({"gmail.read_messages"})}
+ADAPTER_NOT_COMPOSED = "native_adapter_operation_not_composed"
 _JSON_TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "object": dict, "array": list}
 
 
@@ -134,12 +139,35 @@ def validate_governed_candidate(candidate) -> dict:
                 or type(candidate["max_tokens"]) is not int or not 1 <= candidate["max_tokens"] <= MAX_INFERENCE_TOKENS):
             raise NativeServiceBlocked("native_inference_candidate_invalid")
         return dict(candidate)
+    if method == "connections.invokeBoundAdapter":
+        if (set(candidate) != {"schema_version", "method", "connection_ref", "expected_connection_revision", "operation"}
+                or type(candidate["connection_ref"]) is not str or not 0 < len(candidate["connection_ref"]) <= 128
+                or type(candidate["expected_connection_revision"]) is not int or candidate["expected_connection_revision"] < 1
+                or not any(candidate["operation"] in ops for ops in ADAPTER_OPERATIONS.values())):
+            raise NativeServiceBlocked("native_adapter_operation_unknown")
+        return dict(candidate)
     raise NativeServiceBlocked("native_governed_candidate_invalid")
 
 
-def wire_inputs(job_id: str) -> dict:
+def wire_inputs(job_id: str, method: str = "capabilities.invoke") -> dict:
     """The exact plugin-visible request: only the canonical job reference."""
-    return {"request_ref": job_id}
+    return {"operation_ref": job_id} if method == "connections.invokeBoundAdapter" else {"request_ref": job_id}
+
+
+async def current_connection(db, run, candidate) -> None:
+    """The connection must be the caller's current, ready, unchanged row; installation alone authorizes nothing."""
+    from sqlalchemy import select
+    from src.db.models import GoogleServiceConnection
+    row = (await db.execute(select(GoogleServiceConnection.revision, GoogleServiceConnection.state, GoogleServiceConnection.service)
+                            .where(GoogleServiceConnection.connection_id == candidate["connection_ref"],
+                                   GoogleServiceConnection.owner_principal_id == run.owner_principal_id,
+                                   GoogleServiceConnection.owner_session_id == run.operator_session_id))).one_or_none()
+    if row is None or row.revision != candidate["expected_connection_revision"]:
+        raise NativeServiceBlocked("native_connection_candidate_changed")
+    if row.state != "ready":
+        raise NativeServiceBlocked("native_connection_unavailable")
+    if candidate["operation"] not in ADAPTER_OPERATIONS.get(row.service, frozenset()):
+        raise NativeServiceBlocked("native_adapter_operation_unknown")
 
 
 async def _redacted(text: str) -> str:
@@ -264,8 +292,13 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
             raise NativeServiceBlocked("native_task_candidate_not_bound")
         candidate = _run_candidate(run)
         context = read_context(run)
-        if payload != wire_inputs(run.run_identity) or candidate["method"] != method:
+        if payload != wire_inputs(run.run_identity, method) or candidate["method"] != method:
             raise NativeServiceBlocked("native_governed_reference_not_bound")
+        if method == "connections.invokeBoundAdapter":
+            # A current canonical connection and finite operation, then fail closed: no
+            # adapter is composed in this slice, so no credential or effect is touched.
+            await current_connection(db, run, candidate)
+            raise NativeServiceBlocked(ADAPTER_NOT_COMPOSED)
         if context["operations"] or context["result"] is not None:
             # An interrupted effect stays an unresolved intent; it is never re-executed.
             raise NativeServiceBlocked("native_governed_replay_denied")
@@ -328,7 +361,7 @@ async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, 
     scope = await open_invocation(job_id=job["job_id"], owner=owner, fence=fence, host=host,
                                   admission_replayed=replayed, candidate=candidate, jobs=jobs)
     try:
-        result = await host.request_service(method, wire_inputs(job["job_id"]), original_scope=scope)
+        result = await host.request_service(method, wire_inputs(job["job_id"], method), original_scope=scope)
         if result["status"] != "succeeded":
             raise NativeServiceBlocked(result["reason_code"])
         async with jobs._session() as db:
@@ -354,6 +387,13 @@ async def execute_native_capability(*, operator, capability_id: str, arguments: 
         raise NativeServiceBlocked("native_capability_unknown")
     candidate = {"schema_version": 1, "method": "capabilities.invoke", "capability_id": capability_id,
                  "version": descriptor["version"], "arguments": arguments, "arguments_digest": _digest(arguments)}
+    return await _execute_governed(operator=operator, candidate=candidate, idempotency_key=idempotency_key, host=host, jobs=jobs)
+
+
+async def execute_native_connection_operation(*, operator, connection_ref: str, expected_connection_revision: int,
+                                             operation: str, idempotency_key: str, host=None, jobs=None) -> dict:
+    candidate = {"schema_version": 1, "method": "connections.invokeBoundAdapter", "connection_ref": connection_ref,
+                 "expected_connection_revision": expected_connection_revision, "operation": operation}
     return await _execute_governed(operator=operator, candidate=candidate, idempotency_key=idempotency_key, host=host, jobs=jobs)
 
 

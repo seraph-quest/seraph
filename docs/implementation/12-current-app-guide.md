@@ -617,8 +617,14 @@ streaming capability, as chat does. Python returns bounded frames, the sealed
 receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
 and no service returns secrets. A changed attempt, deadline or Root never seals
 output, and unloading the host leaves the job's intent and cost liability for
-recovery while a re-admission reuses the held job. `connections.invokeBoundAdapter`
-stays a typed block until a finite adapter operation is composed.
+recovery while a re-admission reuses the held job.
+`connections.invokeBoundAdapter` admits a job for a canonical connection reference,
+its expected revision and an operation from a closed table
+(`calendar.read_events`, `gmail.read_messages`); the call requires the caller's
+current, ready, unchanged connection row and then fails closed as
+`native_adapter_operation_not_composed`, recorded on the blocked job, without
+touching a credential or effect. Composing those adapters is follow-up work, and
+no Gmail/Calendar operation is a native capability through `capabilities.invoke`.
 
 ### Cordis guardian research (#1008)
 

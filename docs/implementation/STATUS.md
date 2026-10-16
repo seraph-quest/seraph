@@ -116,7 +116,8 @@ composition-snapshot accounting is not shipped. See the
 `CapabilityExecutionHost`) and `inference.request` (two canonical Cordis routes
 through the shared broker and ledger) have Python owners with sealed results,
 bounded Vault-redacted output and job-bound accounting;
-`connections.invokeBoundAdapter` remains a typed block. See the
+`connections.invokeBoundAdapter` validates the current connection reference and
+a closed operation table, then fails closed (no adapter is composed yet). See the
 [guide section](./12-current-app-guide.md#cordis-governed-capabilities-and-inference-1018).
 
 **Cordis guardian research** from

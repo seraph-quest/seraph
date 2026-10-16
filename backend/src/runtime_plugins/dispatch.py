@@ -37,7 +37,7 @@ SUPPORTED_METHODS = frozenset({
     "capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve",
     "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append",
     # #1018 governed executors (CapabilityExecutionHost, model fabric + shared broker).
-    "capabilities.invoke", "inference.request"})
+    "capabilities.invoke", "inference.request", "connections.invokeBoundAdapter"})
 # Operator-visible reasons for every method without a native owner here.
 BLOCKED_METHODS = MappingProxyType({
     "tasks.settle": "native_settlement_python_owner_only",
@@ -58,7 +58,6 @@ BLOCKED_METHODS = MappingProxyType({
     "scheduler.register": "native_scheduler_not_bound",
     "scheduler.disable": "native_scheduler_not_bound",
     "scheduler.dispatchDue": "native_scheduler_not_bound",
-    "connections.invokeBoundAdapter": "native_adapter_invoke_not_bound",
     "source-extraction.extract": "native_research_execution_not_bound",
 })
 assert SUPPORTED_METHODS | set(BLOCKED_METHODS) == set(METHOD_DOMAINS)

@@ -3,6 +3,7 @@ import asyncio
 import json
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from src.db.models import WorkBoardTask, WorkflowRunState, TelegramInboundUpdate
@@ -13,6 +14,23 @@ from tests.test_first_result_setup import authenticated_setup_operator, setup_wo
 from tests.test_telegram_task_controls import SyntheticTelegramHTTP
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.parametrize("async_db", ["file"], indirect=True)]
+
+
+@pytest_asyncio.fixture
+async def channel_admission_signer(setup_workspace, monkeypatch):
+    """Own the real historical admission signer after the disposable Root exists."""
+    from config.settings import settings
+    from src.work_board.historical_method import historical_method_service
+    from tests.general_task_method_lifecycle import AdmissionSignerLifetime
+    lifetime = AdmissionSignerLifetime(historical_method_service)
+    try:
+        # A live owner, including one with an unavailable key, is borrowed intact.
+        if not historical_method_service.started:
+            monkeypatch.setattr(settings, "capability_journal_secret", "channel-admission-disposable-key")
+        await lifetime.start()
+        yield historical_method_service
+    finally:
+        await lifetime.close()
 
 
 async def selected_pair(client, monkeypatch, registry=None):
@@ -161,7 +179,7 @@ async def test_captured_origin_tampering_and_missing_source_deny_before_private_
 
 @pytest.mark.parametrize("completion", ["delivered", "unknown", "revoked_before_resume", "callback_delivered",
     "callback_crash_gap", "callback_cas_failure", "callback_concurrent", "callback_revoked", "callback_unknown_notice", "callback_cancel", "callback_cancel_cas_failure"])
-async def test_actual_captured_task_native_pause_resume_keeps_original_attempt_and_reads_physical_output(client, async_db, setup_workspace, monkeypatch, completion):
+async def test_actual_captured_task_native_pause_resume_keeps_original_attempt_and_reads_physical_output(client, async_db, setup_workspace, channel_admission_signer, monkeypatch, completion):
     from src.native_tools.registry import ToolRegistry
     from src.api.work_board import dispatcher
     from src.work_board.contracts import WorkBoardOwner, GeneralTaskEnvelope

@@ -1,9 +1,9 @@
 ---
 id: governed-optional-audio-route
-title: "ADR-032: Optional governed OpenRouter audio transcription"
+title: "ADR-033: Optional governed OpenRouter audio transcription"
 ---
 
-# ADR-032: Optional governed OpenRouter audio transcription
+# ADR-033: Optional governed OpenRouter audio transcription
 
 **Status:** Accepted architecture target under [#1022](https://github.com/seraph-quest/seraph/issues/1022), adopted on 2026-10-09 after independent review. Acceptance authorizes bounded implementation, not activation or shipped audio. [Development Status](../STATUS.md) owns capability availability. No provider probe or inference is authorized by this decision.
 

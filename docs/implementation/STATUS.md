@@ -675,7 +675,7 @@ revision. Live Telegram remains unverified; see
 ## Legend
 
 Optional governed OpenRouter audio and paired-channel Task capture under
-[ADR-032](./decisions/032-governed-optional-audio-route.md) are **Planned**.
+[ADR-033](./decisions/033-governed-optional-audio-route.md) are **Planned**.
 Branch-local documentary cleanup remains part of this unmerged target: only
 successfully settled exact two-source staging can release quota after verified
 physical deletion. Failed, ambiguous and older unbound inventories remain

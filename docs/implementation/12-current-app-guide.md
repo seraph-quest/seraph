@@ -910,7 +910,7 @@ costs, and embedding usefulness remain externally unverified.
 ### Local cockpit interaction boundaries
 
 Optional governed audio and paired-channel Task capture under
-[ADR-032](./decisions/032-governed-optional-audio-route.md) and
+[ADR-033](./decisions/033-governed-optional-audio-route.md) and
 [#1022](https://github.com/seraph-quest/seraph/issues/1022) are **Planned**.
 The branch-local documentary recovery target distinguishes successfully settled
 source-incomplete staging, which its original owner can reject and bounded

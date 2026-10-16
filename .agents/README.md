@@ -4,9 +4,9 @@ Seraph uses Codex as team lead for substantial planning, architecture,
 implementation, review, and runtime work. `AGENTS.md` is the authority for repo
 rules; this directory holds reusable packets and review artifact formats.
 
-Agent model tiers follow `AGENTS.md`: implementation and other non-review
-agents run on Sonnet at high effort; every review agent (Critic/Contrarian,
-security, design, re-review) runs on Haiku at extra-high (`xhigh`) effort.
+Claude agent teams follow the model tiers in `AGENTS.md`: implementation and
+other non-review agents run on Sonnet at high effort; every review agent runs
+on Haiku at extra-high (`xhigh`) effort.
 
 Use this execution packet for delegated work:
 

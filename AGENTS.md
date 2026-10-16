@@ -287,17 +287,16 @@ beyond a single narrow check.
   Review before issue creation, PR creation, merge, roadmap finalization or
   public superiority claims. Self-approval is not a substitute; if agents are
   unavailable, run separately named passes and state the limitation.
-- Agent model tiers (operator decision, 2026-10-16): spawn implementation
-  workers, planners, researchers and other non-review agents on Sonnet at high
-  effort; spawn every Critic/Contrarian, security, design and re-review agent on
-  Haiku at extra-high (`xhigh`) effort. Start a fresh reviewer for each review
-  round with the context it needs instead of resuming an earlier reviewer.
 - The critic checks unsupported claims, current official sources and dates for
   unstable technical/competitive claims, acceptance/proof gaps, trust/privacy/
   memory boundaries, scope and duplicate issues, docs/code/Project contradictions
   and false completion. Code claims need paths/lines; GitHub claims need IDs.
   Accept, reject with rationale, or defer findings to tracked work and record
   their disposition. No material finding may disappear silently.
+- Agent model tiers for Claude agent teams: spawn implementation workers,
+  planners, researchers and other non-review agents on Sonnet at high effort;
+  spawn every review agent, including Critic/Contrarian, security, design,
+  equivalence and follow-up reviews, on Haiku at extra-high (`xhigh`) effort.
 - Every PR-sized slice is reviewed before merge. Every substantive pushed
   update requires fresh independent cumulative or follow-up review before
   claiming review passed or asking to merge, including tests, docs truth and

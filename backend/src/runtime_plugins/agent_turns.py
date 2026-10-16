@@ -117,8 +117,10 @@ async def chat_runtime_status(host=None) -> dict:
     async with get_session() as db:
         row = (await inventory(db)).get(AGENT_LOOP_DOMAIN)
     if row is None:
-        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": None,
-                "reason": "agent_loop_owner_missing", "recovery": "Repair the runtime composition inventory."}
+        # Startup seeds the legacy owner row and only a fenced cutover writes a Cordis
+        # owner, so an inventory without the row has never been cut over.
+        return {"loop": LOOP_NAMES["legacy"], "route": "chat_agent", "owner_epoch": None, "reason": None,
+                "recovery": None}
     if row.state != "ready":
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch,
                 "reason": f"agent_loop_owner_{row.state}",
@@ -145,6 +147,13 @@ def chat_route(status: dict) -> str:
     if status["loop"] == LOOP_NAMES["legacy"]:
         return "legacy"
     return "blocked"
+
+
+def chat_runtime_status_text(loop: str) -> str:
+    """The WS status line names the actual loop and route."""
+    if loop == "cordis":
+        return "Seraph is using the governed OpenRouter chat runtime on the Cordis agent loop (cordis.agent-loop.v1)."
+    return "Seraph is using the governed OpenRouter chat runtime on the legacy agent loop (legacy.smolagents)."
 
 
 def chat_runtime_unavailable_message(status: dict) -> str:
@@ -205,6 +214,21 @@ async def memory_revocation_revision(db) -> str:
                     "latest": latest.isoformat() if latest else None})
 
 
+async def _token_bound(operator):
+    """A WS operator is re-authenticated by session id each message; bind it to that
+    session's current token so every Root check below is the exact REST check."""
+    if getattr(operator, "_token_hash", None):
+        return operator
+    from dataclasses import replace
+    from src.db.engine import get_session
+    from src.db.models import OperatorSession
+    async with get_session() as db:
+        root = await db.get(OperatorSession, operator.session_id, populate_existing=True)
+    if root is None or root.principal_id != operator.principal.principal_id or root.revoked_at is not None:
+        raise TurnBlocked("native_original_root_inactive")
+    return replace(operator, _token_hash=root.token_hash)
+
+
 # ---------------------------------------------------------------- the turn
 
 class CordisTurn:
@@ -246,6 +270,7 @@ class CordisTurn:
             raise TurnBlocked("delegation_pending_1020")
         if not host.admitting or host.reviewed is None:
             raise TurnBlocked("agent_turn_host_unavailable")
+        operator = await _token_bound(operator)
         max_steps = 1 if profile == "direct" else int(settings.agent_max_steps)
         candidate = {"schema_version": 1, "conversation_session_id": conversation_session_id, "message_id": message_id,
                      "profile": profile, "max_steps": max_steps,
@@ -253,9 +278,13 @@ class CordisTurn:
         job_id = "cordis-turn:" + _digest({"root": operator.session_id, "session": conversation_session_id,
                                            "message": message_id})
         deadline = datetime.now(timezone.utc) + timedelta(seconds=float(timeout_seconds)) + SETTLEMENT_GRACE
+        from src.auth.service import AuthFailure
         try:
             async with get_session() as db:
-                await _current_root(db, operator)
+                try:
+                    await _current_root(db, operator)
+                except AuthFailure as exc:
+                    raise TurnBlocked("native_original_root_inactive") from exc
                 current = await authenticate_principal(operator.principal.principal_id, db=db)
                 if current.session_id != operator.session_id or _grants(current.principal) != _grants(operator.principal):
                     raise TurnBlocked("native_original_policy_changed")

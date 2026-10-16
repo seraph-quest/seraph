@@ -30,6 +30,7 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
+from src.runtime_plugins.agent_turns import chat_runtime_status
 from src.runtime_plugins.bridge import cordis_host
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
@@ -655,6 +656,8 @@ def create_app() -> FastAPI:
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
             "cordis_runtime": await cordis_host.refresh_status(),
+            # Which agent loop chat runs on, from the agent-loop owner row (#1019).
+            "chat_runtime": await chat_runtime_status(cordis_host),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

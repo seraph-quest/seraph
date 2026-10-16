@@ -63,6 +63,9 @@ from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
+from src.runtime_plugins.agent_turns import (CordisTurn, TurnBlocked, chat_route, chat_runtime_status,
+                                             chat_runtime_unavailable_message, turn_blocked_message,
+                                             turn_failure_reason)
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.llm_runtime import (
     _finish_request,
@@ -656,6 +659,46 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         status="accepted",
     )
 
+    # The agent-loop owner row decides the loop; a blocked Cordis owner never falls back.
+    chat_status = await chat_runtime_status()
+    chat_loop = chat_route(chat_status)
+    if chat_loop == "blocked":
+        raise HTTPException(status_code=503, detail={"code": chat_status["reason"],
+                                                     "message": chat_runtime_unavailable_message(chat_status)})
+    cordis_turn: CordisTurn | None = None
+
+    async def admit_cordis_turn(profile_name: str, timeout_seconds: float) -> CordisTurn:
+        try:
+            turn, _replayed = await CordisTurn.admit(
+                operator=operator, conversation_session_id=session.id, message_id=ingress.message_id,
+                profile=profile_name, timeout_seconds=timeout_seconds)
+        except TurnBlocked as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.reason_code,
+                                                         "message": turn_blocked_message(exc.reason_code)}) from exc
+        if turn is None:
+            raise HTTPException(status_code=409, detail=chat_ingress_rejection_detail(
+                ingress, code="chat_message_duplicate", message="This message was already accepted for this session."))
+        return turn
+
+    async def cordis_blocked(reason: str) -> None:
+        if cordis_turn is not None:
+            await cordis_turn.settle("blocked", reason=reason)
+
+    async def settle_cordis(content: str, message_id: str, metadata_json: str | None, *, outcome="succeeded",
+                            reason=None, direct=False) -> None:
+        if direct:
+            try:
+                await cordis_turn.decide_direct(content)
+            except TurnBlocked as exc:
+                await cordis_turn.settle("blocked", reason=exc.reason_code)
+                raise HTTPException(status_code=503, detail={"code": exc.reason_code,
+                                                             "message": turn_blocked_message(exc.reason_code)}) from exc
+        if not await cordis_turn.settle(outcome, reason=reason, message={
+                "session_id": session.id, "role": "assistant", "content": content, "message_id": message_id,
+                "metadata_json": metadata_json}):
+            code = cordis_turn.blocked_reason or "agent_turn_settlement_refused"
+            raise HTTPException(status_code=503, detail={"code": code, "message": turn_blocked_message(code)})
+
     # Check onboarding status
     profile = await get_or_create_profile()
     is_onboarding = not profile.onboarding_completed
@@ -690,6 +733,8 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 },
             )
             raise HTTPException(status_code=503, detail=safe_detail)
+        if chat_loop == "cordis":
+            cordis_turn = await admit_cordis_turn("direct", min(settings.agent_chat_timeout, 60))
         llm_request_id = f"direct-rest:{session.id}:{started_at}"
         _register_request(llm_request_id)
         auth_tokens = set_runtime_context(
@@ -712,11 +757,13 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             response_text = await redact_secrets_in_text(response_text)
             assert_runtime_not_revoked()
         except RuntimeRevokedError as exc:
+            await cordis_blocked("native_original_root_inactive")
             raise HTTPException(
                 status_code=401,
                 detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
             ) from exc
         except asyncio.TimeoutError:
+            await cordis_blocked("agent_turn_timed_out")
             _mark_request_timed_out(llm_request_id)
             await log_agent_run_event(
                 session_id=session.id,
@@ -734,6 +781,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             )
             raise HTTPException(status_code=504, detail="OpenRouter chat timed out — try again")
         except NoCompliantModelRouteError as exc:
+            await cordis_blocked(NoCompliantModelRouteError.code)
             safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
             logger.info(
                 "Direct OpenRouter REST chat blocked before provider contact",
@@ -764,6 +812,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 },
             ) from exc
         except Exception as e:
+            await cordis_blocked("agent_turn_failed")
             logger.exception("Direct OpenRouter chat failed")
             safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
             await log_agent_run_event(
@@ -788,16 +837,17 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
 
         await _ensure_rest_authorized(http_request, revocation_scope)
         assistant_message_id = assistant_message_id_for_ingress(ingress)
-        await session_manager.add_message(
-            session.id,
-            "assistant",
-            response_text,
-            metadata_json=chat_assistant_metadata(
-                ingress,
+        direct_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
+        if cordis_turn is not None:
+            await settle_cordis(response_text, assistant_message_id, direct_metadata, direct=True)
+        else:
+            await session_manager.add_message(
+                session.id,
+                "assistant",
+                response_text,
+                metadata_json=direct_metadata,
                 message_id=assistant_message_id,
-            ),
-            message_id=assistant_message_id,
-        )
+            )
         await log_agent_run_event(
             session_id=session.id,
             transport="rest",
@@ -849,6 +899,9 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 exc_info=True,
             )
             agent = build_agent()
+    if chat_loop == "cordis":
+        cordis_turn = await admit_cordis_turn("onboarding" if is_onboarding else "agent", settings.agent_chat_timeout)
+        cordis_turn.attach(agent)
 
     revocation_scope = None
     try:
@@ -882,11 +935,13 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         response_text = await redact_secrets_in_text(response_text)
         assert_runtime_not_revoked()
     except RuntimeRevokedError as exc:
+        await cordis_blocked("native_original_root_inactive")
         raise HTTPException(
             status_code=401,
             detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
         ) from exc
     except ApprovalRequired as exc:
+        await cordis_blocked("approval_required")
         await _ensure_rest_authorized(http_request, revocation_scope)
         await approval_repository.merge_details(
             exc.approval_id,
@@ -926,22 +981,27 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         await _ensure_rest_authorized(http_request, revocation_scope)
         rendered = await redact_secrets_in_text(exc.render_message())
         clarification_message_id = assistant_message_id_for_ingress(ingress, suffix="clarification")
-        await session_manager.add_message(
-            session.id,
-            "assistant",
-            rendered,
-            metadata_json=chat_assistant_metadata(
-                ingress,
-                message_id=clarification_message_id,
-                display_role="clarification",
-                extra={
-                    "question": exc.question,
-                    "reason": exc.reason,
-                    "options": exc.options,
-                },
-            ),
+        clarification_metadata = chat_assistant_metadata(
+            ingress,
             message_id=clarification_message_id,
+            display_role="clarification",
+            extra={
+                "question": exc.question,
+                "reason": exc.reason,
+                "options": exc.options,
+            },
         )
+        if cordis_turn is not None:
+            await settle_cordis(rendered, clarification_message_id, clarification_metadata, outcome="blocked",
+                                reason="clarification_required")
+        else:
+            await session_manager.add_message(
+                session.id,
+                "assistant",
+                rendered,
+                metadata_json=clarification_metadata,
+                message_id=clarification_message_id,
+            )
         await audit_repository.log_event(
             session_id=session.id,
             actor="agent",
@@ -967,6 +1027,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             },
         )
     except NoCompliantModelRouteError as exc:
+        await cordis_blocked(NoCompliantModelRouteError.code)
         safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
         contacted = request_provider_contacted(llm_request_id)
         logger.info(
@@ -997,6 +1058,10 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             detail={"code": NoCompliantModelRouteError.code, **detail},
         ) from exc
     except asyncio.TimeoutError:
+        if cordis_turn is not None:
+            # Stop the worker at its next boundary.
+            cordis_turn.cancel()
+        await cordis_blocked("agent_turn_timed_out")
         _mark_request_timed_out(llm_request_id)
         logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)
         await log_agent_run_event(
@@ -1014,8 +1079,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         )
         raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
     except Exception as e:
+        turn_reason = turn_failure_reason(e) if cordis_turn is not None else None
+        await cordis_blocked(turn_reason or "agent_turn_failed")
         logger.exception("Agent execution failed")
-        safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
+        safe_detail = await redact_secrets_in_text(
+            turn_blocked_message(turn_reason) if turn_reason else f"Agent error: {e}")
         await log_agent_run_event(
             session_id=session.id,
             transport="rest",
@@ -1037,16 +1105,17 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
 
     await _ensure_rest_authorized(http_request, revocation_scope)
     assistant_message_id = assistant_message_id_for_ingress(ingress)
-    await session_manager.add_message(
-        session.id,
-        "assistant",
-        response_text,
-        metadata_json=chat_assistant_metadata(
-            ingress,
+    assistant_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
+    if cordis_turn is not None:
+        await settle_cordis(response_text, assistant_message_id, assistant_metadata)
+    else:
+        await session_manager.add_message(
+            session.id,
+            "assistant",
+            response_text,
+            metadata_json=assistant_metadata,
             message_id=assistant_message_id,
-        ),
-        message_id=assistant_message_id,
-    )
+        )
     await log_agent_run_event(
         session_id=session.id,
         transport="rest",

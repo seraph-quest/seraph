@@ -156,6 +156,23 @@ beforeEach(() => {
 
 const LOAD_TIMEOUT = 5000;
 
+/**
+ * Choose an existing routine once the owner-bound list has loaded. The
+ * selector renders before listRoutines settles (disabled, placeholder only);
+ * a change fired then targets a missing option, so the select stays "" and the
+ * selection is silently dropped.
+ */
+async function selectExistingRoutine(routineId: string): Promise<HTMLSelectElement> {
+  const selector = await screen.findByLabelText<HTMLSelectElement>("Existing reviewed procedure");
+  await waitFor(() => {
+    expect(Array.from(selector.options, (option) => option.value)).toContain(routineId);
+    expect(selector).toBeEnabled();
+  });
+  fireEvent.change(selector, { target: { value: routineId } });
+  expect(selector).toHaveValue(routineId);
+  return selector;
+}
+
 describe("ProcedureV2Review", () => {
   it("requires an explicit preview and never renders a private source body", async () => {
     vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
@@ -422,7 +439,7 @@ describe("ProcedureV2Review", () => {
     vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(serverPendingRoutine);
 
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} pendingApprovals={[{ id: "approval-server", status: "approved", tool_name: "guardian:routine-install", summary: "Stale list approval" }]} />);
-    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: serverPendingRoutine.id } });
+    await selectExistingRoutine(serverPendingRoutine.id);
     expect(await screen.findByText(/pending-list status approved/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Install with exact approval" })).toBeDisabled();
     expect(lifecycle).not.toHaveBeenCalled();
@@ -1094,7 +1111,7 @@ describe("ProcedureV2Review", () => {
     }));
 
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
-    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: activeRoutine.id } });
+    await selectExistingRoutine(activeRoutine.id);
     // Selecting loads and renders the full routine review (~0.5s idle, more on
     // shared CI runners); the default 1s findBy budget made this flaky.
     await screen.findByRole("button", { name: "Pause future invocations" }, { timeout: LOAD_TIMEOUT });
@@ -1364,7 +1381,7 @@ describe("ProcedureV2Review", () => {
 
     render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
     await screen.findByRole("option", { name: /Reusable public check.*paused/ });
-    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: pausedRoutine.id } });
+    await selectExistingRoutine(pausedRoutine.id);
     const resume = await screen.findByRole("button", { name: "Resume procedure" });
     fireEvent.click(resume);
     await waitFor(() => expect(lifecycle).toHaveBeenCalledWith(pausedRoutine.id, "activate", {
@@ -1530,13 +1547,15 @@ describe("ProcedureV2Review", () => {
 
   it("does not publish a delayed activation readback after the owner session changes", async () => {
     const pausedRoutine = { ...existingRoutine, state: "paused" } as ProcedureV2Routine;
-    vi.spyOn(procedureV2Api, "listRoutines").mockResolvedValue([pausedRoutine]);
+    // Settle the list on a later macrotask, as a loaded CI runner can: the
+    // selection must wait for it rather than race the initial render.
+    vi.spyOn(procedureV2Api, "listRoutines").mockImplementation(() => new Promise((resolve) => { setTimeout(() => resolve([pausedRoutine]), 30); }));
     vi.spyOn(procedureV2Api, "getRoutine").mockResolvedValue(pausedRoutine);
     let resolveActivation!: (value: ProcedureV2Routine) => void;
     const lifecycle = vi.spyOn(procedureV2Api, "lifecycle").mockReturnValue(new Promise((resolve) => { resolveActivation = resolve; }));
 
     const view = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
-    fireEvent.change(await screen.findByLabelText("Existing reviewed procedure"), { target: { value: pausedRoutine.id } });
+    await selectExistingRoutine(pausedRoutine.id);
     fireEvent.click(await screen.findByRole("button", { name: "Resume procedure" }));
     view.rerender(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-2" goals={[goal]} />);
     await act(async () => { resolveActivation({ ...pausedRoutine, state: "active", current_version: 2, revision: pausedRoutine.revision + 1 }); });
@@ -1659,7 +1678,7 @@ describe("ProcedureV2Review", () => {
     listRoutines.mockResolvedValueOnce([existingRoutine]).mockRejectedValueOnce(new Error("routine metadata unavailable"));
     const view = render(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-1" goals={[goal]} />);
     const selector = await screen.findByLabelText("Existing reviewed procedure");
-    expect(screen.getByRole("option", { name: /Reusable public check/ })).toBeInTheDocument();
+    expect(await within(selector).findByRole("option", { name: /Reusable public check/ })).toBeInTheDocument();
     view.rerender(<ProcedureV2Review ownerPrincipalId="operator:one" ownerSessionId="session-2" goals={[goal]} />);
     await waitFor(() => expect(screen.queryByRole("option", { name: /Reusable public check/ })).not.toBeInTheDocument());
     expect(await screen.findByText("Existing procedure unavailable: routine metadata unavailable")).toBeInTheDocument();

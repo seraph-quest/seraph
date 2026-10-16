@@ -166,6 +166,32 @@ def test_production_mount_preflight_fails_closed_without_mountinfo(tmp_path):
     assert mount_check["status"] == "invalid"
 
 
+def test_frontend_dev_server_binds_loopback_unless_docker_dev_opts_in():
+    import re
+
+    vite_config = (ROOT / "frontend" / "vite.config.ts").read_text()
+    compose = (ROOT / "docker-compose.dev.yaml").read_text()
+
+    # server.host is either a loopback literal or a variable whose fallback is
+    # loopback and whose override is a non-VITE_ (server-only) env name.
+    host = re.search(r"\bserver\s*:\s*\{[^}]*?\bhost\s*:\s*([^,\n]+)", vite_config, re.S)
+    assert host is not None
+    expression = host.group(1).strip()
+    if not re.fullmatch(r"[\"'](?:127\.0\.0\.1|localhost)[\"']", expression):
+        binding = re.search(rf"\b{re.escape(expression)}\s*=\s*([^;\n]+)", vite_config)
+        assert binding is not None, expression
+        env_names = re.findall(r"process\.env\.([A-Z0-9_]+)", binding.group(1))
+        assert env_names and not any(name.startswith("VITE_") for name in env_names)
+        assert re.search(r"(?:\|\||\?\?)\s*[\"'](?:127\.0\.0\.1|localhost)[\"']\s*$", binding.group(1).strip())
+    assert not re.search(r"\bhost\s*:\s*[\"']0\.0\.0\.0[\"']", vite_config)
+
+    frontend = compose[compose.index("frontend-dev:"):]
+    assert re.search(r"\bSERAPH_DEV_SERVER_HOST\s*:\s*[\"']?0\.0\.0\.0", frontend)
+    published = re.findall(r"^\s*-\s*[\"']?([0-9.:]+)[\"']?\s*(?:#.*)?$", compose, re.M)
+    port_mappings = [item for item in published if item.count(":") >= 1]
+    assert port_mappings and all(item.startswith("127.0.0.1:") for item in port_mappings)
+
+
 def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
     manage = (ROOT / "manage.sh").read_text()
     env = (ROOT / "env.prod.example").read_text()

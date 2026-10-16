@@ -16,7 +16,6 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
-os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 os.environ.setdefault("CAPABILITY_JOURNAL_SECRET", "test-capability-journal-secret")
 
 

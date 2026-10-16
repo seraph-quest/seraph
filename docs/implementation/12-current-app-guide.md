@@ -985,7 +985,10 @@ costs, and embedding usefulness remain externally unverified.
   A switched-off job makes no model call and records `skipped` with reason
   `disabled_by_operator` in the scheduler audit and the panel; end-of-day
   reports still run deterministically without analysis. Toggles persist in
-  `background-inference-settings.json` in the workspace. An unreadable file
+  `background-inference-settings.json` in the workspace. It is optional
+  canonical workspace state: workspace backup and restore carry it when it
+  exists, and an archive taken before any toggle was saved restores with every
+  job at its default. An unreadable file
   pauses scheduled model calls and reports
   `background_inference_settings_unreadable`; a single-toggle save is then
   refused (HTTP 409) and the panel asks for every job's value plus an explicit
@@ -2356,13 +2359,53 @@ target. Local source/output and current policy metadata reads inside selected
 SQLite writers are bounded by their contracts; their lock duration and physical
 filesystem race limits remain relevant.
 
+### Quarantined downloads and selected desktop drafts (#1014)
+
+[ADR-034](./decisions/034-selected-desktop-draft-actions.md) owns this target.
+`POST /api/browser/downloads` takes a request key and at most two exact public
+HTTPS file URLs (port 443), plus the exact redirect targets allowed for them.
+A JavaScript-free isolated Chromium context reaches each URL in the shared
+browser lane. The bytes come from Seraph's own pinned, bounded transport
+(public addresses, 10 MiB) and are identified from their content: PDF, DOCX,
+XLSX, CSV or plain text. These stop before adoption: a wrong claimed type,
+executables, HTML or script-like text, OOXML macros, embedded objects or
+external links, an out-of-grant redirect, oversized bytes and the deadline.
+Files land read-only in a private quarantine with their source URL, redirect
+chain and claimed type. Replaying the same request key returns the recorded
+outcome without contacting the site again. `GET /api/browser/downloads/{artifact_id}`
+shows metadata and an inert preview marked untrusted; `DELETE` revokes the file.
+Seraph never opens or runs a download. Uploads, file choosers and file controls
+stay refused before any page event or network transfer. Authenticated-session
+downloads wait for #1013.
+
+Desktop drafts run in the local daemon only. Commands:
+`python daemon/desktop_drafts.py probe`, `inspect`, and
+`replace --replacement-file FILE [--countdown 5]`.
+
+To replace text, run `replace`, focus the target window and select the text
+during the countdown. The daemon then shows the exact selected text and
+replacement, with control, bidi and zero-width characters escaped and their
+byte and code-point counts. Type the shown digest prefix in the same terminal,
+then return focus to the target window. The write happens only if the same
+window, control, text and selection are back. Afterwards it reads the text
+back. Any change aborts with no write. An uncertain write is reported for
+inspection and never reapplied.
+
+Allowed controls are plain editable text roles only. A non-exhaustive deny list
+refuses terminals, passwords, browsers, password managers, authentication
+prompts, payment fields and system settings.
+
+Linux needs `gir1.2-atspi-2.0`, a session bus and accessibility enabled;
+otherwise the probe reports unavailable. macOS reports unavailable. The paired
+edge status carries the probe; the core never dispatches desktop writes.
+
 ### Profiled public form preparation (#1012)
 
 `browser.interact.v2` adds a separate registered HTTPBin public form preview
 under [ADR-029](./decisions/029-profiled-browser-interactions.md). The capability
 is **Partial**: bounded public-form preparation and preview are available;
-authenticated exact transactions (#1013), downloads and selected local desktop
-draft actions (#1014) remain **Planned**.
+authenticated exact transactions (#1013) remain **Planned**. Quarantined public
+downloads and selected local desktop draft actions (#1014) are described below.
 The existing public browser v1 remains navigate/extract only. From the public
 browser Work form, explicitly open the HTTPBin preparation controls, select a
 current Goal, acknowledge one public document contact/site access logging, and

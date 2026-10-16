@@ -42,12 +42,24 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+# File inputs and uploads stay unsupported (C5.3): page handlers can transfer
+# bytes at file selection, so these are refused before any page event.
+UPLOAD_ACTION_KINDS = frozenset({"upload", "set_input_files", "file_select", "choose_file", "attach_file"})
+
+
 class BrowserActionV2(Strict):
     schema_version: Literal[2] = 2
     kind: Literal["navigate", "extract", "click", "fill", "select", "check", "wait"]
     locator_ref: str | None = Field(default=None, pattern=r"^node-[a-f0-9]{32}$")
     expected_page_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_value_ref: str | None = Field(default=None, pattern=r"^value-[a-f0-9]{32}$")
+
+    @model_validator(mode="before")
+    @classmethod
+    def uploads_unsupported(cls, value):
+        if isinstance(value, dict) and value.get("kind") in UPLOAD_ACTION_KINDS:
+            raise ValueError("browser_upload_unsupported")
+        return value
 
     @field_validator("schema_version", mode="before")
     @classmethod

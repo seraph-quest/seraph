@@ -415,11 +415,13 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                     # The first exact output completed with known actual debt.
                     # Overrun freezes unfinished work; it must not erase that
                     # already completed child's result or unclipped charge.
+                    # Both funded slots race for the single remote lane, so
+                    # the first contact is whichever slot the broker admitted
+                    # first; bind the completion to that contacted operation.
                     assert len(completed) == 1 and completed[0].job_kind == "readonly_research_child"
-                    # Both children race for the sole remote lane, so either
-                    # slot may be first: the completed child is the contacted one.
-                    assert "remote:" + completed[0].run_identity == contacted[0]["operation_id"]
-                    assert completed[0].finished_at is not None
+                    assert completed[0].run_identity == contacted[0]["job_id"] and completed[0].finished_at is not None
+                    assert completed[0].run_identity.endswith((":child:0", ":child:1"))
+                    assert sibling["job_id"] != contacted[0]["job_id"]
                 else:
                     assert not completed
                 assert next(row for row in rows if row.job_kind == "research_dossier").status != "succeeded"

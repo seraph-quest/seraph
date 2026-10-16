@@ -2141,8 +2141,10 @@ async def init_db() -> None:
         # Seed the fixed Cordis composition inventory only into an empty table
         # (fresh or pre-feature workspace). A partial inventory stays partial
         # so missing mandatory owners keep denying service invocations.
-        from src.runtime_plugins.ownership import seed_legacy_inventory_sync
+        from src.runtime_plugins.ownership import migrate_state_domain_sync, seed_legacy_inventory_sync
         await conn.run_sync(seed_legacy_inventory_sync)
+        # Exact pre-#1024 inventories gain the Python-hosted state domain.
+        await conn.run_sync(migrate_state_domain_sync)
 
     # Reconcile legacy Done-parent links once the additive board schema exists.
     # The helper only materializes proof-backed handoffs; rows without an

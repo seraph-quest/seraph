@@ -33,8 +33,9 @@ import hashlib
 import json
 import logging
 
-from .ownership import (DOMAINS, RECOVERY_EVENT, CompositionBindingError, CompositionDependency, _checked_row,
-                        composition_writer, inventory, legacy_composition_digest, transition_owner)
+from .ownership import (DOMAINS, PYTHON_HOSTED_DOMAINS, RECOVERY_EVENT, CompositionBindingError,
+                        CompositionDependency, _checked_row, composition_writer, inventory,
+                        legacy_composition_digest, transition_owner)
 
 logger = logging.getLogger(__name__)
 CUTOVER_EVENT = "runtime_composition_domain_cutover"
@@ -58,7 +59,7 @@ def register_cutover_domain(domain: str, *, prerequisites: tuple[str, ...] = ())
     cutover order. Registering the same domain twice is refused.
     """
     known = {entry.domain for entry in _MANIFEST}
-    if domain not in DOMAINS or domain in known:
+    if domain not in DOMAINS or domain in known or domain in PYTHON_HOSTED_DOMAINS:
         raise CompositionBindingError("composition_cutover_domain_invalid")
     if any(item not in known for item in prerequisites):
         raise CompositionBindingError("composition_cutover_prerequisite_unknown")

@@ -236,7 +236,7 @@ class GuardianTurn:
         from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
         from .bridge import cordis_host
         from .ownership import CompositionBindingError, bind_invocation
-        from .service_jobs import _jobs
+        from .service_jobs import _grants, _jobs
         host, jobs = host or cordis_host, _jobs(jobs)
         try:
             require_unattended(preset_id)
@@ -503,10 +503,6 @@ def _operator_root(principal):
             or not principal.principal_id or not principal.operator_session_id):
         return None
     return principal
-
-
-def _grants(principal) -> list[str]:
-    return sorted(str(getattr(grant, "value", grant)) for grant in principal.grants)
 
 
 def _spec_owner(owner: dict) -> dict:

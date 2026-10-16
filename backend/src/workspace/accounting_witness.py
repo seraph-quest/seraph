@@ -56,12 +56,30 @@ def assert_deployment_binding(workspace):
     return receipt
 
 
+# Ledger digest v2 (#1086). Each reservation's content hashes to a private,
+# derived ``ledger_row_digest``; the account digest covers the account record
+# (including its running totals) and the ordered root of those row digests.
+# Everything stays recomputable from DB content alone, so maintenance tools
+# fully re-verify any generation. v1 digests (no prefix) remain verifiable;
+# the runtime migrates them forward. v2 is forward-only: older builds see a
+# ``v2:`` digest as a continuity failure and fail closed.
+LEDGER_V2_PREFIX = "v2:"
+ROW_DIGEST_COLUMN = "ledger_row_digest"
+TOTALS_COLUMN = "ledger_totals_json"
+_DATETIME_FIELDS = ("created_at", "updated_at", "deadline_at", "contact_started_at")
+_OPEN_STATES = ("reserved", "contact_started", "unknown")
+_OVERRUN_FIELDS = ("operation_id", "sequence", "revision", "actual_cost_microusd", "bound_microusd",
+    "job_id", "runtime_path", "period_id")
+
+
 def ledger_record(values):
     record = dict(values)
-    # Canonical writers own this unhashed private lookup projection. Raw
-    # SQLite reads and archived checkpoints retain the existing financial wire.
+    # Canonical writers own these unhashed private projections (a lookup hint
+    # and the derived row digest). Raw SQLite reads and archived checkpoints
+    # retain the existing financial wire.
     record.pop("group_lookup_key", None)
-    for field in ("created_at", "updated_at", "deadline_at", "contact_started_at"):
+    record.pop(ROW_DIGEST_COLUMN, None)
+    for field in _DATETIME_FIELDS:
         value = record.get(field)
         if isinstance(value, str):
             record[field] = datetime.fromisoformat(value).isoformat()
@@ -70,11 +88,162 @@ def ledger_record(values):
     return record
 
 
-def ledger_digest(account, rows):
+def _v2_record(values):
+    record = dict(values)
+    record.pop("group_lookup_key", None)
+    record.pop(ROW_DIGEST_COLUMN, None)
+    for field in _DATETIME_FIELDS:
+        value = record.get(field)
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value)
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                value = value.astimezone(timezone.utc).replace(tzinfo=None)
+            record[field] = value.isoformat()
+    return record
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def is_v2_digest(digest):
+    return isinstance(digest, str) and digest.startswith(LEDGER_V2_PREFIX)
+
+
+def valid_row_digest(value):
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def row_digest(values):
+    """Digest of one reservation's financial content (private columns excluded)."""
+    return hashlib.sha256(_canonical(_v2_record(values)).encode()).hexdigest()
+
+
+class RowsRoot:
+    """Incremental root over row digests fed in ``operation_id`` order."""
+
+    def __init__(self):
+        self._hash = hashlib.sha256()
+        self.count = 0
+
+    def add(self, digest):
+        if not valid_row_digest(digest):
+            raise ProductionWorkspaceReconciliationError("accounting row digest invalid")
+        self._hash.update(digest.encode())
+        self.count += 1
+
+    def hexdigest(self):
+        final = self._hash.copy()
+        final.update(f":{self.count}".encode())
+        return final.hexdigest()
+
+
+def rows_root(digests_in_order):
+    root = RowsRoot()
+    for digest in digests_in_order:
+        root.add(digest)
+    return root.hexdigest()
+
+
+def v2_ledger_digest(account, root):
+    owner = _v2_record(account)
+    owner.pop("ledger_digest", None)
+    return LEDGER_V2_PREFIX + hashlib.sha256(_canonical({"account": owner, "rows_root": root}).encode()).hexdigest()
+
+
+def _v1_ledger_digest(account, rows):
     owner = ledger_record(account)
     owner.pop("ledger_digest", None)
+    owner.pop(TOTALS_COLUMN, None)
     payload = {"account": owner, "operations": [ledger_record(row) for row in sorted(rows, key=lambda row: row["operation_id"])]}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    return hashlib.sha256(_canonical(payload).encode()).hexdigest()
+
+
+def ledger_digest(account, rows):
+    """Recompute the account digest from content, in the scheme the account uses."""
+    if not is_v2_digest(account.get("ledger_digest")):
+        return _v1_ledger_digest(account, rows)
+    ordered = sorted(rows, key=lambda row: row["operation_id"])
+    return v2_ledger_digest(account, rows_root(row_digest(row) for row in ordered))
+
+
+def stored_row_digest_mismatch(rows):
+    """Raw rows whose stored derived digest disagrees with their content."""
+    return [row["operation_id"] for row in rows
+        if row.get(ROW_DIGEST_COLUMN) is not None and row.get(ROW_DIGEST_COLUMN) != row_digest(row)]
+
+
+def empty_ledger_totals():
+    return {"schema_version": 1, "open_bound_by_state": {state: 0 for state in _OPEN_STATES},
+        "owner_open_bound": {}, "settled_by_period": {}, "owner_settled_by_period": {},
+        "overruns": {}, "rows_by_period": {}, "row_count": 0}
+
+
+def apply_ledger_contribution(totals, row, sign):
+    """Add (sign=1) or remove (sign=-1) one reservation's held amounts."""
+    state, owner = row["state"], row["owner_id"]
+    if state in _OPEN_STATES:
+        bound = int(row["bound_microusd"])
+        totals["open_bound_by_state"][state] += sign * bound
+        totals["owner_open_bound"][owner] = totals["owner_open_bound"].get(owner, 0) + sign * bound
+    elif state == "settled":
+        actual, period = int(row["actual_cost_microusd"] or 0), row["period_id"]
+        totals["settled_by_period"][period] = totals["settled_by_period"].get(period, 0) + sign * actual
+        by_owner = totals["owner_settled_by_period"].setdefault(owner, {})
+        by_owner[period] = by_owner.get(period, 0) + sign * actual
+        if actual > int(row["bound_microusd"]):
+            if sign > 0:
+                totals["overruns"][row["operation_id"]] = {field: row[field] for field in _OVERRUN_FIELDS}
+            else:
+                totals["overruns"].pop(row["operation_id"], None)
+    totals["row_count"] += sign
+    period = row["period_id"]
+    totals["rows_by_period"][period] = totals["rows_by_period"].get(period, 0) + sign
+    _drop_zeros(totals)
+
+
+def _drop_zeros(totals):
+    for period in [period for period, value in totals["rows_by_period"].items() if value == 0]:
+        del totals["rows_by_period"][period]
+    for owner in [owner for owner, value in totals["owner_open_bound"].items() if value == 0]:
+        del totals["owner_open_bound"][owner]
+    for period in [period for period, value in totals["settled_by_period"].items() if value == 0]:
+        del totals["settled_by_period"][period]
+    for owner, periods in list(totals["owner_settled_by_period"].items()):
+        for period in [period for period, value in periods.items() if value == 0]:
+            del periods[period]
+        if not periods:
+            del totals["owner_settled_by_period"][owner]
+
+
+def ledger_totals(rows):
+    """Running totals recomputed from every row (the full-verification oracle)."""
+    totals = empty_ledger_totals()
+    for row in rows:
+        apply_ledger_contribution(totals, ledger_record(row), 1)
+    return totals
+
+
+def held_microusd(totals, period, owner=None):
+    """Open liabilities plus settlements at or after ``period`` (``held()``)."""
+    if owner is None:
+        open_bound = sum(totals["open_bound_by_state"].values())
+        settled = totals["settled_by_period"]
+    else:
+        open_bound = totals["owner_open_bound"].get(owner, 0)
+        settled = totals["owner_settled_by_period"].get(owner, {})
+    return open_bound + sum(value for key, value in settled.items() if key >= period)
+
+
+def totals_period_rows(totals):
+    """The only row input ``period_state`` reads: the highest row period."""
+    return [{"period_id": max(totals["rows_by_period"])}] if totals["rows_by_period"] else []
+
+
+def totals_overrun_rows(totals):
+    """The only rows ``unreviewed_overruns`` can return: settled overruns."""
+    return [{**row, "state": "settled"} for row in totals["overruns"].values()]
 
 
 def witness(account):

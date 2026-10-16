@@ -64,8 +64,35 @@ def _retained_job_values(source, target, account):
     return values
 
 
+def verify_ledger_content(account, raw_rows):
+    """Full content check shared by the maintenance tools (v1 or v2 ledgers).
+
+    The digest is recomputed from row content; for v2, every stored derived
+    row digest must also match its content and the sealed running totals must
+    equal the totals recomputed from every row.
+    """
+    from src.workspace.accounting_witness import (
+        TOTALS_COLUMN, is_v2_digest, ledger_digest, ledger_record, ledger_totals, stored_row_digest_mismatch,
+    )
+    from src.workspace.production import ProductionWorkspaceReconciliationError
+    raw_rows = [dict(row) for row in raw_rows]
+    rows = [ledger_record(row) for row in raw_rows]
+    if ledger_digest(account, rows) != account["ledger_digest"]:
+        return None
+    if is_v2_digest(account["ledger_digest"]):
+        if stored_row_digest_mismatch(raw_rows):
+            raise ProductionWorkspaceReconciliationError("accounting continuity row digest mismatch")
+        try:
+            sealed = json.loads(account.get(TOTALS_COLUMN) or "")
+        except ValueError as exc:
+            raise ProductionWorkspaceReconciliationError("accounting continuity totals unavailable") from exc
+        if sealed != ledger_totals(rows):
+            raise ProductionWorkspaceReconciliationError("accounting continuity totals mismatch")
+    return rows
+
+
 def verify_accounting_generation(database, expected):
-    from src.workspace.accounting_witness import ledger_record, ledger_digest, witness
+    from src.workspace.accounting_witness import ledger_record, witness
     from src.workspace.production import ProductionWorkspaceReconciliationError
     if not database.is_file() or database.is_symlink():
         raise ProductionWorkspaceReconciliationError("accounting continuity database unavailable")
@@ -75,8 +102,9 @@ def verify_accounting_generation(database, expected):
         if len(owners) != 1:
             raise ProductionWorkspaceReconciliationError("accounting continuity owner unavailable")
         account = ledger_record(owners[0])
-        rows = [ledger_record(row) for row in db.execute("SELECT * FROM inference_cost_reservations")]
-        if witness(account) != expected or ledger_digest(account, rows) != account["ledger_digest"]:
+        rows = verify_ledger_content(account, db.execute("SELECT * FROM inference_cost_reservations").fetchall()) \
+            if witness(account) == expected else None
+        if rows is None:
             raise ProductionWorkspaceReconciliationError("accounting continuity latest ledger unavailable")
         return account, rows
 
@@ -158,6 +186,7 @@ def reconcile_accounting_checkpoint(*, root: Path, registry) -> dict[str, object
     from src.workspace.lifecycle import _require_production_fence
     from src.workspace.production import ProductionWorkspaceReconciliationError, read_lifecycle_receipt, read_accounting_checkpoint
     from src.workspace.accounting_witness import maintenance_accounting_lock as _continuity_lock, ledger_digest as _ledger_digest, witness as _witness, ledger_record
+    from src.workspace.accounting_witness import ROW_DIGEST_COLUMN, row_digest as _row_digest
     _require_production_fence(registry)
     with _continuity_lock(root.resolve()) as workspace:
         receipt = read_lifecycle_receipt(workspace) or {}
@@ -175,8 +204,9 @@ def reconcile_accounting_checkpoint(*, root: Path, registry) -> dict[str, object
             if len(owner_rows) > 1:
                 raise ProductionWorkspaceReconciliationError("accounting checkpoint owner ambiguous")
             old_owner = ledger_record(owner_rows[0]) if owner_rows else None
-            old_rows = [ledger_record(row) for row in connection.execute("SELECT * FROM inference_cost_reservations")]
-            if old_owner is not None and _witness(old_owner) == checkpoint["witness"] and _ledger_digest(old_owner, old_rows) == old_owner["ledger_digest"]:
+            old_raw = connection.execute("SELECT * FROM inference_cost_reservations").fetchall()
+            old_rows = [ledger_record(row) for row in old_raw]
+            if old_owner is not None and _witness(old_owner) == checkpoint["witness"] and verify_ledger_content(old_owner, old_raw) is not None:
                 return {"status": "already_reconciled", "revision": old_owner["revision"], "execution_authority_changed": False}
             if (checkpoint.get("base") != (_witness(old_owner) if old_owner is not None else None)
                 or (old_owner is not None and _ledger_digest(old_owner, old_rows) != old_owner["ledger_digest"])):
@@ -198,15 +228,19 @@ def reconcile_accounting_checkpoint(*, root: Path, registry) -> dict[str, object
                 for value in values:
                     fields = dict(value)
                     allowed = {entry[1] for entry in connection.execute(f'PRAGMA table_info("{table}")')}
-                    private = {"group_lookup_key"} if table == "inference_cost_reservations" else set()
+                    private = {"group_lookup_key", ROW_DIGEST_COLUMN} if table == "inference_cost_reservations" else set()
                     if set(fields) != allowed - private:
                         raise ProductionWorkspaceReconciliationError("accounting checkpoint columns invalid")
-                    if private & allowed:
+                    if "group_lookup_key" in allowed and table == "inference_cost_reservations":
                         # Maintenance remains dependency-free. Startup's
                         # serialized migration classifies this private NULL;
                         # indexed readers block until then. Financial bytes,
                         # revisions, witness and evidence are unchanged.
                         fields["group_lookup_key"] = None
+                    if ROW_DIGEST_COLUMN in allowed and table == "inference_cost_reservations":
+                        # The derived digest is recomputed from the content
+                        # being written, whichever scheme the target uses.
+                        fields[ROW_DIGEST_COLUMN] = _row_digest(fields)
                     names = ",".join('"' + name + '"' for name in fields)
                     connection.execute(f'INSERT OR REPLACE INTO "{table}" ({names}) VALUES ({",".join("?" for _ in fields)})', tuple(fields.values()))
             connection.commit()
@@ -220,6 +254,7 @@ def retain_inference_accounting(*, active: Path, target: Path, database_path: st
     # Only the existing maintenance-fenced lifecycle calls this helper. Its
     # external witness also fences every live ledger mutation.
     from src.workspace.accounting_witness import maintenance_accounting_lock as _continuity_lock, ledger_digest as _ledger_digest, witness as _witness, ledger_record
+    from src.workspace.accounting_witness import ROW_DIGEST_COLUMN, TOTALS_COLUMN, row_digest as _row_digest
     from src.workspace.production import ProductionWorkspace, ProductionWorkspaceReconciliationError, read_lifecycle_receipt
 
     source_path, target_path = active / database_path, target / database_path
@@ -261,14 +296,24 @@ def retain_inference_accounting(*, active: Path, target: Path, database_path: st
                 raise ProductionWorkspaceReconciliationError("accounting continuity owner ambiguous")
             account = ledger_record(owner_rows[0])
             operations = source.execute("SELECT * FROM inference_cost_reservations").fetchall()
-            rows = [ledger_record(row) for row in operations]
-            if receipt.get("inference_accounting") != _witness(account) or _ledger_digest(account, rows) != account["ledger_digest"]:
+            rows = verify_ledger_content(account, operations) if receipt.get("inference_accounting") == _witness(account) else None
+            if rows is None:
                 raise ProductionWorkspaceReconciliationError("accounting continuity latest ledger unavailable")
             destination.execute("BEGIN IMMEDIATE")
             target_tables = {row[0] for row in destination.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table in ("inference_accounting_owners", "inference_cost_reservations"):
                 if table not in target_tables:
                     ddl = source.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
+                    destination.execute(ddl)
+            # An older target schema gains the #1086 v2 columns, so the
+            # retained (possibly v2) ledger and its sealed totals copy intact.
+            for table, column, ddl in (
+                ("inference_accounting_owners", TOTALS_COLUMN, f"ALTER TABLE inference_accounting_owners ADD COLUMN {TOTALS_COLUMN} VARCHAR NOT NULL DEFAULT ''"),
+                ("inference_cost_reservations", ROW_DIGEST_COLUMN, f"ALTER TABLE inference_cost_reservations ADD COLUMN {ROW_DIGEST_COLUMN} VARCHAR"),
+            ):
+                source_columns = {entry[1] for entry in source.execute(f'PRAGMA table_info("{table}")')}
+                target_columns = {entry[1] for entry in destination.execute(f'PRAGMA table_info("{table}")')}
+                if column in source_columns and column not in target_columns:
                     destination.execute(ddl)
             prior = destination.execute("SELECT * FROM inference_accounting_owners").fetchall()
             if prior and (len(prior) != 1 or prior[0]["deployment_id"] != account["deployment_id"] or prior[0]["revision"] > account["revision"]):
@@ -296,15 +341,18 @@ def retain_inference_accounting(*, active: Path, target: Path, database_path: st
                 destination.execute(f'DELETE FROM "{table}"')
                 if values:
                     allowed = {entry[1] for entry in destination.execute(f'PRAGMA table_info("{table}")')}
-                    private = {"group_lookup_key"} if table == "inference_cost_reservations" else set()
+                    private = {"group_lookup_key", ROW_DIGEST_COLUMN} if table == "inference_cost_reservations" else set()
                     records = []
                     for value in values:
                         fields = dict(value)
                         if set(fields) - private != allowed - private:
                             raise ProductionWorkspaceReconciliationError("accounting continuity columns invalid")
                         fields.pop("group_lookup_key", None)
-                        if private & allowed:
+                        fields.pop(ROW_DIGEST_COLUMN, None)
+                        if "group_lookup_key" in allowed and table == "inference_cost_reservations":
                             fields["group_lookup_key"] = None
+                        if ROW_DIGEST_COLUMN in allowed and table == "inference_cost_reservations":
+                            fields[ROW_DIGEST_COLUMN] = _row_digest(fields)
                         records.append(fields)
                     columns = list(records[0])
                     names = ",".join('"' + column + '"' for column in columns)

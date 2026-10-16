@@ -224,6 +224,23 @@ async def _ensure_inference_group_lookup(conn) -> None:
         "ON inference_cost_reservations (owner_id, group_lookup_key)")
 
 
+async def _ensure_inference_ledger_v2_columns(conn) -> None:
+    """Add the #1086 derived row digest and running totals (filled by the ledger writer)."""
+    reservation_columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_cost_reservations)")).fetchall()}
+    if reservation_columns and "ledger_row_digest" not in reservation_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_cost_reservations ADD COLUMN ledger_row_digest VARCHAR")
+    if reservation_columns:
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_inference_cost_reservations_row_digest "
+            "ON inference_cost_reservations (operation_id, ledger_row_digest)")
+    owner_columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_accounting_owners)")).fetchall()}
+    if owner_columns and "ledger_totals_json" not in owner_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_accounting_owners ADD COLUMN ledger_totals_json VARCHAR NOT NULL DEFAULT ''")
+
+
 async def _ensure_legacy_columns(conn) -> None:
     """Backfill columns for older local SQLite databases."""
     async def _table_columns(table_name: str) -> set[str]:
@@ -1957,6 +1974,7 @@ async def init_db() -> None:
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
         await _ensure_inference_group_lookup(conn)
+        await _ensure_inference_ledger_v2_columns(conn)
         await _ensure_operator_session_columns(conn)
         await _ensure_vault_owner(conn)
         await _ensure_operator_principals(conn)

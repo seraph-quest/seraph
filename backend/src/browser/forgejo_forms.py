@@ -156,7 +156,9 @@ def exact_readback(value, target, exact_id):
             or repository["id"] != target["repository_id"]
             or repository.get("full_name") != target["owner"] + "/" + target["repository"]):
             raise ForgejoError("forgejo_form_readback_unknown")
+    # Pinned v15.0.9 serializes a comment's parent issue_url as the issue's web
+    # URL (/{owner}/{repo}/issues/{index}), which is the reviewed page path.
     elif (value["id"] != exact_id or value.get("pull_request_url") != ""
-        or value.get("issue_url") != "https://codeberg.org" + target["issue_api_path"]):
+        or value.get("issue_url") != "https://codeberg.org" + target["page_path"]):
         raise ForgejoError("forgejo_form_readback_unknown")
     return value

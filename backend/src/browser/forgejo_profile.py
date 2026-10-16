@@ -276,7 +276,7 @@ class ForgejoTitleBrowser:
             await source(title=target.old_title, initial=True)
             await check_current()
             async with asyncio.timeout(max(0, (deadline-datetime.now(timezone.utc)).total_seconds()-10)):
-                launched = await runner._launch_session(resources)
+                launched = await runner._launch_session(resources, chromium_sandbox=True)
                 await launched.context.close()
                 context = await launched.browser.new_context(java_script_enabled=True, accept_downloads=False,
                     service_workers="block", storage_state=None, http_credentials=None, permissions=[])

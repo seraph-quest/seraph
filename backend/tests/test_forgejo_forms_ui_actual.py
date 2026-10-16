@@ -28,7 +28,7 @@ async def test_actual_built_ui_form_journey(accounting_db, monkeypatch, profile)
     from config.settings import settings
     from fastapi import FastAPI
     from starlette.middleware.cors import CORSMiddleware
-    from playwright.async_api import BrowserType, async_playwright, expect
+    from playwright.async_api import async_playwright, expect
     from src.api import auth, forgejo, goals, vault
     from src.auth.middleware import OperatorAuthMiddleware
     from src.browser.forgejo_profile import ForgejoTitleBrowser
@@ -36,12 +36,6 @@ async def test_actual_built_ui_form_journey(accounting_db, monkeypatch, profile)
     from src.integrations.forgejo_controls import ForgejoService
     from src.vault.repository import vault_repository
 
-    launch = BrowserType.launch
-    async def confined_launch(self, *args, **kwargs):
-        kwargs["executable_path"] = str(Path(credential_file).parent.parent / "forgejo-chromium-confined.py")
-        return await launch(self, *args, **kwargs)
-    monkeypatch.setattr(BrowserType, "launch", confined_launch)
-    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/home/pawel/.cache/ms-playwright/chromium_headless_shell-1208")
     root, db_engine, factory = accounting_db
     os.chmod(root, 0o700)
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
@@ -203,7 +197,13 @@ async def test_actual_built_ui_form_journey(accounting_db, monkeypatch, profile)
                 await expect(form.get_by_label("Exact Forgejo form job")).to_contain_text("unknown_external_effect")
                 assert len(provider.requests) == before_reload
                 await expect(form.get_by_role("button",name="Run exact form job once",exact=True)).to_be_disabled()
-                assert not rejected, rejected
+                # Every non-local request was aborted. The built index.html
+                # names a Google Fonts stylesheet and the storage panel retries
+                # the API on 127.0.0.1; both stay aborted. Nothing else may be
+                # attempted.
+                unexpected = [url for url in rejected if urlsplit(url).hostname not in
+                    {"fonts.googleapis.com", "fonts.gstatic.com", "127.0.0.1"}]
+                assert not unexpected, unexpected
                 outcome = {"profile":profile,"actual_build_hashes":bundle_hashes,"actual_local_api_calls":local_calls,
                     "success_ui":success_text,"unknown_ui":await form.inner_text(),"provider_requests":provider.requests,
                     "reload_restart_provider_contacts":0,"native_success_posts":1,"no_learning":True}

@@ -35,7 +35,7 @@ async def test_actual_signed_form_complete_journey(accounting_db, monkeypatch, p
     credentials = json.loads(Path(credential_file).read_text())
     from config.settings import settings
     from fastapi import FastAPI
-    from playwright.async_api import BrowserType
+
     from src.api import auth, forgejo, goals
     from src.auth.middleware import OperatorAuthMiddleware
     from src.browser.forgejo_issue_title import digest
@@ -44,14 +44,6 @@ async def test_actual_signed_form_complete_journey(accounting_db, monkeypatch, p
     from src.integrations.forgejo_controls import ForgejoService
     from src.vault.repository import vault_repository
 
-    # Select the reviewed executable wrapper only. The current native runner,
-    # Playwright browser/context, signed provider HTML and POST remain actual.
-    launch = BrowserType.launch
-    async def confined_launch(self, *args, **kwargs):
-        kwargs["executable_path"] = str(Path(credential_file).parent.parent / "forgejo-chromium-confined.py")
-        return await launch(self, *args, **kwargs)
-    monkeypatch.setattr(BrowserType, "launch", confined_launch)
-    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/home/pawel/.cache/ms-playwright/chromium_headless_shell-1208")
     root, db_engine, factory = accounting_db
     os.chmod(root, 0o700)
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
@@ -164,3 +156,116 @@ async def test_actual_signed_form_complete_journey(accounting_db, monkeypatch, p
         receipt.write_text(json.dumps({"provision":provision,"success":success,"private_output":result.json(),
             "lost_response_unknown":original,"restart_contacts_unchanged":True,"no_learning":True}, indent=2))
         os.chmod(receipt, 0o600)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["account", "profile", "revoke", "value"])
+async def test_actual_approval_is_invalidated_by_site_account_profile_or_value_drift(accounting_db, monkeypatch, drift):
+    """An exact approval binds the original site/account/profile/value; any drift blocks with no POST."""
+    credential_file = os.environ.get("FORGEJO_TEST_CREDENTIAL_FILE")
+    if not credential_file:
+        pytest.skip("requires the local signed Forgejo 15.0.9 fixture")
+    credentials = json.loads(Path(credential_file).read_text())
+    from config.settings import settings
+    from fastapi import FastAPI
+    from src.api import auth, forgejo, goals
+    from src.auth.middleware import OperatorAuthMiddleware
+    from src.browser.forgejo_issue_title import digest
+    from src.browser.forgejo_profile import ForgejoTitleBrowser
+    from src.db.models import Goal
+    from src.integrations.forgejo_controls import ForgejoService
+    from src.vault.repository import vault_repository
+
+    root, _db_engine, factory = accounting_db
+    os.chmod(root, 0o700)
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_secret", "form-drift-disposable-root")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+    auth._reset_login_throttle_for_tests()
+    transport = FormLoopback(int(os.environ["FORGEJO_TEST_TCP_PORT"]))
+    monkeypatch.setattr(forgejo, "forgejo_service", ForgejoService(
+        browser=ForgejoTitleBrowser(local_transport=transport, resolver=lambda h, p: ["1.1.1.1"])))
+    app = FastAPI(); app.add_middleware(OperatorAuthMiddleware)
+    app.include_router(auth.router, prefix="/api/auth")
+    app.include_router(goals.router, prefix="/api")
+    app.include_router(forgejo.router, prefix="/api")
+    base = "/api/capabilities/forgejo"
+    profile = "forgejo.issue-create.v1"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+        headers={"origin": "http://localhost:3001"}) as client:
+        assert (await client.post("/api/auth/login", json={"password": "form-drift-disposable-root"})).status_code == 200
+        assert (await client.post("/api/auth/ownership/enroll")).status_code == 200
+        goal = (await client.post("/api/goals", json={"title": "Exact approval drift blocks"})).json()
+        async with factory.accounting_sessions() as db:
+            principal = (await db.get(Goal, goal["id"])).owner_principal_id
+        for key in ("form-drift-input", "form-drift-other-input"):
+            await vault_repository.store(key, json.dumps(credentials), owner_principal_id=principal)
+        assert (await client.put(base+"/connection", json={"vault_key": "form-drift-input", "expected_revision": 0})).status_code == 200
+        assert (await client.put(base+"/connection/read-consent", json={"expected_revision": 1, "duration_seconds": 900, "read_ack": True})).status_code == 200
+        common = {"goal_id": goal["id"], "goal_revision": goal["revision"], "expected_revision": 1}
+
+        async def prepare(operation, **kwargs):
+            return await client.post(base+"/jobs", json={**common, "operation": operation, "request_key": str(uuid.uuid4()), **kwargs})
+
+        async def execute(job):
+            return await client.post(base+"/jobs/"+job["job_id"]+"/execute",
+                json={"expected_revision": job["revision"], "fencing_token": job["lease"]["fencing_token"]})
+
+        provision = await execute((await prepare("provision", fields={})).json())
+        assert provision.json()["status"] == "succeeded", provision.text
+        connection = (await client.get(base+"/connection")).json()
+        activated = await client.put(base+"/connection/form-profiles", json={"expected_revision": connection["revision"],
+            "expected_form_profiles_revision": connection["form_profiles_revision"], "profile_ids": [profile], "profile_ack": True})
+        assert activated.status_code == 200, activated.text
+        connection = activated.json(); common["expected_revision"] = connection["revision"]
+        body = "Drift-bound literal body " + uuid.uuid4().hex
+        fields = {"profile": profile, "owner": credentials["user_name"], "repository": "fixture1013",
+                  "content": body, "title": "Drift title " + uuid.uuid4().hex[:8]}
+        preview = (await execute((await prepare("form-prepare", fields=fields)).json())).json()
+        assert preview["status"] == "succeeded", preview
+        output = (await client.get(base+"/jobs/"+preview["job_id"]+"/output")).json()
+
+        def posts():
+            return sum(method == "POST" and (path.endswith("/issues/new") or path.endswith("/comments"))
+                       for method, path in transport.requests)
+
+        if drift == "value":
+            # A changed value is a different preview: its digest cannot bind
+            # to the reviewed preview, so no submit job or approval exists.
+            altered = {**output, "target": {**output["target"], "content": body + " (edited)"}}
+            refused = await prepare("form-submit", fields={}, preview_job_id=preview["job_id"], preview_digest=digest(altered))
+            assert refused.status_code == 409, refused.text
+            assert posts() == 0
+            return
+        submit = (await prepare("form-submit", fields={}, preview_job_id=preview["job_id"],
+                                preview_digest=digest(output))).json()
+        approved = await client.post(base+"/jobs/"+submit["job_id"]+"/approve", json={
+            "approval_id": submit["approval"]["id"], "decision": "approved", "exact_ack": True})
+        assert approved.status_code == 200, approved.text
+        approved = approved.json()
+        current = (await client.get(base+"/connection")).json()
+        if drift == "account":
+            changed = await client.put(base+"/connection", json={"vault_key": "form-drift-other-input",
+                                                                 "expected_revision": current["revision"]})
+        elif drift == "profile":
+            changed = await client.put(base+"/connection/form-profiles", json={"expected_revision": current["revision"],
+                "expected_form_profiles_revision": current["form_profiles_revision"], "profile_ids": [], "profile_ack": True})
+        else:
+            changed = await client.post(base+"/connection/revoke", json={"expected_revision": current["revision"]})
+        assert changed.status_code == 200, changed.text
+        if drift == "profile":
+            # Restoring the same profile is a new activation revision; the
+            # original approval stays bound to the revoked one.
+            current = changed.json()
+            restored = await client.put(base+"/connection/form-profiles", json={"expected_revision": current["revision"],
+                "expected_form_profiles_revision": current["form_profiles_revision"], "profile_ids": [profile], "profile_ack": True})
+            assert restored.status_code == 200, restored.text
+        before = len(transport.requests)
+        blocked = await execute(approved)
+        assert blocked.status_code != 200 or blocked.json()["status"] != "succeeded", blocked.text
+        assert len(transport.requests) == before and posts() == 0
+        job = (await client.get(base+"/jobs/"+submit["job_id"])).json()
+        assert job["status"] != "succeeded" and not job["forgejo"].get("calls")

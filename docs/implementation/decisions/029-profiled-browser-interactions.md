@@ -185,10 +185,20 @@ successful controls and ordinary unnamed submitter. A source or native DOM
 contradiction blocks the affected adapter until independently reviewed source
 evidence resolves the contract. JavaScript stays disabled during preparation and
 submission. Backend-only web cookies reach exact web paths; Vault-derived Basic
-credentials reach numeric API GETs only. Native Chromium Origin, Referer, frame
-and `Sec-Fetch-Site: same-origin` are required at transport handoff; missing Fetch
-metadata blocks before contact. No synthetic CSRF token is
+credentials reach numeric API GETs only. Native Chromium Origin, Referer and
+frame are required at transport handoff. Chromium's request-stage interception
+runs before its network service adds Fetch Metadata, so the paused native POST
+carries no `Sec-Fetch-Site`. A present value must be `same-origin`; a missing one
+is forwarded as missing and never synthesized, and Forgejo's unmodified Go
+`http.CrossOriginProtection` then checks the genuine Origin against the request
+Host. Requiring a genuine `Sec-Fetch-Site` at handoff needs a separately
+reviewed transport stage and remains a follow-up. No synthetic CSRF token is
 created. Cross-origin and challenge responses fail closed.
+
+Both authenticated profiles launch Playwright's pinned Chromium with its own
+sandbox enabled (`chromium_sandbox=True`). A host that cannot provide the
+sandbox fails the launch and the job blocks; there is no fallback to
+`--no-sandbox`. The public read-only lane keeps its existing launch.
 
 The initial signed 15.0.9 source signature is separate from native HTML5 form
 ownership. It pins the complete selected source structure, source form ancestry,
@@ -217,7 +227,10 @@ contacts cover preparation, submission and readback. The sole success response
 is HTTP200 with one exact JSON redirect. Create binds a positive issue index;
 comment binds a positive comment ID on the original issue. Readback uses only
 that exact numeric API path and compares actor, parent, IDs and full literal
-fields. A comment's `pull_request_url` must be the empty string.
+fields. A comment's `pull_request_url` must be the empty string, and its parent
+`issue_url` must be the original issue's exact web URL
+(`https://codeberg.org/{owner}/{repo}/issues/{index}`), which is how pinned
+15.0.9 serializes it.
 
 Lost response remains Unknown with the original liability. Reload and execution
 replay inspect history; they do not POST again or infer identity through listing
@@ -231,7 +244,9 @@ Acceptance requires both complete UI/API/native-browser journeys against an
 actual signed unmodified Forgejo 15.0.9 fixture, including exact approval,
 one-POST/readback, private outcome, lost-response Unknown, restart inspection
 and positive owned cleanup. Source inspection, profile registration and settings
-tests alone do not establish that acceptance. Production Codeberg execution
+tests alone do not establish that acceptance. `backend/scripts/run_forgejo_form_fixture.py`
+runs those journeys against a disposable local Forgejo 15.0.9 (pinned binary
+SHA-256, loopback only, offline mode) with sandboxed Chromium. Production Codeberg execution
 remains separately blocked by its account/site/version acceptance boundary.
 
 ## Validation and limitations

@@ -190,7 +190,7 @@ class ForgejoFormBrowser:
                     or parser.source_signature != target["fixed_source_signature"]):
                     raise ForgejoError("forgejo_original_form_body_changed")
             await current()
-            launched = await runner._launch_session(resources)
+            launched = await runner._launch_session(resources, chromium_sandbox=True)
             await launched.context.close()
             context = await launched.browser.new_context(java_script_enabled=False, accept_downloads=False,
                 service_workers="block", storage_state=None, http_credentials=None, permissions=[])

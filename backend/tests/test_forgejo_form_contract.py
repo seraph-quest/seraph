@@ -121,8 +121,10 @@ def test_destination_and_comment_readback_require_exact_id_actor_parent_and_empt
     for content in (b'{"redirect":"/a/r/issues/3#issuecomment-12"}', b'{"redirect":"https://evil.example/"}',
                     b'{"redirect":"/a/r/issues/2#issuecomment-12","ok":true}'):
         with pytest.raises(ForgejoError): form_destination(content, profile=profile, owner="a", repository="r", issue_index=2)
-    target = {"profile": profile, "provider_user_id": 7, "content": "Exact body", "issue_api_path": "/api/v1/repos/a/r/issues/2"}
-    value = {"id": 12, "user": {"id": 7}, "body": "Exact body", "pull_request_url": "", "issue_url": "https://codeberg.org/api/v1/repos/a/r/issues/2"}
+    target = {"profile": profile, "provider_user_id": 7, "content": "Exact body",
+              "issue_api_path": "/api/v1/repos/a/r/issues/2", "page_path": "/a/r/issues/2"}
+    value = {"id": 12, "user": {"id": 7}, "body": "Exact body", "pull_request_url": "", "issue_url": "https://codeberg.org/a/r/issues/2"}
     assert exact_readback(value, target, 12) == value
-    for key, altered in (("id", True), ("user", {"id": 8}), ("body", "Different"), ("pull_request_url", None), ("issue_url", "https://evil.example/")):
+    for key, altered in (("id", True), ("user", {"id": 8}), ("body", "Different"), ("pull_request_url", None), ("issue_url", "https://evil.example/"),
+            ("issue_url", "https://codeberg.org/a/r/issues/3"), ("issue_url", "https://codeberg.org/a/r/pulls/2")):
         with pytest.raises(ForgejoError): exact_readback({**value, key: altered}, target, 12)

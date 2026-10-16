@@ -50,7 +50,7 @@ async def test_actual_form_source_preflight():
             # Preserve the signed server's complete HTML and Chromium's native
             # form ownership before asking our profile parser to accept it.
             async with async_playwright() as playwright:
-                native=await playwright.chromium.launch(executable_path=str(Path(credential_file).parent.parent/'forgejo-chromium-confined.py'),headless=True)
+                native=await playwright.chromium.launch(headless=True,chromium_sandbox=True)
                 context=await native.new_context(java_script_enabled=False)
                 try:
                     async def route(request):

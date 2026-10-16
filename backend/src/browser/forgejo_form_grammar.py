@@ -241,9 +241,18 @@ def ordinary_selector(profile):
 
 
 def validate_native_handoff(headers, *, page_path, frame_url, page_url):
+    """Validate the paused native Chromium POST before the backend handoff.
+
+    Chromium's request-stage interception runs before the network service adds
+    Fetch Metadata, so a paused native POST carries no Sec-Fetch-Site. A present
+    value must be same-origin; a missing one is forwarded as missing (never
+    synthesized), and Forgejo's CrossOriginProtection then checks the genuine
+    Origin against the request Host.
+    """
     origin = "https://codeberg.org"
+    site = headers.get("sec-fetch-site")
     if (frame_url != origin + page_path or page_url != origin + page_path
         or headers.get("origin") != origin or headers.get("referer") != origin + page_path
-        or headers.get("sec-fetch-site") != "same-origin"
+        or (site is not None and site != "same-origin")
         or headers.get("content-type", "").lower() != "application/x-www-form-urlencoded"):
         raise ForgejoError("forgejo_exact_native_submission_changed")

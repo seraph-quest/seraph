@@ -153,15 +153,30 @@ def test_only_approved_literal_value_slots_change_after_native_fill(profile):
     with pytest.raises(ForgejoError): validate_native(actual, profile=profile, slots=slots, title=title, content=content)
 
 
-@pytest.mark.parametrize("change", [{"sec-fetch-site":None}, {"sec-fetch-site":"cross-site"},
-    {"origin":"https://evil.example"}, {"referer":"https://codeberg.org/other"}])
-def test_real_same_origin_fetch_metadata_is_mandatory_before_handoff(change):
+@pytest.mark.parametrize("change", [{"sec-fetch-site":"cross-site"}, {"sec-fetch-site":"same-site"},
+    {"sec-fetch-site":"none"}, {"origin":"https://evil.example"}, {"origin":None},
+    {"referer":"https://codeberg.org/other"}, {"content-type":"text/plain"}])
+def test_native_same_origin_metadata_is_validated_before_handoff(change):
     path = "/seraph_fixture1013/fixture1013/issues/new"
     headers = {"origin":"https://codeberg.org", "referer":"https://codeberg.org"+path,
                "sec-fetch-site":"same-origin", "content-type":"application/x-www-form-urlencoded"}
     validate_native_handoff(headers, page_path=path, frame_url=headers["referer"], page_url=headers["referer"])
     with pytest.raises(ForgejoError):
         validate_native_handoff({**headers, **change}, page_path=path, frame_url=headers["referer"], page_url=headers["referer"])
+
+
+def test_paused_native_post_without_fetch_metadata_keeps_genuine_origin_checks():
+    # Request-stage interception precedes Chromium's Fetch Metadata, so the
+    # paused POST has no Sec-Fetch-Site; it is forwarded absent, never invented.
+    path = "/seraph_fixture1013/fixture1013/issues/new"
+    headers = {"origin":"https://codeberg.org", "referer":"https://codeberg.org"+path,
+               "content-type":"application/x-www-form-urlencoded"}
+    validate_native_handoff(headers, page_path=path, frame_url=headers["referer"], page_url=headers["referer"])
+    with pytest.raises(ForgejoError):
+        validate_native_handoff({**headers, "origin":"https://evil.example"}, page_path=path,
+            frame_url=headers["referer"], page_url=headers["referer"])
+    with pytest.raises(ForgejoError):
+        validate_native_handoff(headers, page_path=path, frame_url="https://codeberg.org/other", page_url=headers["referer"])
 
 
 def test_current_numeric_issue_title_and_original_actor_slots_cannot_be_guessed():

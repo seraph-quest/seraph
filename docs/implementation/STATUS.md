@@ -564,7 +564,15 @@ The [Forgejo title profile](https://github.com/seraph-quest/seraph/issues/925)
 uses a local pinned-service proof profile; production Codeberg remains blocked pending
 separate account/site/version acceptance. Local revoke invalidates Seraph's
 authority and credentials; it does not prove provider logout or undo history or
-notifications. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
+notifications. The [exact Forgejo issue and comment forms](https://github.com/seraph-quest/seraph/issues/1013)
+(`forgejo.issue-create.v1`, `forgejo.issue-comment.v1`) are **Partial**: under
+[ADR-029](./decisions/029-profiled-browser-interactions.md) a reviewed form is
+prepared with scripts disabled, exact-approved once, submitted by one native POST
+and read back through the numeric API; site, account, profile or value drift
+invalidates the approval, and a lost response stays Unknown with no replay.
+Local acceptance uses a disposable signed Forgejo 15.0.9 and Chromium with its
+own sandbox; production Codeberg stays blocked, and requiring a genuine
+`Sec-Fetch-Site` at handoff is a follow-up. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 permits ordinary top-frame Chromium text with local preview and deletion-only
 redaction, exact Task/Goal approval and encrypted D1 attachment. It excludes
 screenshots, clipboard and background capture, records no learning or analysis,

@@ -3410,6 +3410,25 @@ usefulness claim.
 - [ADR-008: Portable Core And Consented Context](./decisions/008-portable-core-and-consented-context.md)
 - [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
 
+### Exact Forgejo issue and comment forms {#exact-forgejo-issue-comment-forms}
+
+[ADR-029](./decisions/029-profiled-browser-interactions.md) adds two reviewed
+form profiles on the same fixed Forgejo connection: `forgejo.issue-create.v1`
+(new issue in an owned repository) and `forgejo.issue-comment.v1` (comment on an
+existing ordinary issue). In Settings → Forgejo, after the backend session job,
+explicitly activate the profiles you want (activation contacts no provider and
+grants no POST). Prepare a form with its literal title/body: Seraph reads the
+exact form with scripts disabled and shows a protected literal preview. A
+separate unchecked approval then allows one native POST, followed by an exact
+numeric API readback of the new issue or comment. Reconfiguring the account,
+changing or re-activating profiles, revoking the connection or editing the value
+invalidates the approval before any provider contact. A lost response stays
+Unknown; reload and execute replay only inspect history, and GET-only recovery
+needs a trustworthy exact ID, never listing or search. Both profiles launch
+Chromium with its own sandbox and block if the host cannot provide it.
+`backend/scripts/run_forgejo_form_fixture.py` runs the actual journeys against a
+disposable local Forgejo 15.0.9. Production Codeberg remains blocked.
+
 ### Exact Forgejo issue title transaction profile {#exact-forgejo-issue-title-transaction-target}
 
 [ADR-021](./decisions/021-exact-forgejo-issue-title.md) accepts one ordinary-issue title edit through the real Forgejo v15.0.9 editor, using backend-only session secrets and an exact separately approved title. The bounded profile has actual signed local Forgejo, Chromium, canonical job and cockpit evidence; availability requires the installed reviewed program revision. Live Codeberg is mechanically blocked pending a separate reviewed account/site/version activation path. Providing a key cannot enable live execution. Provider title history and notifications remain; the provider offers no atomic revision CAS or idempotency key. A lost response stays Unknown, read-only observation never resubmits, and reversal requires a new exact approval. Configuration grants neither Goal budget nor mutation permission.

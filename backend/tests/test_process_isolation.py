@@ -519,6 +519,32 @@ def test_stop_tears_down_a_double_forked_daemon(workspace, ignore_term):
     assert _heartbeat_stops(workspace / "notes" / "heartbeat")
 
 
+def test_start_process_outlives_its_short_lived_launching_thread(workspace):
+    """--die-with-parent is a thread-scoped PDEATHSIG (#1103 review).
+
+    Tool calls run on short-lived worker threads; the sandbox must survive
+    the thread that requested it and end only when stopped (or with the
+    backend).
+    """
+    import threading
+
+    relative = _heartbeat_script(workspace, ignore_term=False)
+    launched = {}
+    worker = threading.Thread(target=lambda: launched.update(
+        process_runtime_manager.start_process(command="python3", args_json=json.dumps([relative]))))
+    worker.start()
+    worker.join(timeout=30)
+    assert not worker.is_alive() and launched["process_id"]
+    _wait_for(workspace / "notes" / "heartbeat")
+    time.sleep(1.0)  # well past the launching thread's exit
+    assert not _heartbeat_stops(workspace / "notes" / "heartbeat")
+    listed = {item["process_id"]: item for item in process_runtime_manager.list_processes()}
+    assert listed[launched["process_id"]]["status"] == "running"
+    stopped = process_runtime_manager.stop_process(launched["process_id"])
+    assert stopped["cleanup_status"] == "stopped"
+    assert _heartbeat_stops(workspace / "notes" / "heartbeat")
+
+
 def test_timeout_tears_down_a_double_forked_daemon(workspace):
     relative = _heartbeat_script(workspace, ignore_term=True)
     result = process_runtime_manager.run_command(command="python3", args_json=json.dumps([relative]),
@@ -533,9 +559,12 @@ def test_stop_all_processes_reaps_children_before_a_workspace_swap(workspace):
     _wait_for(workspace / "notes" / "heartbeat")
     from src.workspace import lifecycle
 
-    lifecycle._stop_agent_processes_before_swap()
-    assert process_runtime_manager.list_all_processes() == []
-    assert _heartbeat_stops(workspace / "notes" / "heartbeat")
+    with lifecycle._agent_processes_fenced(strict=True):
+        assert process_runtime_manager.list_all_processes() == []
+        assert _heartbeat_stops(workspace / "notes" / "heartbeat")
+        with pytest.raises(ValueError, match="workspace maintenance is in progress"):
+            run_command_raw("git", "--version")
+    assert run_command_raw("git", "--version")["exit_code"] == 0
 
 
 def test_root_level_files_are_bound_by_inode_so_a_host_rename_leaves_the_old_file(workspace):

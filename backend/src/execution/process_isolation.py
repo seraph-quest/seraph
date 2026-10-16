@@ -109,7 +109,7 @@ LOCALHOST_NOTE = "This process can reach localhost services, including Seraph's 
 PROBE_TIMEOUT_SECONDS = 15
 STARTUP_TIMEOUT_SECONDS = 15
 MAX_LEVEL_CHILDREN = 512
-MAX_DENIED_WALK_ENTRIES = 20_000
+MAX_DENIED_WALK_ENTRIES = 50_000
 VIEW_TMPFS_BYTES = 1024 * 1024
 SANDBOX_TMP_BYTES = 256 * 1024 * 1024
 _FD_HEADROOM = 64
@@ -132,9 +132,10 @@ class ProcessIsolationBlocked(ValueError):
         super().__init__(message)
 
 
-def blocked(reason: str) -> ProcessIsolationBlocked:
+def blocked(reason: str, diagnostic: str = "") -> ProcessIsolationBlocked:
     base = reason.split(":", 1)[0]
-    return ProcessIsolationBlocked(f"{BLOCKED_PREFIX}:{reason}", _REMEDIES.get(base, ""))
+    detail = "; ".join(part for part in (_REMEDIES.get(base, ""), diagnostic) if part)
+    return ProcessIsolationBlocked(f"{BLOCKED_PREFIX}:{reason}", detail)
 
 
 # ------------------------------------------------------------------ openat2
@@ -424,7 +425,10 @@ class _ViewBuilder:
                     for entry in sorted(os.listdir(directory_fd)):
                         self.walked += 1
                         if self.walked > MAX_DENIED_WALK_ENTRIES:
-                            self.fail("too_many_entries")
+                            # The hard-link proof needs every DENIED entry;
+                            # past the bound the launch is refused, never
+                            # assumed safe.
+                            self.fail(f"denied_tree_too_large:{logical}")
                         child = f"{directory}/{entry}"
                         try:
                             entry_fd = _beneath(directory_fd, entry, os.O_PATH | os.O_NOFOLLOW)
@@ -536,7 +540,14 @@ for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ", "SIGTERM"):
     if hasattr(signal, name):
         signal.signal(getattr(signal, name), signal.SIG_DFL)
 os.write(status, b"ok\n")
-os.closerange(3, 1 << 16)
+# Close every inherited fd above stderr, however high (the listing fd is
+# closed when listdir returns, so it is never in the list).
+for fd in sorted(int(name) for name in os.listdir("/proc/self/fd")):
+    if fd > 2:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 argv = sys.argv[2:]
 try:
     os.execvpe(argv[0], argv, os.environ)

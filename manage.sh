@@ -940,6 +940,21 @@ COMPOSE_FILES=(
     -f "$SCRIPT_DIR/docker-compose.$ENV.yaml"
 )
 
+# Agent process sandbox AppArmor profile (#1103): reference it only when the
+# host has it loaded (a missing profile would stop the container starting);
+# otherwise Docker's default profile applies and agent commands are blocked
+# with a typed reason while the rest of the backend runs.
+APPARMOR_OVERRIDE="$SCRIPT_DIR/docker-compose.$ENV.apparmor.yaml"
+if [ -f "$APPARMOR_OVERRIDE" ] && [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = "Y" ]; then
+    if compgen -G "/sys/kernel/security/apparmor/policy/profiles/seraph-backend.*" >/dev/null; then
+        COMPOSE_FILES+=(-f "$APPARMOR_OVERRIDE")
+    else
+        echo "WARNING: AppArmor profile seraph-backend is not loaded; agent commands in the backend container" >&2
+        echo "         will be blocked (container_apparmor_denies_mount). Load it once with:" >&2
+        echo "         sudo apparmor_parser -r -W $SCRIPT_DIR/deploy/apparmor/seraph-backend" >&2
+    fi
+fi
+
 if [ ! -f "$ENV_FILE" ]; then
     error_exit "$ENV_FILE not found. Please create it by copying from $SCRIPT_DIR/env.$ENV.example and filling in the values."
 fi

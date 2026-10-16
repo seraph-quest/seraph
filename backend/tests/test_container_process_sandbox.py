@@ -24,9 +24,9 @@ from src.workspace.production import workspace_ownership_problem
 REPO = Path(__file__).resolve().parents[2]
 PROFILE = REPO / "deploy" / "seccomp" / "seraph-backend.json"
 APPARMOR = REPO / "deploy" / "apparmor" / "seraph-backend"
+BASE_PROFILE = REPO / "deploy" / "seccomp" / "docker-default.json"
 EXPECTED_SECURITY_OPT = [
     "seccomp=./deploy/seccomp/seraph-backend.json",
-    "apparmor=seraph-backend",
     "systempaths=unconfined",
     "no-new-privileges:true",
 ]
@@ -42,6 +42,20 @@ def test_compose_backend_uses_the_shipped_profiles_and_drops_all_capabilities(na
     assert backend["cap_drop"] == ["ALL"]
     assert "cap_add" not in backend and not backend.get("privileged")
     assert (REPO / backend["security_opt"][0].split("=", 1)[1]).resolve() == PROFILE
+    # The AppArmor profile is an override, added only once it is loaded:
+    # referencing an unloaded profile would stop the container starting.
+    override = yaml.safe_load((REPO / f"docker-compose.{name}.apparmor.yaml").read_text())
+    assert override == {"services": {service: {"security_opt": ["apparmor=seraph-backend"]}}}
+
+
+def test_manage_adds_the_apparmor_override_only_when_the_profile_is_loaded():
+    manage = (REPO / "manage.sh").read_text()
+    gate = manage[manage.index("APPARMOR_OVERRIDE="):manage.index("if [ ! -f \"$ENV_FILE\" ]")]
+    assert 'docker-compose.$ENV.apparmor.yaml' in gate
+    assert '/sys/module/apparmor/parameters/enabled' in gate
+    assert '/sys/kernel/security/apparmor/policy/profiles/seraph-backend.*' in gate
+    assert 'COMPOSE_FILES+=(-f "$APPARMOR_OVERRIDE")' in gate
+    assert "container_apparmor_denies_mount" in gate and "apparmor_parser -r -W" in gate
 
 
 def test_check_script_reads_the_same_compose_security_options():
@@ -52,8 +66,8 @@ def test_check_script_reads_the_same_compose_security_options():
         sys.path.remove(str(REPO / "scripts"))
     security_opt, cap_drop = script.compose_security((REPO / "docker-compose.prod.yaml").read_text(), "backend-prod")
     assert security_opt == EXPECTED_SECURITY_OPT and cap_drop == ["ALL"]
-    options = script.docker_options(security_opt, cap_drop)
-    assert f"seccomp={PROFILE}" in options and options[-2:] == ["--cap-drop", "ALL"]
+    assert script.COMPOSE == REPO / "docker-compose.prod.yaml"
+    assert script.APPARMOR_OVERRIDE == REPO / "docker-compose.prod.apparmor.yaml"
 
 
 def test_image_runs_as_the_fixed_non_root_user_with_bubblewrap():
@@ -67,7 +81,18 @@ def test_image_runs_as_the_fixed_non_root_user_with_bubblewrap():
     after_user = final[final.index("USER seraph"):]
     assert not re.search(r"^RUN ", after_user, re.M) and re.search(r"^CMD ", after_user, re.M)
     assert final.index("ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright") < final.index("playwright install chromium")
-    assert "chown -R 10001:10001 /app/data /app/logs" in final
+    assert "chown -R 10001:10001 /app/data /app/logs /app/workspace-lifecycle" in final
+    assert re.search(r"chown -R seraph:seraph .*/app/workspace-lifecycle", final)
+
+
+def test_shipped_profile_is_exactly_the_vendored_base_plus_the_seraph_rules():
+    base = json.loads(BASE_PROFILE.read_text())
+    profile = json.loads(PROFILE.read_text())
+    seraph = [rule for rule in profile["syscalls"] if str(rule.get("comment", "")).startswith("seraph #1103")]
+    assert {key: value for key, value in profile.items() if key != "syscalls"} == {
+        key: value for key, value in base.items() if key != "syscalls"}
+    assert profile["syscalls"] == base["syscalls"] + seraph
+    assert not any(str(rule.get("comment", "")).startswith("seraph") for rule in base["syscalls"])
 
 
 def _rules():
@@ -120,10 +145,13 @@ def test_seccomp_base_matches_a_supplied_docker_default(tmp_path):
         import check_container_process_sandbox as script
     finally:
         sys.path.remove(str(REPO / "scripts"))
-    profile, base, _seraph = _rules()
-    # Self-consistency always: the base alone is a valid "upstream".
-    (tmp_path / "base.json").write_text(json.dumps({**profile, "syscalls": base}))
-    assert script.compare_seccomp(tmp_path / "base.json") == []
+    # Self-consistency always: the vendored base is within itself, and a
+    # rule the upstream lacks is reported.
+    assert script.compare_seccomp(BASE_PROFILE) == []
+    narrowed = json.loads(BASE_PROFILE.read_text())
+    narrowed["syscalls"][0]["names"] = [name for name in narrowed["syscalls"][0]["names"] if name != "read"]
+    (tmp_path / "narrow.json").write_text(json.dumps(narrowed))
+    assert any("'read'" in problem for problem in script.compare_seccomp(tmp_path / "narrow.json"))
     if not upstream:
         pytest.skip("SERAPH_DOCKER_DEFAULT_SECCOMP is not set; the CI container job compares against Docker's file")
     assert script.compare_seccomp(Path(upstream)) == []
@@ -163,6 +191,22 @@ def test_workspace_ownership_is_typed_for_non_root_users(tmp_path):
     assert workspace_ownership_problem(tmp_path / "missing", uid=os.getuid() + 1) is None
 
 
+def test_lifecycle_directory_ownership_is_checked_with_its_own_type(tmp_path, monkeypatch):
+    from src.workspace import production
+
+    workspace, lifecycle = tmp_path / "data", tmp_path / "lifecycle"
+    workspace.mkdir()
+    lifecycle.mkdir()
+    foreign = os.getuid() + 1
+    real = production.workspace_ownership_problem
+    monkeypatch.setattr(production, "workspace_ownership_problem",
+                        lambda path, **kwargs: real(path, uid=foreign if Path(path) == lifecycle else os.getuid(),
+                                                    **kwargs))
+    problems = production.container_ownership_problems(workspace, {"SERAPH_WORKSPACE_LIFECYCLE_PATH": str(lifecycle)})
+    assert problems == [f"workspace_lifecycle_ownership_mismatch:root_owned_by_{os.getuid()}"]
+    assert production.container_ownership_problems(workspace, {}) == []
+
+
 def test_container_preflight_refuses_a_foreign_owned_workspace_but_not_a_blocked_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(process_isolation, "in_container", lambda: True)
     monkeypatch.setattr(process_isolation, "probe",
@@ -174,12 +218,12 @@ def test_container_preflight_refuses_a_foreign_owned_workspace_but_not_a_blocked
     assert checks["process_sandbox"]["status"] == "blocked"
     assert "process_isolation_unavailable:container_seccomp_profile_missing" in checks["process_sandbox"]["detail"]
     assert checks["workspace_ownership"]["status"] == "ready"
-    monkeypatch.setattr(production_preflight, "workspace_ownership_problem",
-                        lambda _path: "workspace_ownership_mismatch:3_entries")
+    monkeypatch.setattr(production_preflight, "container_ownership_problems",
+                        lambda _path, _env: ["workspace_ownership_mismatch:3_entries"])
     report = production_preflight.build_preflight_report(env)
     checks = {check["name"]: check for check in report["core"]["checks"]}
     assert checks["workspace_ownership"]["status"] == "invalid"
-    assert "chown -R 10001:10001 /app/data /app/logs" in checks["workspace_ownership"]["detail"]
+    assert "chown -R 10001:10001 /app/data /app/logs /app/workspace-lifecycle" in checks["workspace_ownership"]["detail"]
     assert report["overall_status"] == "invalid"
 
 

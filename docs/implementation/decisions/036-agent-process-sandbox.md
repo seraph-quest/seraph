@@ -74,6 +74,9 @@ workspace, at its resolved path, is a view:
     (`hard_link_alias:<path>`);
   - more than 512 entries at a level, or too little `RLIMIT_NOFILE`
     headroom (`too_many_entries`);
+  - a DENIED tree with more than 50,000 entries, which the hard-link proof
+    cannot cover (`denied_tree_too_large:<path>`); the launch is refused,
+    never assumed safe;
   - a level that is not a directory.
 
   READ_ONLY files may have extra hard links, because uv and npm installs
@@ -99,17 +102,36 @@ workspace, at its resolved path, is a view:
 - **Namespace teardown.** When the leader dies or the command exits, the pid
   namespace is torn down. Double-forked and `setsid` children die with it.
   A signal death is reported as exit code 128 + signal (bwrap's monitor).
+- **Launcher thread.** `--die-with-parent` is `PR_SET_PDEATHSIG`, which
+  fires when the *thread* that forked the sandbox exits. Every sandbox is
+  therefore forked from one long-lived launcher thread, so a background
+  process outlives the short-lived tool-call thread that requested it and
+  ends only when stopped or when the backend process exits.
+- **Resource limits.** The bootstrap keeps the fixed process profile
+  (CPU 300 s, NPROC 64, FSIZE 1 MiB). `RLIMIT_AS` rises from 512 MiB to a
+  fixed 8 GiB ceiling, matching #1065's repository sandbox: it bounds
+  virtual reservations, not resident memory, and V8 reserves more than
+  512 MiB before running any script, so `node` and `npm` could not start
+  at all under the old value.
 - **The guard.** A fixed Python check runs inside the sandbox before `exec`.
   It requires CapEff and CapBnd to be 0. It verifies that every DENIED path
-  fails to open, every READ_ONLY path refuses writes, every level and
-  absent protected name refuses `O_CREAT|O_EXCL`, and that all fds above 2
-  are closed. It reports `ok` on a status pipe. A launch without that
+  fails to open, every READ_ONLY path refuses writes, and every level and
+  absent protected name refuses `O_CREAT|O_EXCL`. It reports `ok` on a
+  status pipe, then closes every inherited fd above stderr (all of them,
+  listed from `/proc/self/fd`) and restores the default SIGTERM, SIGPIPE
+  and SIGXFSZ dispositions before `exec`. A launch without that
   sentinel maps to `process_isolation_unavailable:*` and is never reported
   as a command result.
-- **Workspace swaps and shutdown.** `_replace_root`, the shared step of
-  restore, recovery and rollback, stops and reaps every process-tool child
-  first. Backend shutdown does the same before releasing the workspace owner
-  lease.
+- **Workspace swaps and shutdown.** Restore, interrupted-restore recovery
+  and rollback hold a launch fence for the whole operation: new launches are
+  refused (`workspace maintenance is in progress`), launches already past
+  the gate are awaited until their leader is registered, and every
+  process-tool child is stopped and reaped once, before the first root
+  rename. A restore refuses to start if that cannot be proven. Recovery and
+  rollback are the repair primitives, so they log the failure and continue
+  rather than strand a half-moved workspace. Backend shutdown stops and
+  reaps every child under the same gate before releasing the workspace
+  owner lease.
 
 ### Posture, probe and approvals
 
@@ -139,26 +161,35 @@ The backend container runs process tools in the same sandbox. Its Compose
 service sets:
 
 - `security_opt: seccomp=./deploy/seccomp/seraph-backend.json`. This is
-  Docker's default profile plus only:
+  the vendored Docker default (`deploy/seccomp/docker-default.json`; see the
+  provenance note in `deploy/seccomp/README.md`) plus only:
   - `clone` with user, mount, pid, net, ipc or uts namespace flags (a cgroup
     namespace stays denied);
   - `unshare` without the cgroup or time namespace flags;
   - `mount`, `umount2` and `pivot_root`.
 
   `setns` stays denied and `clone3` stays ENOSYS.
-- `apparmor=seraph-backend` (`deploy/apparmor/seraph-backend`). This is
-  `docker-default` without its blanket `deny mount`, plus `userns`, `mount`
-  and `pivot_root`. The only additional `/proc/sys` write it permits is
-  `user/max_user_namespaces`, which `--disable-userns` sets inside its own
-  user namespace.
+- `apparmor=seraph-backend` (`deploy/apparmor/seraph-backend`), through a
+  per-environment override (`docker-compose.<env>.apparmor.yaml`) that
+  `manage.sh` adds only when the profile is loaded on the host. Referencing
+  an unloaded profile would stop the container from starting. Without the
+  override, AppArmor hosts apply Docker's `docker-default`; the backend runs
+  and agent commands are blocked with `container_apparmor_denies_mount`. The
+  profile is `docker-default` without its blanket `deny mount`, plus
+  `userns`, `mount` and `pivot_root`. The only additional `/proc/sys` write
+  it permits is `user/max_user_namespaces`, which `--disable-userns` sets
+  inside its own user namespace.
 - `systempaths=unconfined`. Docker masks `/proc` paths, and the kernel
   refuses a fresh procfs mount for a pid namespace under a partially masked
   `/proc`.
 - `no-new-privileges:true` and `cap_drop: [ALL]`.
 
-The image runs as `USER seraph` (uid and gid 10001). A workspace owned by an
-earlier root container is refused at startup (`workspace_ownership_mismatch`)
-until a one-time `chown` migration. The probe runs at container startup and
+The image runs as `USER seraph` (uid and gid 10001). A workspace or managed
+lifecycle directory (`/app/workspace-lifecycle`, which holds the accounting
+witness) owned by an earlier root container is refused at startup
+(`workspace_ownership_mismatch`, `workspace_lifecycle_ownership_mismatch`)
+until a one-time `chown` migration of `/app/data`, `/app/logs` and
+`/app/workspace-lifecycle`. The probe runs at container startup and
 before each launch.
 
 ## Consequences

@@ -1,0 +1,14 @@
+# AppArmor profile for the backend's agent process sandbox (#1103).
+#
+# Requires the profile loaded on the Docker host first:
+#   sudo apparmor_parser -r -W deploy/apparmor/seraph-backend
+# manage.sh adds this file automatically when the profile is loaded; direct
+# Compose users add it themselves:
+#   docker compose -f docker-compose.prod.yaml -f docker-compose.prod.apparmor.yaml ...
+# Referencing a profile that is not loaded makes the container fail to start,
+# which is why the base file does not.
+
+services:
+  backend-prod:
+    security_opt:
+      - apparmor=seraph-backend

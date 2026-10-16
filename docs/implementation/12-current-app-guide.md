@@ -1006,14 +1006,22 @@ the same bubblewrap sandbox as the host
 ([ADR-036](./decisions/036-agent-process-sandbox.md)). Both Compose files give
 the backend service these settings:
 - `security_opt: seccomp=./deploy/seccomp/seraph-backend.json`;
-- `apparmor=seraph-backend`;
 - `systempaths=unconfined`;
 - `no-new-privileges:true`;
 - `cap_drop: [ALL]`.
 
-The seccomp profile is Docker's default plus only the namespace and mount
-syscalls bubblewrap needs. Run Compose from the repository root, which
-`manage.sh` does, so the relative profile path resolves.
+The seccomp profile is the vendored Docker default plus only the namespace
+and mount syscalls bubblewrap needs (`deploy/seccomp/README.md`). Run Compose
+from the repository root, which `manage.sh` does, so the relative profile
+path resolves.
+
+The AppArmor profile is applied through `docker-compose.<env>.apparmor.yaml`
+(`apparmor=seraph-backend`). On an AppArmor host, `manage.sh` adds that
+override only once the `seraph-backend` profile is loaded, and otherwise
+prints the load command. Referencing an unloaded profile would stop the
+container from starting. Without it, Docker's default profile applies and
+agent commands are blocked with `container_apparmor_denies_mount`. Direct
+Compose users add the override file themselves after loading the profile.
 
 One-time host and workspace preparation:
 
@@ -1022,7 +1030,7 @@ One-time host and workspace preparation:
 sudo apparmor_parser -r -W deploy/apparmor/seraph-backend
 # Workspaces written by an earlier root container: the image now runs as uid 10001.
 docker compose -f docker-compose.<env>.yaml run --rm --no-deps --user root <backend service> \
-  chown -R 10001:10001 /app/data /app/logs
+  chown -R 10001:10001 /app/data /app/logs /app/workspace-lifecycle
 ```
 
 On AppArmor 3 hosts (Ubuntu 23.04 and earlier), delete the profile's
@@ -1032,8 +1040,9 @@ should stay owned by your own host user, use a Compose override that sets
 the uid.
 
 At startup the container preflight (production) and the backend lifespan
-(development) refuse a foreign-owned workspace with
-`workspace_ownership_mismatch`, and record the sandbox posture. A container
+(development) refuse a foreign-owned workspace or lifecycle directory with
+`workspace_ownership_mismatch` or `workspace_lifecycle_ownership_mismatch`,
+and record the sandbox posture. A container
 started without the shipped profiles keeps running, but agent commands return
 a typed `process_isolation_unavailable:<reason>`:
 - `container_seccomp_profile_missing`;
@@ -2421,13 +2430,17 @@ Seraph's own API. Every launch drops all capabilities and hides host files
 outside the workspace and runtime; hard-coded `/tmp` writes go to a private
 tmpfs. A stop, timeout, cancel or exit tears down the command's pid
 namespace, so double-forked children cannot outlive it. Background
-processes also end when the backend process exits. A signal death is
-reported as exit code 128 + signal.
+processes also end when the backend process exits, never when the tool
+call that started them returns. A signal death is reported as exit code
+128 + signal. The per-process address-space limit is now 8 GiB (it was
+512 MiB, under which `node` and `npm` could not start). It bounds virtual
+reservations, not resident memory.
 
 A top-level file is bound by inode at launch. If Seraph replaces it by rename
 while a command runs, the command keeps the old file. Workspace restore,
-recovery and rollback stop process-tool children before swapping the root,
-and so does backend shutdown.
+recovery and rollback refuse new agent commands for the whole operation and
+stop process-tool children before the first root swap, and so does backend
+shutdown.
 
 On a host without the sandbox (no `bwrap`, user namespaces denied, macOS,
 Windows, or a container without the shipped profiles), these tools return

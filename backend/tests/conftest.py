@@ -371,7 +371,12 @@ def skip_agent_commands_without_the_process_sandbox(monkeypatch):
     from src.tools import process_tools
 
     if not _HOST_PROCESS_SANDBOX:
-        _HOST_PROCESS_SANDBOX.append(process_tools._sandbox_posture())
+        try:
+            _HOST_PROCESS_SANDBOX.append(process_tools._sandbox_posture())
+        except Exception as exc:  # a broken probe must not break unrelated tests
+            from src.execution.process_isolation import ProcessIsolationPosture
+
+            _HOST_PROCESS_SANDBOX.append(ProcessIsolationPosture("unavailable", reason=f"probe_error_{type(exc).__name__}"))
     posture = _HOST_PROCESS_SANDBOX[0]
     if posture.isolated:
         yield
@@ -381,7 +386,11 @@ def skip_agent_commands_without_the_process_sandbox(monkeypatch):
     original = process_tools._require_sandbox_posture
 
     def require_or_skip():
-        if process_tools._sandbox_posture() == posture:
+        try:
+            current = process_tools._sandbox_posture()
+        except Exception:
+            current = posture
+        if current == posture:
             isolation_unavailable(f"agent process sandbox: {posture.code}")
         return original()
 

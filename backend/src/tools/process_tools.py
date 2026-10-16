@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextvars
-import functools
 import json
 import logging
 import os
+import queue
 import shlex
 import signal
 import subprocess
@@ -15,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1222,17 +1224,16 @@ def _process_launch_argv(executable: str, args: list[str]) -> list[str]:
 _SANDBOX_DENIED_NAMES = frozenset({".seraph-workspace-maintenance.lock"})
 
 
-@functools.lru_cache(maxsize=8)
-def _sandbox_runtime_for(interpreter: str, path_env: str, home: str):
-    names = sorted(_COMMAND_NAME_ALLOWLIST - {"python", "python3"})
-    executables = process_sandbox.resolve_executables(names, path_env)
-    executables = {"python": Path(interpreter).absolute(), **executables}
-    return process_sandbox.process_runtime(executables, interpreter=interpreter), executables
-
-
 def _sandbox_runtime():
-    """(runtime, executables) for the allowlisted commands on this host."""
-    return _sandbox_runtime_for(sys.executable, _command_env()["PATH"], str(Path.home()))
+    """(runtime, executables) for the allowlisted commands on this host.
+
+    Resolved per launch (a few ``which`` lookups), so a changed binary or
+    version-manager selection changes the runtime identity and re-probes.
+    """
+    names = sorted(_COMMAND_NAME_ALLOWLIST - {"python", "python3"})
+    executables = process_sandbox.resolve_executables(names, _command_env()["PATH"])
+    executables = {"python": Path(sys.executable).absolute(), **executables}
+    return process_sandbox.process_runtime(executables, interpreter=sys.executable), executables
 
 
 def _sandbox_posture() -> process_sandbox.ProcessIsolationPosture:
@@ -1345,9 +1346,50 @@ def _prepare_sandbox(
     return _PreparedSandbox(launch=launch, env=env, view_summary=summary)
 
 
+class _LauncherThread:
+    """One long-lived thread that forks every sandbox (#1103).
+
+    bubblewrap's ``--die-with-parent`` is PR_SET_PDEATHSIG, which fires when
+    the *thread* that forked the child exits, not the process.  Tool calls
+    run on short-lived worker threads, so forking there would kill a
+    background ``start_process`` sandbox as soon as its launching call
+    returned.  This daemon thread never exits while the backend runs, so a
+    sandbox dies with the backend and not before.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._thread: threading.Thread | None = None
+        self._start_lock = threading.Lock()
+
+    def run(self, function: Any) -> Any:
+        if threading.current_thread() is self._thread:
+            return function()
+        with self._start_lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._loop, name="seraph-process-launcher", daemon=True)
+                self._thread.start()
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        self._queue.put((function, future))
+        return future.result()
+
+    def _loop(self) -> None:
+        while True:
+            function, future = self._queue.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(function())
+            except BaseException as exc:  # handed back to the caller
+                future.set_exception(exc)
+
+
+_launcher = _LauncherThread()
+
+
 def _spawn_process(argv: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
     """The one process-tool launch site (tests replace it to record argv)."""
-    return subprocess.Popen(argv, **kwargs)
+    return _launcher.run(lambda: subprocess.Popen(argv, **kwargs))
 
 
 def _sandbox_startup_failure(reason: str, diagnostic: str) -> process_sandbox.ProcessIsolationBlocked:
@@ -1359,7 +1401,12 @@ def _sandbox_startup_failure(reason: str, diagnostic: str) -> process_sandbox.Pr
         return process_sandbox.blocked("workspace_view_unsafe:entry_changed_during_launch")
     # The host may have changed under the cached probe; re-probe next time.
     process_sandbox.clear_probe_cache()
-    return process_sandbox.blocked(reason)
+    typed = process_sandbox.classify_startup_failure(diagnostic, container=process_sandbox.in_container())
+    code = reason if typed == "probe_failed" else f"{reason}:{typed}"
+    # bwrap's own diagnostic line; never command output, because the guard
+    # had not reported and the target never ran.
+    bwrap_lines = [line.strip() for line in diagnostic.splitlines() if line.strip().startswith("bwrap:")]
+    return process_sandbox.blocked(code, bwrap_lines[-1][:240] if bwrap_lines else "")
 
 
 _READ_ONLY_LEVEL_HINT = (
@@ -2109,6 +2156,12 @@ class ProcessRuntimeManager:
         self._lock = threading.Lock()
         self._processes: dict[str, ManagedProcess] = {}
         self._foreground: dict[int, tuple[subprocess.Popen[Any], _ProcessLeaderIdentity | None]] = {}
+        # Launch gate (#1103): workspace swaps block new launches and wait
+        # until every launch that already passed the gate has registered its
+        # leader, so a stop-all cannot miss a process forked meanwhile.
+        self._launch_idle = threading.Condition(self._lock)
+        self._launches_blocked = 0
+        self._launching = 0
         self._stopping_sessions: set[str] = set()
         self._last_session_cleanup_receipt: dict[str, Any] | None = None
 
@@ -2248,6 +2301,37 @@ class ProcessRuntimeManager:
             if descendant_identities is not None:
                 process.descendant_identities = descendant_identities
 
+    def _enter_launch(self, owner_session_id: str | None = None) -> None:
+        with self._lock:
+            if self._launches_blocked:
+                raise ValueError("workspace maintenance is in progress; agent commands are temporarily unavailable.")
+            if owner_session_id is not None and owner_session_id in self._stopping_sessions:
+                raise ValueError("session cleanup is in progress; start_process is temporarily unavailable.")
+            self._launching += 1
+
+    def _exit_launch_locked(self) -> None:
+        self._launching -= 1
+        self._launch_idle.notify_all()
+
+    @contextmanager
+    def launches_blocked(self, *, timeout: float = process_sandbox.STARTUP_TIMEOUT_SECONDS + 5):
+        """Refuse new launches and wait for in-flight ones to register.
+
+        Yields whether every in-flight launch registered within ``timeout``.
+        Reentrant; launches resume when the outermost block exits.
+        """
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._launches_blocked += 1
+            while self._launching and (remaining := deadline - time.monotonic()) > 0:
+                self._launch_idle.wait(remaining)
+            idle = self._launching == 0
+        try:
+            yield idle
+        finally:
+            with self._lock:
+                self._launches_blocked -= 1
+
     def begin_session_cleanup(self, session_id: str) -> bool:
         with self._lock:
             if session_id in self._stopping_sessions:
@@ -2276,6 +2360,8 @@ class ProcessRuntimeManager:
         timeout = _normalize_timeout_seconds(timeout_seconds)
         # Fail closed before any worker state exists: no sandbox, no command.
         posture = _require_sandbox_posture()
+        self._enter_launch()
+        launch_open = True
         worker_root = _worker_runtime_root(uuid.uuid4().hex)
         process: subprocess.Popen[bytes] | None = None
         leader_identity: _ProcessLeaderIdentity | None = None
@@ -2306,6 +2392,7 @@ class ProcessRuntimeManager:
             process = _spawn_process(
                 sandbox.launch.argv,
                 cwd=str(resolved_cwd),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
@@ -2321,6 +2408,8 @@ class ProcessRuntimeManager:
             leader_identity = _capture_process_identity(process)
             with self._lock:
                 self._foreground[process.pid] = (process, leader_identity)
+                self._exit_launch_locked()
+                launch_open = False
             captures = (
                 _BoundedPipeCapture(process.stdout),
                 _BoundedPipeCapture(process.stderr),
@@ -2418,8 +2507,10 @@ class ProcessRuntimeManager:
         except OSError:
             raise
         finally:
-            if process is not None:
-                with self._lock:
+            with self._lock:
+                if launch_open:
+                    self._exit_launch_locked()
+                if process is not None:
                     self._foreground.pop(process.pid, None)
             if sandbox is not None:
                 sandbox.launch.close()
@@ -2471,9 +2562,11 @@ class ProcessRuntimeManager:
         )
         posture = _require_sandbox_posture()
         owner_session_id = get_current_session_id()
-        with self._lock:
-            if owner_session_id is not None and owner_session_id in self._stopping_sessions:
-                raise ValueError("session cleanup is in progress; start_process is temporarily unavailable.")
+        # The sandbox is built and started outside the manager lock (startup
+        # may take seconds); the launch gate and the registration re-check
+        # keep session teardown and workspace swaps from missing it.
+        self._enter_launch(owner_session_id)
+        try:
             process_id = uuid.uuid4().hex
             output_path = _process_runtime_root() / f"{process_id}.log"
             worker_root = _worker_runtime_root(process_id)
@@ -2510,7 +2603,34 @@ class ProcessRuntimeManager:
                 )
             finally:
                 sandbox.launch.close()
+            refusal: Exception | None = None
             if startup is not None:
+                diagnostic, _truncated = _tail_text(output_path, max_chars=4000)
+                refusal = _sandbox_startup_failure(startup, diagnostic)
+            else:
+                descendant_identities = _snapshot_process_descendants(popen, leader_identity)
+                managed = ManagedProcess(
+                    process_id=process_id,
+                    popen=popen,
+                    command=executable,
+                    args=args,
+                    cwd=str(resolved_cwd),
+                    output_path=output_path,
+                    worker_root=worker_root,
+                    started_at=_utc_now(),
+                    owner_session_id=owner_session_id,
+                    process_group_id=leader_identity.process_group_id if leader_identity else None,
+                    leader_identity=leader_identity,
+                    descendant_identities=descendant_identities,
+                )
+                with self._lock:
+                    if owner_session_id is not None and owner_session_id in self._stopping_sessions:
+                        refusal = ValueError(
+                            "session cleanup is in progress; start_process is temporarily unavailable."
+                        )
+                    else:
+                        self._processes[process_id] = managed
+            if refusal is not None:
                 termination = _kill_process_group(
                     popen,
                     leader_identity=leader_identity,
@@ -2521,30 +2641,16 @@ class ProcessRuntimeManager:
                     popen.wait(timeout=1.0)
                 except subprocess.TimeoutExpired:
                     pass
-                diagnostic, _truncated = _tail_text(output_path, max_chars=4000)
                 if cleanup_status == "stopped":
                     try:
                         output_path.unlink(missing_ok=True)
                     except OSError:
                         logger.debug("Failed to delete process log %s", output_path, exc_info=True)
                     _delete_runtime_dir(worker_root)
-                raise _sandbox_startup_failure(startup, diagnostic)
-            descendant_identities = _snapshot_process_descendants(popen, leader_identity)
-            managed = ManagedProcess(
-                process_id=process_id,
-                popen=popen,
-                command=executable,
-                args=args,
-                cwd=str(resolved_cwd),
-                output_path=output_path,
-                worker_root=worker_root,
-                started_at=_utc_now(),
-                owner_session_id=owner_session_id,
-                process_group_id=leader_identity.process_group_id if leader_identity else None,
-                leader_identity=leader_identity,
-                descendant_identities=descendant_identities,
-            )
-            self._processes[process_id] = managed
+                raise refusal
+        finally:
+            with self._lock:
+                self._exit_launch_locked()
         return {**managed.status_payload(), **sandbox.view_summary}
 
     def list_processes(self) -> list[dict[str, Any]]:

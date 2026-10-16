@@ -783,3 +783,70 @@ def test_adopted_process_output_is_bounded_before_return_and_receipt(tmp_path, m
     run_record = next(item for item in records if item.get("binding", {}).get("capability_id") == "run_command")
     assert run_record["output_bytes"] <= 13_000
     assert "x" * 100 not in journal.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_handler_sees_the_consumed_approval_context_and_it_is_reset(monkeypatch, tmp_path):
+    """#1103: adapters compare a bound posture against the consumed approval's context."""
+    from src.extensions.capability_execution import current_approved_context
+
+    seen: list = []
+
+    def echo(arguments):
+        seen.append(current_approved_context())
+        if arguments.get("fail"):
+            raise RuntimeError("handler failure")
+        return "ok"
+
+    host = _test_host(tmp_path / "journal.json", **{"test.echo": echo})
+    context = {"process_isolation_posture_sha256": "a" * 64}
+    bindings = []
+    for arguments in ({"message": "hello"}, {"message": "again", "fail": True}):
+        fingerprint = fingerprint_tool_call("test.echo", arguments, approval_context=context)
+        request = ApprovalRequest(
+            id=f"approval:{arguments['message']}", status="approved", session_id="session:test",
+            conversation_id="session:test", owner_principal_id="operator:test", operator_session_id="session:test",
+            tool_name="test.echo", fingerprint=fingerprint,
+            details_json=json.dumps({"conversation_id": "session:test", "owner_principal_id": "operator:test",
+                                     "approval_owner_operator_session_id": "session:test",
+                                     "approval_context": context}),
+        )
+
+        class _Result:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return [request] if request.status == "approved" else []
+
+        class _Db:
+            async def execute(self, statement):
+                if isinstance(statement, Update):
+                    request.status = "consumed"
+                    return SimpleNamespace(rowcount=1)
+                return _Result()
+
+        db = _Db()
+
+        @asynccontextmanager
+        async def _get_session():
+            yield db
+
+        monkeypatch.setattr("src.approval.repository.get_session", _get_session)
+        binding = await approval_repository.consume_approved(
+            session_id="session:test", tool_name="test.echo", fingerprint=fingerprint,
+            owner_operator_session_id="session:test", owner_principal_id="operator:test", approval_binding=context)
+        assert binding["approval_context"] == context
+        bindings.append((request.id, fingerprint, binding, arguments))
+
+    approval_id, fingerprint, binding, arguments = bindings[0]
+    assert host.execute(_request(approval_id=approval_id, approval_digest=fingerprint, approval_binding=binding,
+                                 arguments=arguments)).state == "succeeded"
+    approval_id, fingerprint, binding, arguments = bindings[1]
+    assert host.execute(_request(approval_id=approval_id, approval_digest=fingerprint, approval_binding=binding,
+                                 arguments=arguments)).state == "failed"
+    assert seen == [context, context]
+    # Reset after success and after a failing handler; unapproved calls see None.
+    assert current_approved_context() is None
+    assert host.execute(_request(arguments={"message": "plain"})).state == "succeeded"
+    assert seen[-1] is None and current_approved_context() is None

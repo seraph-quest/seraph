@@ -452,8 +452,11 @@ def identity(pid):
 
 
 def test_add_returns_the_sum():
-    descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
     root = Path(__file__).resolve().parents[1]
+    heartbeat = str(root / 'descendant-heartbeat')
+    descendant = subprocess.Popen([sys.executable, '-c',
+        'import sys, time\\nwhile True:\\n    open(sys.argv[1], "w").write(str(time.monotonic()))\\n    time.sleep(0.05)',
+        heartbeat])
     temporary = root / 'test-process-started.tmp'
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as stream:
@@ -553,8 +556,14 @@ async def test_operator_journey_timeout_and_cancellation_retain_cleanup_receipts
     assert not (job_root / "artifacts" / "readback.json").exists()
     if sandboxed:
         # Namespace-local pids cannot be read back on the host; killing the
-        # leader tears the whole namespace down.
+        # leader tears the whole namespace down, so the descendant's
+        # heartbeat must stop.
         assert cancelled["process_cleanup"]["cleanup_status"] == "stopped"
+        heartbeat = started_path.with_name("descendant-heartbeat")
+        assert heartbeat.is_file(), "the descendant never ran"
+        first = heartbeat.read_text(encoding="utf-8")
+        await asyncio.sleep(0.5)
+        assert heartbeat.read_text(encoding="utf-8") == first, "a sandboxed descendant outlived the cancel"
     elif sys.platform == "linux" and Path("/proc").is_dir():
         for observed in started.values():
             current = process_tools._read_process_stat(observed["pid"])

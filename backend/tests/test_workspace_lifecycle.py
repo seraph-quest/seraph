@@ -965,3 +965,87 @@ def test_restore_requires_explicit_confirmation_and_rejects_bad_id(tmp_path):
         restore_workspace(root, archive, registry=registry)
     with pytest.raises(WorkspaceStateError, match="restore_id"):
         restore_workspace(root, archive, registry=registry, confirm=True, restore_id="../escape")
+
+
+class _ProcessRuntime:
+    """A process-tool runtime whose stop result the test controls (#1103)."""
+
+    def __init__(self, receipt):
+        from src.tools.process_tools import ProcessRuntimeManager
+
+        self.manager = ProcessRuntimeManager()
+        self.receipt = receipt
+        self.stops = 0
+        self.manager.stop_all_processes = self._stop
+
+    def _stop(self):
+        self.stops += 1
+        return dict(self.receipt)
+
+    def launch_refused(self) -> bool:
+        try:
+            self.manager._enter_launch()
+        except ValueError as exc:
+            return "workspace maintenance" in str(exc)
+        with self.manager._lock:
+            self.manager._exit_launch_locked()
+        return False
+
+
+def _install_runtime(monkeypatch, receipt):
+    import sys
+    from types import SimpleNamespace
+
+    runtime = _ProcessRuntime(receipt)
+    monkeypatch.setitem(sys.modules, "src.tools.process_tools", SimpleNamespace(process_runtime_manager=runtime.manager))
+    return runtime
+
+
+_UNPROVEN = {"requested": 1, "stopped": 0, "unknown": 1, "failed": 0, "conflict": 0}
+_STOPPED = {"requested": 1, "stopped": 1, "unknown": 0, "failed": 0, "conflict": 0}
+
+
+def test_restore_stops_agent_processes_once_and_blocks_launches_throughout(tmp_path, monkeypatch):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    runtime = _install_runtime(monkeypatch, _STOPPED)
+    observed = []
+    original_replace = workspace_lifecycle._replace_root
+
+    def replace_root(*args, **kwargs):
+        # Every root rename happens with launches refused and after the stop.
+        observed.append((runtime.launch_refused(), runtime.stops))
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_lifecycle, "_replace_root", replace_root)
+    restored = restore_workspace(root, archive, registry=registry, confirm=True, restore_id="restore-fence-01")
+    assert restored["status"] == "restored"
+    assert observed and all(refused and stops >= 1 for refused, stops in observed)
+    assert runtime.stops >= 1
+    assert runtime.launch_refused() is False  # launches resume afterwards
+
+
+def test_restore_refuses_before_any_move_when_agent_processes_are_not_proven_stopped(tmp_path, monkeypatch):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    (root / "soul.md").write_text("changed soul\n", encoding="utf-8")
+    _install_runtime(monkeypatch, _UNPROVEN)
+    with pytest.raises(WorkspaceLifecycleError, match="agent processes could not be stopped"):
+        restore_workspace(root, archive, registry=registry, confirm=True, restore_id="restore-fence-02")
+    assert (root / "soul.md").read_text(encoding="utf-8") == "changed soul\n"
+    assert not (workspace_restore_staging_dir(root) / "restore-fence-02").exists()
+
+
+def test_rollback_completes_and_logs_when_agent_processes_are_not_proven_stopped(tmp_path, monkeypatch, caplog):
+    root, registry = _workspace(tmp_path)
+    archive = Path(backup_workspace(root, registry=registry)["archive_path"])
+    (root / "soul.md").write_text("changed soul\n", encoding="utf-8")
+    restore_workspace(root, archive, registry=registry, confirm=True, restore_id="restore-fence-03")
+    runtime = _install_runtime(monkeypatch, _UNPROVEN)
+    with caplog.at_level("WARNING"):
+        rollback = rollback_workspace(root, "restore-fence-03", registry=registry)
+    # Rollback is the repair primitive: it must not strand the workspace.
+    assert rollback["status"] == "rolled_back"
+    assert (root / "soul.md").read_text(encoding="utf-8") == "changed soul\n"
+    assert runtime.stops >= 1
+    assert "not proven stopped" in caplog.text

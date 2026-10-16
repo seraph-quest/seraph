@@ -27,8 +27,8 @@ from urllib.parse import urlsplit
 from src.workspace.production import (
     OWNERSHIP_MIGRATION,
     ProductionWorkspaceMountError,
+    container_ownership_problems,
     validate_container_workspace_mount,
-    workspace_ownership_problem,
 )
 
 
@@ -124,10 +124,11 @@ def _workspace_check(env: Mapping[str, str]) -> Check:
 def _workspace_ownership_check(env: Mapping[str, str]) -> Check:
     """The non-root image user must own the workspace before startup (#1103)."""
     path = Path(_value(env, "WORKSPACE_DIR") or DEFAULT_WORKSPACE).expanduser()
-    problem = workspace_ownership_problem(path)
-    if problem:
-        return Check("workspace_ownership", "invalid", f"{problem}; migrate once with: {OWNERSHIP_MIGRATION}")
-    return Check("workspace_ownership", "ready", "workspace is owned by the runtime user")
+    problems = container_ownership_problems(path, env)
+    if problems:
+        return Check("workspace_ownership", "invalid",
+                     f"{', '.join(problems)}; migrate once with: {OWNERSHIP_MIGRATION}")
+    return Check("workspace_ownership", "ready", "workspace and lifecycle directory are owned by the runtime user")
 
 
 def _process_sandbox_check() -> Check:

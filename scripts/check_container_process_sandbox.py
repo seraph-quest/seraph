@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
 """Build the backend image and probe the agent process sandbox inside it (#1103).
 
-Positive check: the container started with the shipped compose security
-options (seccomp profile, AppArmor profile, systempaths=unconfined,
-no-new-privileges, cap_drop ALL) must report an isolated posture and run a
-real command through the process tools with DENIED state refused.
+Positive check (``docker compose run`` on the production service, so the
+compose file's relative seccomp path, security options, ``cap_drop`` and the
+image's non-root user are exactly what is exercised; the AppArmor override is
+added when the ``seraph-backend`` profile is loaded): the posture must be
+isolated, a real command through the process tools must have ``.vault-key``
+refused while ``notes/`` stays writable, the user must be uid 10001 and
+``uv run`` must work as that user.
 
-Negative check: the same image under Docker's defaults must report a typed
-``process_isolation_unavailable:<reason>``, never an isolated posture.
+Negative check (``docker run`` of the same image under Docker's defaults):
+the posture must be a typed ``process_isolation_unavailable:<reason>``.
 
-``--compare-seccomp PATH`` additionally checks that every rule of the shipped
-profile that is not tagged ``seraph #1103`` appears unchanged in Docker's
-default profile at PATH (so the base grants nothing broader than Docker).
+``--compare-seccomp PATH`` checks that every rule of the vendored base
+``deploy/seccomp/docker-default.json`` appears unchanged in Docker's default
+profile at PATH, so the shipped profile grants nothing broader than Docker
+beyond its ``seraph #1103`` rules.
 
 Without a reachable Docker daemon the check is skipped with a reason (exit 0),
-unless ``--require-docker`` is given. No network is used except by
-``docker build`` itself.
+unless ``--require-docker`` is given.
 """
 from __future__ import annotations
 
@@ -27,14 +30,16 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-PROFILE = ROOT / "deploy" / "seccomp" / "seraph-backend.json"
+BASE_PROFILE = ROOT / "deploy" / "seccomp" / "docker-default.json"
 COMPOSE = ROOT / "docker-compose.prod.yaml"
+APPARMOR_OVERRIDE = ROOT / "docker-compose.prod.apparmor.yaml"
 SERVICE = "backend-prod"
+PROJECT = "seraph-prod"
 TYPED_CONTAINER_REASONS = {"container_seccomp_profile_missing", "container_apparmor_denies_mount",
                            "container_proc_masked", "userns_denied"}
 
 PROBE = r"""
-import json, os, tempfile
+import json, os, subprocess, tempfile
 from pathlib import Path
 from src.execution import process_isolation as sandbox
 posture = sandbox.probe(sandbox.process_runtime({}), hidden_paths=sandbox.host_secret_paths(None), use_cache=False)
@@ -70,19 +75,19 @@ def compose_security(compose_text: str, service: str) -> tuple[list[str], list[s
     return entries("security_opt"), entries("cap_drop")
 
 
-def docker_options(security_opt: list[str], cap_drop: list[str]) -> list[str]:
-    options: list[str] = []
-    for item in security_opt:
-        if item.startswith("seccomp="):
-            item = "seccomp=" + str((ROOT / item.split("=", 1)[1]).resolve())
-        options += ["--security-opt", item]
-    for item in cap_drop:
-        options += ["--cap-drop", item]
-    return options
+def apparmor_profile_loaded() -> bool:
+    enabled = Path("/sys/module/apparmor/parameters/enabled")
+    profiles = Path("/sys/kernel/security/apparmor/policy/profiles")
+    try:
+        return (enabled.read_text().strip() == "Y"
+                and any(entry.name.startswith("seraph-backend.") for entry in profiles.iterdir()))
+    except OSError:
+        return False
 
 
-def compare_seccomp(upstream_path: Path) -> list[str]:
-    ours = json.loads(PROFILE.read_text())
+def compare_seccomp(upstream_path: Path, base_path: Path = BASE_PROFILE) -> list[str]:
+    """Rules of the vendored base that Docker's default profile does not grant identically."""
+    ours = json.loads(base_path.read_text())
     upstream = json.loads(upstream_path.read_text())
 
     def key(rule: dict) -> str:
@@ -90,17 +95,15 @@ def compare_seccomp(upstream_path: Path) -> list[str]:
 
     granted: dict[str, set[str]] = {}
     for rule in upstream["syscalls"]:
-        for name in rule["names"]:
-            granted.setdefault(key(rule), set()).add(name)
+        granted.setdefault(key(rule), set()).update(rule["names"])
     problems = []
     for rule in ours["syscalls"]:
-        if str(rule.get("comment", "")).startswith("seraph #1103"):
-            continue
         extra = set(rule["names"]) - granted.get(key(rule), set())
         if extra:
             problems.append(f"{sorted(extra)} under {key(rule)}")
-    if ours["defaultAction"] != upstream["defaultAction"]:
-        problems.append("defaultAction differs")
+    for field in ("defaultAction", "defaultErrnoRet"):
+        if ours.get(field) != upstream.get(field):
+            problems.append(f"{field} differs")
     return problems
 
 
@@ -108,19 +111,26 @@ def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(command, cwd=ROOT, text=True, **kwargs)
 
 
+def _decode(completed: subprocess.CompletedProcess) -> dict:
+    try:
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return {"exit_code": completed.returncode, "stdout": completed.stdout[-1000:],
+                "stderr": completed.stderr[-2000:]}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", default="seraph-backend:process-sandbox-check")
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--require-docker", action="store_true")
     parser.add_argument("--compare-seccomp", type=Path)
     parser.add_argument("--compare-only", action="store_true")
     args = parser.parse_args(argv)
-    receipt: dict = {"schema": "seraph.container-process-sandbox-check.v1"}
+    receipt: dict = {"schema": "seraph.container-process-sandbox-check.v2"}
     status = 0
     if args.compare_seccomp is not None:
         problems = compare_seccomp(args.compare_seccomp)
-        receipt["seccomp_base_matches_docker_default"] = not problems
+        receipt["seccomp_base_within_docker_default"] = not problems
         receipt["seccomp_base_extras"] = problems
         status |= bool(problems)
         if args.compare_only:
@@ -130,39 +140,49 @@ def main(argv: list[str] | None = None) -> int:
         receipt["skipped"] = "no reachable Docker daemon"
         print(json.dumps(receipt, indent=2))
         return 1 if args.require_docker else status
-    security_opt, cap_drop = compose_security(COMPOSE.read_text(), SERVICE)
-    receipt["compose_security_opt"], receipt["compose_cap_drop"] = security_opt, cap_drop
-    if not args.skip_build:
-        built = run(["docker", "build", "--build-context", "cordis=runtime/cordis", "-t", args.image, "backend"])
-        if built.returncode != 0:
+    env_file = ROOT / ".env.prod"
+    created_env = not env_file.exists()
+    if created_env:
+        # The service's env_file must exist; the example holds no secrets.
+        env_file.write_text((ROOT / "env.prod.example").read_text())
+    try:
+        files = ["-f", str(COMPOSE)]
+        receipt["apparmor_profile_loaded"] = apparmor_profile_loaded()
+        if receipt["apparmor_profile_loaded"]:
+            files += ["-f", str(APPARMOR_OVERRIDE)]
+        compose = ["docker", "compose", "-p", PROJECT, *files]
+        receipt["compose_security_opt"], receipt["compose_cap_drop"] = compose_security(COMPOSE.read_text(), SERVICE)
+        if not args.skip_build and run([*compose, "build", SERVICE]).returncode != 0:
             receipt["build"] = "failed"
             print(json.dumps(receipt, indent=2))
             return 1
-    probe_command = ["/app/.venv/bin/python", "-c", PROBE]
-    shipped = run(["docker", "run", "--rm", *docker_options(security_opt, cap_drop), args.image, *probe_command],
-                  capture_output=True)
-    receipt["shipped_profile"] = _decode(shipped)
-    positive = receipt["shipped_profile"]
-    command = positive.get("command") or {}
-    if not (positive.get("variant") == "isolated" and positive.get("uid") == 10001
-            and command.get("exit_code") == 0 and command.get("stdout") == '{"vault": 13}'
-            and command.get("notes_written") is True):
-        status = 1
-    default = run(["docker", "run", "--rm", "--cap-drop", "ALL", args.image, *probe_command], capture_output=True)
-    receipt["docker_defaults"] = _decode(default)
-    if not (receipt["docker_defaults"].get("variant") == "unavailable"
-            and receipt["docker_defaults"].get("reason") in TYPED_CONTAINER_REASONS):
-        status = 1
+        compose_run = [*compose, "run", "--rm", "--no-deps", "-T", SERVICE]
+        shipped = run([*compose_run, "/app/.venv/bin/python", "-c", PROBE], capture_output=True)
+        receipt["shipped_profile"] = positive = _decode(shipped)
+        command = positive.get("command") or {}
+        if not (positive.get("variant") == "isolated" and positive.get("uid") == 10001
+                and command.get("exit_code") == 0 and command.get("stdout") == '{"vault": 13}'
+                and command.get("notes_written") is True):
+            status = 1
+        uv = run([*compose_run, "uv", "run", "python", "-c", "import os, sys; print(os.getuid(), sys.prefix)"],
+                 capture_output=True)
+        receipt["uv_run_as_runtime_user"] = {"exit_code": uv.returncode, "stdout": uv.stdout.strip()[-200:],
+                                             "stderr": uv.stderr.strip()[-500:]}
+        if uv.returncode != 0 or not uv.stdout.strip().startswith("10001 "):
+            status = 1
+        image = f"{PROJECT}-{SERVICE}"
+        default = run(["docker", "run", "--rm", "--cap-drop", "ALL", image, "/app/.venv/bin/python", "-c", PROBE],
+                      capture_output=True)
+        receipt["docker_defaults"] = _decode(default)
+        if not (receipt["docker_defaults"].get("variant") == "unavailable"
+                and receipt["docker_defaults"].get("reason") in TYPED_CONTAINER_REASONS):
+            status = 1
+    finally:
+        if created_env:
+            env_file.unlink(missing_ok=True)
     receipt["status"] = "passed" if status == 0 else "failed"
     print(json.dumps(receipt, indent=2))
     return status
-
-
-def _decode(completed: subprocess.CompletedProcess) -> dict:
-    try:
-        return json.loads(completed.stdout.strip().splitlines()[-1])
-    except (IndexError, ValueError):
-        return {"exit_code": completed.returncode, "stderr": completed.stderr[-2000:]}
 
 
 if __name__ == "__main__":

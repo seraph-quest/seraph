@@ -349,11 +349,11 @@ async def lifespan(app: FastAPI):
         # The image runs as uid 10001 (#1103): refuse to start on a workspace
         # an earlier root container still owns, rather than failing mid-write,
         # and record the agent process sandbox posture probed in here.
-        from src.workspace.production import OWNERSHIP_MIGRATION, workspace_ownership_problem
+        from src.workspace.production import OWNERSHIP_MIGRATION, container_ownership_problems
 
-        ownership = workspace_ownership_problem(settings.workspace_dir)
+        ownership = container_ownership_problems(settings.workspace_dir)
         if ownership:
-            raise RuntimeError(f"{ownership}; migrate once with: {OWNERSHIP_MIGRATION}")
+            raise RuntimeError(f"{', '.join(ownership)}; migrate once with: {OWNERSHIP_MIGRATION}")
         from src.tools.process_tools import _sandbox_posture
 
         posture = await asyncio.to_thread(_sandbox_posture)
@@ -600,7 +600,9 @@ async def lifespan(app: FastAPI):
 
         process_tools = sys.modules.get("src.tools.process_tools")
         if process_tools is not None:
-            process_tools.process_runtime_manager.stop_all_processes()
+            manager = process_tools.process_runtime_manager
+            with manager.launches_blocked():
+                manager.stop_all_processes()
     except Exception:
         logging.getLogger(__name__).exception("Process-tool shutdown cleanup failed")
     if workspace_owner is not None:

@@ -49,13 +49,13 @@ ENV CORDIS_NODE_PATH=/usr/local/bin/node
 # Non-root runtime user with a fixed uid/gid (#1103). Workspaces written by an
 # earlier root container need a one-time ownership migration:
 #   docker compose -f docker-compose.<env>.yaml run --rm --no-deps --user root \
-#     <backend service> chown -R 10001:10001 /app/data /app/logs
+#     <backend service> chown -R 10001:10001 /app/data /app/logs /app/workspace-lifecycle
 # The backend refuses to start (workspace_ownership_mismatch) until then.
 RUN groupadd --system --gid 10001 seraph \
     && useradd --system --uid 10001 --gid 10001 --home-dir /home/seraph --create-home \
        --shell /usr/sbin/nologin seraph \
-    && mkdir -p /app/data /app/logs \
-    && chown -R seraph:seraph /app/.venv /app/data /app/logs /home/seraph
+    && mkdir -p /app/data /app/logs /app/workspace-lifecycle \
+    && chown -R seraph:seraph /app/.venv /app/data /app/logs /app/workspace-lifecycle /home/seraph
 USER seraph
 
 CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]

@@ -139,12 +139,11 @@ jobs:
       - name: Load the seraph-backend AppArmor profile
         run: sudo apparmor_parser -r -W deploy/apparmor/seraph-backend
 
-      - name: Compare the seccomp base with Docker's default profile
-        # Advisory: upstream may add syscalls over time; the base must never
-        # grant one Docker's default does not.
-        continue-on-error: true
+      - name: Compare the vendored seccomp base with Docker's pinned default profile
+        # Every rule of deploy/seccomp/docker-default.json must appear
+        # unchanged in moby v28.0.0's default profile (see deploy/seccomp/README.md).
         run: |
-          curl -fsSL https://raw.githubusercontent.com/moby/moby/master/profiles/seccomp/default.json -o "$RUNNER_TEMP/docker-default-seccomp.json"
+          curl -fsSL https://raw.githubusercontent.com/moby/moby/v28.0.0/profiles/seccomp/default.json -o "$RUNNER_TEMP/docker-default-seccomp.json"
           python3 scripts/check_container_process_sandbox.py --compare-seccomp "$RUNNER_TEMP/docker-default-seccomp.json" --compare-only
 
       - name: Build the backend image and probe the sandbox inside it

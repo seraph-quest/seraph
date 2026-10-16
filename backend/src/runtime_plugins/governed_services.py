@@ -30,6 +30,12 @@ MAX_MESSAGE_BYTES = 4096
 MAX_INFERENCE_TOKENS = 1024
 # Executed without an approval prompt only when the executor's effect is read-only.
 READ_ONLY_CAPABILITIES = frozenset({"read_file", "list_processes", "read_process_output", "preview_workspace_patch"})
+# Runtime-owned files are never readable through Cordis, whatever their registry class.
+RUNTIME_OWNED_PATHS = frozenset({"seraph.db", "seraph.db-wal", "seraph.db-shm", "seraph.db-journal", ".vault-key"})
+# Concurrent Cordis inference per operator: a burst can never take the broker's
+# per-owner admission slots that interactive chat needs.
+CORDIS_INFERENCE_PER_OWNER = 4
+_cordis_inflight: dict[str, int] = {}
 # Tools that return or manage Vault material are never Cordis capabilities.
 SECRET_TOOLS = frozenset({"get_secret", "get_secret_ref", "list_secrets", "store_secret", "delete_secret"})
 # Finite adapter operations per connection service. None is composed yet: a
@@ -127,6 +133,8 @@ def validate_governed_candidate(candidate) -> dict:
         validate_arguments(descriptor, candidate["arguments"])
         if candidate["arguments_digest"] != _digest(candidate["arguments"]):
             raise NativeServiceBlocked("native_capability_input_digest_changed")
+        if "file_path" in candidate["arguments"]:
+            _path_allowed(candidate["arguments"]["file_path"])
         return dict(candidate)
     if method == "inference.request":
         if set(candidate) != {"schema_version", "method", "purpose", "messages", "max_tokens"}:
@@ -171,8 +179,74 @@ async def current_connection(db, run, candidate) -> None:
 
 
 async def _redacted(text: str) -> str:
+    """Vault redaction that fails closed: no redaction means no output."""
     from src.vault.redaction import redact_secrets_in_text
-    return await redact_secrets_in_text(text, fail_closed=True)
+    redacted = await redact_secrets_in_text(text, fail_closed=True)
+    if text and redacted == "[redaction unavailable]":
+        raise NativeServiceBlocked("native_redaction_unavailable")
+    return redacted
+
+
+async def _redacted_value(value):
+    """Redact strings before any JSON escaping, so an exact secret match cannot be missed."""
+    if isinstance(value, str):
+        return await _redacted(value)
+    if isinstance(value, dict):
+        return {await _redacted_value(key): await _redacted_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [await _redacted_value(item) for item in value]
+    return value
+
+
+def _bounded(text: str) -> str:
+    """Read-only output over the cap is truncated with a marker, never failed after the effect."""
+    raw = text.encode()
+    if len(raw) <= MAX_OUTPUT_BYTES:
+        return text
+    kept = raw[:MAX_OUTPUT_BYTES - 96].decode("utf-8", errors="ignore")
+    return kept + f"\n[output truncated by Seraph: {len(raw) - len(kept.encode())} bytes omitted]"
+
+
+def _path_allowed(file_path) -> None:
+    """Deny Vault/secret/recovery and runtime-owned workspace files after resolving traversal and links."""
+    from config.settings import settings
+    from src.workspace.state_registry import (UnknownWorkspacePathError, WorkspaceStateClass, WorkspaceStateError,
+                                              canonical_workspace_registry, canonical_workspace_root)
+    if type(file_path) is not str or not file_path or "\x00" in file_path:
+        raise NativeServiceBlocked("native_capability_path_denied")
+    root = canonical_workspace_root(settings.workspace_dir)
+    try:
+        resolved = (root / file_path).resolve(strict=False)
+        logical = resolved.relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise NativeServiceBlocked("native_capability_path_denied") from exc
+    if logical in {"", "."} or logical.split("/")[0] in RUNTIME_OWNED_PATHS:
+        raise NativeServiceBlocked("native_capability_path_denied")
+    try:
+        state = canonical_workspace_registry(root).classify_path(logical)
+    except UnknownWorkspacePathError:
+        return  # An operator file outside every declared owner.
+    except WorkspaceStateError as exc:
+        raise NativeServiceBlocked("native_capability_path_denied") from exc
+    if state in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY}:
+        raise NativeServiceBlocked("native_capability_path_denied")
+
+
+def _job_grants(run) -> set[str]:
+    return {str(item) for item in (json.loads(run.declared_authority_json or "{}").get("grants") or [])}
+
+
+def recheck_capability(candidate) -> dict:
+    """Effect-time policy: the descriptor must still be invocable at the admitted version."""
+    descriptor = capability_descriptors().get(candidate["capability_id"])
+    tool = candidate["capability_id"].split(":", 1)[1]
+    if (descriptor is None or descriptor["state"] != "available" or tool not in READ_ONLY_CAPABILITIES
+            or descriptor["version"] != candidate["version"]):
+        raise NativeServiceBlocked("native_capability_policy_changed")
+    validate_arguments(descriptor, candidate["arguments"])
+    if "file_path" in candidate["arguments"]:
+        _path_allowed(candidate["arguments"]["file_path"])
+    return descriptor
 
 
 def _frames(text: str) -> list[str]:
@@ -187,15 +261,25 @@ def _frames(text: str) -> list[str]:
 
 # ---------------------------------------------------------------- effects
 
+def _approval_mode(run) -> str:
+    """The operator's current approval mode, as chat resolves it; never a self-chosen "off"."""
+    from src.observer.manager import context_manager
+    return context_manager.get_context(owner_principal_id=run.owner_principal_id,
+                                       owner_session_id=run.operator_session_id).approval_mode
+
+
 async def _invoke_capability(run, candidate) -> dict:
     from src.approval.runtime import reset_runtime_context, reset_runtime_fencing_token, set_runtime_context, set_runtime_fencing_token
     from src.extensions.capability_execution import CapabilityExecutionError, build_capability_request, current_capability_execution_host
     from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
     tool = candidate["capability_id"].split(":", 1)[1]
+    # Grants come only from the job's sealed declared authority, never self-granted.
+    if AuthorityGrant.CAPABILITY_EXECUTE.value not in _job_grants(run):
+        raise NativeServiceBlocked("native_capability_grant_missing")
     principal = TrustPrincipal(principal_id=run.owner_principal_id, principal_type=PrincipalType.OPERATOR,
                                grants=(AuthorityGrant.CAPABILITY_EXECUTE,), session_id=run.session_id,
                                job_id=run.run_identity, operator_session_id=run.operator_session_id)
-    tokens = set_runtime_context(run.session_id, "off", trust_principal=principal)
+    tokens = set_runtime_context(run.session_id, _approval_mode(run), trust_principal=principal)
     fence = set_runtime_fencing_token(str(run.fencing_token))
     try:
         request = build_capability_request(capability_id=tool, arguments=candidate["arguments"],
@@ -207,10 +291,11 @@ async def _invoke_capability(run, candidate) -> dict:
     finally:
         reset_runtime_fencing_token(fence)
         reset_runtime_context(tokens)
-    output = receipt.result if isinstance(receipt.result, str) else json.dumps(receipt.result, ensure_ascii=False, default=str)
-    output = await _redacted(output)
-    if len(output.encode()) > MAX_OUTPUT_BYTES:
-        raise NativeServiceBlocked("native_capability_output_oversize")
+    if receipt.state != "succeeded":
+        # A raising handler is a failed effect, never a successful empty result.
+        raise NativeServiceBlocked("native_capability_failed")
+    value = await _redacted_value(receipt.result)
+    output = _bounded(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str))
     return {"output": output, "receipt": {"effect_id": receipt.effect_id, "state": receipt.state,
                                           "output_digest": receipt.output_digest}}
 
@@ -226,13 +311,20 @@ async def _request_inference(jobs, run, candidate) -> dict:
     remaining = run.deadline_at.replace(tzinfo=run.deadline_at.tzinfo or timezone.utc).timestamp() - time.time()
     if remaining <= 0:
         raise NativeServiceBlocked("native_original_attempt_changed")
+    if AuthorityGrant.MODEL_INFERENCE.value not in _job_grants(run):
+        raise NativeServiceBlocked("native_inference_grant_missing")
     principal = TrustPrincipal(principal_id=run.owner_principal_id, principal_type=PrincipalType.OPERATOR,
                                grants=(AuthorityGrant.MODEL_INFERENCE,), session_id=run.session_id,
                                job_id=run.run_identity, operator_session_id=run.operator_session_id)
     # The broker keys a job-bound operation as ``remote:<job_id>`` (stable across restarts).
     operation_id = "cordis-inference:" + run.run_identity
-    messages = [dict(item) for item in candidate["messages"]]
-    tokens = set_runtime_context(run.session_id, "off", trust_principal=principal)
+    # Outbound content is Vault-redacted (fail closed) before it can reach a provider.
+    messages = [{"role": item["role"], "content": await _redacted(item["content"])} for item in candidate["messages"]]
+    owner, mode = run.owner_principal_id, _approval_mode(run)
+    if _cordis_inflight.get(owner, 0) >= CORDIS_INFERENCE_PER_OWNER:
+        raise NativeServiceBlocked("cordis_inference_capacity")
+    _cordis_inflight[owner] = _cordis_inflight.get(owner, 0) + 1
+    tokens = set_runtime_context(run.session_id, mode, trust_principal=principal)
     parts: list[str] = []
     try:
         try:
@@ -244,17 +336,19 @@ async def _request_inference(jobs, run, candidate) -> dict:
             # The route's latency bound is the operator setup's; the job's original deadline still cuts it.
             context = build_canonical_inference_context(route, payload=messages, output_tokens=candidate["max_tokens"],
                 timeout_seconds=setup.timeout_seconds, principal=principal, session_id=run.session_id,
-                job_id=run.run_identity, request_id=operation_id, streaming=True)
+                job_id=run.run_identity, request_id=operation_id, streaming=True, redaction_applied=True)
             context = replace(context, deadline_at=min(context.deadline_at, time.time() + remaining))
         except (PermissionError, ValueError) as exc:
             raise NativeServiceBlocked("inference_route_unavailable") from exc
         with bind_remote_inference_receipt(repository=jobs, job_id=run.run_identity, owner=run.lease_owner,
                                            fencing_token=run.fencing_token):
-            async for delta in stream_completion_with_fallback(messages, settings.model_temperature, candidate["max_tokens"],
-                                                               route, context, request_id=operation_id):
-                parts.append(delta)
-                if sum(len(part.encode()) for part in parts) > MAX_OUTPUT_BYTES:
-                    raise NativeServiceBlocked("inference_output_oversize")
+            from contextlib import aclosing
+            async with aclosing(stream_completion_with_fallback(messages, settings.model_temperature, candidate["max_tokens"],
+                                                                route, context, request_id=operation_id)) as stream:
+                async for delta in stream:
+                    parts.append(delta)
+                    if sum(len(part.encode()) for part in parts) > MAX_OUTPUT_BYTES:
+                        raise NativeServiceBlocked("inference_output_oversize")
     except NativeServiceBlocked:
         raise
     except asyncio.CancelledError:
@@ -270,6 +364,9 @@ async def _request_inference(jobs, run, candidate) -> dict:
         raise NativeServiceBlocked("inference_request_failed") from exc
     finally:
         reset_runtime_context(tokens)
+        _cordis_inflight[owner] -= 1
+        if not _cordis_inflight[owner]:
+            _cordis_inflight.pop(owner)
     text = await _redacted("".join(parts))
     snapshot = await jobs.inference_accounting_snapshot(job_id=run.run_identity)
     usage = [{key: row.get(key) for key in ("operation_id", "state", "reserved_microusd", "charged_microusd", "runtime_path")}
@@ -302,8 +399,19 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
         if context["operations"] or context["result"] is not None:
             # An interrupted effect stays an unresolved intent; it is never re-executed.
             raise NativeServiceBlocked("native_governed_replay_denied")
+        if method == "capabilities.invoke":
+            # Policy is rechecked at effect time; a denial here is a no-effect block.
+            recheck_capability(candidate)
         context["operations"].append({"op": "intent", "method": method, "call_ref": frame["request_id"], "no_learning": True})
-        await cas_run(db, run, checkpoint_context_json=_canonical(context))
+        # The intent is also an effect receipt, so stale-lease recovery classifies an
+        # interrupted call as an unresolved external effect instead of a clean failure.
+        intent = {"effect_id": "cordis-governed:" + run.run_identity, "receipt_kind": "effect",
+                  "effect_type": "cordis_governed_" + method.split(".")[0], "status": "intent",
+                  "target_path": "cordis-governed:" + method, "target_digest": run.input_digest,
+                  "recorded_at": datetime.now(timezone.utc).isoformat(), "fencing_token": run.fencing_token,
+                  "details": {"no_learning": True}}
+        await cas_run(db, run, checkpoint_context_json=_canonical(context),
+                      effect_receipts_json=_append_receipt(run.effect_receipts_json, intent, key="effect_id"))
         await db.commit()
         await db.refresh(run)
     if method == "capabilities.invoke":
@@ -333,8 +441,9 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
                     "readback_id": "cordis-governed-readback:" + run.run_identity, "reconciled": True,
                     "reconciliation_status": "resolved", "fencing_token": run.fencing_token,
                     "details": {"verified": True, "no_learning": True}}
-        await cas_run(db, run, checkpoint_context_json=_canonical(context),
-                      effect_receipts_json=_append_receipt(run.effect_receipts_json, readback, key="effect_id"))
+        effects = [item for item in json.loads(run.effect_receipts_json or "[]")
+                   if not (isinstance(item, dict) and item.get("effect_id") == readback["effect_id"])]
+        await cas_run(db, run, checkpoint_context_json=_canonical(context), effect_receipts_json=_canonical([*effects, readback]))
         await db.commit()
     return result
 
@@ -378,6 +487,14 @@ async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, 
         reason = getattr(exc, "reason_code", None) or "native_governed_host_unavailable"
         await _block(jobs, scope, reason)
         raise NativeServiceBlocked(reason) from exc
+    except asyncio.CancelledError:
+        # A cancelled owner never leaves a claimed job running: any intent and
+        # unknown cost stay recorded on the blocked job for reconciliation.
+        await asyncio.shield(_block(jobs, scope, "native_governed_cancelled"))
+        raise
+    except Exception as exc:
+        await _block(jobs, scope, "native_governed_failed")
+        raise NativeServiceBlocked("native_governed_failed") from exc
 
 
 async def execute_native_capability(*, operator, capability_id: str, arguments: dict, idempotency_key: str,

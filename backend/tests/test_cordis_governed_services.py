@@ -41,7 +41,7 @@ class Model:
     """Fixed in-memory provider: canary JSON, then scripted SSE streams."""
 
     def __init__(self):
-        self.calls, self.gates, self.script = [], {}, {}
+        self.calls, self.gates, self.script, self.bodies = [], {}, {}, []
 
     def transport(self):
         model = self
@@ -49,6 +49,7 @@ class Model:
         class Boundary(httpx.AsyncBaseTransport):
             async def handle_async_request(self, request):
                 body = json.loads(request.content)
+                model.bodies.append(request.content)
                 if not body.get("stream"):
                     payload = {"id": "canary", "choices": [{"message": {"role": "assistant", "content": "CANARY_OK"}}],
                                "usage": {"cost": "0.000001", "prompt_tokens": 1, "completion_tokens": 1}}
@@ -393,3 +394,197 @@ async def test_bound_adapter_requires_a_current_connection_and_finite_operation_
             await execute_native_connection_operation(operator=operator, connection_ref="conn-1018", expected_connection_revision=2,
                                                       operation="calendar.delete_everything", idempotency_key="conn-x", host=env["host"])
         assert unknown.value.reason_code == "native_adapter_operation_unknown" and len(env["frames"]) == 3
+
+
+# ---------------------------------------------------------------- security review fixes
+
+async def test_secret_runtime_paths_failed_reads_and_policy_changes_never_succeed(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from config.settings import settings
+    from src.runtime_plugins import governed_services
+    from src.runtime_plugins.governed_services import execute_native_capability
+    monkeypatch.setattr(settings, "capability_journal_secret", "test-capability-journal-secret-1018")
+    monkeypatch.setattr(settings, "capability_journal_secret_hash", "")
+    state = {"revoke_policy": False}
+
+    async def hook(frame):
+        if state["revoke_policy"]:
+            monkeypatch.setattr(governed_services, "READ_ONLY_CAPABILITIES", frozenset())
+    async with governed(accounting_db, monkeypatch, hook=hook) as env:
+        workspace = Path(settings.workspace_dir)
+        (workspace / ".vault-key").write_text("MASTER_KEY_CANARY_1018")
+        (workspace / "d").mkdir()
+        (workspace / "notes").mkdir(exist_ok=True)
+        (workspace / "notes" / "credentials.txt").write_text("x")
+        # Vault/secret/recovery and runtime-owned files are denied before any job or crossing.
+        for index, path in enumerate((".vault-key", "d/../.vault-key", "./.vault-key", "seraph.db", "seraph.db-wal",
+                                      "google_calendar_token.json", "../outside.txt", "")):
+            with pytest.raises(NativeServiceBlocked) as denied:
+                await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
+                                                arguments={"file_path": path}, idempotency_key=f"vk-{index}", host=env["host"])
+            assert denied.value.reason_code == "native_capability_path_denied", path
+        assert env["frames"] == [] and await _governed_jobs(env["jobs"]) == []
+        # The same rule covers every path-taking read-only capability.
+        with pytest.raises(NativeServiceBlocked) as preview:
+            await execute_native_capability(operator=env["operator"], capability_id="native_tool:preview_workspace_patch",
+                arguments={"file_path": "d/../.vault-key", "old_text": "M", "new_text": "N", "expected_occurrences": 1},
+                idempotency_key="preview", host=env["host"])
+        assert preview.value.reason_code == "native_capability_path_denied"
+        # A raising handler is a failed effect: blocked, never a successful empty result.
+        with pytest.raises(NativeServiceBlocked) as failed:
+            await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
+                                            arguments={"file_path": "notes/credentials.txt"}, idempotency_key="failed",
+                                            host=env["host"])
+        assert failed.value.reason_code == "native_capability_failed"
+        job = (await _governed_jobs(env["jobs"]))[-1]
+        assert job["status"] == "blocked" and job["failure_reason"] == "native_capability_failed"
+        # Large read-only output is truncated with a marker, not failed after the effect.
+        (workspace / "big.txt").write_text("y" * 40000)
+        big = await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
+                                              arguments={"file_path": "big.txt"}, idempotency_key="big", host=env["host"])
+        assert big["job"]["status"] == "succeeded" and "[output truncated by Seraph:" in big["output"]
+        assert len(big["output"].encode()) <= governed_services.MAX_OUTPUT_BYTES
+        # Policy is rechecked at effect time: a capability withdrawn after admission never runs.
+        (workspace / "late-policy.txt").write_text("never read")
+        state["revoke_policy"] = True
+        with pytest.raises(NativeServiceBlocked) as changed:
+            await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
+                                            arguments={"file_path": "late-policy.txt"}, idempotency_key="policy", host=env["host"])
+        assert changed.value.reason_code == "native_capability_policy_changed"
+        job = (await _governed_jobs(env["jobs"]))[-1]
+        assert job["status"] == "blocked" and job["effects"] == []
+
+
+async def test_late_and_cancelled_capability_results_are_settled_and_recoverable(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    import threading
+    from datetime import timedelta
+    from config.settings import settings
+    from src.extensions import capability_execution
+    from src.runtime_plugins import service_jobs
+    from src.runtime_plugins.dispatch import read_context
+    from src.runtime_plugins.governed_services import execute_native_capability
+    monkeypatch.setattr(settings, "capability_journal_secret", "test-capability-journal-secret-1018")
+    monkeypatch.setattr(settings, "capability_journal_secret_hash", "")
+    real_host, gate, entered = capability_execution.current_capability_execution_host, threading.Event(), threading.Event()
+
+    class SlowHost:
+        def execute(self, request):
+            entered.set()
+            gate.wait(10)
+            return real_host().execute(request)
+    monkeypatch.setattr(capability_execution, "current_capability_execution_host", lambda: SlowHost())
+    async with governed(accounting_db, monkeypatch) as env:
+        jobs = env["jobs"]
+        (Path(settings.workspace_dir) / "notes.txt").write_text("late notes")
+        # Late: the handler answers after the original deadline; nothing is sealed.
+        monkeypatch.setattr(service_jobs, "SERVICE_TIMEOUT", timedelta(seconds=3))
+        late = asyncio.create_task(execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
+                                   arguments={"file_path": "notes.txt"}, idempotency_key="late-cap", host=env["host"]))
+        await asyncio.to_thread(entered.wait, 10)
+        await asyncio.sleep(3.5)
+        gate.set()
+        with pytest.raises(NativeServiceBlocked):
+            await late
+        job = (await _governed_jobs(jobs))[-1]
+        async with jobs._session() as db:
+            assert read_context(await jobs._fetch(db, job["job_id"]))["result"] is None
+        # The expired attempt lost its authority to settle; stale-lease recovery owns it and
+        # keeps the recorded intent visible as an unresolved effect.
+        if job["status"] == "running":
+            from datetime import datetime, timezone
+            job = await jobs.recover_stale_job(job["job_id"], now=datetime.now(timezone.utc) + timedelta(hours=1))
+        assert (job["status"], job["failure_reason"]) == ("failed", "deadline_expired")
+        assert [(item["receipt_kind"], item["status"]) for item in job["effects"]] == [("effect", "intent")]
+        monkeypatch.setattr(service_jobs, "SERVICE_TIMEOUT", timedelta(seconds=30))
+        if not env["host"].admitting:
+            await env["host"].stop()
+            assert await env["host"].start()
+        # Cancelled: the owner settles the claimed job as blocked with its intent kept.
+        gate.clear(), entered.clear()
+        cancelled = asyncio.create_task(execute_native_capability(operator=env["operator"],
+            capability_id="native_tool:read_file", arguments={"file_path": "notes.txt"}, idempotency_key="cancel-cap",
+            host=env["host"]))
+        await asyncio.to_thread(entered.wait, 10)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        gate.set()
+        job = (await _governed_jobs(jobs))[-1]
+        assert job["status"] == "blocked" and job["failure_reason"] == "native_governed_cancelled"
+        async with jobs._session() as db:
+            assert [op["op"] for op in read_context(await jobs._fetch(db, job["job_id"]))["operations"]] == ["intent"]
+        assert [item["status"] for item in job["effects"]] == ["intent"]
+
+
+async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    import time as clock
+    from src.runtime_plugins import governed_services
+    from src.runtime_plugins.governed_services import execute_native_inference
+    from src.vault.repository import vault_repository
+    async with governed(accounting_db, monkeypatch) as env:
+        broker, jobs, model = env["broker"], env["jobs"], env["model"]
+        await vault_repository.store("cordis-1018-outbound", SECRET)
+        # Outbound messages are Vault-redacted before any provider sees them, including JSON-escaped forms.
+        done = await execute_native_inference(operator=env["operator"], purpose="interactive",
+            messages=[{"role": "system", "content": 'cfg {"k": "' + SECRET + '"}'}, {"role": "user", "content": "say " + SECRET}],
+            max_tokens=64, idempotency_key="outbound", host=env["host"])
+        assert done["job"]["status"] == "succeeded"
+        assert model.bodies and all(SECRET.encode() not in body for body in model.bodies) and SECRET not in json.dumps(done)
+
+        # Cordis interactive outranks Cordis background through the service, in one broker.
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def active():
+            started.set()
+            await release.wait()
+            return {"usage": {"cost": "0.000001"}}
+        holder = asyncio.create_task(broker.execute(broker_request("hold-lanes"), active))
+        await started.wait()
+        background = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="background",
+            messages=_messages("lane-background"), max_tokens=64, idempotency_key="lane-bg", host=env["host"]))
+        assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 2))
+        interactive = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="interactive",
+            messages=_messages("lane-interactive"), max_tokens=64, idempotency_key="lane-int", host=env["host"]))
+        assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 3))
+        release.set()
+        await asyncio.gather(holder, background, interactive)
+        assert model.calls[-2:] == ["lane-interactive", "lane-background"]
+
+        # Cordis has its own per-owner sub-quota: a burst is refused before the broker, chat keeps its slots.
+        monkeypatch.setattr(governed_services, "CORDIS_INFERENCE_PER_OWNER", 1)
+        model.gates["lane-burst-1"] = asyncio.Event()
+        first = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="background",
+            messages=_messages("lane-burst-1"), max_tokens=64, idempotency_key="burst-1", host=env["host"]))
+        assert await _until(lambda: _contacted(model, "lane-burst-1"))
+        with pytest.raises(NativeServiceBlocked) as burst:
+            await execute_native_inference(operator=env["operator"], purpose="background", messages=_messages("lane-burst-2"),
+                                           max_tokens=64, idempotency_key="burst-2", host=env["host"])
+        assert burst.value.reason_code == "cordis_inference_capacity" and "lane-burst-2" not in model.calls
+        chat = asyncio.create_task(broker.execute(broker_request("chat-during-burst"), _usage))
+        assert await _until(lambda: _has_row(jobs, "chat-during-burst"))  # Admitted, not refused for capacity.
+        model.gates["lane-burst-1"].set()
+        assert (await first)["job"]["status"] == "succeeded"
+        assert (await chat)["usage"]
+        monkeypatch.setattr(governed_services, "CORDIS_INFERENCE_PER_OWNER", 4)
+
+        # Unknown cost: by broker design an uncertain provider result keeps the serial slot
+        # until it is reconciled, so the next request (Cordis or chat) waits rather than
+        # risking double spend; once reconciled it proceeds.
+        model.script["lane-lost"] = {"lost": True}
+        with pytest.raises(NativeServiceBlocked):
+            await execute_native_inference(operator=env["operator"], purpose="interactive", messages=_messages("lane-lost"),
+                                           max_tokens=64, idempotency_key="lane-lost", host=env["host"])
+        lost_job = (await _governed_jobs(jobs))[-1]
+        held = broker.receipt_for("remote:" + lost_job["job_id"])
+        assert held.status == "blocked" and held.reconciliation_required
+        after = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="interactive",
+            messages=_messages("lane-after-lost"), max_tokens=64, idempotency_key="lane-after", host=env["host"]))
+        assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 6))
+        await asyncio.sleep(0.5)
+        assert "lane-after-lost" not in model.calls and not after.done()
+        await broker.reconcile(held.operation_id, owner_id=held.owner_id, job_id=held.job_id,
+                               fencing_token=held.fencing_token, outcome="failed", actual_cost_microusd=2)
+        assert (await after)["job"]["status"] == "succeeded" and "lane-after-lost" in model.calls
+
+
+async def _usage():
+    return {"usage": {"cost": "0.000001"}}

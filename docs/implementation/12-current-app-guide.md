@@ -602,9 +602,19 @@ from `factory.get_tools` (stable `native_tool:<name>` id and version, closed
 input schema, effect class, limits, permissions and executor). Only adopted,
 read-only `CapabilityExecutionHost` capabilities are invocable; approval-gated,
 MCP, ungoverned and Vault tools are listed as blocked. Invalid arguments are
-denied at admission. The call records an intent, runs the host under the job's
-runtime trust context and fence, and seals Python's result; the provider's
-answer must echo it.
+denied at admission. A path argument that resolves (after `..` and links) to a
+Vault secret/recovery file in the workspace state registry or to a runtime-owned
+file (`seraph.db` and its sidecars, `.vault-key`) is denied as
+`native_capability_path_denied`. Policy, descriptor version and path are checked
+again at effect time (`native_capability_policy_changed`). The job's grants come
+only from its sealed declared authority, and the host runs under the operator's
+current approval mode. The call records an intent (also an `intent` effect
+receipt, so stale-lease recovery never reports a clean failure), runs the host
+under the job's runtime trust context and fence, and seals Python's result; the
+provider's answer must echo it. A handler that raises is `native_capability_failed`;
+output over 16 KiB is truncated with a marker. A cancelled or unexpectedly
+failing owner settles its claimed job as blocked (`native_governed_cancelled`,
+`native_governed_failed`) and keeps the intent for reconciliation.
 
 `inference.request` maps a closed purpose (`interactive` or `background`) to the
 canonical routes `cordis_interactive_inference` and `cordis_background_inference`
@@ -612,8 +622,13 @@ and runs `stream_completion_with_fallback`, that is `execute_streaming` behind
 the single `remote_inference_admission_broker`, bound to the job's lease.
 Interactive work keeps its priority over queued background work; cancelling a
 queued request releases its reservation without contact; a lost response after
-contact stays an `unknown` cost liability. Routes need a declared and proven
-streaming capability, as chat does. Python returns bounded frames, the sealed
+contact stays an `unknown` cost liability. By broker design that uncertain
+result keeps the serial slot until it is reconciled, so the next request (Cordis
+or chat) waits instead of risking a double charge. Outbound messages are
+Vault-redacted (fail closed) before JSON encoding, and Cordis inference is capped
+at four concurrent requests per operator (`cordis_inference_capacity`) so a burst
+cannot take the broker's per-owner admission slots chat needs. Routes need a
+declared and proven streaming capability, as chat does. Python returns bounded frames, the sealed
 receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
 and no service returns secrets. A changed attempt, deadline or Root never seals
 output, and unloading the host leaves the job's intent and cost liability for

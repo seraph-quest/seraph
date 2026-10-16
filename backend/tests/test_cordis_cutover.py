@@ -16,7 +16,7 @@ from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import real_auth  # noqa: F401
 from src.runtime_plugins.agent_turns import AGENT_LOOP_DOMAIN, chat_runtime_status
 from src.runtime_plugins.bridge import CordisHost
-from src.runtime_plugins.cutover import (CUTOVER_EVENT, OPERATOR_EVENT, LegacyTurnGate, legacy_turns,
+from src.runtime_plugins.cutover import (BOOT_EVENT, CUTOVER_EVENT, OPERATOR_EVENT, LegacyTurnGate, legacy_turns,
                                          run_boot_cutover, transition_domain)
 from src.runtime_plugins.ownership import CompositionBindingError
 from src.workflows.job_runtime import DurableJobRepository
@@ -46,6 +46,9 @@ async def test_fresh_workspace_cuts_chat_over_once_and_a_missing_runtime_blocks_
         # A later boot with a ready runtime completes the same cutover, never a second one.
         [completed] = await run_boot_cutover(host)
         assert completed["action"] == "completed" and completed["state"] == "ready"
+        # The completion is audited, but it is not a second cutover marker.
+        [boot] = await _events(BOOT_EVENT)
+        assert (boot["reason"], boot["prior"]["state"], boot["state"]) == ("completed", "blocked", "ready")
         status = await chat_runtime_status(host)
         assert (status["loop"], status["owner_kind"]) == ("cordis.agent-loop.v1", "cordis")
         assert await run_boot_cutover(host) == []
@@ -231,8 +234,10 @@ async def test_boot_refreshes_a_stale_cordis_digest_and_status_names_the_drift(a
                                                                                  cut["epoch"] + 1)
         assert (await chat_runtime_status(rebuilt))["loop"] == "cordis.agent-loop.v1"
         assert await run_boot_cutover(rebuilt) == []
-        # Still one default cutover marker: a refresh is not a re-cut.
+        # Still one default cutover marker: a refresh is not a re-cut, but it is audited.
         assert len(await _events(CUTOVER_EVENT)) == 1
+        [boot] = await _events(BOOT_EVENT)
+        assert (boot["reason"], boot["epoch"], boot["prior"]["epoch"]) == ("digest_refreshed", cut["epoch"] + 1, cut["epoch"])
 
 
 async def test_a_blocked_cordis_owner_recovery_names_local_and_docker_restarts(accounting_db, real_auth):  # noqa: F811
@@ -241,3 +246,35 @@ async def test_a_blocked_cordis_owner_recovery_names_local_and_docker_restarts(a
     await run_boot_cutover(stopped)
     status = await chat_runtime_status(stopped)
     assert status["loop"] == "blocked" and "./manage.sh -e prod up -d --build" in status["recovery"]
+
+
+async def test_a_failed_production_startup_releases_the_owner_lease(monkeypatch, tmp_path):
+    """The lifespan takes the workspace owner lease first; a startup failure after that releases it."""
+    from config.settings import settings
+    from fastapi import FastAPI
+    from src import app as app_module
+    from src.workspace import production
+    from tests.test_workspace_production import _workspace
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "deployment_environment", "production")
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+
+    async def failing_init_db():
+        assert production.runtime_workspace_owner_held()
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(app_module, "init_db", failing_init_db)
+    # Keep every lease object alive, so only an explicit exit (never garbage collection) can release it.
+    leases = []
+    real_owner = production.runtime_workspace_owner
+
+    def kept_owner(path):
+        leases.append(real_owner(path))
+        return leases[-1]
+    monkeypatch.setattr(production, "runtime_workspace_owner", kept_owner)
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        async with app_module.lifespan(FastAPI()):
+            pass
+    assert len(leases) == 1 and not production.runtime_workspace_owner_held()
+    # The lock itself is free again: a second owner can take it.
+    with real_owner(root):
+        assert production.runtime_workspace_owner_held()

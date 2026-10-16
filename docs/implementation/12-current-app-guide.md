@@ -736,7 +736,9 @@ skipped. A marked, ready Cordis domain whose stored composition digest differs
 from this boot's reviewed build (a rebuilt package) is moved to the running
 build's digest at a higher epoch (`digest_refreshed`); until that happens chat
 status reports `agent_loop_composition_drift` with the restart fix instead of
-naming a stale build.
+naming a stale build. A completed cutover and a digest refresh are each audited
+as `runtime_composition_domain_boot_transition` in the same writer; neither is
+a second cutover marker.
 
 Operators move a domain live with `GET /api/runtime/composition/domains` and
 `POST /api/runtime/composition/domains/{domain}/owner {target, expected_epoch,
@@ -751,7 +753,8 @@ while a dependent domain is Cordis-owned (`composition_dependent_cordis_owned`).
 
 In production (`DEPLOYMENT_ENVIRONMENT=prod|production`) the backend lifespan
 holds the exclusive workspace owner lease (`runtime_workspace_owner`) for its
-whole life, so no backup or restore can observe a transition; a production
+whole life, and releases it on every exit, including a failed startup, so no
+backup or restore can observe a transition; a production
 process that does not hold the lease refuses every boot and live transition
 (`composition_owner_lease_missing`, logged as an error). Dev and test processes
 take no lease, so a workspace backup taken there while a transition runs has no

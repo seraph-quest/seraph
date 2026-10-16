@@ -110,7 +110,7 @@ export function decodeJson(data: Uint8Array): Json {
     offset += number.length;
     const value = Number(number);
     if (!Number.isFinite(value)) throw new ProtocolError('nonfinite number');
-    if (key && ['protocol', 'seq', 'deadline_at', 'composition_epoch', 'resources_remaining', 'limit', 'max_bytes', 'expected_revision', 'revision', 'source_slot', 'first_line', 'last_line', 'size_bytes'].includes(key)) {
+    if (key && ['protocol', 'seq', 'deadline_at', 'composition_epoch', 'resources_remaining', 'limit', 'max_bytes', 'offset', 'expected_revision', 'revision', 'source_slot', 'first_line', 'last_line', 'size_bytes'].includes(key)) {
       if (!/^-?(?:0|[1-9][0-9]*)$/.test(number)) throw new ProtocolError('integer used float syntax');
       if (!Number.isSafeInteger(value)) throw new ProtocolError('unsafe integer');
     }

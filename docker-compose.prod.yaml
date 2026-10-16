@@ -14,6 +14,9 @@ services:
     build:
       context: ./backend
       dockerfile: ./Dockerfile
+      # Resolved relative to this Compose file (verified with `docker compose config`).
+      additional_contexts:
+        cordis: ./runtime/cordis
     command:
       - sh
       - -c
@@ -31,6 +34,8 @@ services:
       - .env.prod
     environment:
       DEPLOYMENT_ENVIRONMENT: production
+      # The image's reviewed Node; a host value in the env file never applies here.
+      CORDIS_NODE_PATH: /usr/local/bin/node
       WORKSPACE_DIR: /app/data
       SERAPH_WORKSPACE_LIFECYCLE_PATH: /app/workspace-lifecycle
       SERAPH_PRODUCTION_MOUNT_CHECK: "true"

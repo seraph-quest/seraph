@@ -1,10 +1,14 @@
 import json
+import logging
 import os
+import sys
+import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from typing import AsyncGenerator, Callable, Iterable, Iterator
 
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -50,6 +54,58 @@ def _restore_sqlite_busy_timeout(dbapi_connection, connection_record, _connectio
 event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
 event.listen(engine.sync_engine, "checkout", _restore_sqlite_busy_timeout)
 
+logger = logging.getLogger(__name__)
+
+# Writer-lock hold diagnostics (#1074): time each write transaction from its
+# first lock-taking statement to commit/rollback, and name the call site only
+# when it held SQLite's writer lock long enough to stall other requests.
+_WRITE_HOLD_WARN_SECONDS = 1.0
+_WRITE_STARTED_AT = "seraph_write_started_at"
+_WRITE_STATEMENTS = ("BEGIN IMMEDIATE", "INSERT", "UPDATE", "DELETE", "REPLACE")
+_CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + os.sep
+
+
+def _note_write_start(conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+    if _WRITE_STARTED_AT not in conn.info and statement.lstrip()[:15].upper().startswith(_WRITE_STATEMENTS):
+        conn.info[_WRITE_STARTED_AT] = time.monotonic()
+
+
+def _write_call_site() -> str:
+    # Async callers run SQLAlchemy inside a greenlet; their frames live on the
+    # parent greenlet's stack, so walk the whole chain.
+    import greenlet
+
+    frames = []
+    current = greenlet.getcurrent()
+    while current is not None:
+        frame = sys._getframe() if current is greenlet.getcurrent() else current.gr_frame
+        while frame is not None:
+            name = frame.f_code.co_filename
+            if name.startswith(_CODE_ROOT) and "site-packages" not in name and name != __file__:
+                frames.append(f"{name[len(_CODE_ROOT):]}:{frame.f_lineno}:{frame.f_code.co_name}")
+            frame = frame.f_back
+        current = current.parent
+    return " <- ".join(frames[:4]) or "unknown"
+
+
+def _report_write_hold(conn) -> None:
+    started = conn.info.pop(_WRITE_STARTED_AT, None)
+    if started is None:
+        return
+    held = time.monotonic() - started
+    if held >= _WRITE_HOLD_WARN_SECONDS:
+        logger.warning("SQLite writer lock held %.2fs by %s", held, _write_call_site())
+
+
+def _forget_write_start(_dbapi_connection, connection_record) -> None:
+    connection_record.info.pop(_WRITE_STARTED_AT, None)
+
+
+event.listen(engine.sync_engine, "before_cursor_execute", _note_write_start)
+event.listen(engine.sync_engine, "commit", _report_write_hold)
+event.listen(engine.sync_engine, "rollback", _report_write_hold)
+event.listen(engine.sync_engine, "checkin", _forget_write_start)
+
 
 async def bound_lock_wait(session: AsyncSession, milliseconds: int) -> None:
     """Shorten SQLite's lock wait for the rest of this session's work.
@@ -73,6 +129,24 @@ def is_database_locked(exc: BaseException) -> bool:
     """Whether ``exc`` is SQLite lock contention rather than a real fault."""
     message = str(getattr(exc, "orig", None) or exc).lower()
     return "database is locked" in message or "database table is locked" in message
+
+
+async def commit_or_defer(session: AsyncSession, milliseconds: int) -> bool:
+    """Commit housekeeping done on a read path, or drop it under contention.
+
+    Returns False (after rolling back) when another writer holds SQLite's lock
+    for longer than ``milliseconds``; the caller must already present the
+    outcome to its reader without relying on the write (#1074).
+    """
+    await bound_lock_wait(session, milliseconds)
+    try:
+        await session.commit()
+    except OperationalError as exc:
+        if not is_database_locked(exc):
+            raise
+        await session.rollback()
+        return False
+    return True
 
 
 async_session_factory = sessionmaker(
@@ -1201,6 +1275,15 @@ async def _ensure_repo_repair_columns(conn) -> None:
             "effective_upstream": "VARCHAR DEFAULT ''",
             "maximum_input_bytes": "INTEGER DEFAULT 65536",
             "maximum_output_tokens": "INTEGER DEFAULT 4096",
+            "iteration_id": "VARCHAR",
+            "egress_envelope_schema": "VARCHAR",
+            "egress_envelope_artifact_ref": "VARCHAR",
+            "egress_envelope_sha256": "VARCHAR",
+            "diagnostics_sha256": "VARCHAR",
+            "redaction_version": "VARCHAR",
+            "serialized_request_sha256": "VARCHAR",
+            "combined_input_bytes": "INTEGER",
+            "diagnostics_acknowledged": "BOOLEAN DEFAULT 0",
             "expires_at": "DATETIME",
             "state": "VARCHAR DEFAULT 'active'",
             "revision": "INTEGER DEFAULT 1",

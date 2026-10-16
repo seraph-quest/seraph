@@ -44,7 +44,8 @@ BLOCKED_METHODS = MappingProxyType({
     "memory.propose": "native_memory_mutation_deferred",
     "memory.applyReviewed": "native_memory_mutation_deferred",
     "memory.forget": "native_memory_mutation_deferred",
-    # Extension point for #1008: register a native research planning owner.
+    # Cordis owns research planning/execution (#1008); Python originates these
+    # calls and never serves them as callbacks.
     "research.buildPlan": "native_research_plan_not_bound",
     "research.executeAccepted": "native_research_execution_not_bound",
     "conversation.accept": "native_turn_producer_not_bound",
@@ -282,6 +283,26 @@ class NativeServiceDispatcher:
     async def current_authority(self, db, run) -> str:
         """Server-resolved discriminated authority; plugins supply none of it."""
         authority = json.loads(run.declared_authority_json or "{}")
+        if isinstance(authority, dict) and authority.get("authority_type") == "goal_programme_planning_v1":
+            # One goal-less planning job per discovery occurrence (#1008); the
+            # current programme/grant/goal binding is its only authority.
+            from src.guardian.goal_programmes import GoalProgrammeError, goal_programme_service, stage_programme_policy
+            from src.work_board.research_parent import DISCOVERY_SERVICE, PLANNING_KIND, planning_authority
+            try:
+                planning = planning_authority(authority)
+            except ValueError as exc:
+                raise NativeServiceBlocked("native_programme_authority_invalid") from exc
+            if (run.job_kind != PLANNING_KIND or run.owner_kind != "service"
+                    or run.owner_principal_id != DISCOVERY_SERVICE or run.service_id != DISCOVERY_SERVICE
+                    or run.session_id is not None or run.goal_id is not None
+                    or planning.planning_job_id != run.run_identity):
+                raise NativeServiceBlocked("native_programme_lineage_changed")
+            try:
+                await goal_programme_service.validate_current_binding(
+                    db=db, binding=planning.programme_binding, policy=stage_programme_policy())
+            except GoalProgrammeError as exc:
+                raise NativeServiceBlocked("native_programme_authority_changed") from exc
+            return "goal-programme"
         if isinstance(authority, dict) and authority.get("authority_type") == "goal_programme_discovery_v1":
             # Issuer Root is provenance only: its idle expiry never disables
             # standing work, while current programme/grant/goal scope,
@@ -357,6 +378,10 @@ class NativeServiceDispatcher:
             if method in BLOCKED_METHODS:
                 # Typed and operator-visible; no authority or private bytes used.
                 return blocked(BLOCKED_METHODS[method])
+            if scope.binding.native_branch in {"programme_planning", "programme_discovery"}:
+                # Guardian research callbacks (#1008) have their own Python owner.
+                from .research_dispatch import dispatch_research
+                return await dispatch_research(self, frame, payload, scope)
             if method in {"artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"}:
                 from .service_artifacts import dispatch_artifact_operation
                 return await dispatch_artifact_operation(self, frame, payload, scope)

@@ -9,6 +9,7 @@ import type { ScopedRequestClient } from './contracts/client.js';
 import type { Input, Result, ServiceMethod } from './contracts/methods.js';
 import { invokeService, SERVICE_KEYS, servicePlugins } from './plugins/index.js';
 import { object, type Schema } from './contracts/schema.js';
+import { FORMAT_PROVIDERS, SOURCE_MEDIA_TYPES } from './plugins/source_extraction/index.js';
 
 export const CORDIS_VERSION = '4.0.0-rc.10';
 export const CORDIS_INTEGRITY = 'sha512-xG90nPNQxR272cC4lR/m5LHevegIJvdddQBlKdEAdGz3n+zgH5lsgkg8o9fc2P3T/f+pO5D7FN1HZvkNBiABnw==';
@@ -57,6 +58,11 @@ export const BUILD_FILES = [
   'src/plugins/connections/index.ts',
   'src/plugins/agent_loop/index.ts',
   'src/plugins/source_extraction/index.ts',
+  'src/plugins/source_extraction/html.ts',
+  'src/plugins/source_extraction/html-entities.ts',
+  'src/plugins/source_extraction/rss-atom.ts',
+  'src/plugins/research/guardian.ts',
+  'src/providers/goal-plan.ts',
   'dist/src/bootstrap.js',
   'dist/src/composition.js',
   'dist/src/protocol.js',
@@ -94,6 +100,11 @@ export const BUILD_FILES = [
   'dist/src/plugins/connections/index.js',
   'dist/src/plugins/agent_loop/index.js',
   'dist/src/plugins/source_extraction/index.js',
+  'dist/src/plugins/source_extraction/html.js',
+  'dist/src/plugins/source_extraction/html-entities.js',
+  'dist/src/plugins/source_extraction/rss-atom.js',
+  'dist/src/plugins/research/guardian.js',
+  'dist/src/providers/goal-plan.js',
 ];
 export const PACKAGE_FILES = [...BUILD_FILES, 'dist/build-manifest.json'];
 export interface PluginSpec { id: string; required: boolean; dependencies: string[]; config: Record<string, Json>; }
@@ -117,9 +128,19 @@ const registry: Readonly<Record<string, Plugin.Object<Record<string, Json>>>> = 
   ...servicePlugins({ isActive: () => false, request: async () => { throw new ProtocolError('native invocation required'); } }),
 });
 
+/** Source-format selection: reviewed media types to reviewed format providers. */
+const formats: Schema<Record<string, string>> = { parse(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > SOURCE_MEDIA_TYPES.length) throw new ProtocolError('invalid source formats');
+  for (const [mediaType, provider] of Object.entries(value)) {
+    if (!(SOURCE_MEDIA_TYPES as readonly string[]).includes(mediaType) || typeof provider !== 'string' || !Object.hasOwn(FORMAT_PROVIDERS, provider)) throw new ProtocolError('invalid source formats');
+  }
+  return value as Record<string, string>;
+} };
 /** Closed per-plugin configuration schemas; unknown plugins or keys fail closed. */
-const CONFIG_SCHEMAS: Readonly<Record<string, Schema<Record<string, unknown>>>> = Object.freeze(
-  Object.fromEntries(Object.keys(registry).map(id => [id, object({})])));
+const CONFIG_SCHEMAS: Readonly<Record<string, Schema<Record<string, unknown>>>> = Object.freeze({
+  ...Object.fromEntries(Object.keys(registry).map(id => [id, object({})])),
+  'seraph.source-extraction.v1': object({ formats }),
+});
 const SERVICE_KEY_BY_PLUGIN: Readonly<Record<string, (typeof SERVICE_KEYS)[number]>> = Object.freeze(
   Object.fromEntries(Object.keys(servicePlugins({ isActive: () => false, request: async () => { throw new ProtocolError('native invocation required'); } })).map((id, index) => [id, SERVICE_KEYS[index]!])));
 export function validateProfile(value: Json): Profile {
@@ -142,14 +163,23 @@ export function validateProfile(value: Json): Profile {
   return profile as unknown as Profile;
 }
 /** Files whose reviewed hashes identify one provider implementation. */
+// Provider implementations beyond each domain's own index/contract files.
+const EXTRA_PLUGIN_FILES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'seraph.source-extraction.v1': ['src/plugins/source_extraction/html.ts', 'src/plugins/source_extraction/html-entities.ts', 'src/plugins/source_extraction/rss-atom.ts'],
+  'seraph.goal-plan.v1': ['src/providers/goal-plan.ts', 'src/contracts/research.ts'],
+  'seraph.guardian-research.v1': ['src/plugins/research/guardian.ts', 'src/contracts/research.ts'],
+});
 export function pluginFiles(id: string): string[] {
   if (id === HOST_PLUGIN) return ['src/composition.ts', 'dist/src/composition.js'];
   const match = /^seraph\.([a-z-]+)\.v1$/.exec(id);
-  if (!match) throw new ProtocolError('unknown plugin');
+  if (!match || !Object.hasOwn(registry, id)) throw new ProtocolError('unknown plugin');
+  const common = ['src/plugins/proxy.ts', 'dist/src/plugins/proxy.js', 'src/contracts/methods.ts', 'dist/src/contracts/methods.js',
+    'src/contracts/schema.ts', 'dist/src/contracts/schema.js'];
+  const extra = (EXTRA_PLUGIN_FILES[id] ?? []).flatMap(path => [path, 'dist/' + path.replace(/\.ts$/, '.js')]);
+  if (id === 'seraph.goal-plan.v1' || id === 'seraph.guardian-research.v1') return [...extra, ...common];
   const name = match[1]!.replace('-', '_');
   return [`src/plugins/${name}/index.ts`, `dist/src/plugins/${name}/index.js`, `src/contracts/${name}.ts`, `dist/src/contracts/${name}.js`,
-    'src/plugins/proxy.ts', 'dist/src/plugins/proxy.js', 'src/contracts/methods.ts', 'dist/src/contracts/methods.js',
-    'src/contracts/schema.ts', 'dist/src/contracts/schema.js'];
+    ...common, ...extra];
 }
 export function pluginDigest(spec: PluginSpec, files: Record<string, Json>): string {
   const hashes: Record<string, Json> = {};
@@ -221,7 +251,8 @@ export class Composition {
     const context = new Context();
     context.logger.bufferSize = 0;
     const listed = new Set(this.fibers.filter(({ spec }) => this.composed(spec.id)).map(({ spec }) => spec.id));
-    const plugins = Object.fromEntries(Object.entries(servicePlugins(client)).filter(([id]) => listed.has(id)));
+    const plugins = Object.fromEntries(Object.entries(servicePlugins(client, this.pluginDigests)).filter(([id]) => listed.has(id)));
+    const configs = Object.fromEntries(this.profile.plugins.map(spec => [spec.id, spec.config]));
     const fibers: Fiber[] = [];
     const id = `invocation-scope-${this.scopeSequence++}`;
     let scopeErrors = 0;
@@ -233,7 +264,7 @@ export class Composition {
     });
     try {
       removeLogger = context.logger.exporter({ export: message => { if (message.type === 'error') scopeErrors++; } });
-      for (const plugin of Object.values(plugins)) fibers.push(await context.plugin(plugin, {}));
+      for (const [pluginId, plugin] of Object.entries(plugins)) fibers.push(await context.plugin(plugin as Plugin.Object<Record<string, Json>>, configs[pluginId] ?? {}));
       if (fibers.some(fiber => fiber.state !== FiberState.ACTIVE)) throw new ProtocolError('invocation provider unavailable');
       const result = await invokeService(context, method, input);
       this.assertReady();

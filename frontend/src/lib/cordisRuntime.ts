@@ -1,6 +1,6 @@
 export interface CordisRuntimeSnapshot {
   state: "ready" | "blocked" | "stopped" | "cleanup_unknown" | "starting" | "quiescing";
-  reason: string | null; profile_id: string | null; cordis_version: string;
+  reason: string | null; recovery: string | null; profile_id: string | null; cordis_version: string;
   node_version: string | null; composition_digest: string | null; package_digest: string | null;
   readiness: { state: "verified" | "unknown" | "blocked"; checked_at: number | null };
   plugins: { id: string; state: "ready" | "blocked" | "stopped"; reason: string | null }[];
@@ -11,7 +11,7 @@ const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof
 const nullableText = (v: unknown) => v === null || (typeof v === "string" && v.length <= 256);
 export function normalizeCordisRuntime(value: unknown): CordisRuntimeSnapshot | null {
   if (!record(value) || !["ready", "blocked", "stopped", "cleanup_unknown", "starting", "quiescing"].includes(String(value.state))
-    || !nullableText(value.reason) || !nullableText(value.profile_id) || value.cordis_version !== "4.0.0-rc.10"
+    || !nullableText(value.reason) || !(value.recovery === undefined || nullableText(value.recovery)) || !nullableText(value.profile_id) || value.cordis_version !== "4.0.0-rc.10"
     || !nullableText(value.node_version) || !nullableText(value.composition_digest) || !nullableText(value.package_digest)
     || !Array.isArray(value.plugins) || value.plugins.length > 64 || value.plugins.some(p => !record(p) || typeof p.id !== "string"
       || p.id.length > 128 || !["ready", "blocked", "stopped"].includes(String(p.state)) || !nullableText(p.reason))
@@ -29,6 +29,7 @@ export function normalizeCordisRuntime(value: unknown): CordisRuntimeSnapshot | 
   const verified = readiness.state === "verified";
   return { state: value.state === "ready" && !verified ? "blocked" : value.state as CordisRuntimeSnapshot["state"],
     reason: value.state === "ready" && !verified ? "readiness_not_checked" : value.reason as string | null, readiness,
+    recovery: (value.recovery as string | null | undefined) ?? null,
     profile_id: value.profile_id as string | null, cordis_version: value.cordis_version,
     node_version: value.node_version as string | null, composition_digest: value.composition_digest as string | null,
     package_digest: value.package_digest as string | null,

@@ -422,7 +422,9 @@ def _private_input_file_metadata(metadata: os.stat_result) -> bool:
     )
 
 
-def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) -> bytes:
+def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int,
+                     max_bytes: int = INPUT_ARTIFACT_MAX_BYTES) -> bytes:
+    """No-follow digest-verified read; ``max_bytes`` lets an owner with a larger fixed cap (discovery raw sources) reuse it."""
     parent_fd = -1
     descriptor = -1
     try:
@@ -443,8 +445,8 @@ def _safe_file_bytes(path: Path, *, expected_digest: str, expected_size: int) ->
         stat_result = os.fstat(descriptor)
         if not _private_input_file_metadata(stat_result) or stat_result.st_size != int(expected_size):
             raise BoardError("input_artifact_file_invalid", "The input artifact is not the verified regular file", status_code=409)
-        if stat_result.st_size > INPUT_ARTIFACT_MAX_BYTES:
-            raise BoardError("input_artifact_too_large", "The input artifact exceeds 64 KiB", status_code=409)
+        if stat_result.st_size > max_bytes:
+            raise BoardError("input_artifact_too_large", "The input artifact exceeds its byte cap", status_code=409)
         chunks: list[bytes] = []
         remaining = stat_result.st_size
         while remaining:
@@ -494,6 +496,11 @@ async def _validate_request(
     publication_population=None,
     general_task_publication=None,
 ) -> tuple[dict[str, Any], str, str]:
+    if (request.capability_id == "agent.task.v1" and isinstance(request.input, Mapping)
+            and request.input.get("repository_source") is not None
+            and general_task_publication is None):
+        raise BoardError("repository_source_publication_required",
+            "Repository source binding requires its fixed inspected Task publisher", status_code=422)
     if general_task_publication is not None:
         from src.work_board.general_task_proposal import recheck_proposal_publication
         envelope = await recheck_proposal_publication(db, owner, general_task_publication)
@@ -1016,7 +1023,7 @@ async def prepare_input_artifact(
         return _metadata(refreshed)
 
 
-async def resolve_input_artifact_for_task(
+async def _resolve_input_artifact_metadata_for_task(
     db: AsyncSession,
     owner: WorkBoardOwner,
     *,
@@ -1026,8 +1033,8 @@ async def resolve_input_artifact_for_task(
     capability_id: str,
     expected_task_id: str | None = None,
     now: datetime | None = None,
-) -> ResolvedInputArtifact:
-    """Resolve and verify an owner-bound artifact for dispatcher execution."""
+) -> WorkBoardInputArtifact:
+    """Original task resolver metadata predicates, with no physical reads."""
 
     row = (
         await db.execute(
@@ -1059,6 +1066,25 @@ async def resolve_input_artifact_for_task(
         raise BoardError("input_artifact_task_conflict", "The input artifact is bound to another task", status_code=409)
     if _metadata_digest(row) != row.metadata_digest:
         raise BoardError("input_artifact_metadata_mismatch", "The input artifact metadata changed", status_code=409)
+    return row
+
+
+async def resolve_input_artifact_for_task(
+    db: AsyncSession,
+    owner: WorkBoardOwner,
+    *,
+    artifact_id: str,
+    goal_id: str,
+    goal_revision: int,
+    capability_id: str,
+    expected_task_id: str | None = None,
+    now: datetime | None = None,
+) -> ResolvedInputArtifact:
+    """Resolve and verify an owner-bound artifact for dispatcher execution."""
+
+    row = await _resolve_input_artifact_metadata_for_task(db, owner,
+        artifact_id=artifact_id, goal_id=goal_id, goal_revision=goal_revision,
+        capability_id=capability_id, expected_task_id=expected_task_id, now=now)
     payload = _safe_file_bytes(_payload_path(row), expected_digest=row.payload_sha256, expected_size=row.size_bytes)
     parsed = _decode_and_validate_payload(row, payload)
     await _verify_general_proposal(db, row, parsed)

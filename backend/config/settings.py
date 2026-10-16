@@ -130,6 +130,8 @@ class Settings(BaseSettings):
     repo_sandbox: RepoSandboxSettings = Field(default_factory=RepoSandboxSettings)
     browser_timeout: int = 30
     browser_site_allowlist: str = ""  # comma-separated hostname patterns allowed for browse/search
+    # Reviewed Node 22.12+/24 for the Cordis host (goal research); empty uses `node` on PATH.
+    cordis_node_path: str = ""
     browser_site_blocklist: str = ""  # comma-separated hostname patterns blocked for browse/search
 
     # Phase 3.5 — Timeouts

@@ -2108,6 +2108,7 @@ class ProcessRuntimeManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._processes: dict[str, ManagedProcess] = {}
+        self._foreground: dict[int, tuple[subprocess.Popen[Any], _ProcessLeaderIdentity | None]] = {}
         self._stopping_sessions: set[str] = set()
         self._last_session_cleanup_receipt: dict[str, Any] | None = None
 
@@ -2318,6 +2319,8 @@ class ProcessRuntimeManager:
             # Retain its start time and PGID so a later timeout cannot signal a
             # recycled PID's process group.
             leader_identity = _capture_process_identity(process)
+            with self._lock:
+                self._foreground[process.pid] = (process, leader_identity)
             captures = (
                 _BoundedPipeCapture(process.stdout),
                 _BoundedPipeCapture(process.stderr),
@@ -2415,6 +2418,9 @@ class ProcessRuntimeManager:
         except OSError:
             raise
         finally:
+            if process is not None:
+                with self._lock:
+                    self._foreground.pop(process.pid, None)
             if sandbox is not None:
                 sandbox.launch.close()
             # Preserve the worker root when cleanup is unknown or failed so an
@@ -2651,6 +2657,54 @@ class ProcessRuntimeManager:
         payload["registry_removed"] = False
         payload["artifacts_removed"] = artifacts_removed
         return payload
+
+    def stop_all_processes(self) -> dict[str, int]:
+        """Force-stop and reap every process-tool child (shutdown, workspace swap).
+
+        Background processes are stopped like a session teardown; in-flight
+        foreground commands are killed through their verified group (their
+        callers then report cancellation cleanup).  The receipt counts what
+        could not be proven stopped.
+        """
+        with self._lock:
+            claimed = [process for process in self._processes.values() if not process.stop_claimed]
+            conflicts = len(self._processes) - len(claimed)
+            for process in claimed:
+                process.stop_claimed = True
+                process.stop_requested = True
+            foreground = list(self._foreground.values())
+        stopped = unknown = failed = 0
+        for popen, identity in foreground:
+            try:
+                termination = _kill_process_group(
+                    popen,
+                    leader_identity=identity,
+                    descendant_identities=_snapshot_process_descendants(popen, identity),
+                )
+                status, _remaining = _termination_cleanup_status(termination)
+            except Exception:
+                logger.exception("Foreground process stop failed for pid %s", popen.pid)
+                status = "failed"
+            stopped += status == "stopped"
+            unknown += status == "unknown"
+            failed += status not in {"stopped", "unknown"}
+        for process in claimed:
+            try:
+                status = self._stop_managed_process(process, force=True)["cleanup_status"]
+                if status == "stopped" and not self._delete_process_artifacts(process):
+                    status = "failed"
+            except Exception:
+                logger.exception("Managed process stop failed for %s", process.process_id)
+                status = "failed"
+            with self._lock:
+                process.stop_claimed = False
+                if status == "stopped":
+                    self._processes.pop(process.process_id, None)
+            stopped += status == "stopped"
+            unknown += status == "unknown"
+            failed += status not in {"stopped", "unknown"}
+        return {"requested": len(claimed) + len(foreground) + conflicts, "stopped": stopped,
+                "unknown": unknown, "failed": failed, "conflict": conflicts}
 
     def reset_for_tests(self) -> None:
         with self._lock:

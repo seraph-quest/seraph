@@ -353,6 +353,24 @@ def _assert_root_identity(
     return actual_identity
 
 
+def _stop_agent_processes_before_swap() -> None:
+    """Never swap a workspace root under a live agent command (#1103).
+
+    Process-tool commands hold their workspace view by inode; a command still
+    running across a swap would keep writing into the replaced generation.
+    Only a process that has launched process tools owns any (the module is
+    imported lazily), so maintenance CLIs do not import the runtime.
+    """
+    import sys
+
+    module = sys.modules.get("src.tools.process_tools")
+    if module is None:
+        return
+    receipt = module.process_runtime_manager.stop_all_processes()
+    if receipt.get("unknown") or receipt.get("failed") or receipt.get("conflict"):
+        raise WorkspaceLifecycleError("agent processes could not be stopped before the workspace swap")
+
+
 def _replace_root(
     source: Path,
     destination: Path,
@@ -362,6 +380,7 @@ def _replace_root(
     check_path_digest: bool = True,
 ) -> None:
     """Rename a root after a final identity check immediately before replace."""
+    _stop_agent_processes_before_swap()
     if expected_identity is not None:
         _assert_root_identity(
             source,

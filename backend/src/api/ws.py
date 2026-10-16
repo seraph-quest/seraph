@@ -786,6 +786,85 @@ async def websocket_chat(websocket: WebSocket):
                     ).model_dump_json()
                 )
                 continue
+            # The agent-loop owner row decides the loop; a blocked Cordis owner never falls
+            # back. Readiness, the direct-route preflight and turn admission all precede the
+            # user-row reservation, so a refused message is never a duplicate on retry.
+            chat_status = await chat_runtime_status()
+            chat_loop = chat_route(chat_status)
+            active_cordis_turn = None
+            if chat_loop == "blocked":
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content=chat_runtime_unavailable_message(chat_status),
+                        session_id=session.id,
+                        reason=chat_status["reason"],
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+
+            async def _admit_cordis_turn(message_id: str) -> bool:
+                """Admit the turn before the reservation; False means a refusal frame was sent.
+                A replayed message leaves no turn, and the reservation answers the duplicate."""
+                nonlocal active_cordis_turn, active_turn_completed
+                admit_profile = await get_or_create_profile()
+                onboarding = not admit_profile.onboarding_completed
+                runtime_path = "onboarding_agent" if onboarding else "chat_agent"
+                direct = should_use_direct_local_chat(ws_msg.message, runtime_path=runtime_path,
+                                                      is_onboarding=onboarding)
+                reason = None
+                if direct and (route_error := await direct_local_chat_route_error(runtime_path=runtime_path)):
+                    safe_error = await redact_secrets_in_text(route_error)
+                    await log_agent_run_event(
+                        session_id=session.id,
+                        transport="websocket",
+                        is_onboarding=onboarding,
+                        outcome="failed",
+                        policy_mode=get_current_tool_policy_mode(),
+                        details={"duration_ms": 0, "message_length": len(ws_msg.message), "error": safe_error,
+                                 "runtime": "direct-openrouter-chat", "failure_stage": "route_preflight"},
+                    )
+                    content = safe_error
+                else:
+                    try:
+                        turn, _replayed = await CordisTurn.admit(
+                            operator=operator, conversation_session_id=session.id, message_id=message_id,
+                            profile="direct" if direct else ("onboarding" if onboarding else "agent"),
+                            timeout_seconds=min(settings.agent_chat_timeout, 60) if direct
+                            else settings.agent_chat_timeout)
+                        active_cordis_turn = turn
+                        return True
+                    except TurnBlocked as exc:
+                        reason, content = exc.reason_code, turn_blocked_message(exc.reason_code)
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content=content,
+                        session_id=session.id,
+                        reason=reason,
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                return False
+
+            async def _cordis_blocked(reason: str) -> None:
+                if active_cordis_turn is not None:
+                    await active_cordis_turn.settle("blocked", reason=reason)
+
+            async def _cordis_profile_changed(expected: set[str]) -> bool:
+                if active_cordis_turn is None or active_cordis_turn.profile in expected:
+                    return False
+                await _cordis_blocked("agent_turn_profile_changed")
+                await websocket.send_text(
+                    WSResponse(type="error", content=turn_blocked_message("agent_turn_profile_changed"),
+                               session_id=session.id,
+                               reason="agent_turn_profile_changed", seq=_next_seq()).model_dump_json()
+                )
+                return True
+
             ingress = None
             if ws_msg.type != "resume_message":
                 try:
@@ -812,6 +891,8 @@ async def websocket_chat(websocket: WebSocket):
                         ).model_dump_json()
                     )
                     continue
+                if chat_loop == "cordis" and not await _admit_cordis_turn(ingress.message_id):
+                    continue
                 try:
                     _ingress_message, duplicate = await session_manager.reserve_ingress_message(
                         session.id,
@@ -821,6 +902,7 @@ async def websocket_chat(websocket: WebSocket):
                         attachment_refs=ws_msg.attachments,
                     )
                 except MessageIngressConflictError as exc:
+                    await _cordis_blocked("chat_message_identity_conflict")
                     await log_chat_ingress_event(
                         session_id=session.id,
                         envelope=ingress,
@@ -846,6 +928,8 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 if duplicate:
+                    # A replayed message never re-runs; a row reserved before cutover blocks its new turn.
+                    await _cordis_blocked("chat_message_duplicate")
                     await log_chat_ingress_event(
                         session_id=session.id,
                         envelope=ingress,
@@ -875,6 +959,16 @@ async def websocket_chat(websocket: WebSocket):
                     envelope=ingress,
                     status="accepted",
                 )
+                if chat_loop == "cordis" and active_cordis_turn is None:
+                    # The turn exists but its user row did not (an interrupted earlier attempt).
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(type="error", content=turn_blocked_message("agent_turn_replayed"),
+                                   session_id=session.id, reason="agent_turn_replayed", seq=_next_seq()).model_dump_json()
+                    )
+                    continue
+            elif chat_loop == "cordis" and not await _admit_cordis_turn("resume:" + uuid.uuid4().hex):
+                continue
             active_turn_ingress = ingress
             active_turn_session_id = session.id
             active_turn_completed = False
@@ -893,53 +987,6 @@ async def websocket_chat(websocket: WebSocket):
             except Exception:
                 pass
 
-            # The agent-loop owner row decides the loop; a blocked Cordis owner never falls back.
-            chat_status = await chat_runtime_status()
-            chat_loop = chat_route(chat_status)
-            active_cordis_turn = None
-            turn_message_id = ingress.message_id if ingress is not None else "resume:" + uuid.uuid4().hex
-            if chat_loop == "blocked":
-                active_turn_completed = True
-                await websocket.send_text(
-                    WSResponse(
-                        type="error",
-                        content=chat_runtime_unavailable_message(chat_status),
-                        session_id=session.id,
-                        reason=chat_status["reason"],
-                        seq=_next_seq(),
-                    ).model_dump_json()
-                )
-                continue
-
-            async def _admit_cordis_turn(profile_name: str, timeout_seconds: float) -> bool:
-                nonlocal active_cordis_turn, active_turn_completed
-                try:
-                    turn, _replayed = await CordisTurn.admit(
-                        operator=operator, conversation_session_id=session.id, message_id=turn_message_id,
-                        profile=profile_name, timeout_seconds=timeout_seconds)
-                    reason = None if turn is not None else "chat_message_duplicate"
-                except TurnBlocked as exc:
-                    turn, reason = None, exc.reason_code
-                if turn is None:
-                    active_turn_completed = True
-                    await websocket.send_text(
-                        WSResponse(
-                            type="error",
-                            content=("This message was already accepted for this session."
-                                     if reason == "chat_message_duplicate" else turn_blocked_message(reason)),
-                            session_id=session.id,
-                            reason=reason,
-                            seq=_next_seq(),
-                        ).model_dump_json()
-                    )
-                    return False
-                active_cordis_turn = turn
-                return True
-
-            async def _cordis_blocked(reason: str) -> None:
-                if active_cordis_turn is not None:
-                    await active_cordis_turn.settle("blocked", reason=reason)
-
             profile = await get_or_create_profile()
             direct_is_onboarding = not profile.onboarding_completed
             direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
@@ -949,6 +996,7 @@ async def websocket_chat(websocket: WebSocket):
                 reject_removed_external_agent_route(runtime_path=direct_runtime_path)
             except ExternalAgentRuntimeRemovedError as exc:
                 active_turn_completed = True
+                await _cordis_blocked("external_agent_runtime_removed")
                 await websocket.send_text(
                     WSResponse(
                         type="error",
@@ -965,7 +1013,12 @@ async def websocket_chat(websocket: WebSocket):
                 is_onboarding=direct_is_onboarding,
             ):
                 started_at = perf_counter()
-                route_error = await direct_local_chat_route_error(runtime_path=direct_runtime_path)
+                if await _cordis_profile_changed({"direct"}):
+                    active_turn_completed = True
+                    continue
+                # The Cordis route ran this preflight before admission.
+                route_error = (None if active_cordis_turn is not None
+                               else await direct_local_chat_route_error(runtime_path=direct_runtime_path))
                 if route_error:
                     safe_error = await redact_secrets_in_text(route_error)
                     await log_agent_run_event(
@@ -991,9 +1044,6 @@ async def websocket_chat(websocket: WebSocket):
                             seq=_next_seq(),
                         ).model_dump_json()
                     )
-                    continue
-                if chat_loop == "cordis" and not await _admit_cordis_turn(
-                        "direct", min(settings.agent_chat_timeout, 60)):
                     continue
                 llm_request_id = f"direct-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
@@ -1287,9 +1337,9 @@ async def websocket_chat(websocket: WebSocket):
                 owner_session_id=operator.session_id,
                 trust_principal=chat_principal,
             )
-            if chat_loop == "cordis":
-                if not await _admit_cordis_turn("onboarding" if is_onboarding else "agent",
-                                                settings.agent_chat_timeout):
+            if active_cordis_turn is not None:
+                if await _cordis_profile_changed({"onboarding" if is_onboarding else "agent"}):
+                    active_turn_completed = True
                     continue
                 active_cordis_turn.attach(agent)
             await websocket.send_text(

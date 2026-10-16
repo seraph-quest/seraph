@@ -661,8 +661,17 @@ recovery}`, the Settings Cordis panel shows it, and the WS status line names the
 loop (`cordis.agent-loop.v1` or `legacy.smolagents`).
 
 One `cordis_chat_turn_v1` job owns each ingress, keyed by the ingress message
-id; it is admitted right after `reserve_ingress_message`, so a duplicate message
-keeps today's `chat_message_duplicate` 409 and never creates a second turn. The
+id. Cordis readiness, the direct-chat route preflight and the turn admission run
+before `reserve_ingress_message`, so a refused message is never a duplicate on
+retry; a replayed message admits no new turn and keeps today's
+`chat_message_duplicate` 409. Admission and reservation are two transactions: a
+crash between them leaves a claimed turn with no user row, which stale-lease
+recovery blocks (a later resend of that id gets `agent_turn_replayed`), so a user
+row never exists without its turn. Guardian state is still built once per turn
+as legacy does; each step re-validates only the cheap Root, epoch, deadline and
+memory markers. Turn state persists only digests, step kinds, decisions and
+tool receipts (tool name and outcome); observations, arguments and model text
+stay in the in-memory agent, redacted for WS frames exactly as legacy. The
 turn runs the same agent legacy builds (prompts, `get_model` owner, wrapped
 `get_tools` surface, onboarding surface, approvals and frames). At each step
 boundary a short `agent-loop.startTurn` invocation on its own step job asks the
@@ -691,12 +700,22 @@ and WS streamed deltas, redaction, `direct-openrouter-chat` label); Python owns
 the stream and the sequencer settles it after the final text is sealed.
 
 Disclosed differences from legacy: tool calls in one model message run
-sequentially in call order (smolagents ran them in parallel; memory and frames
-are ordered by call id in both); at most 12 tool calls per step
-(`agent_turn_tool_calls_exceeded`); `store_secret` returns a visible denial
-pointing to Settings -> Vault and its value never enters turn state. Measured
-offline on a loaded host: about 125 ms added per step (cap 250 ms) and about
-40 ms before a direct-chat first delta (cap 300 ms).
+sequentially in submission order (smolagents ran them in parallel); in both
+loops memory observations are recorded sorted by tool-call id, every submitted
+call still executes when a sibling raises, and that step's observation is then
+the error alone (legacy drops sibling observations the same way). At most 12
+tool calls per step (`agent_turn_tool_calls_exceeded`). `store_secret` returns a
+visible denial pointing to Settings -> Vault and its value never enters turn
+state (operator decision; per-argument sensitivity redaction is follow-up work).
+Unchanged by construction: a failed max-steps final call returns smolagents'
+"Error in generating final LLM output" text; tools have no separate deadline
+class (the turn budget only); direct chat keeps its runtime path, its 60 s cap
+(agent turns 120 s), REST without and WS with the streaming flag, and no
+post-turn side effects. Measured offline on a loaded host over 110 samples of
+the real path: a startTurn step p50/p95 92/106 ms, a tool's intent and outcome
+receipts 18/24 ms, and the turn admission (the only Cordis work before a
+direct-chat first delta; the sequencer runs after the stream) 31/40 ms, all
+under one 250 ms p95 budget asserted by the suite.
 
 ### Cordis guardian research (#1008)
 

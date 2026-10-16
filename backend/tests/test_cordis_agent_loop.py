@@ -250,33 +250,40 @@ async def test_runtime_status_names_the_actual_loop_and_route(accounting_db, rea
     assert Path(__file__).exists()
 
 
-async def test_measured_step_overhead_and_direct_first_delta_budget(accounting_db, real_auth, monkeypatch):  # noqa: F811
-    """Design caps: <= 250 ms added per step and <= 300 ms added before a direct-chat first delta."""
+async def test_measured_step_and_first_delta_overhead_p95_over_100_samples(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    """One budget, 250 ms p95, for each added Cordis cost on the real path: a startTurn step
+    (step job, invocation, decisions, verification), a tool's intent+outcome receipts, and the
+    turn admission that is the only Cordis work before a direct-chat first delta."""
     import statistics
     import time
+    from config.settings import settings
     deny_sockets(monkeypatch)
+    monkeypatch.setattr(settings, "agent_max_steps", 130)
     jobs = DurableJobRepository()
-    steps = 5
+    samples = 110
 
-    def script():
-        return [tools(call("echo", {"text": str(index)}, f"call-{index}")) for index in range(steps)] + [final("done")]
+    def p95(values):
+        return statistics.quantiles(values, n=100)[94]
     async with agent_loop_host(jobs) as host:
         operator = await _session()
-        loop = asyncio.get_running_loop()
-        legacy, cordis, admissions = [], [], []
-        for attempt in range(3):
-            agent = ToolCallingAgent(tools=[Echo()], model=ScriptedModel(script()), max_steps=10, verbosity_level=0)
+        admissions, steps, receipts = [], [], []
+        for index in range(samples):
             began = time.perf_counter()
-            await loop.run_in_executor(None, lambda: agent.run("go"))
-            legacy.append(time.perf_counter() - began)
-            began = time.perf_counter()
-            turn = await _turn(operator, host, jobs, message_id=f"measure-{attempt}")
+            admitted = await _turn(operator, host, jobs, message_id=f"measure-{index}", timeout=600)
             admissions.append(time.perf_counter() - began)
-            agent = ToolCallingAgent(tools=[Echo()], model=ScriptedModel(script()), max_steps=10, verbosity_level=0)
-            await _run(turn, agent, "go")
-            assert await turn.settle("succeeded", message=_reply(f"measure-reply-{attempt}", "done"))
-            cordis.append(time.perf_counter() - began)
-        per_step = (statistics.median(cordis) - statistics.median(legacy)) / (steps + 1)
-        first_delta = statistics.median(admissions)
-        print(f"MEASURED per-step overhead {per_step * 1000:.1f} ms; direct first-delta overhead {first_delta * 1000:.1f} ms")
-        assert per_step <= 0.250 and first_delta <= 0.300
+            if index:
+                assert await admitted.settle("blocked", reason="measurement")
+            else:
+                turn = admitted
+        for index in range(1, samples + 1):
+            began = time.perf_counter()
+            assert await turn.decide("tool_calls", step_index=index, call_count=1, output_digest="a" * 64) == ["tool_intent:0"]
+            steps.append(time.perf_counter() - began)
+            began = time.perf_counter()
+            await turn.tool_intent(step_index=index, call_index=0, tool_name="echo")
+            await turn.tool_outcome(step_index=index, call_index=0, tool_name="echo", outcome="succeeded")
+            receipts.append(time.perf_counter() - began)
+        print("MEASURED n=%d p50/p95 ms: step %.1f/%.1f, tool receipts %.1f/%.1f, admission %.1f/%.1f" % (
+            samples, statistics.median(steps) * 1000, p95(steps) * 1000, statistics.median(receipts) * 1000,
+            p95(receipts) * 1000, statistics.median(admissions) * 1000, p95(admissions) * 1000))
+        assert p95(steps) <= 0.250 and p95(receipts) <= 0.250 and p95(admissions) <= 0.250

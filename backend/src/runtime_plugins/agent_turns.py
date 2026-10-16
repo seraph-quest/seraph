@@ -60,6 +60,9 @@ TURN_BLOCKED_MESSAGES = {
     "agent_turn_memory_revoked": ("A memory was forgotten while this turn ran, so Seraph stopped before using it again. "
                                   "Send the message again."),
     "agent_turn_tool_calls_exceeded": f"The model asked for more than {MAX_TOOL_CALLS} tool calls in one step.",
+    "agent_turn_replayed": ("This message already started a turn that did not finish. "
+                            "Send it again as a new message."),
+    "agent_turn_profile_changed": "Chat settings changed while this turn started. Send the message again.",
     "delegation_pending_1020": ("Delegation is not available on the Cordis agent loop yet (#1020). "
                                 "Turn off use_delegation to chat."),
 }

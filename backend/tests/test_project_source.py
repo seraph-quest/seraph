@@ -37,6 +37,10 @@ class IssuesFixture:
         self.calls.append(str(request.url))
         if self.status != 200:
             return httpx.Response(self.status, json={"message": "denied"})
+        if request.url.path.startswith(f"/repos/{REPOSITORY}/issues/"):
+            number = int(request.url.path.rsplit("/", 1)[-1])
+            item = next((item for item in self.items if item["number"] == number), None)
+            return httpx.Response(200 if item else 404, json=item or {"message": "Not Found"})
         assert request.url.path == f"/repos/{REPOSITORY}/issues", request.url.path
         page, per_page = int(request.url.params["page"]), int(request.url.params["per_page"])
         ordered = sorted(self.items, key=lambda item: item["updated_at"], reverse=True)

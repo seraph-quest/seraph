@@ -17,7 +17,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, Query
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 from sqlalchemy import select, case
 
 from config.settings import settings
@@ -56,6 +56,16 @@ class PrepareRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=18000)
     idempotency_key: str = Field(min_length=36, max_length=36)
+    # The operator's explicit acceptance of a changed linked project source
+    # revision (C4.3). Absent for unlinked repairs and older requests.
+    acknowledged_project_source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_request(self, handler):
+        result = handler(self)
+        if self.acknowledged_project_source_digest is None:
+            result.pop("acknowledged_project_source_digest", None)
+        return result
 
     @field_validator("title", "commit_message", "body")
     @classmethod
@@ -266,6 +276,21 @@ class RepoPublicationService:
             raise PublicationError("patch_digest_changed")
         binding["test_artifacts"] = {name: {"file_path": artifacts[name]["file_path"], "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in contents.items()}
         binding["tested_input_digest"] = digest(tested)
+        # A repair whose C1 task came from a project finding binds the exact
+        # accepted source revision; the item is re-read before external action.
+        from src.extensions.github_followthrough import GitHubFollowthroughError
+        from src.integrations.project_source import project_link_for_repair, project_source_publication_binding
+        link = await project_link_for_repair(root["job_id"], principal)
+        acknowledged = getattr(request, "acknowledged_project_source_digest", None)
+        if link is not None:
+            try:
+                binding["project_source"] = await project_source_publication_binding(self.adapter, link=link,
+                    principal=principal, session=session, connection=await self.adapter._get_connection_row(principal),
+                    acknowledged_digest=acknowledged, refresh=_with_source_witness)
+            except GitHubFollowthroughError as exc:
+                raise PublicationError(exc.code, status_code=exc.status_code) from exc
+        elif acknowledged is not None:
+            raise PublicationError("project_source_not_linked", status_code=422)
         return (binding, tested, patch, source_witness) if _with_source_witness else (binding, tested, patch)
 
     async def tested_runtime_current(self, binding, tested):
@@ -374,6 +399,10 @@ class RepoPublicationService:
         current = await jobs.bind_approval_id(job_id, approval.id, **self.fence(current))
         await approval_repository.update_pending_details(approval.id, owner_principal_id=principal, operator_session_id=session, updates={"durable_authority_digest": current["authority_digest"], "durable_approval_id": approval.id, "approval_operator_principal_id": principal, "approval_expires_at": _approval_expiry(approval.expires_at).timestamp()})
         current = await jobs.transition_job(job_id, "awaiting_approval", reason="repo_publication_fresh_approval_required", **self.fence(current))
+        if "project_source" in binding:
+            from src.integrations.project_source import project_link_for_repair, record_project_link
+            await record_project_link(source=await project_link_for_repair(request.repair_job_id, principal),
+                link_kind="publication", target_id=job_id)
         return await self.view(current)
 
     @staticmethod

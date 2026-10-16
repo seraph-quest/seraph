@@ -286,8 +286,14 @@ class ProjectSourceService:
             "status": getattr(task.status, "value", str(task.status)), "requires_review": True,
             "accepted": False, "no_learning": True})
 
-    async def lineage(self, *, owner_principal_id: str, task_id: str) -> dict[str, Any]:
-        """Source item revision linked to a task, with its sibling links."""
+    async def lineage(self, *, owner_principal_id: str, task_id: str, owner_session_id: str | None = None) -> dict[str, Any]:
+        """One navigable lineage: source revision → task → repository root → patch → publication → PR.
+
+        Downstream entries are read from their own durable owners on every
+        request; the lineage only names them and grants no authority.
+        """
+        from src.db.models import WorkflowRunState
+        from src.workflows.repo_repair_source import read_repository_original
         async with self._session() as db:
             link = (await db.execute(select(ProjectSourceLink).where(
                 ProjectSourceLink.owner_principal_id == owner_principal_id,
@@ -298,10 +304,47 @@ class ProjectSourceService:
                 ProjectSourceLink.owner_principal_id == owner_principal_id,
                 ProjectSourceLink.snapshot_id == link.snapshot_id,
                 ProjectSourceLink.item_number == link.item_number))).scalars().all()
+            roots = (await db.execute(select(WorkflowRunState).where(
+                WorkflowRunState.owner_principal_id == owner_principal_id,
+                WorkflowRunState.job_kind == "engineering.repo-repair.v1",
+                WorkflowRunState.idempotency_scope == "original-repository-child"))).scalars().all()
+            repository_roots = []
+            for run in roots:
+                if read_repository_original(run)[4].task_id != task_id:
+                    continue
+                records = {item.get("checkpoint_id"): item.get("payload") for item in json.loads(run.checkpoint_receipts_json or "[]")}
+                iterations = []
+                for checkpoint_id, payload in records.items():
+                    if isinstance(checkpoint_id, str) and checkpoint_id.startswith("repository:execution:"):
+                        identity = checkpoint_id.removeprefix("repository:execution:")
+                        readback = records.get("repository:readback:" + identity) or {}
+                        iterations.append({"iteration_id": identity, "patch_digest": payload.get("patch_sha256"),
+                            "status": readback.get("status")})
+                repository_roots.append({"job_id": run.run_identity, "status": run.status, "iterations": iterations})
+        publications = []
+        for item in siblings:
+            if item.link_kind != "publication" or owner_session_id is None:
+                continue
+            from src.workflows.repo_publication import RepoPublicationService
+            publisher = RepoPublicationService()
+            try:
+                view = await publisher.view(await publisher.owned(item.target_id, owner_principal_id, owner_session_id))
+            except Exception as exc:
+                publications.append({"job_id": item.target_id, "status": "unavailable",
+                    "reason_code": getattr(exc, "code", type(exc).__name__)})
+                continue
+            binding = view["preview"]["repair_binding"]
+            publications.append({"job_id": item.target_id, "status": view["status"],
+                "approval_status": view["approval_status"], "repair_job_id": binding["repair_job_id"],
+                "approved_input_patch_digest": binding.get("approved_input_patch_digest", binding["patch_sha256"]),
+                "tested_patch_digest": binding["patch_sha256"], "project_source": binding.get("project_source"),
+                "pull_request": None if not view.get("result") else {"number": view["result"]["pr_number"],
+                    "browser_url": view["result"]["browser_url"]}})
         return {"source": {"repository": link.repository, "number": link.item_number, "kind": link.item_kind,
                 "updated_at": link.item_updated_at, "digest": link.item_digest, "snapshot_id": link.snapshot_id,
                 "html_url": f"https://github.com/{link.repository}/{'pull' if link.item_kind == 'pull_request' else 'issues'}/{link.item_number}"},
-            "goal_id": link.goal_id, "finding_kind": link.finding_kind,
+            "goal_id": link.goal_id, "finding_kind": link.finding_kind, "task_id": task_id,
+            "repository_roots": repository_roots, "publications": publications,
             "links": sorted(({"kind": item.link_kind, "target_id": item.target_id} for item in siblings),
                 key=lambda value: (value["kind"], value["target_id"]))}
 
@@ -369,7 +412,78 @@ async def propose_project_finding(body: ProjectFindingRequest, request: Request)
 @project_source_router.get("/lineage/{task_id}")
 async def get_project_lineage(task_id: str, request: Request):
     try:
-        principal, _ = _owner(request)
-        return await ProjectSourceService().lineage(owner_principal_id=principal, task_id=task_id)
+        principal, session = _owner(request)
+        return await ProjectSourceService().lineage(owner_principal_id=principal, task_id=task_id,
+            owner_session_id=session)
     except GitHubFollowthroughError as exc:
         raise _http(exc) from exc
+
+
+async def project_link_for_repair(repair_job_id: str, owner_principal_id: str, *, session_factory=None):
+    """The source link of the C1 task that owns this original repository root, if any."""
+    from src.db.models import WorkflowRunState
+    from src.workflows.repo_repair_source import read_repository_original
+    sessions = session_factory or db_engine.get_session
+    async with sessions() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == repair_job_id))).scalars().first()
+        if (run is None or run.owner_principal_id != owner_principal_id
+                or run.idempotency_scope != "original-repository-child"):
+            return None
+        binding = read_repository_original(run)[4]
+        link = (await db.execute(select(ProjectSourceLink).where(
+            ProjectSourceLink.owner_principal_id == owner_principal_id,
+            ProjectSourceLink.link_kind == "task",
+            ProjectSourceLink.target_id == binding.task_id))).scalars().first()
+        if link is not None:
+            db.expunge(link)
+        return link
+
+
+def link_source_digest(link: ProjectSourceLink, acknowledged_digest: str | None) -> str:
+    return acknowledged_digest or link.item_digest
+
+
+async def project_source_publication_binding(adapter, *, link: ProjectSourceLink, principal: str, session: str,
+                                             connection, acknowledged_digest: str | None, refresh: bool) -> dict[str, Any]:
+    """Bind the exact accepted source revision into a publication approval.
+
+    Before an external action (``refresh``) the item is read again. A changed
+    or closed item never cancels completed local work, but it stops this
+    unstarted publication until the operator explicitly accepts the new
+    revision (``acknowledged_digest``); that acceptance is then part of the
+    approval-bound preview, so any later change invalidates it again.
+    """
+    if connection is None or connection.repository != link.repository:
+        raise ProjectSourceError("project_source_repository_changed", status_code=409)
+    accepted = link_source_digest(link, acknowledged_digest)
+    if refresh:
+        current = project_item(link.repository, await adapter.read_project_item(owner_principal_id=principal,
+            owner_session_id=session, connection_id=connection.id,
+            expected_connection_revision=int(connection.revision or 0),
+            repository=link.repository, number=link.item_number))
+        if current["digest"] != accepted:
+            error = ProjectSourceError("project_source_changed_decision_required", status_code=409)
+            error.current_source = {"digest": current["digest"], "updated_at": current["updated_at"],
+                "state": current["state"]}
+            raise error
+    return {"repository": link.repository, "number": link.item_number, "kind": link.item_kind,
+        "task_bound_digest": link.item_digest, "accepted_digest": accepted,
+        "operator_accepted_new_revision": accepted != link.item_digest}
+
+
+async def record_project_link(*, source: ProjectSourceLink, link_kind: str, target_id: str, session_factory=None):
+    sessions = session_factory or db_engine.get_session
+    async with sessions() as db:
+        existing = (await db.execute(select(ProjectSourceLink).where(
+            ProjectSourceLink.owner_principal_id == source.owner_principal_id,
+            ProjectSourceLink.link_kind == link_kind, ProjectSourceLink.target_id == target_id))).scalars().first()
+        if existing is None:
+            db.add(ProjectSourceLink(owner_principal_id=source.owner_principal_id, snapshot_id=source.snapshot_id,
+                repository=source.repository, item_number=source.item_number, item_kind=source.item_kind,
+                item_updated_at=source.item_updated_at, item_digest=source.item_digest, goal_id=source.goal_id,
+                goal_revision=source.goal_revision, finding_kind=source.finding_kind, link_kind=link_kind,
+                target_id=target_id))
+            await db.commit()
+        elif (existing.snapshot_id, existing.item_number) != (source.snapshot_id, source.item_number):
+            raise ProjectSourceError("project_link_bound_elsewhere", status_code=409)

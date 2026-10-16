@@ -639,6 +639,11 @@ async def test_actual_source_unknown_model_cost_retains_original_capacity(accoun
         unknown_model_cost=True)
 
 
+def _repository_cost_rows():
+    """Repository iteration reservations; a reviewed planner proposal (if any) is separate."""
+    return select(InferenceCostReservation).where(InferenceCostReservation.runtime_path != "general_task_planner")
+
+
 async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iterations, language,
         node_readback_drift=None, node_build=False, stop_at=None, publication_profile=False,
         unknown_model_cost=False, task_limits=None, work_limits=None, actual_model_cost_microusd=0,
@@ -714,7 +719,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             general_task_service=service, principal=operator.principal)
     assert contacted == []
     async with factory() as db:
-        assert list((await db.scalars(select(InferenceCostReservation))).all()) == []
+        assert list((await db.scalars(_repository_cost_rows())).all()) == []
     assert (await jobs.get_job(binding.invocation_id))['lease'] == before_child['lease']
     if unknown_model_cost:
         with pytest.raises(Exception):
@@ -723,7 +728,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 principal=operator.principal)
         assert len(contacted) == 1
         async with factory() as db:
-            rows = list((await db.scalars(select(InferenceCostReservation))).all())
+            rows = list((await db.scalars(_repository_cost_rows())).all())
             assert len(rows) == 1 and rows[0].state == 'unknown'
             assert rows[0].contact_started_at is not None
             assert rows[0].actual_cost_microusd is None
@@ -761,7 +766,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
     assert after_child['lease']['revision'] == before_child['lease']['revision'] + 1
     assert after_child['attempt_count'] == 1
     async with factory() as db:
-        rows = list((await db.scalars(select(InferenceCostReservation))).all())
+        rows = list((await db.scalars(_repository_cost_rows())).all())
         assert len(rows) == 1 and rows[0].state == 'settled'
         assert rows[0].contact_started_at is not None and rows[0].actual_cost_microusd == actual_model_cost_microusd
         assert rows[0].job_id == root_id
@@ -955,7 +960,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             assert jobs._repo_repair_reservation_state(root)['status'] == 'released'
             terminal = _repository_record(root, 'repository:terminal:v1')
             assert terminal['closure']['limit_evidence']['cause'] == stop_at
-            rows = list((await db.scalars(select(InferenceCostReservation))).all())
+            rows = list((await db.scalars(_repository_cost_rows())).all())
             assert len(rows) == 1 and rows[0].state == 'settled'
             assert rows[0].actual_cost_microusd == actual_model_cost_microusd
         return {'factory': factory, 'owner': owner, 'service': service, 'jobs': jobs, 'root_id': root_id}
@@ -1058,7 +1063,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 assert root_id not in service.repository_source_service._iterative_lanes
                 assert len(contacted) == 3
                 async with factory() as db:
-                    rows = list((await db.scalars(select(InferenceCostReservation))).all())
+                    rows = list((await db.scalars(_repository_cost_rows())).all())
                     assert len(rows) == 3 and all(row.state == 'settled' for row in rows)
                 return
             if index == 2:
@@ -1069,7 +1074,7 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
                 assert current_child['lease']['fencing_token'] == original_child['lease']['fencing_token']
                 assert current_child['lease']['owner'] is None and current_child['lease']['expires_at'] is None
         async with factory() as db:
-            costs = list((await db.scalars(select(InferenceCostReservation))).all())
+            costs = list((await db.scalars(_repository_cost_rows())).all())
             assert len(costs) == 3 and all(row.state == 'settled' for row in costs)
             assert len({row.operation_id for row in costs}) == 3
         assert (accounting_db[0] / 'example' / original_path).read_text() == original_bytes

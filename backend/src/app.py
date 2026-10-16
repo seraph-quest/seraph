@@ -41,6 +41,7 @@ async def _chat_runtime_or_unavailable() -> dict:
         logging.getLogger(__name__).warning("Chat runtime status unavailable", exc_info=True)
         return {"loop": "blocked", "route": "chat_agent", "owner_epoch": None, "owner_kind": None,
                 "reason": "chat_runtime_status_unavailable", "recovery": "Restart Seraph; the runtime inventory is unreadable."}
+from src.runtime_plugins.guardian_turns import guardian_runtime_status, runtime_domains_status
 from src.runtime_plugins.bridge import cordis_host
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
@@ -676,6 +677,9 @@ def create_app() -> FastAPI:
             "cordis_runtime": await cordis_host.refresh_status(),
             # Which agent loop chat runs on, from the agent-loop owner row (#1019).
             "chat_runtime": await _chat_runtime_or_unavailable(),
+            # Scheduled guardian work and every runtime domain owner (#1020).
+            "guardian_runtime": await guardian_runtime_status(cordis_host),
+            "runtime_domains": await runtime_domains_status(cordis_host),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

@@ -8,6 +8,7 @@ from time import perf_counter
 from config.settings import settings
 from src.audit.runtime import log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.models.schemas import WSResponse
 
@@ -114,18 +115,24 @@ async def run_weekly_activity_review() -> None:
 
         try:
             transport_messages = [{"role": "user", "content": prompt}]
-            response = await completion_with_fallback(
-                messages=transport_messages,
-                temperature=0.6,
-                max_tokens=1024,
-                timeout=settings.agent_briefing_timeout,
-                runtime_path="weekly_activity_review",
-                request_context=build_canonical_inference_context(
-                    "weekly_activity_review",
-                    payload=transport_messages,
-                    output_tokens=1024,
-                    timeout_seconds=settings.agent_briefing_timeout,
+            # #1020: the same call, on the guardian loop its owner row selects.
+            response = await guardian_completion(
+                "guardian.weekly_activity_review",
+                lambda: completion_with_fallback(
+                    messages=transport_messages,
+                    temperature=0.6,
+                    max_tokens=1024,
+                    timeout=settings.agent_briefing_timeout,
+                    runtime_path="weekly_activity_review",
+                    request_context=build_canonical_inference_context(
+                        "weekly_activity_review",
+                        payload=transport_messages,
+                        output_tokens=1024,
+                        timeout_seconds=settings.agent_briefing_timeout,
+                    ),
                 ),
+                timeout_seconds=settings.agent_briefing_timeout, runtime_path="weekly_activity_review",
+                temperature=0.6, max_tokens=1024,
             )
         except asyncio.TimeoutError:
             await log_scheduler_job_event(
@@ -137,6 +144,10 @@ async def run_weekly_activity_review() -> None:
                 },
             )
             logger.warning("weekly_activity_review: LLM timed out after %ds", settings.agent_briefing_timeout)
+            return
+        except GuardianBlocked as exc:
+            # The guardian loop refused the call or its output: nothing is delivered.
+            await report_guardian_blocked("weekly_activity_review", exc, started_at=started_at)
             return
 
         review_text = response.choices[0].message.content.strip()
@@ -162,6 +173,7 @@ async def run_weekly_activity_review() -> None:
                 "total_tracked_minutes": summary.get("total_tracked_minutes", 0),
             },
         )
+        report_guardian_succeeded("weekly_activity_review")
         logger.info("weekly_activity_review: delivered weekly review")
 
     except Exception as exc:

@@ -23,6 +23,7 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
 from src.db.models import GoalStatus, MemoryEpisode, MemoryEpisodeType, ScreenObservation
 from src.llm_runtime import completion_with_fallback, provider_profiles
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.observer.image_metadata import image_metadata_label
 from src.observer.screenshot_folder_source import resolve_screenshot_folder
@@ -808,23 +809,25 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
     )
 
     transport_messages = [{"role": "user", "content": prompt}]
-    response = await completion_with_fallback(
-        messages=transport_messages,
-        temperature=0.4,
-        max_tokens=900,
-        timeout=settings.agent_briefing_timeout,
-        runtime_path="end_of_day_goal_report",
-        # The active phase has one governed OpenRouter inference route.  The
-        # workload policy, rather than a legacy local-only flag, controls
-        # whether this cloud request may dispatch.
-        local_runtime_only=False,
-        request_context=build_canonical_inference_context(
-            "end_of_day_goal_report",
-            payload=transport_messages,
-            output_tokens=900,
-            timeout_seconds=settings.agent_briefing_timeout,
-        ),
-    )
+    try:
+        response = await _report_completion(transport_messages)
+    except GuardianBlocked as exc:
+        # The deterministic report still runs; the analysis is marked blocked.
+        await report_guardian_blocked("end_of_day_goal_report", exc)
+        return {
+            "date": target_day.isoformat(),
+            "timezone": str(tz),
+            "body": ("End-of-day report analysis was blocked by the guardian runtime "
+                     f"({exc.reason_code}). {exc.recovery} No analysis output was used."),
+            "summary": summary,
+            "screenshot_digests": screenshot_digests,
+            "goal_alignment": [],
+            "completed_goal_count": len(completed_goals),
+            "active_goal_count": len(active_goals),
+            "analysis_provider": f"blocked:{exc.reason_code}",
+            "artifact_schema": "seraph.end_of_day_goal_report.v1",
+        }
+    report_guardian_succeeded("end_of_day_goal_report")
     body = str(response.choices[0].message.content or "").strip()
     if not body:
         body = "No report generated."
@@ -841,6 +844,32 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
         "analysis_provider": f"llm:{_report_llm_label(decision.runtime_profile)}",
         "artifact_schema": "seraph.end_of_day_goal_report.v1",
     }
+
+
+async def _report_completion(transport_messages):
+    # #1020: the same call, on the guardian loop its owner row selects.
+    return await guardian_completion(
+        "guardian.end_of_day_goal_report",
+        lambda: completion_with_fallback(
+            messages=transport_messages,
+            temperature=0.4,
+            max_tokens=900,
+            timeout=settings.agent_briefing_timeout,
+            runtime_path="end_of_day_goal_report",
+            # The active phase has one governed OpenRouter inference route.  The
+            # workload policy, rather than a legacy local-only flag, controls
+            # whether this cloud request may dispatch.
+            local_runtime_only=False,
+            request_context=build_canonical_inference_context(
+                "end_of_day_goal_report",
+                payload=transport_messages,
+                output_tokens=900,
+                timeout_seconds=settings.agent_briefing_timeout,
+            ),
+        ),
+        timeout_seconds=settings.agent_briefing_timeout, runtime_path="end_of_day_goal_report",
+        temperature=0.4, max_tokens=900,
+    )
 
 
 async def store_end_of_day_goal_report(report: dict[str, Any]) -> str:

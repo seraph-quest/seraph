@@ -13,7 +13,9 @@ import { createPlugin as research } from "./research/index.js";
 import { createPlugin as conversation } from "./conversation/index.js";
 import { createPlugin as scheduler } from "./scheduler/index.js";
 import { createPlugin as connections } from "./connections/index.js";
+import { createPlugin as agent_presets } from "./agent_presets/index.js";
 import { createPlugin as agent_loop } from "./agent_loop/index.js";
+import { createPlugin as guardian } from "./guardian/index.js";
 import { createPlugin as source_extraction } from "./source_extraction/index.js";
 import { createPlugin as goal_plan } from "../providers/goal-plan.js";
 import { createPlugin as guardian_research } from "./research/guardian.js";
@@ -30,7 +32,9 @@ export const SERVICE_KEYS = [
   "seraphConversation",
   "seraphScheduler",
   "seraphConnections",
+  "seraphAgentPresets",
   "seraphAgentLoop",
+  "seraphGuardian",
   "seraphSourceExtraction",
   "seraphResearchPlanner",
   "seraphResearchConsumer",
@@ -49,7 +53,9 @@ export function servicePlugins(client: ScopedRequestClient, digests: Readonly<Re
   "seraph.conversation.v1": conversation(client),
   "seraph.scheduler.v1": scheduler(client),
   "seraph.connections.v1": connections(client),
+  "seraph.agent-presets.v1": agent_presets(client),
   "seraph.agent-loop.v1": agent_loop(client),
+  "seraph.guardian.v1": guardian(client),
   "seraph.source-extraction.v1": source_extraction(client, digests["seraph.source-extraction.v1"]),
   "seraph.goal-plan.v1": goal_plan(client),
   "seraph.guardian-research.v1": guardian_research(client),
@@ -88,6 +94,7 @@ const invokers: {[M in ServiceMethod]: (ctx: Context, input: Input<ServiceMethod
   "agent-loop.startTurn": (ctx, input) => ctx.seraphAgentLoop.startTurn(input as Input<"agent-loop.startTurn">),
   "agent-loop.cancelTurn": (ctx, input) => ctx.seraphAgentLoop.cancelTurn(input as Input<"agent-loop.cancelTurn">),
   "agent-loop.inspectTurn": (ctx, input) => ctx.seraphAgentLoop.inspectTurn(input as Input<"agent-loop.inspectTurn">),
+  "guardian.startTurn": (ctx, input) => ctx.seraphGuardian.startTurn(input as Input<"guardian.startTurn">),
   "source-extraction.extract": (ctx, input) => ctx.seraphSourceExtraction.extract(input as Input<"source-extraction.extract">),
 };
 export function invokeService<M extends ServiceMethod>(ctx: Context, method: M, input: Input<M>): Promise<Result<M>> { return invokers[method](ctx, input) as Promise<Result<M>>; }

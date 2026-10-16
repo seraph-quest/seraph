@@ -24,7 +24,12 @@ from .contracts import METHOD_DOMAINS
 DOMAINS = tuple(f"seraph.{name}.v1" for name in (
     "authority", "goals", "tasks", "capabilities", "inference", "memory",
     "artifacts", "audit", "research", "conversation", "scheduler",
-    "connections", "agent-loop", "source-extraction"))
+    "connections", "agent-loop", "source-extraction", "agent-presets", "guardian"))
+# Domains added after an install's inventory was first seeded, with the issue
+# that introduced them. Boot inserts each missing one once as its legacy owner
+# (``introduce_domains_sync``); a missing original domain is never repaired.
+DOMAIN_INTRODUCTIONS = {"seraph.agent-presets.v1": "1020", "seraph.guardian.v1": "1020"}
+PRESETS_DOMAIN = "seraph.agent-presets.v1"
 STATES = frozenset({"ready", "draining", "blocked"})
 OWNER_KINDS = frozenset({"legacy", "cordis"})
 MANIFEST_VERSION = "runtime-service-methods.v1"
@@ -76,7 +81,7 @@ class CompositionDependency:
 # Finite branch closures. A branch names the methods one original invocation
 # may forward; it never grants the authority those methods check.
 NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow", "programme_planning", "programme_discovery", "governed",
-                             "agent_loop"})
+                             "agent_loop", "guardian"})
 READ_ORIGINS = frozenset({"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"})
 ARTIFACT_CHILDREN = ("artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append")
 WORKFLOW_CHILDREN = ("authority.resolve", "goals.read", "tasks.inspect", "tasks.checkpoint", "tasks.cancel")
@@ -109,6 +114,9 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
         return (origin_method,)
     if native_branch == "agent_loop" and origin_method == "agent-loop.startTurn":
         return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
+    if native_branch == "guardian" and origin_method == "guardian.startTurn":
+        # #1020 unattended step: the same sealed-projection children as a chat step.
+        return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
     raise CompositionBindingError("composition_branch_unsupported")
 
 
@@ -127,6 +135,9 @@ def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, 
     if method in GOVERNED_ORIGINS:
         # Governed effects need the artifact and audit owners explicitly (#1018).
         names.update({"seraph.artifacts.v1", "seraph.audit.v1"})
+    if method in {"agent-loop.startTurn", "guardian.startTurn"}:
+        # Every turn step is checked against the reviewed presets (#1020).
+        names.add(PRESETS_DOMAIN)
     if method == "research.executeAccepted":
         # The consumer extracts through the composed source provider.
         names.add("seraph.source-extraction.v1")
@@ -334,6 +345,40 @@ def seed_legacy_inventory_sync(connection) -> int:
             "VALUES (:domain, 'legacy', 1, :digest, 'ready', NULL)"),
             {"domain": domain, "digest": legacy_composition_digest(domain)})
     return len(DOMAINS)
+
+
+def introduce_domains_sync(connection) -> list[str]:
+    """Insert each introduced domain missing from a non-empty inventory once, as its legacy owner.
+
+    An empty inventory is seeded whole by ``seed_legacy_inventory_sync``. An
+    existing one keeps every row it has; only domains named in
+    ``DOMAIN_INTRODUCTIONS`` are added, each audited. A missing original
+    domain still denies its consumers until a fenced transition repairs it.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    existing = {row[0] for row in connection.execute(text("SELECT runtime_domain FROM runtime_composition_states"))}
+    if not existing:
+        return []
+    added = []
+    for domain, issue in DOMAIN_INTRODUCTIONS.items():
+        if domain in existing:
+            continue
+        connection.execute(text(
+            "INSERT INTO runtime_composition_states "
+            "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "
+            "VALUES (:domain, 'legacy', 1, :digest, 'ready', NULL)"),
+            {"domain": domain, "digest": legacy_composition_digest(domain)})
+        connection.execute(text(
+            "INSERT INTO audit_events (id, session_id, actor, event_type, tool_name, risk_level, policy_mode, summary, "
+            "details_json, created_at) VALUES (:id, NULL, 'system', 'runtime_composition_domain_introduced', NULL, "
+            "'low', 'full', :summary, :details, :at)"),
+            {"id": str(uuid4()), "summary": f"Runtime domain {domain} introduced as its legacy owner",
+             "details": _canonical({"runtime_domain": domain, "owner_kind": "legacy", "epoch": 1,
+                                    "introduced_by": issue}),
+             "at": datetime.now(timezone.utc).replace(tzinfo=None)})
+        added.append(domain)
+    return added
 
 
 def _boot_proved(runtime_domain: str, owner_kind: str, composition_digest: str, boot_host) -> bool:

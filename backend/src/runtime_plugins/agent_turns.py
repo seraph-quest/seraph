@@ -38,8 +38,11 @@ from .dispatch import (NativeServiceBlocked, _append_receipt, _canonical, _diges
 logger = logging.getLogger(__name__)
 TURN_JOB_KIND = "cordis_chat_turn_v1"
 STEP_JOB_KIND = "cordis_turn_step_v1"
+# #1020 unattended guardian step: same sealed projection, its own sequencer.
+GUARDIAN_STEP_JOB_KIND = "cordis_guardian_step_v1"
 TURN_CONTEXT_TAG = "cordis-turn.v1"
 AGENT_LOOP_DOMAIN = "seraph.agent-loop.v1"
+PRESETS_DOMAIN = "seraph.agent-presets.v1"
 # Bounded by the child's 16-callback cap: one read, the decisions, one inspect.
 MAX_TOOL_CALLS = 12
 STEP_KINDS = ("tool_calls", "final_answer", "parse_error", "max_steps")
@@ -94,6 +97,16 @@ def expected_decisions(projection: dict) -> list[str] | None:
     return [f"tool_intent:{index}" for index in range(projection["call_count"])]
 
 
+def _preset_current(preset_id, digest, max_steps) -> bool:
+    """A chat step names its reviewed interactive preset exactly (#1020)."""
+    from src.agent.presets import PresetError, preset, preset_digest, preset_max_steps
+    try:
+        return (type(preset_id) is str and preset(preset_id)["kind"] == "interactive"
+                and digest == preset_digest(preset_id) and max_steps == preset_max_steps(preset_id))
+    except PresetError:
+        return False
+
+
 def validate_step_candidate(candidate) -> dict:
     if (type(candidate) is not dict or set(candidate) != {"schema_version", "method", "turn_ref", "projection"}
             or candidate["schema_version"] != 1 or candidate["method"] != "agent-loop.startTurn"
@@ -101,7 +114,9 @@ def validate_step_candidate(candidate) -> dict:
         raise NativeServiceBlocked("native_turn_candidate_invalid")
     projection = candidate["projection"]
     if (type(projection) is not dict
-            or set(projection) != {"schema_version", "kind", "call_count", "step_index", "max_steps", "output_ref"}
+            or set(projection) != {"schema_version", "kind", "call_count", "step_index", "max_steps", "output_ref",
+                                   "preset_id", "preset_digest"}
+            or not _preset_current(projection.get("preset_id"), projection.get("preset_digest"), projection.get("max_steps"))
             or projection["schema_version"] != 1 or projection["kind"] not in STEP_KINDS
             or any(type(projection[key]) is not int for key in ("call_count", "step_index", "max_steps"))
             or not 0 <= projection["call_count"] <= MAX_TOOL_CALLS
@@ -157,6 +172,13 @@ async def chat_runtime_status(host=None) -> dict:
     if row.owner_kind == "legacy":
         return {"loop": LOOP_NAMES["legacy"], "route": "chat_agent", "owner_epoch": row.epoch, "reason": None,
                 "recovery": None, "owner_kind": "legacy"}
+    presets = rows.get(PRESETS_DOMAIN)
+    if presets is None or presets.state != "ready":
+        # Every Cordis turn binds the reviewed presets (#1020); boot seeds the row.
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
+                "reason": "composition_dependency_missing" if presets is None else f"agent_presets_owner_{presets.state}",
+                "recovery": "Restart Seraph to seed the runtime inventory." if presets is None
+                else "Finish the agent-presets owner transition at a higher epoch."}
     if not host.admitting or host.reviewed is None:
         snapshot = host.snapshot()
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
@@ -198,7 +220,8 @@ async def dispatch_turn_step(dispatcher, frame, payload, scope):
     async with dispatcher.jobs._session() as db:
         await _writer(db)
         run, _, _ = await dispatcher.current(db, scope, method)
-        if run.job_kind != STEP_JOB_KIND:
+        expected_kind = GUARDIAN_STEP_JOB_KIND if scope.binding.native_branch == "guardian" else STEP_JOB_KIND
+        if run.job_kind != expected_kind:
             raise NativeServiceBlocked("native_turn_candidate_not_bound")
         candidate = _run_candidate(run)
         context = read_context(run)
@@ -272,6 +295,9 @@ class CordisTurn:
                  max_steps: int, deadline: datetime, memory_revision: str):
         self.operator, self.job_id, self.owner, self.fence = operator, job["job_id"], owner, fence
         self.host, self.jobs, self.profile, self.max_steps = host, jobs, profile, max_steps
+        from src.agent.presets import PROFILE_PRESETS, preset_digest
+        self.preset_id = PROFILE_PRESETS[profile]
+        self.preset_digest = preset_digest(self.preset_id)
         self.deadline, self.memory_revision = deadline, memory_revision
         self.loop = asyncio.get_running_loop()
         self.cancelled = threading.Event()
@@ -308,9 +334,11 @@ class CordisTurn:
         if not host.admitting or host.reviewed is None:
             raise TurnBlocked("agent_turn_host_unavailable")
         operator = await _token_bound(operator)
-        max_steps = 1 if profile == "direct" else int(settings.agent_max_steps)
+        from src.agent.presets import PROFILE_PRESETS, preset_digest, preset_max_steps
+        max_steps = preset_max_steps(PROFILE_PRESETS[profile])
         candidate = {"schema_version": 1, "conversation_session_id": conversation_session_id, "message_id": message_id,
-                     "profile": profile, "max_steps": max_steps,
+                     "profile": profile, "max_steps": max_steps, "preset_id": PROFILE_PRESETS[profile],
+                     "preset_digest": preset_digest(PROFILE_PRESETS[profile]),
                      "timeout_seconds": float(timeout_seconds)}
         job_id = "cordis-turn:" + _digest({"root": operator.session_id, "session": conversation_session_id,
                                            "message": message_id})
@@ -394,6 +422,7 @@ class CordisTurn:
                 context = self._context(run)
                 if initial:
                     context = {"schema_version": 1, "context_tag": TURN_CONTEXT_TAG, "profile": self.profile,
+                               "preset_id": self.preset_id, "preset_digest": self.preset_digest,
                                "steps": [], "surface_digest": None, "settlement": None}
                 elif context is None or context["settlement"] is not None:
                     raise TurnBlocked("agent_turn_context_changed")
@@ -450,7 +479,7 @@ class CordisTurn:
             if call_count > MAX_TOOL_CALLS:
                 raise TurnBlocked("agent_turn_tool_calls_exceeded")
             projection = {"schema_version": 1, "kind": kind, "call_count": call_count, "step_index": step_index,
-                          "max_steps": self.max_steps,
+                          "max_steps": self.max_steps, "preset_id": self.preset_id, "preset_digest": self.preset_digest,
                           "output_ref": "turn-output:" + hmac.new(self._ref_key, output_digest.encode(),
                                                                   hashlib.sha256).hexdigest()[:48]}
             expected = expected_decisions(projection)

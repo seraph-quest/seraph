@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
 from src.agent.strategist import parse_strategist_response, run_strategist_decision_completion
+from src.scheduler.guardian_runtime import GuardianBlocked, report_guardian_blocked, report_guardian_succeeded
 from src.audit.runtime import log_scheduler_job_event
 from src.db.models import Goal, NativeNotificationOutbox
 from src.goals.contracts import GoalCandidateRequest
@@ -1135,6 +1136,7 @@ async def run_strategist_tick() -> None:
             durable_fencing_token=durable_fencing_token,
         )
 
+        report_guardian_succeeded("strategist_tick")
         decision = parse_strategist_response(str(raw))
 
         if not decision.should_intervene:
@@ -1320,6 +1322,18 @@ async def run_strategist_tick() -> None:
             _policy_action_value(result),
         )
 
+    except GuardianBlocked as exc:
+        # The guardian loop refused the decision call or its output: nothing is delivered.
+        if durable_job_id is not None and durable_fencing_token is not None:
+            try:
+                await _transition_tick(durable_job_id, status="blocked", fencing_token=durable_fencing_token,
+                                       reason=exc.reason_code, result={"reason": exc.reason_code,
+                                                                       "recovery": exc.recovery, "delivery": "blocked"},
+                                       result_summary="strategist decision blocked by the guardian runtime")
+            except Exception:
+                logger.exception("strategist_tick: failed to persist the guardian block (%s)", durable_job_id)
+        await report_guardian_blocked("strategist_tick", exc, started_at=started_at,
+                                      details={"durable_job_id": durable_job_id})
     except asyncio.TimeoutError:
         if llm_request_id is not None:
             _mark_request_timed_out(llm_request_id)

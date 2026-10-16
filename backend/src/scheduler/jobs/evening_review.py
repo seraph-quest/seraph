@@ -8,6 +8,7 @@ from time import perf_counter
 from config.settings import settings
 from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.models.schemas import WSResponse
 
@@ -131,18 +132,24 @@ async def run_evening_review() -> None:
 
         try:
             transport_messages = [{"role": "user", "content": prompt}]
-            response = await completion_with_fallback(
-                messages=transport_messages,
-                temperature=0.6,
-                max_tokens=512,
-                timeout=settings.agent_briefing_timeout,
-                runtime_path="evening_review",
-                request_context=build_canonical_inference_context(
-                    "evening_review",
-                    payload=transport_messages,
-                    output_tokens=512,
-                    timeout_seconds=settings.agent_briefing_timeout,
+            # #1020: the same call, on the guardian loop its owner row selects.
+            response = await guardian_completion(
+                "guardian.evening_review",
+                lambda: completion_with_fallback(
+                    messages=transport_messages,
+                    temperature=0.6,
+                    max_tokens=512,
+                    timeout=settings.agent_briefing_timeout,
+                    runtime_path="evening_review",
+                    request_context=build_canonical_inference_context(
+                        "evening_review",
+                        payload=transport_messages,
+                        output_tokens=512,
+                        timeout_seconds=settings.agent_briefing_timeout,
+                    ),
                 ),
+                timeout_seconds=settings.agent_briefing_timeout, runtime_path="evening_review",
+                temperature=0.6, max_tokens=512,
             )
         except asyncio.TimeoutError:
             logger.warning("evening_review: LLM timed out after %ds", settings.agent_briefing_timeout)
@@ -154,6 +161,10 @@ async def run_evening_review() -> None:
                     "timeout_seconds": settings.agent_briefing_timeout,
                 },
             )
+            return
+        except GuardianBlocked as exc:
+            # The guardian loop refused the call or its output: nothing is delivered.
+            await report_guardian_blocked("evening_review", exc, started_at=started_at)
             return
 
         review_text = response.choices[0].message.content.strip()
@@ -180,6 +191,7 @@ async def run_evening_review() -> None:
                 "degraded_inputs": degraded_inputs,
             },
         )
+        report_guardian_succeeded("evening_review")
         logger.info("evening_review: delivered evening review")
 
     except Exception as exc:

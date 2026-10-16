@@ -81,7 +81,19 @@
       "config": {}
     },
     {
+      "id": "seraph.agent-presets.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
       "id": "seraph.agent-loop.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.guardian.v1",
       "required": true,
       "dependencies": [],
       "config": {}

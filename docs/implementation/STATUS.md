@@ -246,8 +246,13 @@ batches of at most 128. Historical financial seals retain their original typed
 defaults and field presence without resealing. The private hint grants no
 authority and is not a direct-database-tamper integrity seal. Stopped stdlib
 workspace backup/restore accepts the sole added hint column; restored NULL hints
-require canonical startup migration before accounting readiness. This does not
-bound the existing global `_accounting_rows` deployment-ledger baseline.
+require canonical startup migration before accounting readiness. Since #1086
+the hot accounting writers and status reads no longer load the deployment
+ledger: they verify the witness, the root of stored row digests and the rows
+they touch, and admit against digest-sealed running totals; full verification
+(every row) runs per process on first write, when over 20 minutes stale, on
+rare writers, at startup and every 10 minutes in the background. The rare
+writers still load the whole ledger.
 
 Private handoff publication derives at most twelve specialist callback identities
 from validated original-group reservations and uses exact unique run-identity

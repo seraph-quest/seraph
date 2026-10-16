@@ -244,6 +244,17 @@ def reset_bounded_snapshot_cache():
 
 
 @pytest.fixture(autouse=True)
+def inference_ledger_shadow_oracle(monkeypatch):
+    """#1086: every accounting test also checks bounded verification against
+    the pre-#1086 full-ledger decisions, and starts from a fresh process view."""
+    from src.workflows import inference_ledger
+    inference_ledger.reset_process_state()
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", True)
+    yield
+    inference_ledger.reset_process_state()
+
+
+@pytest.fixture(autouse=True)
 def reset_process_singletons(monkeypatch):
     """Give each test the fresh per-process state a real app boot has.
 

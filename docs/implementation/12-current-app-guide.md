@@ -610,7 +610,8 @@ and the target is also compared by file identity (device and inode), so another
 spelling or a hard link cannot reach those files. `preview_workspace_patch` is not
 a Cordis read-only capability: its pre-encoded JSON diff could carry an escaped
 or line-split Vault value past exact-match redaction. Policy, descriptor version and path are checked
-again at effect time (`native_capability_policy_changed`). The job's grants come
+again immediately before the effect, in the governed dispatch before the intent is
+recorded (`native_capability_policy_changed`), so a denial there leaves no intent. The job's grants come
 only from its sealed declared authority, and the host runs under the operator's
 current approval mode. The call records an intent (also an `intent` effect
 receipt, so stale-lease recovery never reports a clean failure), runs the host

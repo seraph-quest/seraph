@@ -1049,6 +1049,32 @@ class SessionManager:
             return raced, True
         return message, False
 
+    async def add_message_if_absent_in_db(
+        self,
+        db,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        message_id: str,
+        metadata_json: str | None = None,
+    ) -> Message:
+        """Insert one row by its deterministic id inside the caller's transaction.
+
+        An existing row with the same id must be the identical message (session,
+        role, content, metadata); a replay is a no-op, anything else is a conflict.
+        """
+        if len(content) > 50_000:
+            content = content[:50_000] + "\n\n[truncated]"
+        existing = await db.get(Message, message_id)
+        if existing is not None:
+            if (existing.session_id != session_id or existing.role != role or existing.content != content
+                    or (existing.metadata_json or None) != (metadata_json or None)):
+                raise MessageIngressConflictError(message_id)
+            return existing
+        return await self._add_message_in_db(db, session_id, role, content, metadata_json=metadata_json,
+                                             message_id=message_id)
+
     async def _add_message_in_db(
         self,
         db,

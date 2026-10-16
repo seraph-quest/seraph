@@ -30,6 +30,17 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
+from src.runtime_plugins.agent_turns import chat_runtime_status
+
+
+async def _chat_runtime_or_unavailable() -> dict:
+    """Runtime status never fails because the composition inventory is unreadable."""
+    try:
+        return await chat_runtime_status(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Chat runtime status unavailable", exc_info=True)
+        return {"loop": "blocked", "route": "chat_agent", "owner_epoch": None, "owner_kind": None,
+                "reason": "chat_runtime_status_unavailable", "recovery": "Restart Seraph; the runtime inventory is unreadable."}
 from src.runtime_plugins.bridge import cordis_host
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
@@ -533,6 +544,14 @@ async def lifespan(app: FastAPI):
                         await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
+                    try:
+                        # Default Cordis owner cutover (#1019): once per workspace and domain,
+                        # forward-only; a missing runtime leaves the domain blocked with its fix.
+                        from src.runtime_plugins.cutover import run_boot_cutover
+                        for receipt in await run_boot_cutover(cordis_host):
+                            logging.getLogger(__name__).warning("Cordis owner cutover: %s", receipt)
+                    except Exception:
+                        logging.getLogger(__name__).exception("Cordis owner cutover deferred")
                     yield
                 finally:
                     session_manager.bind_task_continuity(None)
@@ -676,6 +695,8 @@ def create_app() -> FastAPI:
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
             "cordis_runtime": await cordis_host.refresh_status(),
+            # Which agent loop chat runs on, from the agent-loop owner row (#1019).
+            "chat_runtime": await _chat_runtime_or_unavailable(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

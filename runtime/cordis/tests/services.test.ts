@@ -70,8 +70,8 @@ test('real scoped proxies reject terminal reference separators before IPC and pr
     assert.deepEqual(await composition.dispose(), {resources_remaining:0, cordis_disposal:'confirmed'});
   }
 });
-// Composed in Cordis (#1008): these read their staged input first and never forward themselves.
-const COMPOSED = new Set<ServiceMethod>(['research.buildPlan', 'research.executeAccepted', 'source-extraction.extract']);
+// Composed in Cordis (#1008, #1019): these read their staged input first and never forward themselves.
+const COMPOSED = new Set<ServiceMethod>(['research.buildPlan', 'research.executeAccepted', 'source-extraction.extract', 'agent-loop.startTurn']);
 for (const method of SERVICE_METHODS) test(`real scoped Cordis provider forwards ${method} once and preserves native block`, async () => {
   const calls: unknown[] = [];
   const client: ScopedRequestClient = {isActive: () => true, request: async (name, value) => {calls.push([name,value]); return blocked;}};

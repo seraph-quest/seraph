@@ -700,6 +700,143 @@ if no caller takes it; the periodic sweep expires it too. Backups taken before t
 the backup itself is pruned. No Gmail/Calendar operation is a native capability
 through `capabilities.invoke`.
 
+### Cordis agent loop (#1019)
+
+Chat routes on the `seraph.agent-loop.v1` owner row. While the row's owner is
+`legacy` (the seeded default, or an entirely unseeded inventory) REST and WS chat
+run the existing smolagents loop unchanged. A partial inventory without the row
+blocks chat as `agent_loop_owner_missing` and a malformed inventory as
+`agent_loop_inventory_invalid`, on both routes and in `/api/runtime/status`.
+No product path repairs such an inventory (for example after a partial restore):
+the operator restores the row with the fenced owner transition (`ready` ->
+`draining` -> `blocked` at a higher epoch -> `ready` on boot proof), under the
+workspace maintenance fence, and chat stays blocked until then. After the fenced cutover
+(`ready -> draining -> blocked` at a higher epoch with owner `cordis` -> `ready`
+on the running child's boot proof) every chat ingress runs through the Cordis
+agent loop; a Cordis owner that is not ready, a host that is not admitting, or
+`use_delegation=true` (`delegation_pending_1020`) blocks chat visibly with the
+exact fix and never falls back to legacy. Rollback is another higher epoch.
+`/api/runtime/status` reports `chat_runtime {loop, route, owner_epoch, reason,
+recovery}`, the Settings Cordis panel shows it, and the WS status line names the
+loop (`cordis.agent-loop.v1` or `legacy.smolagents`).
+
+**Default cutover and operator control.** `runtime_plugins/cutover.py` holds an
+ordered manifest of domains whose default owner is Cordis
+(`register_cutover_domain(domain, prerequisites=(...))`; #1019 registers
+`seraph.agent-loop.v1`, and #1020 adds its domains with their prerequisites).
+After the host starts, the boot step moves every never-cut domain forward through
+the real fenced `transition_owner` sequence (`ready` -> `draining` -> `blocked`
+at epoch+1 with owner `cordis` -> `ready` on this boot's proof) and records a
+`runtime_composition_domain_cutover` audit event in the same writer. A domain
+whose provider is not built or not admitting stays `blocked`, and chat shows the
+host's exact fix; a later boot with a ready runtime completes it. A domain with a
+cutover marker or any operator transition is never moved by boot again, so a
+rollback is sticky. A domain whose prerequisites are not yet Cordis-owned is
+skipped. A marked, ready Cordis domain whose stored composition digest differs
+from this boot's reviewed build (a rebuilt package) is moved to the running
+build's digest at a higher epoch (`digest_refreshed`); until that happens chat
+status reports `agent_loop_composition_drift` with the restart fix instead of
+naming a stale build.
+
+Operators move a domain live with `GET /api/runtime/composition/domains` and
+`POST /api/runtime/composition/domains/{domain}/owner {target, expected_epoch,
+confirm_domain}` (authenticated HTTP only through the global Origin/cookie
+middleware, audited as `runtime_composition_operator_transition`, the domain
+validated against the manifest), surfaced as one confirmed action in Settings →
+Cordis runtime host. A Root whose `ownership_continuity` is not `stable` can
+list owners but is refused a move (`operator_ownership_recovery_required`).
+Moving a domain to Cordis requires its prerequisites to be Cordis-owned
+(`composition_prerequisite_not_cordis`), and a rollback to legacy is refused
+while a dependent domain is Cordis-owned (`composition_dependent_cordis_owned`).
+
+In production (`DEPLOYMENT_ENVIRONMENT=prod|production`) the backend lifespan
+holds the exclusive workspace owner lease (`runtime_workspace_owner`) for its
+whole life, so no backup or restore can observe a transition; a production
+process that does not hold the lease refuses every boot and live transition
+(`composition_owner_lease_missing`, logged as an error). Dev and test processes
+take no lease, so a workspace backup taken there while a transition runs has no
+such protection. Cordis turns are bound and block a transition while live
+(`composition_not_quiescent`); legacy turns are not bound, so a process-local
+gate counts them: a transition refuses while one runs, and no new legacy turn
+starts while any transition runs (overlapping transitions keep the gate closed
+until the last ends; `composition_transition_in_progress`). REST and WS chat
+re-read the route after taking the gate, so a transition that finished between
+the first read and the gate sends the message to the new owner instead of
+starting a legacy turn. Recovery text names both restarts: `./manage.sh -e dev
+local up` for the local stack and `./manage.sh -e prod up -d --build` under
+Docker.
+
+One `cordis_chat_turn_v1` job owns each ingress, keyed by the ingress message
+id. Cordis readiness, the direct-chat route preflight and the turn admission run
+before `reserve_ingress_message`, so a refused message is never a duplicate on
+retry; a replayed message admits no new turn and keeps today's
+`chat_message_duplicate` 409. Admission and reservation are two transactions: a
+crash between them leaves a claimed turn with no user row, which stale-lease
+recovery blocks (a later resend of that id gets `agent_turn_replayed`), so a user
+row never exists without its turn. Guardian state is still built once per turn
+as legacy does; each step re-validates only the cheap Root, epoch, deadline and
+memory markers. Turn state persists only digests, step kinds, decisions and
+tool receipts (tool name and outcome); observations, arguments and model text
+stay in the in-memory agent, redacted for WS frames exactly as legacy. The
+turn runs the same agent legacy builds (prompts, `get_model` owner, wrapped
+`get_tools` surface, onboarding surface, approvals and frames). At each step
+boundary a short `agent-loop.startTurn` invocation on its own step job asks the
+reviewed sequencer for the transition: the child reads only a sealed projection
+(step kind, call count, step index, budget; never text, a tool name or an
+argument) and stages finite decisions (`tool_intent:<n>`, `continue`,
+`settlement`, `final_call`), which Python accepts only when they equal its own
+parse (`native_child_result_mismatch` otherwise). A turn settles only on
+`final_answer`; a reply without a tool call, an unknown tool, invalid arguments
+and a raising tool stay smolagents observations; max-steps exhaustion makes the
+same single tool-less final call. Before every step and tool call Python
+rechecks the turn lease, fence and bound epoch, the operator Root, the deadline,
+cancellation and the memory revocation marker, which is read at admission
+(before guardian state is built) and rechecked at settlement: an operator forget
+or canonical delete mid-turn stops the turn before the next prompt assembly and
+refuses its output (`agent_turn_memory_revoked`). Supersede, decay and other
+lifecycle archiving do not trip it, and direct chat (no memory in its prompt)
+skips it. The marker is global, not per retrieved record, so any operator forget
+during a turn stops that turn (deliberately conservative). Tool intents and outcomes (`succeeded`, `failed`,
+`no_effect` for approval/clarification gates) are receipts on the turn job; the
+reply row is inserted by its deterministic id (insert-if-absent, an existing
+different row is `turn_transcript_conflict`) in the same writer transaction as
+the turn's fenced settlement CAS, so a stale epoch or lost lease adopts nothing.
+A WS disconnect or cancelled handler, a REST client disconnect and a timeout
+cancel the turn at its next boundary; the turn owner writes the single
+interrupted row. Restart never resumes a turn: stale-lease recovery keeps its
+committed and `intent` (unknown) tool effects visible. Direct chat keeps every
+current value (messages, limits, preflight before admission, REST non-streaming
+and WS streamed deltas, redaction, `direct-openrouter-chat` label); Python owns
+the stream and the sequencer settles it after the final text is sealed.
+
+Disclosed differences from legacy: tool calls in one model message run
+sequentially in submission order (smolagents ran them in parallel); in both
+loops memory observations are recorded sorted by tool-call id, every submitted
+call still executes when a sibling raises, and that step's observation is then
+the error alone (legacy drops sibling observations the same way). A step asking
+for more than 12 tool calls runs none of them and gets a model-visible
+observation saying so. The tool surface digest is pinned at step 1 and compared
+at every later step (`agent_turn_surface_changed`); the child's `output_ref` is a
+per-turn HMAC of the sealed output, never a guessable digest of model text (the
+key is per turn owner and ephemeral, so refs cannot be re-derived after a
+restart; nothing needs them then, because restart never resumes a turn).
+Any failure between REST admission and settlement (agent build, guardian state,
+ingress logging, a client disconnect) closes the turn as blocked. `store_secret` returns a
+visible denial pointing to Settings -> Vault and its value never enters turn
+state (operator decision; per-argument sensitivity redaction is follow-up work).
+Unchanged by construction: a failed max-steps final call returns smolagents'
+"Error in generating final LLM output" text; tools have no separate deadline
+class (the turn budget only); direct chat keeps its runtime path, its 60 s cap
+(agent turns 120 s), REST without and WS with the streaming flag, and no
+post-turn side effects. Measured offline on a loaded host over 110 samples of
+the real path: a startTurn step p50/p95 92/106 ms, a tool's intent and outcome
+receipts 18/24 ms, and the turn admission (the only Cordis work before a
+direct-chat first delta; the sequencer runs after the stream) 31/40 ms, all
+under one 250 ms p95 budget, and a real WS direct-chat first delta about 70 ms
+after legacy's. The budgets are asserted only with
+`SERAPH_CORDIS_LATENCY_BUDGET=1` on a quiet host; elsewhere the suite prints the
+numbers without gating (at load average ~35 the step p95 rose to ~245 ms).
+
 ### Cordis guardian research (#1008)
 
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2

@@ -8,8 +8,9 @@ const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? "http://127.0.0.1:80
 const websocketProxyTarget = apiProxyTarget.replace(/^http/, "ws");
 // The dev server serves the cockpit and can read local files over its
 // WebSocket, so it binds loopback unless a caller opts into a wider bind
-// explicitly (docker-dev sets VITE_DEV_HOST=0.0.0.0 inside its container).
-const devServerHost = process.env.VITE_DEV_HOST?.trim() || "127.0.0.1";
+// explicitly (docker-dev sets SERAPH_DEV_SERVER_HOST=0.0.0.0 inside its
+// container). The name avoids the VITE_ prefix so it never reaches client code.
+const devServerHost = process.env.SERAPH_DEV_SERVER_HOST?.trim() || "127.0.0.1";
 
 export default defineConfig({
   plugins: [react()],

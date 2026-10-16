@@ -26,7 +26,7 @@ services:
     networks:
       - seraph-network-dev
     ports:
-      - "8004:8003" # Non-standard port for dev
+      - "127.0.0.1:8004:8003" # Non-standard port for dev; loopback only
     shm_size: "1gb"  # Required for Playwright/Chromium
     depends_on:
       - sandbox-dev
@@ -80,12 +80,14 @@ services:
       - .env.dev
     environment:
       # The container must listen beyond its own loopback for the port mapping;
-      # vite.config.ts otherwise binds 127.0.0.1.
-      VITE_DEV_HOST: "0.0.0.0"
+      # vite.config.ts otherwise binds 127.0.0.1. Not VITE_-prefixed, so it is
+      # never exposed to client code through import.meta.env.
+      SERAPH_DEV_SERVER_HOST: "0.0.0.0"
     networks:
       - seraph-network-dev
     ports:
-      - "3000:5173"
+      # Published on host loopback only; the dev server can read local files.
+      - "127.0.0.1:3000:5173"
     depends_on:
       - backend-dev
 

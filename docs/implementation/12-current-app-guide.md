@@ -985,7 +985,10 @@ costs, and embedding usefulness remain externally unverified.
   A switched-off job makes no model call and records `skipped` with reason
   `disabled_by_operator` in the scheduler audit and the panel; end-of-day
   reports still run deterministically without analysis. Toggles persist in
-  `background-inference-settings.json` in the workspace. An unreadable file
+  `background-inference-settings.json` in the workspace. It is optional
+  canonical workspace state: workspace backup and restore carry it when it
+  exists, and an archive taken before any toggle was saved restores with every
+  job at its default. An unreadable file
   pauses scheduled model calls and reports
   `background_inference_settings_unreadable`; a single-toggle save is then
   refused (HTTP 409) and the panel asks for every job's value plus an explicit

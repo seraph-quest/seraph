@@ -925,7 +925,7 @@ The child's report is adopted only if all of these hold:
   epochs.
 
 **Blocked delegation.** A host, epoch or preset failure in a child stops the
-parent visibly: "Delegated specialist <name> stopped: <reason>". Delegation
+parent visibly: "Delegated specialist `name` stopped: `reason`". Delegation
 needs the `seraph.delegation.v1` owner on Cordis; its prerequisite is the
 presets owner. Otherwise chat reports `delegation_owner_not_ready` with the
 fix, and there is no fallback.

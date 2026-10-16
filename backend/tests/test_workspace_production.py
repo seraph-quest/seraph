@@ -1025,3 +1025,32 @@ def test_background_inference_toggles_survive_backup_and_restore(tmp_path, monke
     assert not background_inference.background_inference_settings_path().exists()
     defaults, error = background_inference.read_background_inference_settings()
     assert error is None and all(defaults.values())
+
+
+@pytest.mark.parametrize("writer", ["extension-lock", "evolution-state"])
+def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monkeypatch, writer):
+    from config.settings import settings
+    from src.workspace.state_registry import production_workspace_inventory
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+    if writer == "extension-lock":
+        from src.api.extensions import _extension_effect_guard
+        with _extension_effect_guard():
+            pass
+        assert (root / ".seraph-extension-lifecycle.lock").exists()
+    else:
+        from src.evolution.runtime import EvolutionRuntime
+        runtime = EvolutionRuntime(EvolutionRuntime.default_path(root))
+        with runtime._locked():
+            runtime.state_path.write_text('{"schema_version": 1, "proposals": {}}\n', encoding="utf-8")
+        assert (root / "evolution" / "runtime-state.json").exists()
+    assert production_workspace_inventory(root)["status"] != "blocked"
+    archive = _cli(tmp_path, environment, "backup", "--archive", f"{writer}.zip")
+    if writer == "evolution-state":
+        (root / "evolution" / "runtime-state.json").write_text("changed\n", encoding="utf-8")
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    if writer == "evolution-state":
+        # Operator evolution state is canonical and round-trips.
+        assert (root / "evolution" / "runtime-state.json").read_text(encoding="utf-8").startswith('{"schema_version"')
+    _cli(tmp_path, environment, "backup", "--archive", f"{writer}-after.zip")

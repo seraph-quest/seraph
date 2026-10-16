@@ -32,6 +32,7 @@ BUILD_FILES = (
     'src/contracts/client.ts',
     'src/contracts/methods.ts',
     'src/contracts/schema.ts',
+    'src/contracts/state.ts',
     'src/contracts/authority.ts',
     'src/contracts/goals.ts',
     'src/contracts/tasks.ts',
@@ -48,6 +49,7 @@ BUILD_FILES = (
     'src/contracts/source_extraction.ts',
     'src/plugins/index.ts',
     'src/plugins/proxy.ts',
+    'src/plugins/state/index.ts',
     'src/plugins/authority/index.ts',
     'src/plugins/goals/index.ts',
     'src/plugins/tasks/index.ts',
@@ -74,6 +76,7 @@ BUILD_FILES = (
     'dist/src/contracts/client.js',
     'dist/src/contracts/methods.js',
     'dist/src/contracts/schema.js',
+    'dist/src/contracts/state.js',
     'dist/src/contracts/authority.js',
     'dist/src/contracts/goals.js',
     'dist/src/contracts/tasks.js',
@@ -90,6 +93,7 @@ BUILD_FILES = (
     'dist/src/contracts/source_extraction.js',
     'dist/src/plugins/index.js',
     'dist/src/plugins/proxy.js',
+    'dist/src/plugins/state/index.js',
     'dist/src/plugins/authority/index.js',
     'dist/src/plugins/goals/index.js',
     'dist/src/plugins/tasks/index.js',
@@ -114,9 +118,22 @@ PACKAGE_FILES = (*BUILD_FILES, "dist/build-manifest.json")
 # Child gets no PATH/HOME/config or credentials. Absolute argv needs no lookup.
 CHILD_ENV = {"LANG": "C.UTF-8", "TZ": "UTC"}
 KNOWN_PLUGIN = "seraph.host-lifecycle@1.0.0"
-KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-loop.v1', 'seraph.source-extraction.v1', 'seraph.goal-plan.v1', 'seraph.guardian-research.v1')
+KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.state.v1', 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-loop.v1', 'seraph.source-extraction.v1', 'seraph.goal-plan.v1', 'seraph.guardian-research.v1')
 
 
+# Python always hosts state, authority and audit (#1024); their facades and the
+# host plugin can never be removed or made optional by profile configuration.
+MANDATORY_PLUGINS = (KNOWN_PLUGIN, 'seraph.state.v1', 'seraph.authority.v1', 'seraph.audit.v1')
+# Declared, fixed provider dependencies (mirror of runtime/cordis/src/composition.ts
+# and runtime_plugins.worker.DEPENDENCIES); a profile can neither add nor drop one.
+PLUGIN_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    'seraph.authority.v1': ('seraph.state.v1',),
+    'seraph.audit.v1': ('seraph.state.v1',),
+    'seraph.tasks.v1': ('seraph.state.v1', 'seraph.authority.v1'),
+    'seraph.goals.v1': ('seraph.state.v1', 'seraph.authority.v1'),
+    'seraph.artifacts.v1': ('seraph.state.v1', 'seraph.authority.v1'),
+    'seraph.memory.v1': ('seraph.state.v1', 'seraph.authority.v1', 'seraph.audit.v1'),
+}
 # Closed per-plugin configuration fields; only source extraction is configurable.
 PLUGIN_CONFIG_FIELDS: dict[str, frozenset[str]] = {identifier: frozenset() for identifier in KNOWN_PLUGINS}
 PLUGIN_CONFIG_FIELDS["seraph.source-extraction.v1"] = frozenset({"formats"})
@@ -166,13 +183,15 @@ def validate_profile(value: Any) -> dict[str, Any]:
     cursor = 0
     for spec in plugins:
         closed(spec, {"id", "required", "dependencies", "config"})
-        # Literal registry order: no duplicates or unknown IDs. Service
-        # providers may be optional; their methods then return typed blocks.
+        # Literal registry order: no duplicates or unknown IDs. Providers
+        # outside the mandatory set may be optional; their methods then
+        # return typed blocks.
         try:
             position = KNOWN_PLUGINS.index(spec["id"], cursor)
         except ValueError as exc:
             raise ProtocolError("unknown or invalid plugin") from exc
-        if type(spec["required"]) is not bool or type(spec["dependencies"]) is not list or spec["dependencies"] != []:
+        if (type(spec["required"]) is not bool or type(spec["dependencies"]) is not list
+                or spec["dependencies"] != list(PLUGIN_DEPENDENCIES.get(spec["id"], ()))):
             raise ProtocolError("unknown or invalid plugin")
         cursor = position + 1
         closed(spec["config"], set(PLUGIN_CONFIG_FIELDS[spec["id"]]))
@@ -184,6 +203,9 @@ def validate_profile(value: Any) -> dict[str, Any]:
                 raise ProtocolError("invalid source formats")
     if plugins[0]["id"] != KNOWN_PLUGIN or plugins[0]["required"] is not True:
         raise ProtocolError("required host plugin missing")
+    required = {spec["id"] for spec in plugins if spec["required"] is True}
+    if any(identifier not in required for identifier in MANDATORY_PLUGINS):
+        raise ProtocolError("required provider missing")
     return profile
 
 

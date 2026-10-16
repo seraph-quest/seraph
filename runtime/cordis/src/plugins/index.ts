@@ -1,6 +1,7 @@
 import type { Context } from "cordis";
 import type { ScopedRequestClient } from "../contracts/client.js";
 import type { Input, Result, ServiceMethod } from "../contracts/methods.js";
+import { createPlugin as state } from "./state/index.js";
 import { createPlugin as authority } from "./authority/index.js";
 import { createPlugin as goals } from "./goals/index.js";
 import { createPlugin as tasks } from "./tasks/index.js";
@@ -18,6 +19,7 @@ import { createPlugin as source_extraction } from "./source_extraction/index.js"
 import { createPlugin as goal_plan } from "../providers/goal-plan.js";
 import { createPlugin as guardian_research } from "./research/guardian.js";
 export const SERVICE_KEYS = [
+  "seraphState",
   "seraphAuthority",
   "seraphGoals",
   "seraphTasks",
@@ -37,6 +39,7 @@ export const SERVICE_KEYS = [
 ] as const;
 /** Literal registry order. ``digests`` are the reviewed per-plugin build digests. */
 export function servicePlugins(client: ScopedRequestClient, digests: Readonly<Record<string, string>> = {}) { return {
+  "seraph.state.v1": state(client),
   "seraph.authority.v1": authority(client),
   "seraph.goals.v1": goals(client),
   "seraph.tasks.v1": tasks(client),

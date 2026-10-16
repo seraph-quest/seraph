@@ -98,6 +98,8 @@ class CordisHost:
         self._plugins: list[dict[str, Any]] = []
         self._readiness_checked_at: int | None = None
         self.stderr_bytes = 0
+        # Host-reported provider readiness the child acknowledged (#1024).
+        self._provider_reports: dict[str, dict[str, Any]] = {}
 
     @property
     def admitting(self) -> bool:
@@ -192,6 +194,7 @@ class CordisHost:
                 self.service_dispatch = NativeServiceDispatcher()
             self.state, self.reason = "starting", None
             self.boot_nonce = secrets.token_hex(32)
+            self._provider_reports = {}
             self._readiness_checked_at = None
             self._in_seq = self._out_seq = 0
             self._pending.clear()
@@ -366,6 +369,26 @@ class CordisHost:
             raise HostBlocked("control_not_public")
         return (await self._rpc(method, invocation_ref=invocation_ref, deadline_at=deadline_at))["payload"]
 
+    async def report_providers(self, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Report Python-hosted provider readiness to the child's facades.
+
+        Frames flow host to child only and carry the closed five-field report;
+        the child never initiates one and nothing it answers can activate or
+        deactivate a provider.
+        """
+        from .protocol import validate_provider_report
+        if not self.admitting:
+            raise HostBlocked(self.reason or "runtime_not_ready")
+        acknowledged = []
+        for report in reports:
+            report = validate_provider_report(dict(report), "provider.readiness")
+            response = await self._rpc("provider.readiness", internal=True, payload=report)
+            if response["payload"] != {"domain": report["domain"], "state": "recorded"}:
+                raise HostBlocked("provider_report_not_acknowledged")
+            self._provider_reports[report["domain"]] = report
+            acknowledged.append(response["payload"])
+        return acknowledged
+
     async def refresh_status(self, *, deadline_at: int | None = None) -> dict[str, Any]:
         """One current-boot readback, bounded below the browser's five seconds.
 
@@ -504,6 +527,11 @@ class CordisHost:
         drain_deadline = min([now + 10_000, *[pending.frame["deadline_at"] for pending in self._pending.values()]])
         if process.returncode is None and not preserve_blocked:
             try:
+                for report in list(self._provider_reports.values()):
+                    # The facades report quiescing; providers stay Python-owned.
+                    await self._rpc("provider.quiesce", internal=True, deadline_at=drain_deadline,
+                                    payload={**report, "state": "quiescing", "reason_code": "host_stopping"})
+                self._provider_reports.clear()
                 await self._rpc("runtime.quiesce", internal=True, deadline_at=drain_deadline)
                 response = await self._rpc("runtime.shutdown", internal=True, deadline_at=drain_deadline)
                 payload = response["payload"]

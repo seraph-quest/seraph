@@ -290,6 +290,22 @@ class ProviderWorker:
         return {"providers": [self.status[name].payload() for name in PROVIDERS],
                 "mandatory_ready": all(self.status[name].state == "active" for name in MANDATORY)}
 
+    async def provider_reports(self) -> list[dict]:
+        """Closed five-field reports for the child's facades: no handle or key."""
+        from src.db import engine as db_engine
+        from .ownership import inventory
+        async with db_engine.get_session() as db:
+            rows = await inventory(db)
+        reports = []
+        for name in PROVIDERS:
+            row = rows.get(f"seraph.{name}.v1")
+            status = self.status[name]
+            if row is None or status.state not in {"active", "degraded", "failed"}:
+                continue
+            reports.append({"domain": row.runtime_domain, "state": status.state, "epoch": row.epoch,
+                            "composition_digest": row.composition_digest, "reason_code": status.reason_code})
+        return reports
+
     def provider_ready(self, provider: str) -> bool:
         return self.status[provider].state == "active"
 

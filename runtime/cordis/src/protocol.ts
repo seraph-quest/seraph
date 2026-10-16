@@ -3,13 +3,17 @@ import { TextDecoder } from 'node:util';
 import type { Readable, Writable } from 'node:stream';
 import { Resources } from './resources.js';
 import { isServiceMethod, validateInput, validateResult, type ServiceMethod } from './contracts/methods.js';
+import { PROVIDER_DOMAINS, type ProviderReport } from './contracts/state.js';
 
 export const MAX_FRAME = 1_048_576;
 export const CONTROL_TIMEOUT_MS = 5_000;
 export const ORDINARY_TIMEOUT_MS = 30_000;
 export const MAX_PENDING = 32;
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export type Method = 'bootstrap.hello' | 'runtime.ready' | 'runtime.status' | 'runtime.quiesce' | 'runtime.shutdown' | 'invocation.cancel' | ServiceMethod;
+export type Method = 'bootstrap.hello' | 'runtime.ready' | 'runtime.status' | 'runtime.quiesce' | 'runtime.shutdown' | 'invocation.cancel' | ProviderMethod | ServiceMethod;
+/** Host-to-child provider reports (#1024); the child never sends one. */
+export type ProviderMethod = 'provider.readiness' | 'provider.quiesce';
+export const PROVIDER_METHODS: ReadonlySet<string> = new Set(['provider.readiness', 'provider.quiesce']);
 export interface Frame {
   protocol: 1; boot_nonce: string; request_id: string; seq: number;
   kind: 'request' | 'response'; method: Method; invocation_ref: string | null;
@@ -18,7 +22,7 @@ export interface Frame {
 }
 export class ProtocolError extends Error {}
 const fields = ['protocol', 'boot_nonce', 'request_id', 'seq', 'kind', 'method', 'invocation_ref', 'composition_epoch', 'composition_digest', 'package_digest', 'deadline_at', 'payload'];
-const methods = new Set<string>(['bootstrap.hello', 'runtime.ready', 'runtime.status', 'runtime.quiesce', 'runtime.shutdown', 'invocation.cancel']);
+const methods = new Set<string>(['bootstrap.hello', 'runtime.ready', 'runtime.status', 'runtime.quiesce', 'runtime.shutdown', 'invocation.cancel', 'provider.readiness', 'provider.quiesce']);
 const hex64 = /^[0-9a-f]{64}$/;
 const token = /^[A-Za-z0-9_.:-]{1,128}$/;
 
@@ -121,6 +125,17 @@ export function decodeJson(data: Uint8Array): Json {
   return result;
 }
 
+/** The closed five-field provider report: no handle, key or credential crosses IPC. */
+export function validateProviderReport(value: Json | undefined, method: string): ProviderReport {
+  const report = closed(value, ['domain', 'state', 'epoch', 'composition_digest', 'reason_code']);
+  const states = method === 'provider.quiesce' ? ['quiescing'] : ['active', 'degraded', 'failed'];
+  if (typeof report.domain !== 'string' || !(PROVIDER_DOMAINS as readonly string[]).includes(report.domain)
+    || typeof report.state !== 'string' || !states.includes(report.state)
+    || typeof report.composition_digest !== 'string' || !hex64.test(report.composition_digest)
+    || (report.reason_code !== null && (typeof report.reason_code !== 'string' || !token.test(report.reason_code)))) throw new ProtocolError('invalid provider report');
+  integer(report.epoch, 1);
+  return report as unknown as ProviderReport;
+}
 function plugins(value: Json | undefined): void {
   if (!Array.isArray(value) || value.length > 64) throw new ProtocolError('invalid plugins');
   const seen = new Set<string>();
@@ -152,7 +167,11 @@ export function validateFrame(value: Json): Frame {
   const payload = frame.payload;
   if (frame.kind === 'request') {
     if (frame.method === 'runtime.ready') throw new ProtocolError('ready is response only');
-    closed(payload, []);
+    if (PROVIDER_METHODS.has(frame.method)) validateProviderReport(payload, frame.method);
+    else closed(payload, []);
+  } else if (PROVIDER_METHODS.has(frame.method)) {
+    const result = closed(payload, ['domain', 'state']);
+    if (typeof result.domain !== 'string' || !(PROVIDER_DOMAINS as readonly string[]).includes(result.domain) || result.state !== (frame.method === 'provider.quiesce' ? 'quiescing' : 'recorded')) throw new ProtocolError('invalid provider acknowledgement');
   } else if (frame.method === 'runtime.ready') {
     const result = closed(payload, ['state', 'plugins']);
     if (result.state !== 'ready') throw new ProtocolError('invalid readiness');

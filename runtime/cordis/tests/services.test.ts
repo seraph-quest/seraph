@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Context, FiberState, symbols } from 'cordis';
 import { readFileSync } from 'node:fs';
-import { Composition, validateProfile } from '../src/composition.js';
-import { decodeJson, validateFrame } from '../src/protocol.js';
+import { Composition, MANDATORY_PLUGINS, validateProfile } from '../src/composition.js';
+import { decodeJson, validateFrame, validateProviderReport } from '../src/protocol.js';
+import { hostProviderReports } from '../src/plugins/state/index.js';
 import { invokeService, servicePlugins, SERVICE_KEYS } from '../src/plugins/index.js';
 import { SERVICE_METHODS, validateInput, validateResult, type Input, type ServiceMethod } from '../src/contracts/methods.js';
 import type { ScopedRequestClient } from '../src/contracts/client.js';
@@ -119,7 +120,7 @@ test('scope disposal and expiry fence retained providers and late native respons
   await new Promise(resolve=>setImmediate(resolve));
   active = false; release?.(blocked);
   await assert.rejects(waiting,/unavailable/);
-  assert.equal(composition.resources.remaining,18); // host16 plugins + logger/lifecycle.
+  assert.equal(composition.resources.remaining,19); // host17 plugins + logger/lifecycle.
   await composition.dispose(); assert.equal(composition.resources.remaining,0);
 });
 test('concurrent scopes retain independent original request clients and register no ambient authority', async () => {
@@ -206,11 +207,12 @@ test('closed per-plugin config, optional providers and per-plugin digests fail c
 
 test('governed services are composed only with their authority, task, artifact and audit owners', async () => {
   const base = profile() as unknown as {plugins: Record<string, unknown>[]} & Record<string, unknown>;
-  // Optional governed providers whose audit owner is absent stay unregistered (a required one fences readiness).
+  // The audit owner is mandatory (#1024): a profile cannot remove it at all.
+  assert.throws(() => validateProfile({...base, plugins: base.plugins.filter(p => p.id !== 'seraph.audit.v1')} as never), /required provider/);
+  // Withdrawn optional governed providers stay unregistered and never contact the owner.
   const governed = new Set(['seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.connections.v1']);
-  const withoutAudit = validateProfile({...base, plugins: base.plugins.filter(p => p.id !== 'seraph.audit.v1')
-    .map(p => governed.has(String(p.id)) ? {...p, required: false} : p)} as never);
-  const composition = new Composition(withoutAudit); await composition.start();
+  const withoutGoverned = validateProfile({...base, plugins: base.plugins.filter(p => !governed.has(String(p.id)))} as never);
+  const composition = new Composition(withoutGoverned); await composition.start();
   let contacts = 0;
   const client: ScopedRequestClient = {isActive: () => true, request: async () => { contacts++; return blocked; }};
   try {
@@ -220,5 +222,41 @@ test('governed services are composed only with their authority, task, artifact a
         {status: 'blocked', reason_code: 'service_provider_not_composed', memory_status: 'no_learning'});
     }
     assert.equal(contacts, 0, 'a withdrawn governed provider never contacts the native owner');
+  } finally { await composition.dispose(); }
+});
+test('state, authority and audit facades are mandatory with fixed dependencies (#1024)', () => {
+  const base = profile() as unknown as {plugins: Record<string, unknown>[]} & Record<string, unknown>;
+  const variant = (plugins: Record<string, unknown>[]) => ({...base, plugins}) as unknown as Parameters<typeof validateProfile>[0];
+  assert.deepEqual(MANDATORY_PLUGINS, ['seraph.host-lifecycle@1.0.0', 'seraph.state.v1', 'seraph.authority.v1', 'seraph.audit.v1']);
+  for (const id of ['seraph.state.v1', 'seraph.authority.v1', 'seraph.audit.v1']) {
+    assert.throws(() => validateProfile(variant(base.plugins.filter(p => p.id !== id))), /required provider/);
+    assert.throws(() => validateProfile(variant(base.plugins.map(p => p.id === id ? {...p, required: false} : p))), /required provider/);
+  }
+  for (const [id, dependencies] of [['seraph.memory.v1', []], ['seraph.authority.v1', ['seraph.state.v1', 'seraph.audit.v1']],
+    ['seraph.state.v1', ['seraph.authority.v1']], ['seraph.research.v1', ['seraph.state.v1']]] as const) {
+    assert.throws(() => validateProfile(variant(base.plugins.map(p => p.id === id ? {...p, dependencies} : p))), /plugin/);
+  }
+  assert.ok(validateProfile(variant(base.plugins.map(p => p.id === 'seraph.memory.v1' ? {...p, required: false} : p))));
+});
+test('provider frames are closed host reports that only update the state facade (#1024)', async () => {
+  const frame = {protocol: 1, boot_nonce: 'a'.repeat(64), request_id: 'r-2', seq: 2, kind: 'request', method: 'provider.readiness',
+    invocation_ref: null, composition_epoch: null, composition_digest: 'b'.repeat(64), package_digest: 'c'.repeat(64), deadline_at: 2000000000000,
+    payload: {domain: 'seraph.state.v1', state: 'active', epoch: 1, composition_digest: 'd'.repeat(64), reason_code: null}};
+  assert.equal(validateFrame(frame as never).method, 'provider.readiness');
+  for (const payload of [{...frame.payload, database_handle: 'x'}, {...frame.payload, vault_key: 'k'}, {...frame.payload, domain: 'seraph.research.v1'},
+    {...frame.payload, state: 'quiescing'}, {...frame.payload, epoch: 0}, {...frame.payload, reason_code: 'has spaces'}]) {
+    assert.throws(() => validateFrame({...frame, payload} as never), /provider report|fields|integer/);
+  }
+  assert.throws(() => validateFrame({...frame, method: 'provider.quiesce'} as never), /provider report/);
+  assert.equal(validateFrame({...frame, method: 'provider.quiesce', payload: {...frame.payload, state: 'quiescing'}} as never).method, 'provider.quiesce');
+  assert.equal(validateFrame({...frame, kind: 'response', payload: {domain: 'seraph.state.v1', state: 'recorded'}} as never).kind, 'response');
+  assert.throws(() => validateFrame({...frame, kind: 'response', payload: {domain: 'seraph.state.v1', state: 'active'}} as never));
+  const composition = new Composition(profile()); await composition.start();
+  try {
+    assert.equal(composition.context.seraphState.readiness('seraph.audit.v1'), undefined);
+    hostProviderReports.record(validateProviderReport({...frame.payload, domain: 'seraph.audit.v1'}, 'provider.readiness'));
+    assert.deepEqual(composition.context.seraphState.readiness('seraph.audit.v1'),
+      {domain: 'seraph.audit.v1', state: 'active', epoch: 1, composition_digest: 'd'.repeat(64), reason_code: null});
+    assert.ok(composition.states().some(state => state.id === 'seraph.state.v1' && state.state === 'ready'));
   } finally { await composition.dispose(); }
 });

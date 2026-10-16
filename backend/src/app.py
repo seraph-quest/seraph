@@ -557,7 +557,9 @@ async def _services_lifespan(app: FastAPI):
                     try:
                         if settings.cordis_node_path and cordis_host.node_path is None:
                             cordis_host.node_path = Path(settings.cordis_node_path)
-                        await cordis_host.start()
+                        if await cordis_host.start():
+                            # The child's mandatory facades report what Python hosts (#1024).
+                            await cordis_host.report_providers(await app.state.provider_worker.provider_reports())
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
                     try:

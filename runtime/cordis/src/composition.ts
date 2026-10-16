@@ -28,6 +28,7 @@ export const BUILD_FILES = [
   'src/contracts/client.ts',
   'src/contracts/methods.ts',
   'src/contracts/schema.ts',
+  'src/contracts/state.ts',
   'src/contracts/authority.ts',
   'src/contracts/goals.ts',
   'src/contracts/tasks.ts',
@@ -44,6 +45,7 @@ export const BUILD_FILES = [
   'src/contracts/source_extraction.ts',
   'src/plugins/index.ts',
   'src/plugins/proxy.ts',
+  'src/plugins/state/index.ts',
   'src/plugins/authority/index.ts',
   'src/plugins/goals/index.ts',
   'src/plugins/tasks/index.ts',
@@ -70,6 +72,7 @@ export const BUILD_FILES = [
   'dist/src/contracts/client.js',
   'dist/src/contracts/methods.js',
   'dist/src/contracts/schema.js',
+  'dist/src/contracts/state.js',
   'dist/src/contracts/authority.js',
   'dist/src/contracts/goals.js',
   'dist/src/contracts/tasks.js',
@@ -86,6 +89,7 @@ export const BUILD_FILES = [
   'dist/src/contracts/source_extraction.js',
   'dist/src/plugins/index.js',
   'dist/src/plugins/proxy.js',
+  'dist/src/plugins/state/index.js',
   'dist/src/plugins/authority/index.js',
   'dist/src/plugins/goals/index.js',
   'dist/src/plugins/tasks/index.js',
@@ -128,6 +132,22 @@ const registry: Readonly<Record<string, Plugin.Object<Record<string, Json>>>> = 
   ...servicePlugins({ isActive: () => false, request: async () => { throw new ProtocolError('native invocation required'); } }),
 });
 
+/** Python always hosts state, authority and audit (#1024); with the host plugin
+ * these can never be removed or made optional by profile configuration. */
+export const MANDATORY_PLUGINS = Object.freeze([HOST_PLUGIN, 'seraph.state.v1', 'seraph.authority.v1', 'seraph.audit.v1']);
+/** Declared, fixed provider dependencies (mirror of the Python validator). */
+export const PLUGIN_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'seraph.authority.v1': ['seraph.state.v1'],
+  'seraph.audit.v1': ['seraph.state.v1'],
+  'seraph.tasks.v1': ['seraph.state.v1', 'seraph.authority.v1'],
+  'seraph.goals.v1': ['seraph.state.v1', 'seraph.authority.v1'],
+  'seraph.artifacts.v1': ['seraph.state.v1', 'seraph.authority.v1'],
+  'seraph.memory.v1': ['seraph.state.v1', 'seraph.authority.v1', 'seraph.audit.v1'],
+});
+const fixedDependencies = (id: string, value: Json | undefined): boolean => {
+  const expected = PLUGIN_DEPENDENCIES[id] ?? [];
+  return Array.isArray(value) && value.length === expected.length && value.every((item, index) => item === expected[index]);
+};
 /** Source-format selection: reviewed media types to reviewed format providers. */
 const formats: Schema<Record<string, string>> = { parse(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length > SOURCE_MEDIA_TYPES.length) throw new ProtocolError('invalid source formats');
@@ -152,14 +172,16 @@ export function validateProfile(value: Json): Profile {
     const spec = closed(value, ['id', 'required', 'dependencies', 'config']);
     // Entries follow the literal registry order: no duplicates, no unknown IDs.
     const position = typeof spec.id === 'string' ? identifiers.indexOf(spec.id, cursor) : -1;
-    if (position < 0 || typeof spec.required !== 'boolean' || !Array.isArray(spec.dependencies) || spec.dependencies.length !== 0) throw new ProtocolError('unknown or invalid plugin');
+    if (position < 0 || typeof spec.required !== 'boolean' || !fixedDependencies(spec.id as string, spec.dependencies)) throw new ProtocolError('unknown or invalid plugin');
     cursor = position + 1;
     try { CONFIG_SCHEMAS[spec.id as string]!.parse(spec.config); } catch { throw new ProtocolError('invalid plugin configuration'); }
   }
-  // The host plugin is mandatory; service providers may be optional, in which
-  // case their methods return typed blocks instead of fencing readiness.
+  // Providers outside the mandatory set may be optional, in which case their
+  // methods return typed blocks instead of fencing readiness.
   const host = profile.plugins[0] as Record<string, Json> | undefined;
   if (host?.id !== HOST_PLUGIN || host.required !== true) throw new ProtocolError('required host plugin missing');
+  const required = new Set((profile.plugins as Record<string, Json>[]).filter(spec => spec.required === true).map(spec => spec.id));
+  if (MANDATORY_PLUGINS.some(id => !required.has(id))) throw new ProtocolError('required provider missing');
   return profile as unknown as Profile;
 }
 /** Files whose reviewed hashes identify one provider implementation. */

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import functools
 import json
 import logging
 import os
@@ -23,8 +24,14 @@ from smolagents import Tool
 
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
+from src.execution import process_isolation as process_sandbox
 from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
-from src.workspace import AgentAccessIndex, AgentWorkspaceAccess
+from src.workspace import (
+    AgentAccessIndex,
+    AgentWorkspaceAccess,
+    WorkspaceStateError,
+    agent_workspace_view_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +115,11 @@ _COMMAND_TIMEOUT_MAX = 300
 # resource ceilings are the hard local profile carried by every child. The
 # lower display limit remains an intentional operator/UI bound.
 _PROCESS_CPU_SECONDS = 300
-_PROCESS_MEMORY_BYTES = 512 * 1024 * 1024
+# RLIMIT_AS bounds virtual reservations, not resident memory: V8 reserves
+# more than 512 MiB before running any script, so node/npm could not start
+# under the earlier value.  The fixed ceiling matches #1065's repository
+# sandbox (repo_isolation.ADDRESS_SPACE_BYTES).
+_PROCESS_MEMORY_BYTES = 8 * 1024 * 1024 * 1024
 _PROCESS_PID_LIMIT = 64
 _PROCESS_OUTPUT_BYTES = 1 * 1024 * 1024
 _PROCESS_PIPE_CHUNK_BYTES = 64 * 1024
@@ -373,6 +384,8 @@ def _normalize_cwd(raw_cwd: str | None) -> Path:
         raise ValueError("cwd must stay within the workspace.") from exc
     if not resolved.exists() or not resolved.is_dir():
         raise ValueError("cwd must point to an existing workspace directory.")
+    if AgentAccessIndex(_workspace_root()).access(resolved) is AgentWorkspaceAccess.DENIED:
+        raise ValueError("cwd cannot target runtime-owned workspace state.")
     return resolved
 
 
@@ -1189,14 +1202,170 @@ def _tail_text(path: Path, *, max_chars: int) -> tuple[str, bool]:
 
 
 def _process_launch_argv(executable: str, args: list[str]) -> list[str]:
-    """Apply the fixed profile after exec, never in a threaded fork child."""
+    """Apply the fixed profile after exec, never in a threaded fork child.
+
+    The sandbox (#1103) launches ``bootstrap -> bwrap``; this is the bootstrap
+    prefix ahead of the bubblewrap argv, so the managed leader keeps the
+    bootstrap's PID, session and process group.
+    """
     argv = [executable, *args]
     if os.name != "posix":
         return argv
     bootstrap = Path(__file__).absolute().with_name("process_limit_bootstrap.py")
-    return [sys.executable, "-I", "-S", "-B", str(bootstrap),
+    return [sys.executable, "-I", "-S", "-B", str(bootstrap), "--sandbox-monitor",
             str(_PROCESS_CPU_SECONDS), str(_PROCESS_MEMORY_BYTES),
             str(_PROCESS_PID_LIMIT), str(_PROCESS_OUTPUT_BYTES), "--", *argv]
+
+
+# Commands may not take the maintenance fence (#1103 design decision): the
+# lock file is DENIED inside the process view even though file tools may read it.
+_SANDBOX_DENIED_NAMES = frozenset({".seraph-workspace-maintenance.lock"})
+
+
+@functools.lru_cache(maxsize=8)
+def _sandbox_runtime_for(interpreter: str, path_env: str, home: str):
+    names = sorted(_COMMAND_NAME_ALLOWLIST - {"python", "python3"})
+    executables = process_sandbox.resolve_executables(names, path_env)
+    executables = {"python": Path(interpreter).absolute(), **executables}
+    return process_sandbox.process_runtime(executables, interpreter=interpreter), executables
+
+
+def _sandbox_runtime():
+    """(runtime, executables) for the allowlisted commands on this host."""
+    return _sandbox_runtime_for(sys.executable, _command_env()["PATH"], str(Path.home()))
+
+
+def _sandbox_posture() -> process_sandbox.ProcessIsolationPosture:
+    """The probed sandbox posture (cached per bwrap binary and runtime)."""
+    runtime, _executables = _sandbox_runtime()
+    hidden, ancestors, trees = process_sandbox.host_probe_inputs(_workspace_root())
+    return process_sandbox.probe(runtime, hidden_paths=hidden, forbidden_ancestors=ancestors, forbidden_trees=trees)
+
+
+def _approved_posture_digest() -> str | None:
+    """The sandbox posture digest the consumed approval was bound to, if any."""
+    from src.extensions.capability_execution import current_approved_context
+
+    context = current_approved_context()
+    if not isinstance(context, dict):
+        return None
+    value = context.get("process_isolation_posture_sha256")
+    return value if isinstance(value, str) else None
+
+
+def _require_sandbox_posture() -> process_sandbox.ProcessIsolationPosture:
+    """Fail closed unless the OS sandbox is available and matches the approval."""
+    posture = _sandbox_posture()
+    if not posture.isolated:
+        raise process_sandbox.blocked(posture.reason or "probe_failed")
+    approved = _approved_posture_digest()
+    if approved is not None and approved != posture.digest:
+        raise process_sandbox.ProcessIsolationBlocked(
+            process_sandbox.POSTURE_CHANGED,
+            "the sandbox posture changed after approval; request the command again",
+        )
+    return posture
+
+
+def _sandbox_view_policy() -> tuple[Path, list[tuple[str, str]], Any]:
+    try:
+        root, protected, access = agent_workspace_view_policy(_workspace_root())
+    except WorkspaceStateError as exc:
+        raise process_sandbox.blocked("workspace_view_unsafe:root_unbindable") from exc
+    entries = {logical: item.value for logical, item in protected}
+    for name in _SANDBOX_DENIED_NAMES:
+        entries[name] = process_sandbox.DENIED
+
+    def access_for(logical: str) -> str:
+        if logical in _SANDBOX_DENIED_NAMES:
+            return process_sandbox.DENIED
+        return access(logical).value
+
+    return root, sorted(entries.items()), access_for
+
+
+def _sandbox_protected_counts() -> dict[str, int]:
+    try:
+        _root, protected, _access = _sandbox_view_policy()
+    except ValueError:
+        return {}
+    return {
+        "denied": sum(1 for _, access in protected if access == process_sandbox.DENIED),
+        "read_only": sum(1 for _, access in protected if access == process_sandbox.READ_ONLY),
+    }
+
+
+@dataclass
+class _PreparedSandbox:
+    launch: process_sandbox.SandboxLaunch
+    env: dict[str, str]
+    view_summary: dict[str, Any]
+
+
+def _prepare_sandbox(
+    executable: str,
+    args: list[str],
+    cwd: Path,
+    worker_root: Path,
+    *,
+    network: str,
+    posture: process_sandbox.ProcessIsolationPosture,
+) -> _PreparedSandbox:
+    root, protected, access_for = _sandbox_view_policy()
+    runtime, executables = _sandbox_runtime()
+    _hidden, ancestors, trees = process_sandbox.host_probe_inputs(root)
+    extra = process_sandbox.workspace_venv_runtime_paths(
+        cwd, root, forbidden_ancestors=ancestors, forbidden_trees=trees
+    )
+    view = process_sandbox.build_workspace_view(root, protected, access_for)
+    try:
+        bootstrap = _process_launch_argv("", [])[:-1]
+        launch = process_sandbox.sandbox_launch(
+            [executable, *args],
+            posture=posture,
+            runtime=runtime,
+            view=view,
+            cwd=cwd,
+            writable=(worker_root,),
+            network=network,
+            extra_runtime_paths=extra,
+            bootstrap=bootstrap,
+        )
+    except BaseException:
+        view.close()
+        raise
+    env = _command_env(worker_root=worker_root, path=process_sandbox.sandbox_path(executables))
+    summary = {
+        **view.summary(),
+        "process_isolation": "bwrap_userns_workspace_view",
+        "network_namespace": "loopback_only" if network == "none" else "host_shared",
+        "host_paths_outside_workspace_visible": False,
+        "workspace_view_stale_inode_note": process_sandbox.STALE_INODE_NOTE,
+    }
+    return _PreparedSandbox(launch=launch, env=env, view_summary=summary)
+
+
+def _spawn_process(argv: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
+    """The one process-tool launch site (tests replace it to record argv)."""
+    return subprocess.Popen(argv, **kwargs)
+
+
+def _sandbox_startup_failure(reason: str, diagnostic: str) -> process_sandbox.ProcessIsolationBlocked:
+    """Map a launch that never reached the guard's sentinel; never a command result."""
+    if reason.startswith("workspace_view_mismatch:"):
+        return process_sandbox.blocked(reason)
+    if "Race condition" in diagnostic:
+        # bwrap re-checks each fd bind's inode after mounting.
+        return process_sandbox.blocked("workspace_view_unsafe:entry_changed_during_launch")
+    # The host may have changed under the cached probe; re-probe next time.
+    process_sandbox.clear_probe_cache()
+    return process_sandbox.blocked(reason)
+
+
+_READ_ONLY_LEVEL_HINT = (
+    "(note: the workspace top level, artifacts/ and artifacts/mail/ are read-only for commands; "
+    "write inside a subfolder or use the file tools)"
+)
 
 
 def _display_command(argv: list[str]) -> str:
@@ -1253,7 +1422,38 @@ def _process_approval_context(
         context["confirmation_scope"] = "bounded_command_execution"
     if tool_name in {"run_command", "start_process"}:
         context["command"] = _sanitized_process_arguments(arguments).get("command")
+        context.update(_sandbox_approval_context(network="host" if tool_name == "start_process" else "none"))
     return context
+
+
+def _sandbox_approval_context(*, network: str) -> dict[str, Any]:
+    """Sandbox posture bound into the approval fingerprint (#1103).
+
+    A posture change after approval changes the fingerprint, so the earlier
+    approval no longer matches; the manager also compares the consumed
+    approval's digest at launch (``process_isolation_posture_changed``).
+    """
+    posture = _sandbox_posture()
+    if not posture.isolated:
+        return {"process_isolation_variant": posture.variant,
+                "process_isolation_unavailable_reason": posture.reason}
+    counts = _sandbox_protected_counts()
+    return {
+        **posture.approval_fields(),
+        "workspace_view": "os_enforced",
+        "workspace_view_read_only_levels": [".", "artifacts", "artifacts/mail"],
+        "host_paths_outside_workspace_visible": False,
+        "network_namespace": "loopback_only" if network == "none" else "host_shared",
+        "approval_notes": process_sandbox.approval_lines(network, counts),
+    }
+
+
+def _sandbox_preflight_error() -> str | None:
+    """A blocked result before any approval is created, or None."""
+    posture = _sandbox_posture()
+    if posture.isolated:
+        return None
+    return f"Error: {process_sandbox.blocked(posture.reason or 'probe_failed')}"
 
 
 @dataclass(frozen=True)
@@ -1791,7 +1991,7 @@ def _bounded_reap_process(
     return _bounded_reap_process(process, captures=fallback_captures, timeout=timeout)
 
 
-def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
+def _command_env(*, worker_root: Path | None = None, path: str | None = None) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
@@ -1806,7 +2006,7 @@ def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
     # points through a symlink into a shared interpreter installation, while
     # sibling entry points such as ``pytest`` live beside the wrapper itself.
     interpreter_bin = str(Path(sys.executable).absolute().parent)
-    caller_path = env.get("PATH", "")
+    caller_path = env.get("PATH", "") if path is None else path
     env["PATH"] = os.pathsep.join(
         entry for entry in (interpreter_bin, caller_path) if entry
     )
@@ -2073,12 +2273,16 @@ class ProcessRuntimeManager:
             cwd=cwd,
         )
         timeout = _normalize_timeout_seconds(timeout_seconds)
+        # Fail closed before any worker state exists: no sandbox, no command.
+        posture = _require_sandbox_posture()
         worker_root = _worker_runtime_root(uuid.uuid4().hex)
         process: subprocess.Popen[bytes] | None = None
         leader_identity: _ProcessLeaderIdentity | None = None
         captures: tuple[_BoundedPipeCapture, _BoundedPipeCapture] | None = None
         runtime_cleanup_status = "not_requested"
         remaining_descendants: int | None = None
+        sandbox: _PreparedSandbox | None = None
+        view_summary: dict[str, Any] = {}
         try:
             if cancel_event is not None and cancel_event.is_set():
                 return {
@@ -2092,16 +2296,24 @@ class ProcessRuntimeManager:
                     "cwd": str(resolved_cwd),
                     "timeout_seconds": timeout,
                 }
-            process = subprocess.Popen(
-                _process_launch_argv(executable, args),
+            # run_command gets an unshared network namespace (loopback only):
+            # local endpoints trust 127.0.0.1, so a shared one would reach them.
+            sandbox = _prepare_sandbox(
+                executable, args, resolved_cwd, worker_root, network="none", posture=posture
+            )
+            view_summary = sandbox.view_summary
+            process = _spawn_process(
+                sandbox.launch.argv,
                 cwd=str(resolved_cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
                 shell=False,
-                env=_command_env(worker_root=worker_root),
+                env=sandbox.env,
                 start_new_session=True,
+                pass_fds=sandbox.launch.pass_fds,
             )
+            sandbox.launch.close_child_fds()
             # start_new_session makes the child PID the process-group leader.
             # Retain its start time and PGID so a later timeout cannot signal a
             # recycled PID's process group.
@@ -2111,6 +2323,20 @@ class ProcessRuntimeManager:
                 _BoundedPipeCapture(process.stderr),
             )
             deadline = time.monotonic() + timeout
+            startup = process_sandbox.await_startup(
+                process,
+                sandbox.launch.status_read_fd,
+                deadline=min(deadline, time.monotonic() + process_sandbox.STARTUP_TIMEOUT_SECONDS),
+            )
+            if startup is not None:
+                termination = _kill_process_group(
+                    process,
+                    leader_identity=leader_identity,
+                    descendant_identities=_snapshot_process_descendants(process, leader_identity),
+                )
+                runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
+                _stdout, diagnostic = _bounded_reap_process(process, captures=captures)
+                raise _sandbox_startup_failure(startup, diagnostic)
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -2146,6 +2372,7 @@ class ProcessRuntimeManager:
                             if runtime_cleanup_status not in {"not_requested", "stopped"}
                             else None
                         ),
+                        **view_summary,
                     }
                 time.sleep(min(0.05, remaining))
         except subprocess.TimeoutExpired as exc:
@@ -2183,10 +2410,13 @@ class ProcessRuntimeManager:
                     if runtime_cleanup_status not in {"not_requested", "stopped"}
                     else None
                 ),
+                **view_summary,
             }
         except OSError:
             raise
         finally:
+            if sandbox is not None:
+                sandbox.launch.close()
             # Preserve the worker root when cleanup is unknown or failed so an
             # operator can inspect the retained state while the detached
             # descendant remains alive.  Successful bounded cleanup reclaims
@@ -2194,13 +2424,19 @@ class ProcessRuntimeManager:
             if runtime_cleanup_status in {"not_requested", "stopped"}:
                 _delete_runtime_dir(worker_root)
 
+        stderr_text = captures[1].text() if captures is not None else ""
+        hint = (
+            {"workspace_view_hint": _READ_ONLY_LEVEL_HINT}
+            if process.returncode != 0 and "Read-only file system" in stderr_text
+            else {}
+        )
         return {
             "ok": process.returncode == 0,
             "cancelled": bool(cancel_event is not None and cancel_event.is_set()),
             "timed_out": False,
             "exit_code": process.returncode,
             "stdout": captures[0].text() if captures is not None else "",
-            "stderr": captures[1].text() if captures is not None else "",
+            "stderr": stderr_text,
             "display_command": _display_command([executable, *args]),
             "cwd": str(resolved_cwd),
             "timeout_seconds": timeout,
@@ -2211,6 +2447,8 @@ class ProcessRuntimeManager:
                 if runtime_cleanup_status not in {"not_requested", "stopped"}
                 else None
             ),
+            **view_summary,
+            **hint,
         }
 
     def start_process(
@@ -2225,6 +2463,7 @@ class ProcessRuntimeManager:
             args_json=args_json,
             cwd=cwd,
         )
+        posture = _require_sandbox_posture()
         owner_session_id = get_current_session_id()
         with self._lock:
             if owner_session_id is not None and owner_session_id in self._stopping_sessions:
@@ -2232,20 +2471,58 @@ class ProcessRuntimeManager:
             process_id = uuid.uuid4().hex
             output_path = _process_runtime_root() / f"{process_id}.log"
             worker_root = _worker_runtime_root(process_id)
-            output_fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(output_fd, "w", encoding="utf-8", errors="replace") as output_stream:
-                popen = subprocess.Popen(
-                    _process_launch_argv(executable, args),
-                    cwd=str(resolved_cwd),
-                    stdout=output_stream,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    text=True,
-                    shell=False,
-                    env=_command_env(worker_root=worker_root),
-                    start_new_session=True,
+            # Background servers share the host network namespace so other
+            # process-tool invocations can reach them; the approval says so.
+            try:
+                sandbox = _prepare_sandbox(
+                    executable, args, resolved_cwd, worker_root, network="host", posture=posture
                 )
-            leader_identity = _capture_process_identity(popen)
+            except BaseException:
+                _delete_runtime_dir(worker_root)
+                raise
+            try:
+                output_fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(output_fd, "w", encoding="utf-8", errors="replace") as output_stream:
+                    popen = _spawn_process(
+                        sandbox.launch.argv,
+                        cwd=str(resolved_cwd),
+                        stdout=output_stream,
+                        stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
+                        text=True,
+                        shell=False,
+                        env=sandbox.env,
+                        start_new_session=True,
+                        pass_fds=sandbox.launch.pass_fds,
+                    )
+                sandbox.launch.close_child_fds()
+                leader_identity = _capture_process_identity(popen)
+                startup = process_sandbox.await_startup(
+                    popen,
+                    sandbox.launch.status_read_fd,
+                    deadline=time.monotonic() + process_sandbox.STARTUP_TIMEOUT_SECONDS,
+                )
+            finally:
+                sandbox.launch.close()
+            if startup is not None:
+                termination = _kill_process_group(
+                    popen,
+                    leader_identity=leader_identity,
+                    descendant_identities=_snapshot_process_descendants(popen, leader_identity),
+                )
+                cleanup_status, _remaining = _termination_cleanup_status(termination)
+                try:
+                    popen.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
+                diagnostic, _truncated = _tail_text(output_path, max_chars=4000)
+                if cleanup_status == "stopped":
+                    try:
+                        output_path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.debug("Failed to delete process log %s", output_path, exc_info=True)
+                    _delete_runtime_dir(worker_root)
+                raise _sandbox_startup_failure(startup, diagnostic)
             descendant_identities = _snapshot_process_descendants(popen, leader_identity)
             managed = ManagedProcess(
                 process_id=process_id,
@@ -2262,7 +2539,7 @@ class ProcessRuntimeManager:
                 descendant_identities=descendant_identities,
             )
             self._processes[process_id] = managed
-        return managed.status_payload()
+        return {**managed.status_payload(), **sandbox.view_summary}
 
     def list_processes(self) -> list[dict[str, Any]]:
         session_id = get_current_session_id()
@@ -2543,6 +2820,8 @@ class RunCommandTool(Tool):
         if result["stderr"]:
             output = output + ("\n" if output and not output.endswith("\n") else "") + "--- stderr ---\n" + result["stderr"]
         rendered_output, truncated = _truncate_output(output)
+        if result.get("workspace_view_hint"):
+            rendered_output = rendered_output + ("\n" if rendered_output else "") + result["workspace_view_hint"]
 
         _run_command_audit_payload.set((
             f"run_command finished with exit_code={result['exit_code'] if result['exit_code'] is not None else 'timeout'}",
@@ -2557,6 +2836,8 @@ class RunCommandTool(Tool):
                 "stdout_chars": len(result["stdout"]),
                 "stderr_chars": len(result["stderr"]),
                 "output_truncated": truncated,
+                "workspace_view_sha256": result.get("workspace_view_sha256"),
+                "network_namespace": result.get("network_namespace"),
             },
         ))
 
@@ -2603,6 +2884,9 @@ class RunCommandTool(Tool):
             arguments,
             persistent_background_execution=False,
         )
+
+    def get_approval_preflight_error(self, _arguments: dict[str, Any]) -> str | None:
+        return _sandbox_preflight_error()
 
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):
@@ -2679,6 +2963,9 @@ class StartProcessTool(Tool):
             arguments,
             persistent_background_execution=True,
         )
+
+    def get_approval_preflight_error(self, _arguments: dict[str, Any]) -> str | None:
+        return _sandbox_preflight_error()
 
     def _normalize_invocation(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
         if len(args) == 1 and not kwargs and isinstance(args[0], dict):

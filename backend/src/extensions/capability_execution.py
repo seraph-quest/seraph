@@ -72,6 +72,15 @@ _JOURNAL_LOCKS_GUARD = threading.Lock()
 _REGISTRY_TOKEN = object()
 _RAW_RESULT_TOKEN = object()
 _INTERNAL_RAW_RESULT = ContextVar("capability_internal_raw_result", default=None)
+# The approval context of the verified, consumed approval for the effect now
+# executing (None when the call needed no approval).  Adapters that bind a
+# runtime posture into the approval compare it here before acting (#1103).
+_APPROVED_CONTEXT: ContextVar[Mapping[str, Any] | None] = ContextVar("capability_approved_context", default=None)
+
+
+def current_approved_context() -> Mapping[str, Any] | None:
+    """The approval context bound to the executing adopted effect, if any."""
+    return _APPROVED_CONTEXT.get()
 
 try:
     import fcntl
@@ -860,6 +869,11 @@ class CapabilityExecutionHost:
             record["state"] = "started"
             self._write_records_unlocked(records)
 
+        binding = request.approval_binding if isinstance(request.approval_binding, Mapping) else None
+        approved_context = binding.get("approval_context") if binding is not None else None
+        context_token = _APPROVED_CONTEXT.set(
+            dict(approved_context) if isinstance(approved_context, Mapping) else None
+        )
         try:
             result = handler(request.arguments)
         except Exception as exc:
@@ -913,6 +927,8 @@ class CapabilityExecutionHost:
                     current["completed_at"] = time.time()
                     self._write_records_unlocked(records)
             raise
+        finally:
+            _APPROVED_CONTEXT.reset(context_token)
 
         try:
             bounded_result, truncated = _bounded_json(result, limit=request.limits.output_bytes)

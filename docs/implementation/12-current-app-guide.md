@@ -597,9 +597,14 @@ guardian consumer `seraph.guardian-research.v1`
 selects a format provider per media type from its closed profile config:
 `plain-text` and `html-text` (a port of `normalize_source_text`, including the
 WHATWG entity table, with a parity test) and `rss-atom`, a hand-written bounded
-reader (256 KiB input, depth 32, 4,096 elements, 64 items, 4 KiB per field)
-that rejects DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
-declarations; feed links stay inert text. An absent planner, consumer, source
+reader (256 KiB input, depth 32, 4,096 elements, 64 items) that rejects
+DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
+declarations; feed links stay inert text. A field longer than 4 KiB is cut on a
+code point boundary and ends with `…` instead of rejecting the feed. One UTF-8
+byte order mark may precede the declaration. Atom `type="xhtml"` content keeps
+its text in document order with breaks at block elements; `type="text"` stays
+literal and `type="html"` and RSS descriptions are normalized as HTML. Feeds
+served as `application/xml` or `text/xml` use the same reader. An absent planner, consumer, source
 extraction plugin or format mapping returns a typed block
 (`research_plan_provider_unavailable`, `research_consumer_unavailable`,
 `source_extraction_provider_unavailable`, `source_format_provider_unavailable`);
@@ -609,7 +614,9 @@ is the only way to replace a provider; consumer code is unchanged.
 Admission stages a bounded planning request (identities, revisions, public
 brief reference/digest, route epoch, strategy binding, issue time, original
 deadline and the limit/output ceilings) and admits one goal-less
-`goal_discovery_planning_v1` service job per occurrence. Its single
+`goal_discovery_planning_v1` service job per occurrence. The discovery history
+lists only the current UTC day's planning jobs for that Goal's programmes, found
+by their derived occurrence IDs rather than by scanning every planning row. Its single
 `research.buildPlan` invocation may only read that request and stage one plan;
 Python checks every binding field against the request, every limit and output
 cap against the ceiling, then `validate_goal_research_plan`, and writes its own
@@ -631,7 +638,9 @@ config digests. For the `plain-text` and `html-text` providers Python also
 recomputes `normalize_source_text` over the staged bytes (before taking the
 job writer) and rejects a differing output for that slot only
 (`source_output_mismatch`); the HTML provider matches Python's `re.I` tag-name
-case folding (`ı`/`İ`/`ſ`) with explicit character classes; `rss-atom` output is provider-attested (Python
+case folding (`ı`/`İ`/`ſ`) with explicit character classes, and a script/style
+closing tag accepts exactly the characters whose CPython simple lowercase equals
+the opening tag's (`i`/`I`/`İ` together; `ı` and `ſ` only themselves); `rss-atom` output is provider-attested (Python
 bounds it but has no reference feed parser). Both normalizers strip comments,
 script/style blocks and tags with linear scans, so unclosed constructs cannot
 stall the shared child. Feed, size and line-ending rejections are recorded per
@@ -654,10 +663,11 @@ exact fix while core startup continues. Runtime status (Settings → Cordis runt
 and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
 and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
 `./manage.sh -e dev cordis build`, then restart. The backend container image
-builds `runtime/cordis` in a pinned `node:24.13.1-bookworm-slim` stage (Compose
-`additional_contexts`, npm 11.8.0, `npm ci --ignore-scripts`, `npm run build`)
-and copies that Node binary and the built package to `/runtime/cordis`, the
-path the backend resolves.
+builds `runtime/cordis` in a `node:24.13.1-bookworm-slim` stage pinned by its
+image digest (Compose `additional_contexts`, which needs Docker Compose 2.17 or
+newer, npm 11.8.0, `npm ci --ignore-scripts`, `npm run build`) and copies that
+Node binary and the built package to `/runtime/cordis`, the path the backend
+resolves.
 
 Raw public sources up to the plan's `max_source_bytes` (256 KiB) cross to Cordis
 as one staged envelope read in bounded 64 KiB `artifacts.read` chunks at UTF-8

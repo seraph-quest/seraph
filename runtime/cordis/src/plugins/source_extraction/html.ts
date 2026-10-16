@@ -16,6 +16,18 @@ const SCRIPT_OPEN = new RegExp(`<(${['script', 'style', 'noscript'].map(folded).
 const BLOCK_CLOSE = new RegExp(`</(${['p', 'div', 'li', 'h[1-6]', 'br', 'tr', 'section', 'article'].map(folded).join('|')})>`, 'gu');
 const CHARREF = /&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)/gu;
 const RUNS = new RegExp(`[${WS}]+`, 'u');
+// Python's ``\1`` under re.I compares CPython's simple lowercase per character.
+// Only U+0130 (to ``i``) and U+212A (to ``k``) map onto ASCII letters; ``ı`` and
+// ``ſ`` lowercase to themselves, so they match only themselves.
+const SIMPLE_LOWER: Readonly<Record<string, string>> = Object.freeze({ '\u0130': 'i', '\u212a': 'k' });
+const FOLD_CANDIDATES = Array.from('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u0130\u0131\u017f\u212a');
+const simpleLower = (c: string) => SIMPLE_LOWER[c] ?? (/^[A-Za-z]$/.test(c) ? c.toLowerCase() : c);
+const escapeClass = (c: string) => c.replace(/[\\\]^-]/g, '\\$&');
+function closingClass(c: string): string {
+  const members = FOLD_CANDIDATES.filter(candidate => simpleLower(candidate) === simpleLower(c));
+  if (!members.includes(c)) members.push(c);
+  return `[${members.map(escapeClass).join('')}]`;
+}
 
 // Linear equivalents of ``<!--.*?-->``, ``<(script|style|noscript)\b[^>]*>.*?</\1\s*>``
 // and ``<[^>]+>`` (identical output to the Python owner): an unclosed construct is
@@ -40,8 +52,7 @@ function stripScripts(value: string): string {
     const name = opening[1]!, key = name.toLowerCase();
     let cached = closing.get(key);
     if (cached === undefined || (cached[0] !== -1 && cached[0] < nameEnd + 1)) {
-      // Python's ``\1`` under re.I compares lower() per character (so ``ſ`` is not ``s``).
-      const letters = Array.from(name, c => /^[A-Za-z]$/.test(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : c).join('');
+      const letters = Array.from(name, closingClass).join('');
       const pattern = new RegExp(`</${letters}[${WS}]*>`, 'gu');
       pattern.lastIndex = nameEnd + 1;
       const found = pattern.exec(value);

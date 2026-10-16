@@ -55,7 +55,60 @@ test('malformed, DTD, entity, encoding and oversized feeds are rejected before o
   rejects('<rss><channel>' + '<item><title>x</title></item>'.repeat(FEED_LIMITS.maxItems + 1) + '</channel></rss>', 'source_output_oversize');
   rejects('<rss>' + '<a>'.repeat(40) + '</a>'.repeat(40) + '</rss>', 'source_output_oversize');
   rejects('<rss><channel><title>' + 'x'.repeat(FEED_LIMITS.maxInputBytes) + '</title></channel></rss>', 'source_output_oversize');
-  rejects('<rss><channel><item><description>' + 'word '.repeat(1000) + '</description></item></channel></rss>', 'source_output_oversize');
+});
+
+test('a field over 4 KiB is cut on a code point boundary instead of rejecting the feed', () => {
+  const lines = (source: string) => feedText(source).split('\n');
+  const byteLength = (text: string) => Buffer.byteLength(text, 'utf8');
+  const long = lines('<rss><channel><title>T</title><item><title>Short</title><description>' + 'word '.repeat(1000)
+    + '</description></item></channel></rss>');
+  assert.equal(long[0], 'Feed: T');
+  assert.equal(long[1], 'Item: Short');
+  const summary = long[2]!.slice('Summary: '.length);
+  assert.ok(byteLength(summary) <= FEED_LIMITS.maxFieldBytes && summary.endsWith('\u2026') && summary.startsWith('word word'));
+  // Multi-byte characters straddling the limit are never split.
+  for (const char of ['é', '日', '😀']) {
+    const text = lines(`<rss><channel><title>${char.repeat(5000)}</title></channel></rss>`)[0]!.slice('Feed: '.length);
+    assert.ok(byteLength(text) <= FEED_LIMITS.maxFieldBytes);
+    assert.equal(text.replace(/\u2026$/, ''), char.repeat(Array.from(text).length - 1));
+  }
+  // Every field is bounded independently; whole-input and element caps still reject.
+  const huge = lines('<feed><title>' + 'a'.repeat(9000) + '</title><entry><title>' + 'b'.repeat(9000) + '</title><link href="https://x/'
+    + 'c'.repeat(9000) + '"/><updated>' + 'd'.repeat(9000) + '</updated><summary>' + 'e'.repeat(9000) + '</summary></entry></feed>');
+  assert.equal(huge.length, 5);
+  for (const line of huge) assert.ok(byteLength(line) <= FEED_LIMITS.maxFieldBytes + 16);
+  rejects('<rss><channel><title>' + 'x'.repeat(FEED_LIMITS.maxInputBytes) + '</title></channel></rss>', 'source_output_oversize');
+});
+
+test('one UTF-8 byte order mark may precede the XML declaration', () => {
+  assert.equal(feedText('\uFEFF' + RSS), feedText(RSS));
+  assert.equal(feedText('\uFEFF' + ATOM), feedText(ATOM));
+  assert.equal(feedText('\uFEFF<rss><channel><title>No declaration</title></channel></rss>'), 'Feed: No declaration');
+  // A second mark, a mark after whitespace or a mark inside the declaration stays malformed.
+  rejects('\uFEFF\uFEFF' + RSS, 'source_feed_malformed');
+  rejects(' \uFEFF' + RSS, 'source_feed_malformed');
+  rejects('<?xml\uFEFF version="1.0"?><rss><channel/></rss>', 'source_feed_malformed');
+  rejects('\uFEFF<?xml version="1.0" encoding="UTF-16"?><rss><channel/></rss>', 'source_feed_malformed');
+  rejects('\uFEFF<!DOCTYPE rss><rss><channel/></rss>', 'source_feed_dtd_forbidden');
+});
+
+test('Atom xhtml content keeps its text in document order with block breaks', () => {
+  const entry = (content: string) => feedText(`<feed xmlns="http://www.w3.org/2005/Atom"><title>X</title><entry><title>E</title>${content}</entry></feed>`)
+    .split('\n').find(line => line.startsWith('Summary: '));
+  assert.equal(entry('<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>One <em>two</em> three.</p><p>Four &amp; five</p></div></content>'),
+    'Summary: One two three. Four & five');
+  assert.equal(entry('<summary type="xhtml"><xhtml:div xmlns:xhtml="http://www.w3.org/1999/xhtml">A<xhtml:br/>B</xhtml:div></summary>'), 'Summary: A B');
+  // Decoded markup inside xhtml text stays literal text, never re-parsed as HTML.
+  assert.equal(entry('<content type="xhtml"><div>&lt;script&gt;x&lt;/script&gt; kept</div></content>'), 'Summary: <script>x</script> kept');
+  assert.equal(entry('<summary type="text">&lt;b&gt;literal&lt;/b&gt;</summary>'), 'Summary: <b>literal</b>');
+  assert.equal(entry('<summary type="html">&lt;b&gt;markup&lt;/b&gt;</summary>'), 'Summary: markup');
+  // Deep nesting stays inside the depth cap; beyond it the feed is rejected.
+  const nested = (depth: number) => '<span>'.repeat(depth) + 'deep' + '</span>'.repeat(depth);
+  assert.equal(entry(`<content type="xhtml"><div>${nested(25)}</div></content>`), 'Summary: deep');
+  rejects(`<feed><entry><content type="xhtml"><div>${nested(40)}</div></content></entry></feed>`, 'source_output_oversize');
+  // A huge xhtml body is cut like any other field.
+  const big = entry(`<content type="xhtml"><div>${'<p>para graph</p>'.repeat(400)}</div></content>`)!;
+  assert.ok(Buffer.byteLength(big, 'utf8') <= FEED_LIMITS.maxFieldBytes + 9 && big.endsWith('\u2026'));
 });
 
 /** Fixed in-memory owner: ASCII content served in offset/max_bytes chunks. */

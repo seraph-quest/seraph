@@ -14,9 +14,12 @@ export class FeedRejected extends Error {
   constructor(readonly reason: 'source_feed_malformed' | 'source_feed_dtd_forbidden' | 'source_feed_entity_forbidden' | 'source_output_oversize') { super(reason); }
 }
 
-interface Element { name: string; attributes: Record<string, string>; children: Element[]; text: string; }
+/** ``parts`` keeps text and child elements in document order (Atom xhtml content). */
+interface Element { name: string; attributes: Record<string, string>; children: Element[]; text: string; parts: (string | Element)[]; }
 
 const NAME = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}/;
+// XML's S production: JS ``\s`` also matches U+FEFF, NBSP and other Unicode spaces.
+const XML_SPACE = /[ \t\r\n]/;
 const PREDEFINED: Readonly<Record<string, string>> = Object.freeze({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" });
 
 function xmlChar(value: number): boolean {
@@ -39,14 +42,17 @@ function decodeEntities(raw: string): string {
 
 /** Parse one well-formed document into a bounded element tree. */
 export function parseXml(source: string): Element {
+  // One UTF-8 byte order mark may precede the declaration; a second one, or
+  // any other leading character, still makes the declaration malformed.
+  if (source.startsWith('\uFEFF')) source = source.slice(1);
   if (Buffer.byteLength(source, 'utf8') > FEED_LIMITS.maxInputBytes) throw new FeedRejected('source_output_oversize');
   for (const char of source) if (!xmlChar(char.codePointAt(0)!)) throw new FeedRejected('source_feed_malformed');
   let offset = 0, elements = 0;
-  const declaration = /^<\?xml(\s[^?]*)?\?>/.exec(source);
+  const declaration = /^<\?xml([ \t\r\n][^?]*)?\?>/.exec(source);
   if (declaration) {
     const attributes = declaration[1] ?? '';
-    const encoding = /\bencoding\s*=\s*["']([^"']*)["']/.exec(attributes);
-    if (!/\bversion\s*=\s*["']1\.[0-9]["']/.test(attributes) || (encoding && !/^utf-8$/i.test(encoding[1]!))) throw new FeedRejected('source_feed_malformed');
+    const encoding = /\bencoding[ \t\r\n]*=[ \t\r\n]*["']([^"']*)["']/.exec(attributes);
+    if (!/\bversion[ \t\r\n]*=[ \t\r\n]*["']1\.[0-9]["']/.test(attributes) || (encoding && !/^utf-8$/i.test(encoding[1]!))) throw new FeedRejected('source_feed_malformed');
     offset = declaration[0].length;
   }
   const stack: Element[] = [];
@@ -55,6 +61,7 @@ export function parseXml(source: string): Element {
     const current = stack[stack.length - 1];
     if (current) {
       current.text += text;
+      current.parts.push(text);
       if (Buffer.byteLength(current.text, 'utf8') > FEED_LIMITS.maxInputBytes) throw new FeedRejected('source_output_oversize');
     } else if (text.trim()) throw new FeedRejected('source_feed_malformed');
   };
@@ -78,34 +85,35 @@ export function parseXml(source: string): Element {
     } else if (source.startsWith('<?', offset)) {
       // Processing instructions (stylesheets) are inert; the declaration is only first.
       const end = source.indexOf('?>', offset + 2);
-      if (end < 0 || /^<\?xml(\s|\?)/i.test(source.slice(offset, offset + 6))) throw new FeedRejected('source_feed_malformed');
+      // Only a target that is exactly ``xml`` (not ``xml-stylesheet``) is the declaration.
+      if (end < 0 || /^<\?xml(?![A-Za-z0-9_.:-])/i.test(source.slice(offset, offset + 6))) throw new FeedRejected('source_feed_malformed');
       offset = end + 2;
     } else if (source.startsWith('</', offset)) {
       const name = NAME.exec(source.slice(offset + 2));
       const current = stack.pop();
       if (!name || !current || current.name !== name[0]) throw new FeedRejected('source_feed_malformed');
       offset += 2 + name[0].length;
-      while (/\s/.test(source[offset] ?? '')) offset++;
+      while (XML_SPACE.test(source[offset] ?? '')) offset++;
       if (source[offset++] !== '>') throw new FeedRejected('source_feed_malformed');
     } else {
       const name = NAME.exec(source.slice(offset + 1));
       if (!name) throw new FeedRejected('source_feed_malformed');
       if (++elements > FEED_LIMITS.maxElements || stack.length >= FEED_LIMITS.maxDepth) throw new FeedRejected('source_output_oversize');
-      const element: Element = { name: name[0], attributes: Object.create(null) as Record<string, string>, children: [], text: '' };
+      const element: Element = { name: name[0], attributes: Object.create(null) as Record<string, string>, children: [], text: '', parts: [] };
       offset += 1 + name[0].length;
       let selfClosing = false;
       while (true) {
-        const spaced = /^\s*/.exec(source.slice(offset))![0].length;
+        const spaced = /^[ \t\r\n]*/.exec(source.slice(offset))![0].length;
         offset += spaced;
         if (source.startsWith('/>', offset)) { selfClosing = true; offset += 2; break; }
         if (source[offset] === '>') { offset++; break; }
-        const attribute = /^([A-Za-z_][A-Za-z0-9_.:-]{0,127})\s*=\s*("([^"]*)"|'([^']*)')/.exec(source.slice(offset));
+        const attribute = /^([A-Za-z_][A-Za-z0-9_.:-]{0,127})[ \t\r\n]*=[ \t\r\n]*("([^"]*)"|'([^']*)')/.exec(source.slice(offset));
         if (!spaced || !attribute || Object.hasOwn(element.attributes, attribute[1]!)) throw new FeedRejected('source_feed_malformed');
         element.attributes[attribute[1]!] = decodeEntities(attribute[3] ?? attribute[4] ?? '');
         offset += attribute[0].length;
       }
       const parent = stack[stack.length - 1];
-      if (parent) parent.children.push(element);
+      if (parent) { parent.children.push(element); parent.parts.push(element); }
       else if (root) throw new FeedRejected('source_feed_malformed');
       else root = element;
       if (!selfClosing) stack.push(element);
@@ -117,11 +125,37 @@ export function parseXml(source: string): Element {
 
 const local = (name: string) => name.slice(name.indexOf(':') + 1);
 const child = (element: Element, name: string) => element.children.find(item => local(item.name) === name);
-const field = (value: string | undefined, html = false): string => {
-  const text = html ? normalizeSourceText(value ?? '', true) : normalizeLines(value ?? '');
-  if (Buffer.byteLength(text, 'utf8') > FEED_LIMITS.maxFieldBytes) throw new FeedRejected('source_output_oversize');
-  return text.replace(/\n/g, ' ');
-};
+const ELLIPSIS = '\u2026';
+/** Cut to at most ``maxFieldBytes`` UTF-8 bytes on a code point boundary. */
+function truncateField(text: string): string {
+  if (Buffer.byteLength(text, 'utf8') <= FEED_LIMITS.maxFieldBytes) return text;
+  const budget = FEED_LIMITS.maxFieldBytes - Buffer.byteLength(ELLIPSIS, 'utf8');
+  let out = '', size = 0;
+  for (const char of text) {
+    const bytes = Buffer.byteLength(char, 'utf8');
+    if (size + bytes > budget) break;
+    out += char; size += bytes;
+  }
+  return out.trimEnd() + ELLIPSIS;
+}
+const field = (value: string | undefined, html = false): string =>
+  // A long field is cut rather than rejecting the whole feed.
+  truncateField((html ? normalizeSourceText(value ?? '', true) : normalizeLines(value ?? '')).replace(/\n/g, ' '));
+// Block elements whose boundaries separate words in Atom xhtml content.
+const XHTML_BLOCKS = new Set(['p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'br', 'tr', 'td', 'th', 'section',
+  'article', 'blockquote', 'pre', 'ul', 'ol', 'table', 'dt', 'dd']);
+/** Document-order text of an element, with line breaks at xhtml block boundaries. */
+function deepText(element: Element): string {
+  return element.parts.map(part => typeof part === 'string' ? part
+    : XHTML_BLOCKS.has(local(part.name).toLowerCase()) ? `\n${deepText(part)}\n` : deepText(part)).join('');
+}
+/** Atom text constructs: ``xhtml`` is inline markup, ``text`` is literal, ``html`` and RSS are escaped HTML. */
+function summary(element: Element | undefined, atom: boolean): string {
+  if (!element) return '';
+  if (atom && element.attributes.type === 'xhtml') return field(deepText(element));
+  if (atom && element.attributes.type === 'text') return field(element.text);
+  return field(element.text, true);
+}
 
 /** Normalized text lines: feed title, then each item's title/link/date/summary. */
 export function feedText(source: string): string {
@@ -148,7 +182,7 @@ export function feedText(source: string): string {
       ['Item', field(child(entry, 'title')?.text)],
       ['Link', field(link)],
       ['Published', field(child(entry, atom ? 'updated' : 'pubDate')?.text)],
-      ['Summary', field((atom ? (child(entry, 'summary') ?? child(entry, 'content')) : child(entry, 'description'))?.text, true)],
+      ['Summary', summary(atom ? (child(entry, 'summary') ?? child(entry, 'content')) : child(entry, 'description'), atom)],
     ];
     for (const [label, value] of values) if (value) lines.push(`${label}: ${value}`);
   }

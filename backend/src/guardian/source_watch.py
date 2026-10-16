@@ -93,6 +93,23 @@ logger = logging.getLogger(__name__)
 # (I, S) and ``<[^>]+>``: identical output, but an unclosed construct is scanned
 # once instead of once per opening (adversarial pages stalled the regex forms).
 _HTML_SCRIPT_OPEN_RE = re.compile(r"<(script|style|noscript)\b", re.I)
+# ``\1`` under re.I compares CPython's simple lowercase of each character. Only
+# U+0130 (to ``i``) and U+212A (to ``k``) map onto ASCII letters; ``ı`` and ``ſ``
+# lowercase to themselves, so they match only themselves.
+_SIMPLE_LOWER = {"\u0130": "i", "\u212a": "k"}
+_FOLD_CANDIDATES = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u0130\u0131\u017f\u212a"
+
+
+def _simple_lower(char: str) -> str:
+    return _SIMPLE_LOWER.get(char, char.lower() if char.isascii() else char)
+
+
+def _closing_class(char: str) -> str:
+    """Characters a re.I backreference to ``char`` accepts in the closing tag."""
+    members = [candidate for candidate in _FOLD_CANDIDATES if _simple_lower(candidate) == _simple_lower(char)]
+    if char not in members:
+        members.append(char)
+    return "[" + "".join(re.escape(member) for member in members) + "]"
 
 
 def _strip_comments(value: str) -> str:
@@ -117,8 +134,7 @@ def _strip_scripts(value: str) -> str:
         key = name.lower()
         cached = closing.get(key)
         if cached is None or (cached[0] != -1 and cached[0] < name_end + 1):
-            # ``\1`` under re.I compares lower() per character (so ``ſ`` is not ``s``).
-            letters = "".join(f"[{c.lower()}{c.upper()}]" if c.isascii() and c.isalpha() else re.escape(c) for c in name)
+            letters = "".join(_closing_class(c) for c in name)
             pattern = re.compile(r"</" + letters + r"\s*>")
             found = pattern.search(value, name_end + 1)
             cached = (found.start(), found.end()) if found else (-1, -1)

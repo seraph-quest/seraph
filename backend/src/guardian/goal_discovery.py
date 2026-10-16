@@ -29,7 +29,8 @@ from src.workflows.job_runtime import DurableJobRepository, DurableJobSpec, Dura
 from src.guardian.discovery_search import DiscoverySearch, DiscoverySearchBlocked
 
 # Media types Python admits for Cordis source extraction (#1008).
-SOURCE_MEDIA_TYPES = ("text/plain", "text/html", "application/rss+xml", "application/atom+xml")
+SOURCE_MEDIA_TYPES = ("text/plain", "text/html", "application/rss+xml", "application/atom+xml",
+                      "application/xml", "text/xml")
 RESEARCH_RECOVERY = ("Restore the reviewed Cordis research runtime and its planning/source providers "
     "(reviewed Node 22.12+/24 on PATH, runtime/cordis installed with npm ci and built with "
     "'./manage.sh -e dev cordis build', then restart the backend); the original occurrence is never "
@@ -169,6 +170,14 @@ class GoalDiscoveryService:
         await validated_discovery_strategy(result)
         return result
 
+    @staticmethod
+    def _occurrence(owner_identity_id, programme_id, day):
+        """The deterministic identifier of one programme's discovery occurrence for a UTC day."""
+        return uuid5(NAMESPACE_URL, f"seraph:public-discovery:{owner_identity_id}:{programme_id}:{day}")
+
+    def _today(self):
+        return goal_programme_service._clock().astimezone(timezone.utc).date().isoformat()
+
     async def admit(self, *, goal_id, programme_id, grant_revision):
         self._ready()
         programme = await goal_programme_service.assert_authority(goal_id=goal_id,
@@ -176,8 +185,8 @@ class GoalDiscoveryService:
         binding = GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY)
         from src.workflows.job_runtime import _utc_now
         now = _utc_now()
-        day = goal_programme_service._clock().astimezone(timezone.utc).date().isoformat()
-        identifier = uuid5(NAMESPACE_URL, f"seraph:public-discovery:{binding.owner_identity_id}:{programme.id}:{day}")
+        day = self._today()
+        identifier = self._occurrence(binding.owner_identity_id, programme.id, day)
         job_id = "goal-discovery:" + identifier.hex
         prior = await self.jobs.get_job(job_id)
         if prior is not None:
@@ -786,11 +795,21 @@ class GoalDiscoveryService:
                         "Review original Goal, programme, route and unresolved receipts; provider replay is forbidden.")
                         if held else None)})
             from src.work_board.research_parent import PLANNING_KIND, planning_authority
+            # Planning jobs are goal-less on the ledger, but each occurrence's
+            # job id is derived from its owner, programme and day: read exactly
+            # this Goal's programmes for today instead of every planning row.
+            # Past-day plans are not carried forward (current_day_only).
+            goal = await db.get(Goal, goal_id)
+            owners = {raw["id"]: raw["owner_identity_id"] for raw in _load(goal)["generations"]} if goal is not None else {}
+            day = self._today()
+            plan_ids = sorted("goal-discovery-plan:" + self._occurrence(owners[programme_id], programme_id, day).hex
+                              for programme_id in ids if programme_id in owners)
             planning = []
-            for run in (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == PLANNING_KIND)
-                    .order_by(WorkflowRunState.started_at.desc()))).scalars():
+            for run in (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == PLANNING_KIND,
+                    WorkflowRunState.run_identity.in_(plan_ids)).order_by(WorkflowRunState.started_at.desc()))).scalars():
                 plan_authority = planning_authority(run.declared_authority_json)
-                if plan_authority.programme_binding.goal_id != goal_id or plan_authority.programme_binding.programme_id not in ids:
+                if (plan_authority.programme_binding.goal_id != goal_id or plan_authority.programme_binding.programme_id not in ids
+                        or plan_authority.occurrence_day != day):
                     continue
                 held = run.status != "succeeded"
                 planning.append({"job_id": run.run_identity, "discovery_job_id": plan_authority.discovery_job_id,

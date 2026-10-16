@@ -327,7 +327,7 @@ runtime surfaces instead of roadmap placeholders.
   - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_catalog_api.py::TestCatalogAPI::test_install_catalog_messaging_connector_pack_can_be_configured_and_enabled tests/test_catalog_api.py::TestCatalogAPI::test_install_catalog_additional_messaging_connector_packs tests/test_extensions_api.py::test_install_configure_and_toggle_wave2_contribution_surfaces tests/test_extensions_api.py::test_install_and_configure_workspace_managed_connector_extension -q`
   - result: `5 passed`
 - backend full suite:
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+  - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
   - result: `1154 passed`, `4 warnings`
 - frontend full suite:
   - `cd frontend && npm test`

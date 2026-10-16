@@ -276,7 +276,14 @@ class ForgejoTitleBrowser:
             await source(title=target.old_title, initial=True)
             await check_current()
             async with asyncio.timeout(max(0, (deadline-datetime.now(timezone.utc)).total_seconds()-10)):
-                launched = await runner._launch_session(resources)
+                try:
+                    launched = await runner._launch_session(resources, chromium_sandbox=True)
+                except ForgejoError:
+                    raise
+                except Exception as exc:
+                    # The authenticated profile requires Chromium's own sandbox; a host
+                    # that cannot provide it blocks before any provider contact.
+                    raise ForgejoError("forgejo_sandboxed_browser_unavailable") from exc
                 await launched.context.close()
                 context = await launched.browser.new_context(java_script_enabled=True, accept_downloads=False,
                     service_workers="block", storage_state=None, http_credentials=None, permissions=[])

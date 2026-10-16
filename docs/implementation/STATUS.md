@@ -71,6 +71,13 @@ Python lifecycle. Its bounded offline fill/select/check/radio-click and private
 literal preview reuse native jobs, current Root/Goal authority and the existing
 browser lane. Source or DOM drift, unknown effects and unverified cleanup block;
 submission, imported sessions and arbitrary-site writes remain excluded.
+[ADR-034](./decisions/034-selected-desktop-draft-actions.md) (#1014) adds at most
+two quarantined public downloads (10 MiB each; PDF, DOCX, XLSX, CSV, text)
+verified from their bytes, stored read-only with source metadata and never
+executed; uploads are refused before any contact. Selected local desktop text
+replacement runs only in the daemon after an exact preview with readback, and
+stops on any focus or selection change. Linux AT-SPI reports its actual
+readiness; macOS Accessibility and authenticated downloads remain Planned.
 Private values are encrypted; redacted action history survives reload without
 reopening old work. Linux local Chromium/TCP/SQLite checks prove the named
 mechanics with zero inference/provider spend. Business-form usefulness, production
@@ -109,6 +116,16 @@ including inference, Memory mutations, research, conversation/agent-loop,
 scheduler and bound adapters, return typed `blocked` results. Memory
 composition-snapshot accounting is not shipped. See the
 [guide section](./12-current-app-guide.md#cordis-typed-service-bridge-1007).
+
+**Cordis governed capabilities and inference** from
+[#1018](https://github.com/seraph-quest/seraph/issues/1018) is **Partial**:
+`capabilities.invoke` (adopted read-only native capabilities through
+`CapabilityExecutionHost`) and `inference.request` (two canonical Cordis routes
+through the shared broker and ledger) have Python owners with sealed results,
+bounded Vault-redacted output and job-bound accounting;
+`connections.invokeBoundAdapter` validates the current connection reference and
+a closed operation table, then fails closed (no adapter is composed yet). See the
+[guide section](./12-current-app-guide.md#cordis-governed-capabilities-and-inference-1018).
 
 **Cordis guardian research** from
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal
@@ -564,7 +581,17 @@ The [Forgejo title profile](https://github.com/seraph-quest/seraph/issues/925)
 uses a local pinned-service proof profile; production Codeberg remains blocked pending
 separate account/site/version acceptance. Local revoke invalidates Seraph's
 authority and credentials; it does not prove provider logout or undo history or
-notifications. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
+notifications. The [exact Forgejo issue and comment forms](https://github.com/seraph-quest/seraph/issues/1013)
+(`forgejo.issue-create.v1`, `forgejo.issue-comment.v1`) are **Partial**: under
+[ADR-029](./decisions/029-profiled-browser-interactions.md) a reviewed form is
+prepared with scripts disabled, exact-approved once, submitted by one native POST
+and read back through the numeric API; site, account, profile or value drift
+invalidates the approval, and a lost response stays Unknown with no replay.
+Local acceptance uses a disposable signed Forgejo 15.0.9 and Chromium with its
+own sandbox; production Codeberg stays blocked. The paused native POST carries no
+`Sec-Fetch-Site`, so Forgejo's cross-origin check is not an independent control;
+backend-only cookies and the exact validated single POST are. Requiring a genuine
+`Sec-Fetch-Site` at handoff is a follow-up. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 permits ordinary top-frame Chromium text with local preview and deletion-only
 redaction, exact Task/Goal approval and encrypted D1 attachment. It excludes
 screenshots, clipboard and background capture, records no learning or analysis,

@@ -66,6 +66,8 @@ from src.vlm_runtime import (
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
+# Monotonic deadlines of registered requests whose caller waits with a timeout.
+_runtime_request_deadlines: dict[str, float] = {}
 # Request ids whose turn reached a provider transport at least once.
 _runtime_request_contacts: set[str] = set()
 _target_health_lock = Lock()
@@ -3433,6 +3435,13 @@ def _register_request(request_id: str) -> None:
         _runtime_requests[request_id] = False
 
 
+def _start_request_deadline(request_id: str, timeout_seconds: float) -> None:
+    """Record the caller's deadline at the instant its own timeout starts."""
+    with _runtime_request_lock:
+        if request_id in _runtime_requests:
+            _runtime_request_deadlines[request_id] = monotonic() + max(float(timeout_seconds), 0.0)
+
+
 def _mark_request_timed_out(request_id: str) -> None:
     with _runtime_request_lock:
         if request_id in _runtime_requests:
@@ -3442,6 +3451,7 @@ def _mark_request_timed_out(request_id: str) -> None:
 def _finish_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests.pop(request_id, None)
+        _runtime_request_deadlines.pop(request_id, None)
         _runtime_request_contacts.discard(request_id)
 
 
@@ -3489,9 +3499,12 @@ def _can_log_request(request_id: str | None) -> bool:
         return True
     with _runtime_request_lock:
         timed_out = _runtime_requests.get(request_id)
+        deadline = _runtime_request_deadlines.get(request_id)
     if timed_out is None:
         return False
-    return not timed_out
+    # The worker thread judges lateness against the caller's own deadline: the
+    # caller's loop may mark the timeout only after the worker has returned.
+    return not timed_out and (deadline is None or monotonic() < deadline)
 
 
 def set_current_llm_request_id(request_id: str) -> contextvars.Token[str | None]:
@@ -4751,6 +4764,13 @@ async def completion_with_fallback(
     try:
         if timeout is None:
             return await coro
+        # The worker starts only when awaited here, so its lateness is judged
+        # from the same instant wait_for starts its timer. Separately, if the
+        # loop stalls past the deadline, the thread's result can be delivered
+        # before the timeout callback runs and wait_for then returns normally;
+        # that pre-existing asyncio race returns a result the provider did
+        # produce, and the worker logged it only if it finished in time.
+        _start_request_deadline(request_id, timeout)
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
         _mark_request_timed_out(request_id)

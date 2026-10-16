@@ -72,7 +72,12 @@ async def pairings(request: Request):
     # Existing owner-filtered public inventory; never export private Vault locator.
     entries = _node_inventory_for_owner(owner.principal.principal_id)
     return {"state_revision": int(payload.get("revision", 0)), "companion_origin": COMPANION_ORIGIN,
-        "adapter_optional": True, "pairings": [{"extension_id": item.extension_id,
+        "adapter_optional": True,
+        # Desktop drafts run only in the local daemon after its exact preview;
+        # the core never dispatches desktop writes (C5.3, ADR-034).
+        "desktop_draft": {"capability": "desktop.draft.replace_selected_text.v1",
+                          "dispatch": "local_daemon_only", "core_write_authority": False},
+        "pairings": [{"extension_id": item.extension_id,
         "reference": item.reference, "name": item.name, "pairing": item.pairing} for item in entries]}
 
 

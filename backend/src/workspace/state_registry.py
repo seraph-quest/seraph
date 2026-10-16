@@ -404,9 +404,12 @@ class WorkspacePathSpec:
 
     logical_path: str
     state_class: WorkspaceStateClass
-    # Requiredness is currently used for secret/recovery material.  Production
-    # integrations may declare optional credentials without weakening the
-    # fail-closed rule for recovery keys and other required secrets.
+    # Requiredness is used for secret/recovery material and for canonical
+    # operator preferences that exist only after the operator first saves
+    # them. Production integrations may declare optional credentials without
+    # weakening the fail-closed rule for recovery keys and other required
+    # secrets; an optional canonical file is archived when present and its
+    # absence (for example in an older archive) is not an error.
     required: bool = True
 
     def __post_init__(self) -> None:
@@ -419,9 +422,9 @@ class WorkspacePathSpec:
             raise WorkspaceStateError("external-reference state must use ExternalReferenceSpec, not a local path")
         if not isinstance(self.required, bool):
             raise WorkspaceStateError("workspace path requiredness must be boolean")
-        if not self.required and state_class is not WorkspaceStateClass.SECRET:
+        if not self.required and state_class is WorkspaceStateClass.SECRET_RECOVERY:
             raise WorkspaceStateError(
-                "only ordinary secret credentials may be declared optional"
+                "recovery secrets cannot be declared optional"
             )
         object.__setattr__(self, "logical_path", logical_path)
         object.__setattr__(self, "state_class", state_class)
@@ -952,6 +955,10 @@ class WorkspaceStateRegistry:
             try:
                 candidate_stat = candidate.lstat()
             except FileNotFoundError as exc:
+                if not spec.required:
+                    # Optional state (written only on first use) is neither
+                    # missing nor degraded when absent, on any root kind.
+                    continue
                 if (
                     self.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
                     and missing_declared_paths is not None
@@ -1577,11 +1584,14 @@ _RUNTIME_PATH_SPECS = (
     ("starter-packs.json", WorkspaceStateClass.CANONICAL),
     ("model-fabric-settings.json", WorkspaceStateClass.CANONICAL),
     ("screen-analysis-settings.json", WorkspaceStateClass.CANONICAL),
+    ("background-inference-settings.json", WorkspaceStateClass.CANONICAL),
+    ("evolution", WorkspaceStateClass.CANONICAL),
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
     (".seraph-extension-snapshots", WorkspaceStateClass.DERIVED),
     (".seraph-workspace-maintenance.lock", WorkspaceStateClass.DERIVED),
+    (".seraph-extension-lifecycle.lock", WorkspaceStateClass.DISPOSABLE),
     ("seraph.db-wal", WorkspaceStateClass.DERIVED),
     ("seraph.db-shm", WorkspaceStateClass.DERIVED),
     ("seraph.db-journal", WorkspaceStateClass.DERIVED),
@@ -1591,6 +1601,13 @@ _RUNTIME_PATH_SPECS = (
     ("google_calendar_token.json", WorkspaceStateClass.SECRET),
 )
 _OPTIONAL_RUNTIME_SECRET_PATHS = frozenset({"google_calendar_token.json"})
+# Written only when the operator first changes a background inference toggle;
+# absent means every job keeps its default and older archives restore cleanly.
+# Evolution proposals and evaluator receipts are operator state written by the
+# harness runtime only after first use (its .lock sits beside the state file).
+# The extension lifecycle lock is an fcntl lock file: never archived.
+_OPTIONAL_RUNTIME_CANONICAL_PATHS = frozenset({"background-inference-settings.json", "evolution"})
+_OPTIONAL_RUNTIME_TRANSIENT_PATHS = frozenset({".seraph-extension-lifecycle.lock"})
 # Canonical runtime state agent file tools may neither read nor write: MCP
 # server and stdio proxy settings (inline credentials are possible, and an
 # edit reconfigures tool egress outside the Settings consent flow) and private
@@ -1607,11 +1624,13 @@ _AGENT_READ_ONLY_RUNTIME_PATHS = frozenset(
         "starter-packs.json",
         "model-fabric-settings.json",
         "screen-analysis-settings.json",
-        # Runtime writers not (yet) declared as registry roots.  Agent policy
-        # covers them by location so it does not wait on their declarations.
-        "artifacts/tool-package-runtime",
         "background-inference-settings.json",
+        # Operator proposal state; only the evolution runtime writes it.
         "evolution",
+        # A runtime writer nested inside the canonical ``artifacts`` root,
+        # which the registry cannot declare separately (overlapping roots
+        # are rejected); agent policy covers it by location.
+        "artifacts/tool-package-runtime",
     }
 )
 # Top-level ``.seraph-*`` names are reserved for runtime locks, snapshots and
@@ -1674,7 +1693,8 @@ def canonical_workspace_config(root: str | os.PathLike[str]) -> WorkspaceConfig:
             WorkspacePathSpec(
                 path,
                 state_class,
-                required=path not in _OPTIONAL_RUNTIME_SECRET_PATHS,
+                required=path not in (_OPTIONAL_RUNTIME_SECRET_PATHS | _OPTIONAL_RUNTIME_CANONICAL_PATHS
+                    | _OPTIONAL_RUNTIME_TRANSIENT_PATHS),
             )
             for path, state_class in _RUNTIME_PATH_SPECS
         ),

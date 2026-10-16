@@ -1628,10 +1628,17 @@ sealed open liabilities, so an open row hidden by a state edit is refused, not
 skipped. The discovery programme budget takes each row's programme from its
 digest-covered admission evidence, so an edit to the unsealed run row is refused
 rather than dropping that row's cost. Consumer reads outside the accounting
-writer path (opportunity runtime, research snapshot and close-out, repository
-source recovery) only classify job or display state; they are not
-digest-checked, never admit spend, and a row hidden from them stays held in the
-sealed totals until full verification. The scoped reads cannot be emptied either: a general-task group read
+writer path (opportunity runtime, research snapshot and close-out) only
+classify job or display state; they are not digest-checked, never admit spend,
+and a row hidden from them stays held in the sealed totals until full
+verification. The repository-repair readers (remaining allowance, stop
+liability, child wait and final witnesses, recovered and held final evidence)
+read the original group's members by their private lookup key plus the Root's
+rows by job, not the whole table (#1114). Every row they read must hash to its
+stored digest and the group read must hold exactly the sealed member count, so
+a row hidden by a key, owner or job edit, or a content edit to a row they read,
+is refused. They do not re-verify the account digest; an edit that also
+rewrites stored digests or totals is refused by the next accounting writer. The scoped reads cannot be emptied either: a general-task group read
 must return exactly the sealed member count for that group, a discovery
 programme read the sealed count of discovery-service rows, and the near-text
 outstanding check reads a sealed per-owner count, so hiding a row by editing its

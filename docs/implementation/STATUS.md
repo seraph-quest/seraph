@@ -356,7 +356,10 @@ they touch, and admit against digest-sealed running totals; full verification
 startup and every 10 minutes in the background. Since #1095 the rare writers
 and readers (recovery, settings saves, denial quiescence, research funding,
 cancel and readback) use the same bounded verification, and startup's full pass
-runs on a worker thread without the writer lock.
+runs on a worker thread without the writer lock. Since #1114 the
+repository-repair readers read the original group and Root rows by index, not
+the whole table, and refuse a read whose rows fail their stored digests or miss
+the sealed group member count.
 
 Private handoff publication derives at most twelve specialist callback identities
 from validated original-group reservations and uses exact unique run-identity

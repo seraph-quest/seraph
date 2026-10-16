@@ -10,7 +10,7 @@ from types import MappingProxyType
 from sqlalchemy import select, update, inspect as inspect_mapper
 
 from src.db.models import (WorkflowRunState, WorkBoardTask, WorkBoardAttempt,
-    WorkBoardInputArtifact, Goal, OperatorSession, InferenceCostReservation)
+    WorkBoardInputArtifact, Goal, OperatorSession)
 from src.work_board.contracts import WorkBoardOwner, RepositoryNativeStopClosureV1
 from src.workflows.job_runtime import DurableJobLeaseError, _canonical, _as_utc, _utc_now
 
@@ -467,10 +467,20 @@ async def _validate_repository_stop_context_rows_sql(db, service, jobs, *, conte
 
 async def _original_accounting_members(db, context):
     """Validate original liability without granting terminal settlement."""
+    source = _source()
+    rows = await source._repository_accounting_rows(db, context,  # indexed (#1114)
+        error=lambda: DurableJobLeaseError("original stop accounting rows changed"))
+
+    async def members(candidates):
+        return _original_accounting_members_from(candidates, context)
+    await source._shadow_full_table(db, members, rows)
+    return await members(rows)
+
+
+def _original_accounting_members_from(rows, context):
     from src.workflows.general_task_accounting import entry_for, reservation_liability
     source = _source()
     group = context["group"]
-    rows = list((await db.scalars(select(InferenceCostReservation))).all())
     members, root_members = [], []
     for row in rows:
         entry = entry_for(row)

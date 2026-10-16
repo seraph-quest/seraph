@@ -29,9 +29,13 @@ programme from its digest-covered evidence, not the unsealed run row. A content
 edit to a row no operation reads is caught at the next full verification and
 cannot change any admission decision.
 
+The repository-repair readers (#1114) read the original group by its key and
+the Root by job; each read row must match its stored digest and the group read
+the sealed member count.
+
 Accepted residual: consumer reads outside the accounting writer path
-(guardian opportunity runtime, research snapshot and coordinator close-out,
-repository source recovery) read reservations without digest checks. They
+(guardian opportunity runtime, research snapshot and coordinator close-out)
+read reservations without digest checks. They
 classify job or display state only and never admit spend or free capacity; a
 row hidden from them stays held in the sealed totals and is caught at the next
 full verification.

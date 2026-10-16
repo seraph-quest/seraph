@@ -1289,12 +1289,118 @@ async def _recheck_repository_sql(db, context, *, allow_stop_cleanup=False):
         raise DurableJobLeaseError("original repository cutoff expired")
 
 
-async def _repository_remaining(db, context, *, allow_exhausted_readback=False):
-    from sqlalchemy import select
+def _accounting_continuity_error():
+    from src.workflows.inference_accounting import InferenceAccountingError
+    return InferenceAccountingError("accounting_continuity_unavailable")
+
+
+async def _repository_accounting_rows(db, context, *, error=_accounting_continuity_error):
+    """The original group's candidate members and the Root's rows (#1114).
+
+    Indexed, instead of the whole reservations table: the group owner's rows
+    under the private group key, that owner's still-unclassified (NULL or
+    'invalid' key) rows so unmigrated rows are still evaluated, and the Root's
+    rows by job. Rowid order, as the earlier full-table read returned them.
+    The key, owner and job are hints a row edit can change, so the read must
+    hold exactly the sealed group membership (see ``_assert_scoped_rows``).
+    """
+    from sqlalchemy import and_, literal_column, or_, select
+    from src.db.models import InferenceCostReservation as Row
+    group, run = context["group"], context["run"]
+    rows = list((await db.execute(select(Row).where(or_(
+        and_(Row.owner_id == group.owner_principal_id, or_(Row.group_lookup_key == "g:" + group.group_id,
+            Row.group_lookup_key.is_(None), Row.group_lookup_key == "invalid")),
+        Row.job_id == run.run_identity)).order_by(literal_column("inference_cost_reservations.rowid")))).scalars())
+    await _assert_scoped_rows(db, rows, group_key="g:" + group.group_id, error=error)
+    return rows
+
+
+async def _assert_scoped_rows(db, rows, *, error, group_key=None):
+    """Refuse a scoped reservation read that a row edit could have changed (#1114).
+
+    Each read row must hash to its stored digest, so a content edit (state,
+    cost, job, evidence) to a row the caller decides on is refused. With
+    ``group_key``, the rows whose digest-covered evidence names the group must
+    number exactly the sealed ``rows_by_group`` count, so a member hidden by
+    editing its unhashed lookup key or its owner is refused, not under-counted.
+    Rows this session's accounting writer verified or changed are its to seal.
+    Not a ledger verification: an edit that also rewrites a stored digest or
+    the sealed totals breaks the account digest, which every accounting writer
+    and admission verify first.
+    """
+    from sqlalchemy import inspect
+    from src.db.models import InferenceAccountingOwner
+    from src.workflows import inference_ledger
+    from src.workspace.accounting_witness import evidence_group_key, row_digest
+    state = db.info.get(inference_ledger._SESSION_KEY)
+    for row in rows:
+        if (state is not None and row.operation_id in state.pre_images) or inspect(row).pending or inspect(row).modified:
+            continue
+        if row.ledger_row_digest != row_digest(inference_ledger.row_values(row)):
+            raise error()
+    if group_key is None:
+        return
+    if state is not None:
+        totals = state.totals
+    else:
+        account = await db.get(InferenceAccountingOwner, "deployment")
+        try:
+            totals = inference_ledger.parse_totals(account) if account is not None else None
+        except inference_ledger.LedgerVerificationError:
+            totals = None
+    members = sum(evidence_group_key(row.evidence_json) == group_key for row in rows)
+    if totals is None or members != totals["rows_by_group"].get(group_key, 0):
+        raise error()
+
+
+async def _job_cost_rows(db, job_id, *, error=_accounting_continuity_error):
+    """One job's reservations in rowid order, for its final accounting digest (#1114)."""
+    from sqlalchemy import literal_column, select
     from src.db.models import InferenceCostReservation
+    rows = list((await db.execute(select(InferenceCostReservation).where(InferenceCostReservation.job_id == job_id)
+        .order_by(literal_column("inference_cost_reservations.rowid")))).scalars())
+    await _assert_scoped_rows(db, rows, error=error)
+    return rows
+
+
+async def _iteration_cost_rows(db, run, group, cost, *, error):
+    """What an iteration witness check reads (#1114): the original group's
+    sealed members and the Root's rows, plus the contacted operation's row.
+
+    Through the group read, not the Root's job alone: a Root row moved off the
+    job by an edit is still a member, so its digest check refuses the edit.
+    """
+    rows = await _repository_accounting_rows(db, {"group": group, "run": run}, error=error)
+    if cost is not None and all(row is not cost for row in rows):
+        await _assert_scoped_rows(db, [cost], error=error)
+        rows.append(cost)
+    return rows
+
+
+async def _shadow_full_table(db, call, scoped_rows):
+    """Test-only: a reader fed its indexed rows must equal it fed every row."""
+    from src.workflows import inference_ledger
+    if not inference_ledger.SHADOW_FULL_LEDGER:
+        return
+    from sqlalchemy import literal_column, select
+    from src.db.models import InferenceCostReservation
+    full = list((await db.execute(select(InferenceCostReservation)
+        .order_by(literal_column("inference_cost_reservations.rowid")))).scalars())
+    await inference_ledger.shadow_compare_helper(lambda: call(scoped_rows), lambda: call(full))
+
+
+async def _repository_remaining(db, context, *, allow_exhausted_readback=False):
+    rows = await _repository_accounting_rows(db, context)
+
+    async def remaining(candidates):
+        return _repository_remaining_from(candidates, context, allow_exhausted_readback=allow_exhausted_readback)
+    await _shadow_full_table(db, remaining, rows)
+    return await remaining(rows)
+
+
+def _repository_remaining_from(rows, context, *, allow_exhausted_readback):
     from src.workflows.general_task_accounting import entry_for, reservation_liability
     from src.workflows.inference_accounting import InferenceAccountingError
-    rows = list((await db.execute(select(InferenceCostReservation))).scalars())
     members = []
     root_members = []
     group = context["group"]
@@ -2431,8 +2537,9 @@ async def validate_repository_child_wait_witness(db, witness, *, parent, task,
             or closure.get("provider_callback_digest") != response["callback_quiescence_digest"]
             or _source_digest(closure) != witness.callback_quiescence_digest):
         raise DurableJobLeaseError("actual original adapter callback closure changed")
-    rows = list((await db.scalars(select(InferenceCostReservation))).all())
-    cost = next((row for row in rows if row.operation_id == response["operation_id"]), None)
+    cost = await db.get(InferenceCostReservation, response["operation_id"])
+    rows = await _iteration_cost_rows(db, run, group, cost,
+        error=lambda: DurableJobLeaseError("original repository accounting rows changed"))
     if (cost is None or cost.state != "settled" or cost.contact_started_at is None
             or _source_digest(cost.model_dump(mode="json")) != response["accounting_digest"]):
         raise DurableJobLeaseError("original contacted response accounting changed")
@@ -2441,9 +2548,12 @@ async def validate_repository_child_wait_witness(db, witness, *, parent, task,
            "original_deadline_at": _as_utc(run.deadline_at)},
         _canonical_source=source, _request_body_digest=witness.request_body_digest,
         _request_route_digest=prepared["request_route_digest"], _seal=_SEAL)
-    await validate_repository_iteration_accounting(db, accounting, run, rows=rows,
-        operation_id=cost.operation_id, payload_digest=cost.payload_digest,
-        bound_microusd=cost.bound_microusd, deadline_at=cost.deadline_at, already_reserved=True)
+    async def validate(candidates):
+        return await validate_repository_iteration_accounting(db, accounting, run, rows=candidates,
+            operation_id=cost.operation_id, payload_digest=cost.payload_digest,
+            bound_microusd=cost.bound_microusd, deadline_at=cost.deadline_at, already_reserved=True)
+    await _shadow_full_table(db, validate, rows)
+    await validate(rows)
     approval = await db.get(ApprovalRequest, approval_binding["approval_id"])
     if (approval is None or approval.status not in {"pending", "approved", "consumed"}
             or approval.fingerprint != approval_binding["fingerprint"]
@@ -3450,7 +3560,7 @@ async def _validate_recovered_repository_final_evidence(service, jobs, *, comple
     exits = {"test_args": args, "commands": manifest["commands"]} if context["work"].language_profile == "test_node" else {
         "test_args": args, "exit_code": manifest["exit_code"]}
     async with jobs._session() as db:
-        costs = list((await db.scalars(select(InferenceCostReservation))).all())
+        costs = await _job_cost_rows(db, job_id)
         await _repository_remaining(db, context, allow_exhausted_readback=True)
     derived = {"final_patch_digest": execution["patch_sha256"], "final_manifest_digest": readback["manifest_digest"],
         "final_readback_digest": readback["artifact_digest"], "final_command_receipt_digest": _source_digest(execution),
@@ -3653,7 +3763,7 @@ async def _finalize_repository_iteration_held(service, jobs, *, job_id, owner, i
         canonical = await repository_completion_recovered_final_source(_recovered_completion)
     remaining_context = await _repository_precontact(service, jobs, job_id=job_id, owner=owner)
     async with jobs._session() as db:
-        costs = list((await db.scalars(select(InferenceCostReservation))).all())
+        costs = await _job_cost_rows(db, job_id)
         await _repository_remaining(db, remaining_context, allow_exhausted_readback=True)
     evidence = {"final_patch_digest": execution["patch_sha256"],
         "final_manifest_digest": readback["manifest_digest"], "final_readback_digest": readback["artifact_digest"],
@@ -3850,8 +3960,9 @@ async def validate_repository_child_final_witness(db, witness, *, parent, task, 
     execution = _repository_record(run, "repository:execution:" + identity)
     response = _repository_record(run, "repository:response:" + identity)
     iteration = _repository_record(run, "repository:iteration:" + identity)
-    rows = list((await db.scalars(select(InferenceCostReservation))).all())
-    cost = next((row for row in rows if row.operation_id == response["operation_id"]), None)
+    cost = await db.get(InferenceCostReservation, response["operation_id"])
+    rows = await _iteration_cost_rows(db, run, group, cost,
+        error=lambda: DurableJobLeaseError("original repository accounting rows changed"))
     if (binding != witness.wait_witness.native_binding or run.fencing_token != witness.wait_witness.repository_fence
             or readback.get("status") != "succeeded" or cleanup.get("cleanup_proven") is not True
             or readback["artifact_digest"] != witness.final_readback_digest
@@ -3867,8 +3978,12 @@ async def validate_repository_child_final_witness(db, witness, *, parent, task, 
         "original_deadline_at": _as_utc(run.deadline_at)}, _canonical_source=current_source,
         _request_body_digest=cost.payload_digest,
         _request_route_digest=_repository_record(run, "repository:prepared:" + identity)["request_route_digest"], _seal=_SEAL)
-    await validate_repository_iteration_accounting(db, accounting, run, rows=rows, operation_id=cost.operation_id,
-        payload_digest=cost.payload_digest, bound_microusd=cost.bound_microusd, deadline_at=cost.deadline_at, already_reserved=True)
+    async def validate(candidates):
+        return await validate_repository_iteration_accounting(db, accounting, run, rows=candidates,
+            operation_id=cost.operation_id, payload_digest=cost.payload_digest, bound_microusd=cost.bound_microusd,
+            deadline_at=cost.deadline_at, already_reserved=True)
+    await _shadow_full_table(db, validate, rows)
+    await validate(rows)
     return {"verified": True, "no_learning": True}
 
 

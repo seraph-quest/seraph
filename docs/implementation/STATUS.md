@@ -64,6 +64,34 @@ server-captured base and the tested tree. It must also reproduce the tested byte
 when applied to a fresh base copy outside the workspace, so a test that commits or
 configures Git textconv cannot misreport its change.
 
+**Project issues and pull requests to goal tasks: Partial (#1017).** An explicit
+sync reads only the connected repository's issues and pull requests: at most 50
+items over 3 pages, newest updates first, with no webhooks, comments, reviews or
+diffs. Every task, publication and comment reference keeps the exact item
+revision and digest. A finding becomes an inert Triage task. The item text is
+quoted as untrusted data, and the task gets no execution authority until the
+operator accepts it. An accepted change runs as ordinary `repository_work`, and
+its tested patch publishes through the existing exact PR publication. One
+lineage links the source revision, the task, the repository root, each
+iteration's patch digest, the publication and the verified PR.
+
+The publication approval binds the accepted source revision. The item is read
+again at prepare, when the approval resumes, and immediately before the first
+GitHub write. A changed title, body, state or labels, a closed item, another
+repository, a moved base or a changed patch stops the publication before any
+GitHub write. Comment activity alone, including Seraph's own prepared comment,
+does not. Completed local work is kept. A changed revision needs an explicit
+operator acceptance and a fresh approval. Synced items can also be written as
+workspace text that an ordinary source watch reads. That watch's verified
+packet, bound to the exact snapshot it observed, then prepares a blocker or
+review comment through the existing exact GitHub follow-through. The comment
+awaits its own approval and is not posted.
+Lost connection, repository or credential access blocks new reads and keeps
+local artifacts. The status endpoint lists the connection's actual
+limitations. Verified with offline local GitHub fixtures and zero
+inference/provider spend. Live GitHub usefulness remains
+**external-unverified**.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current
@@ -71,6 +99,13 @@ Python lifecycle. Its bounded offline fill/select/check/radio-click and private
 literal preview reuse native jobs, current Root/Goal authority and the existing
 browser lane. Source or DOM drift, unknown effects and unverified cleanup block;
 submission, imported sessions and arbitrary-site writes remain excluded.
+[ADR-034](./decisions/034-selected-desktop-draft-actions.md) (#1014) adds at most
+two quarantined public downloads (10 MiB each; PDF, DOCX, XLSX, CSV, text)
+verified from their bytes, stored read-only with source metadata and never
+executed; uploads are refused before any contact. Selected local desktop text
+replacement runs only in the daemon after an exact preview with readback, and
+stops on any focus or selection change. Linux AT-SPI reports its actual
+readiness; macOS Accessibility and authenticated downloads remain Planned.
 Private values are encrypted; redacted action history survives reload without
 reopening old work. Linux local Chromium/TCP/SQLite checks prove the named
 mechanics with zero inference/provider spend. Business-form usefulness, production
@@ -313,8 +348,13 @@ batches of at most 128. Historical financial seals retain their original typed
 defaults and field presence without resealing. The private hint grants no
 authority and is not a direct-database-tamper integrity seal. Stopped stdlib
 workspace backup/restore accepts the sole added hint column; restored NULL hints
-require canonical startup migration before accounting readiness. This does not
-bound the existing global `_accounting_rows` deployment-ledger baseline.
+require canonical startup migration before accounting readiness. Since #1086
+the hot accounting writers and status reads no longer load the deployment
+ledger: they verify the witness, the root of stored row digests and the rows
+they touch, and admit against digest-sealed running totals; full verification
+(every row) runs per process on first write, when over 20 minutes stale, on
+rare writers, at startup and every 10 minutes in the background. The rare
+writers still load the whole ledger.
 
 Private handoff publication derives at most twelve specialist callback identities
 from validated original-group reservations and uses exact unique run-identity
@@ -574,7 +614,17 @@ The [Forgejo title profile](https://github.com/seraph-quest/seraph/issues/925)
 uses a local pinned-service proof profile; production Codeberg remains blocked pending
 separate account/site/version acceptance. Local revoke invalidates Seraph's
 authority and credentials; it does not prove provider logout or undo history or
-notifications. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
+notifications. The [exact Forgejo issue and comment forms](https://github.com/seraph-quest/seraph/issues/1013)
+(`forgejo.issue-create.v1`, `forgejo.issue-comment.v1`) are **Partial**: under
+[ADR-029](./decisions/029-profiled-browser-interactions.md) a reviewed form is
+prepared with scripts disabled, exact-approved once, submitted by one native POST
+and read back through the numeric API; site, account, profile or value drift
+invalidates the approval, and a lost response stays Unknown with no replay.
+Local acceptance uses a disposable signed Forgejo 15.0.9 and Chromium with its
+own sandbox; production Codeberg stays blocked. The paused native POST carries no
+`Sec-Fetch-Site`, so Forgejo's cross-origin check is not an independent control;
+backend-only cookies and the exact validated single POST are. Requiring a genuine
+`Sec-Fetch-Site` at handoff is a follow-up. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 permits ordinary top-frame Chromium text with local preview and deletion-only
 redaction, exact Task/Goal approval and encrypted D1 attachment. It excludes
 screenshots, clipboard and background capture, records no learning or analysis,

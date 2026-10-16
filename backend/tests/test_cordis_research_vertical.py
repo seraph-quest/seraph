@@ -39,7 +39,13 @@ BIG_RSS = (b'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><
            + b"".join(b"<item><title>Version %d ships</title><link>https://example.com/v%d</link><description><![CDATA["
                       % (i, i) + b'<div class="layout"><span class="x"></span></div>' * 129 + b"<p>Dated.</p>]]></description></item>"
                       for i in range(40)) + b"</channel></rss>")
+# Feeds served as generic XML (#1083): a BOM-prefixed RSS under application/xml and
+# an Atom feed with xhtml content under text/xml.
+XHTML_ATOM = (b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Release log</title><entry><title>Entry one</title>'
+              b'<link href="https://example.com/e1"/><updated>2026-10-14T00:00:00Z</updated><content type="xhtml">'
+              b'<div xmlns="http://www.w3.org/1999/xhtml"><p>Dated</p><p>entry</p></div></content></entry></feed>')
 FORMATS = {"html": ("text/html", HTML), "rss": ("application/rss+xml", RSS), "atom": ("application/atom+xml", ATOM),
+           "xml_rss": ("application/xml", b"\xef\xbb\xbf" + RSS), "text_xml_atom": ("text/xml", XHTML_ATOM),
            "big_html": ("text/html", BIG_HTML), "big_rss": ("application/rss+xml", BIG_RSS)}
 
 
@@ -198,7 +204,7 @@ async def _artifacts(env, job_id):
 
 # ---------------------------------------------------------------- 1 + 2: journey, two formats, one consumer
 
-@pytest.mark.parametrize("fmt", ["html", "rss", "atom"])
+@pytest.mark.parametrize("fmt", ["html", "rss", "atom", "xml_rss", "text_xml_atom"])
 async def test_goal_plan_job_cordis_source_canonical_artifact_readback(accounting_db, real_auth, monkeypatch, fmt):  # noqa: F811
     fixture = Fixture(FORMATS[fmt])
     async with discovery(accounting_db, monkeypatch, fixture) as env:
@@ -235,7 +241,8 @@ async def test_goal_plan_job_cordis_source_canonical_artifact_readback(accountin
                     "rss": ["Feed: Release feed", "Item: Version 2 ships", "Link: https://example.com/v2",
                             "Published: Tue, 13 Oct 2026 10:00:00 GMT", "Summary: Faster sync."],
                     "atom": ["Feed: Release log", "Item: Entry one", "Link: https://example.com/e1",
-                             "Published: 2026-10-14T00:00:00Z", "Summary: Dated entry"]}[fmt]
+                             "Published: 2026-10-14T00:00:00Z", "Summary: Dated entry"]}
+        expected = {**expected, "xml_rss": expected["rss"], "text_xml_atom": expected["atom"]}[fmt]
         assert snapshot.lines == expected and snapshot.mime == FORMATS[fmt][0]
         request = json.loads(next(a for a in witness.artifacts.values() if a["kind"] == "extraction")["content"])
         reviewed = env["host"].reviewed
@@ -258,6 +265,17 @@ async def test_goal_plan_job_cordis_source_canonical_artifact_readback(accountin
         # An exact re-admission reuses the occurrence and never re-plans or re-fetches.
         assert (await _admit(env))["job_id"] == job["job_id"]
         assert len(fixture.frames) == 9 and len(fixture.gets) == 1
+        if fmt == "html":
+            # The planning projection reads only this Goal's programmes for the
+            # current UTC day: yesterday's plan is not carried into tomorrow.
+            from datetime import timedelta
+            from src.guardian.goal_programmes import goal_programme_service
+            today = goal_programme_service._clock()
+            monkeypatch.setattr(goal_programme_service, "_clock", lambda: today + timedelta(days=1))
+            tomorrow = await env["inspect"]()
+            assert tomorrow.status_code == 200, tomorrow.text
+            assert tomorrow.json()["planning"] == [] and tomorrow.json()["current_day_only"] is True
+            assert any(run["job_id"] == job["job_id"] for run in tomorrow.json()["runs"])
 
 
 @pytest.mark.parametrize("fmt", ["big_html", "big_rss"])

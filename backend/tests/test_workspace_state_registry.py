@@ -7,6 +7,7 @@ import pytest
 from config.settings import settings
 from src.artifacts.registry import build_artifact_record
 from src.workspace import (
+    AgentWorkspaceAccess,
     AmbiguousWorkspaceRootsError,
     ExternalReferencePolicy,
     ExternalReferenceSpec,
@@ -21,6 +22,7 @@ from src.workspace import (
     WorkspaceStateClass,
     WorkspaceStateError,
     WorkspaceStateRegistry,
+    canonical_agent_workspace_access,
     canonical_workspace_database_path,
     canonical_workspace_registry,
     production_workspace_inventory,
@@ -176,7 +178,7 @@ def test_root_and_declared_path_safety(tmp_path):
         ExternalReferenceSpec("secret-key", ExternalReferencePolicy.CONSENTED_LOGICAL_ROOT)
     with pytest.raises(WorkspaceStateError):
         WorkspacePathSpec("external", WorkspaceStateClass.EXTERNAL_REFERENCE)
-    with pytest.raises(WorkspaceStateError, match="ordinary secret"):
+    with pytest.raises(WorkspaceStateError, match="recovery secrets"):
         WorkspacePathSpec(".vault-key", WorkspaceStateClass.SECRET_RECOVERY, required=False)
     with pytest.raises(WorkspaceStateError):
         WorkspaceIdentity("synthetic-secret-key", root)
@@ -280,6 +282,74 @@ def test_runtime_registry_binds_existing_persistence_roots_without_scanning(tmp_
     )
     assert calendar_spec.state_class is WorkspaceStateClass.SECRET
     assert calendar_spec.required is False
+
+
+@pytest.mark.parametrize(
+    ("logical_path", "expected"),
+    [
+        (".vault-key", AgentWorkspaceAccess.DENIED),
+        ("google_calendar_token.json", AgentWorkspaceAccess.DENIED),
+        ("seraph.db", AgentWorkspaceAccess.DENIED),
+        ("seraph.db-wal", AgentWorkspaceAccess.DENIED),
+        ("seraph.db-shm", AgentWorkspaceAccess.DENIED),
+        ("seraph.db-journal", AgentWorkspaceAccess.DENIED),
+        ("mcp-servers.json", AgentWorkspaceAccess.DENIED),
+        ("stdio-proxies.json", AgentWorkspaceAccess.DENIED),
+        (".VAULT-KEY", AgentWorkspaceAccess.DENIED),
+        ("Seraph.DB-Wal", AgentWorkspaceAccess.DENIED),
+        (".vault-\u212aey", AgentWorkspaceAccess.DENIED),
+        ("artifacts/mail/private/message.json", AgentWorkspaceAccess.DENIED),
+        ("artifacts/mail/summary.md", AgentWorkspaceAccess.READ_WRITE),
+        ("starter-packs.json", AgentWorkspaceAccess.READ_ONLY),
+        ("extensions-state.json", AgentWorkspaceAccess.READ_ONLY),
+        ("model-fabric-settings.json", AgentWorkspaceAccess.READ_ONLY),
+        ("extensions/pack/manifest.yaml", AgentWorkspaceAccess.READ_ONLY),
+        ("daemon-status.json", AgentWorkspaceAccess.READ_ONLY),
+        ("lance/memories", AgentWorkspaceAccess.READ_ONLY),
+        ("cache/entry", AgentWorkspaceAccess.READ_ONLY),
+        ("notes/today.md", AgentWorkspaceAccess.READ_WRITE),
+        ("plans/q4.md", AgentWorkspaceAccess.READ_WRITE),
+        ("reports/weekly.md", AgentWorkspaceAccess.READ_WRITE),
+        ("artifacts/reports/daily.md", AgentWorkspaceAccess.READ_WRITE),
+        ("soul.md", AgentWorkspaceAccess.READ_WRITE),
+        ("tmp/scratch", AgentWorkspaceAccess.READ_WRITE),
+        ("projects/app/main.py", AgentWorkspaceAccess.READ_WRITE),
+        ("my-seraph.db", AgentWorkspaceAccess.READ_WRITE),
+        ("seraph.dbx", AgentWorkspaceAccess.DENIED),
+        ("seraph.db.bak", AgentWorkspaceAccess.DENIED),
+        (".vault-key.old", AgentWorkspaceAccess.DENIED),
+        ("google_calendar_token.json.bak", AgentWorkspaceAccess.DENIED),
+        ("evolution/runtime-state.json", AgentWorkspaceAccess.READ_ONLY),
+        (".seraph-extension-lifecycle.lock", AgentWorkspaceAccess.READ_ONLY),
+        (".seraph-workspace-maintenance.lock", AgentWorkspaceAccess.READ_ONLY),
+        ("artifacts/tool-package-runtime/profile/state.json", AgentWorkspaceAccess.READ_ONLY),
+        ("background-inference-settings.json", AgentWorkspaceAccess.READ_ONLY),
+        ("notes/../seraph.db", AgentWorkspaceAccess.DENIED),
+        ("/seraph.db", AgentWorkspaceAccess.DENIED),
+    ],
+)
+def test_runtime_registry_agent_access_follows_state_classes(tmp_path, logical_path, expected):
+    assert canonical_workspace_registry(tmp_path).agent_workspace_access(logical_path) is expected
+
+
+def test_canonical_agent_access_classifies_resolved_paths(tmp_path):
+    root = tmp_path.resolve()
+
+    assert canonical_agent_workspace_access(root, root / ".vault-key") is AgentWorkspaceAccess.DENIED
+    assert canonical_agent_workspace_access(root, root / "notes" / "a.md") is AgentWorkspaceAccess.READ_WRITE
+    assert canonical_agent_workspace_access(root, root) is AgentWorkspaceAccess.READ_WRITE
+    assert canonical_agent_workspace_access(root, root.parent / "elsewhere") is AgentWorkspaceAccess.DENIED
+
+
+def test_canonical_agent_access_matches_aliases_by_file_identity(tmp_path):
+    root = tmp_path.resolve()
+    (root / ".vault-key").write_text("key\n", encoding="utf-8")
+    (root / "notes").mkdir()
+    (root / "notes" / "alias.md").hardlink_to(root / ".vault-key")
+    (root / "notes" / "plain.md").write_text("ok\n", encoding="utf-8")
+
+    assert canonical_agent_workspace_access(root, root / "notes" / "alias.md") is AgentWorkspaceAccess.DENIED
+    assert canonical_agent_workspace_access(root, root / "notes" / "plain.md") is AgentWorkspaceAccess.READ_WRITE
 
 
 def test_artifact_persistence_consumes_runtime_registry(tmp_path, monkeypatch):
@@ -480,7 +550,7 @@ def test_production_inventory_reports_missing_declared_paths_as_degraded(tmp_pat
     assert receipt["blocked_reasons"] == []
 
 
-def test_production_inventory_allows_missing_optional_secret_and_marks_degraded(tmp_path):
+def test_production_inventory_allows_missing_optional_secret_without_degrading(tmp_path):
     root, config = _make_production_workspace(tmp_path)
     config = WorkspaceConfig(
         identity=config.identity,
@@ -490,11 +560,12 @@ def test_production_inventory_allows_missing_optional_secret_and_marks_degraded(
     manifest = WorkspaceStateRegistry(config).build_manifest()
     receipt = WorkspaceStateRegistry(config).build_inventory_receipt()
 
-    assert manifest["inventory"]["status"] == "degraded"
-    assert manifest["inventory"]["missing_declared_paths"] == ["optional-token.json"]
+    # An absent optional credential is the normal default, not degradation.
+    assert manifest["inventory"]["status"] == "ready"
+    assert manifest["inventory"]["missing_declared_paths"] == []
     assert manifest["inventory"]["required_secret_paths"] == ["secret.bin"]
     assert manifest["inventory"]["optional_secret_paths"] == ["optional-token.json"]
-    assert receipt["status"] == "degraded"
+    assert receipt["status"] == "ready"
     assert receipt["required_secret_paths"] == ["secret.bin"]
     assert receipt["optional_secret_paths"] == ["optional-token.json"]
 
@@ -564,3 +635,54 @@ def test_production_inventory_requires_a_real_explicit_root(tmp_path):
     assert linked_receipt["status"] == "blocked"
     assert linked_receipt["blocked_reasons"] == ["unsupported_or_symlink_entry"]
     assert str(linked_root) not in json.dumps(linked_receipt, sort_keys=True)
+
+
+def test_optional_paths_are_not_missing_or_degraded_when_absent(tmp_path):
+    root, config = _make_production_workspace(tmp_path)
+    production = WorkspaceConfig(identity=config.identity, declared_paths=(*config.declared_paths,
+        WorkspacePathSpec("optional-settings.json", WorkspaceStateClass.CANONICAL, required=False)))
+    assert WorkspaceStateRegistry(production).build_manifest()["inventory"]["missing_declared_paths"] == []
+    synthetic_root, synthetic = _make_workspace(tmp_path)
+    # A synthetic fixture root does not need optional files either.
+    optional = WorkspaceConfig(identity=synthetic.identity, declared_paths=(*synthetic.declared_paths,
+        WorkspacePathSpec("optional-settings.json", WorkspaceStateClass.CANONICAL, required=False)),
+        external_references=synthetic.external_references, expected_database_objects=synthetic.expected_database_objects)
+    manifest = WorkspaceStateRegistry(optional).build_manifest()
+    assert "optional-settings.json" not in {entry["logical_path"] for entry in manifest["entries"]}
+    with pytest.raises(WorkspaceStateError):
+        WorkspacePathSpec(".vault-key", WorkspaceStateClass.SECRET_RECOVERY, required=False)
+
+
+# Literal path components that follow a non-root base (for example the
+# extensions package root) rather than the workspace root itself.
+_NESTED_LITERALS = frozenset({"manifest.yaml"})
+
+
+def test_every_literal_workspace_root_writer_is_declared(tmp_path):
+    """Regression guard: a new top-level workspace writer must be registered.
+
+    An undeclared top-level entry makes every production backup fail with
+    workspace_state_invalid (unknown_workspace_path), so scan the backend for
+    paths joined directly onto the workspace root and classify each one.
+    """
+    import re
+    pattern = re.compile(r'workspace_dir(?:\)|\b)(?:\)?\.expanduser\(\))?(?:\.resolve\(\))?\)?\s*(?:/|,)\s*f?["\']([^"\'{}]+?)["\'/]')
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    found: dict[str, str] = {}
+    for path in source_root.rglob("*.py"):
+        if "evals" in path.relative_to(source_root).parts:
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for match in pattern.finditer(line):
+                found.setdefault(match.group(1).split("/")[0], f"{path.relative_to(source_root)}:{number}")
+    assert {".seraph-extension-lifecycle.lock", "evolution", "background-inference-settings.json"} <= set(found)
+    registry = canonical_workspace_registry(str(tmp_path))
+    unknown = []
+    for name, location in sorted(found.items()):
+        if name in _NESTED_LITERALS:
+            continue
+        try:
+            registry.classify_path(name)
+        except UnknownWorkspacePathError:
+            unknown.append(f"{name} ({location})")
+    assert unknown == [], "undeclared workspace root writers: " + ", ".join(unknown)

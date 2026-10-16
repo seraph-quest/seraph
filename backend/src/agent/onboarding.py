@@ -2,9 +2,10 @@
 
 import re
 
-from smolagents import ToolCallingAgent, tool
+from smolagents import tool
 
 from config.settings import settings
+from src.agent.tool_calling_agent import ToolCallingAgent
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.tools.browser_tool import browse_webpage as base_browse_webpage
 from src.tools.soul_tool import view_soul, update_soul

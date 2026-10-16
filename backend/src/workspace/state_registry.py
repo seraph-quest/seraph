@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -26,6 +27,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import sqlite3
 import stat
 from typing import Any, Mapping
+import unicodedata
 from urllib.parse import quote
 
 
@@ -248,6 +250,35 @@ _STATE_CLASS_ROLES: dict[str, str] = {
 }
 
 
+class AgentWorkspaceAccess(str, Enum):
+    """File access an agent tool may take on one workspace path.
+
+    Runtime code owns its registry paths through dedicated APIs; this is the
+    narrower view exposed to agent file tools, which must not bypass those
+    owners.
+    """
+
+    READ_WRITE = "read_write"
+    READ_ONLY = "read_only"
+    DENIED = "denied"
+
+
+_AGENT_ACCESS_RANK = {
+    AgentWorkspaceAccess.READ_WRITE: 0,
+    AgentWorkspaceAccess.READ_ONLY: 1,
+    AgentWorkspaceAccess.DENIED: 2,
+}
+_DATABASE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _strictest_agent_access(accesses: Any) -> AgentWorkspaceAccess:
+    return max(accesses, key=_AGENT_ACCESS_RANK.__getitem__, default=AgentWorkspaceAccess.READ_WRITE)
+
+
+def _is_under_any(logical_path: str, roots: frozenset[str]) -> bool:
+    return any(logical_path == root or logical_path.startswith(f"{root}/") for root in roots)
+
+
 class ExternalReferencePolicy(str, Enum):
     """Non-secret policies for logical references that are not local paths."""
 
@@ -373,9 +404,12 @@ class WorkspacePathSpec:
 
     logical_path: str
     state_class: WorkspaceStateClass
-    # Requiredness is currently used for secret/recovery material.  Production
-    # integrations may declare optional credentials without weakening the
-    # fail-closed rule for recovery keys and other required secrets.
+    # Requiredness is used for secret/recovery material and for canonical
+    # operator preferences that exist only after the operator first saves
+    # them. Production integrations may declare optional credentials without
+    # weakening the fail-closed rule for recovery keys and other required
+    # secrets; an optional canonical file is archived when present and its
+    # absence (for example in an older archive) is not an error.
     required: bool = True
 
     def __post_init__(self) -> None:
@@ -388,9 +422,9 @@ class WorkspacePathSpec:
             raise WorkspaceStateError("external-reference state must use ExternalReferenceSpec, not a local path")
         if not isinstance(self.required, bool):
             raise WorkspaceStateError("workspace path requiredness must be boolean")
-        if not self.required and state_class is not WorkspaceStateClass.SECRET:
+        if not self.required and state_class is WorkspaceStateClass.SECRET_RECOVERY:
             raise WorkspaceStateError(
-                "only ordinary secret credentials may be declared optional"
+                "recovery secrets cannot be declared optional"
             )
         object.__setattr__(self, "logical_path", logical_path)
         object.__setattr__(self, "state_class", state_class)
@@ -782,6 +816,88 @@ class WorkspaceStateRegistry:
         normalized = _normalize_relative_path(logical_path, field_name="logical_path")
         return self._declared_spec(normalized)
 
+    def agent_workspace_access(self, logical_path: str) -> AgentWorkspaceAccess:
+        """Return the access agent file tools may take on one logical path.
+
+        Secret classes, the database and its sidecars, and declared paths
+        that may carry inline credentials are denied outright.  Other
+        runtime-owned state (derived, cache, and canonical settings with an
+        owning API) is read-only.  Operator content roots, disposable scratch
+        space, and undeclared project files stay read/write.  A path the
+        registry cannot classify deterministically is denied.
+
+        Workspace roots may live on case- or normalization-insensitive
+        filesystems (APFS, NTFS), so the NFC-normalised, casefolded spelling
+        of a protected path is held to the protected path's access.
+        """
+        try:
+            normalized = _normalize_relative_path(logical_path, field_name="logical_path")
+        except WorkspaceStateError:
+            return AgentWorkspaceAccess.DENIED
+        folded = unicodedata.normalize("NFC", normalized).casefold()
+        return _strictest_agent_access(self._agent_access_for(candidate) for candidate in {normalized, folded})
+
+    def agent_protected_paths(self) -> tuple[tuple[str, AgentWorkspaceAccess], ...]:
+        """Return each declared logical path agents may not freely write."""
+        candidates = {
+            *(spec.logical_path for spec in self.config.declared_paths),
+            *_AGENT_DENIED_RUNTIME_PATHS,
+            *_AGENT_READ_ONLY_RUNTIME_PATHS,
+        }
+        protected = (
+            (logical_path, self.agent_workspace_access(logical_path)) for logical_path in sorted(candidates)
+        )
+        return tuple(item for item in protected if item[1] is not AgentWorkspaceAccess.READ_WRITE)
+
+    def _agent_access_for(self, logical_path: str) -> AgentWorkspaceAccess:
+        if _is_under_any(logical_path, _AGENT_DENIED_RUNTIME_PATHS):
+            return AgentWorkspaceAccess.DENIED
+        try:
+            spec = self._declared_spec(logical_path)
+        except UnknownWorkspacePathError:
+            return self._undeclared_agent_access(logical_path)
+        except WorkspaceStateError:
+            return AgentWorkspaceAccess.DENIED
+        state_class = spec.state_class
+        if state_class in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY} or (
+            spec.logical_path in self._database_files()
+        ):
+            return AgentWorkspaceAccess.DENIED
+        if (
+            state_class in {WorkspaceStateClass.DERIVED, WorkspaceStateClass.CACHE}
+            or _is_under_any(logical_path, _AGENT_READ_ONLY_RUNTIME_PATHS)
+            or logical_path.startswith(_AGENT_RUNTIME_NAME_PREFIX)
+        ):
+            return AgentWorkspaceAccess.READ_ONLY
+        if state_class in {WorkspaceStateClass.CANONICAL, WorkspaceStateClass.DISPOSABLE}:
+            return AgentWorkspaceAccess.READ_WRITE
+        return AgentWorkspaceAccess.DENIED
+
+    def _database_files(self) -> set[str]:
+        database_path = self.config.database_path
+        return {database_path, *(f"{database_path}{suffix}" for suffix in _DATABASE_SIDECAR_SUFFIXES)}
+
+    def _undeclared_agent_access(self, logical_path: str) -> AgentWorkspaceAccess:
+        """Undeclared paths are project files unless they sit in runtime space.
+
+        Runtime writers outside the declarations (lock files, runtime state
+        directories) are read-only.  A top-level copy of secret or database
+        state, such as ``seraph.db.bak`` or ``.vault-key.old``, is denied.
+        """
+        if _is_under_any(logical_path, _AGENT_READ_ONLY_RUNTIME_PATHS):
+            return AgentWorkspaceAccess.READ_ONLY
+        top_level = logical_path.split("/", 1)[0]
+        protected_names = self._database_files() | {
+            spec.logical_path
+            for spec in self.config.declared_paths
+            if spec.state_class in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY}
+        }
+        if any(top_level.startswith(name) for name in protected_names):
+            return AgentWorkspaceAccess.DENIED
+        if top_level.startswith(_AGENT_RUNTIME_NAME_PREFIX):
+            return AgentWorkspaceAccess.READ_ONLY
+        return AgentWorkspaceAccess.READ_WRITE
+
     def _validated_root(self) -> Path:
         root = self.config.identity.root
         try:
@@ -839,6 +955,10 @@ class WorkspaceStateRegistry:
             try:
                 candidate_stat = candidate.lstat()
             except FileNotFoundError as exc:
+                if not spec.required:
+                    # Optional state (written only on first use) is neither
+                    # missing nor degraded when absent, on any root kind.
+                    continue
                 if (
                     self.config.identity.root_kind is WorkspaceRootKind.PRODUCTION
                     and missing_declared_paths is not None
@@ -1392,6 +1512,7 @@ class WorkspaceStateRegistry:
 
 
 __all__ = [
+    "AgentWorkspaceAccess",
     "AmbiguousWorkspaceRootsError",
     "ExternalReferencePolicy",
     "ExternalReferenceSpec",
@@ -1420,6 +1541,8 @@ __all__ = [
     "DEFAULT_MAX_INVENTORY_DEPTH",
     "DEFAULT_MAX_INVENTORY_TOTAL_BYTES",
     "DEFAULT_MAX_INVENTORY_FILE_BYTES",
+    "AgentAccessIndex",
+    "canonical_agent_workspace_access",
     "canonical_workspace_config",
     "canonical_workspace_database_path",
     "canonical_workspace_inventory",
@@ -1461,11 +1584,14 @@ _RUNTIME_PATH_SPECS = (
     ("starter-packs.json", WorkspaceStateClass.CANONICAL),
     ("model-fabric-settings.json", WorkspaceStateClass.CANONICAL),
     ("screen-analysis-settings.json", WorkspaceStateClass.CANONICAL),
+    ("background-inference-settings.json", WorkspaceStateClass.CANONICAL),
+    ("evolution", WorkspaceStateClass.CANONICAL),
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
     (".seraph-extension-snapshots", WorkspaceStateClass.DERIVED),
     (".seraph-workspace-maintenance.lock", WorkspaceStateClass.DERIVED),
+    (".seraph-extension-lifecycle.lock", WorkspaceStateClass.DISPOSABLE),
     ("seraph.db-wal", WorkspaceStateClass.DERIVED),
     ("seraph.db-shm", WorkspaceStateClass.DERIVED),
     ("seraph.db-journal", WorkspaceStateClass.DERIVED),
@@ -1475,6 +1601,41 @@ _RUNTIME_PATH_SPECS = (
     ("google_calendar_token.json", WorkspaceStateClass.SECRET),
 )
 _OPTIONAL_RUNTIME_SECRET_PATHS = frozenset({"google_calendar_token.json"})
+# Written only when the operator first changes a background inference toggle;
+# absent means every job keeps its default and older archives restore cleanly.
+# Evolution proposals and evaluator receipts are operator state written by the
+# harness runtime only after first use (its .lock sits beside the state file).
+# The extension lifecycle lock is an fcntl lock file: never archived.
+_OPTIONAL_RUNTIME_CANONICAL_PATHS = frozenset({"background-inference-settings.json", "evolution"})
+_OPTIONAL_RUNTIME_TRANSIENT_PATHS = frozenset({".seraph-extension-lifecycle.lock"})
+# Canonical runtime state agent file tools may neither read nor write: MCP
+# server and stdio proxy settings (inline credentials are possible, and an
+# edit reconfigures tool egress outside the Settings consent flow) and private
+# mail artifacts, which are readable only through mail read consent.
+_AGENT_DENIED_RUNTIME_PATHS = frozenset({"mcp-servers.json", "stdio-proxies.json", MAIL_PRIVATE_ARTIFACT_ROOT})
+# Canonical runtime state owned by a settings or install API.  Agents may
+# inspect it, but a direct file edit would bypass that owner's validation and
+# consent path (extension enablement, starter packs, model routes, screen
+# analysis consent).
+_AGENT_READ_ONLY_RUNTIME_PATHS = frozenset(
+    {
+        "extensions",
+        "extensions-state.json",
+        "starter-packs.json",
+        "model-fabric-settings.json",
+        "screen-analysis-settings.json",
+        "background-inference-settings.json",
+        # Operator proposal state; only the evolution runtime writes it.
+        "evolution",
+        # A runtime writer nested inside the canonical ``artifacts`` root,
+        # which the registry cannot declare separately (overlapping roots
+        # are rejected); agent policy covers it by location.
+        "artifacts/tool-package-runtime",
+    }
+)
+# Top-level ``.seraph-*`` names are reserved for runtime locks, snapshots and
+# maintenance state, declared or not.
+_AGENT_RUNTIME_NAME_PREFIX = ".seraph-"
 
 
 def canonical_workspace_root(root: str | os.PathLike[str]) -> Path:
@@ -1532,7 +1693,8 @@ def canonical_workspace_config(root: str | os.PathLike[str]) -> WorkspaceConfig:
             WorkspacePathSpec(
                 path,
                 state_class,
-                required=path not in _OPTIONAL_RUNTIME_SECRET_PATHS,
+                required=path not in (_OPTIONAL_RUNTIME_SECRET_PATHS | _OPTIONAL_RUNTIME_CANONICAL_PATHS
+                    | _OPTIONAL_RUNTIME_TRANSIENT_PATHS),
             )
             for path, state_class in _RUNTIME_PATH_SPECS
         ),
@@ -1584,6 +1746,94 @@ def production_workspace_inventory(root: str | os.PathLike[str]) -> dict[str, An
 def canonical_workspace_inventory(root: str | os.PathLike[str]) -> dict[str, Any]:
     """Compatibility name for the production inventory receipt boundary."""
     return production_workspace_inventory(root)
+
+
+@lru_cache(maxsize=8)
+def _agent_access_registry(root: str) -> WorkspaceStateRegistry:
+    # Directory searches classify every candidate file; the canonical config
+    # depends only on the resolved root, so build it once per root.
+    return canonical_workspace_registry(root)
+
+
+@lru_cache(maxsize=8)
+def _agent_protected_paths(root: str) -> tuple[tuple[str, AgentWorkspaceAccess], ...]:
+    return _agent_access_registry(root).agent_protected_paths()
+
+
+class AgentAccessIndex:
+    """Agent access for one canonical root, built once per check or scan.
+
+    Building the index lstat()s each protected registry path once.  A
+    directory scan then classifies every entry by name (no syscalls) and by
+    the entry's own inode, instead of rebuilding that table per file.
+    """
+
+    def __init__(self, root: str | os.PathLike[str]) -> None:
+        self.root: Path | None
+        try:
+            self.root = canonical_workspace_root(root)
+            self._registry = _agent_access_registry(str(self.root))
+        except WorkspaceStateError:
+            self.root = None
+            return
+        self._identities: dict[tuple[int, int], AgentWorkspaceAccess] = {}
+        for logical_path, access in _agent_protected_paths(str(self.root)):
+            try:
+                metadata = (self.root / logical_path).lstat()
+            except OSError:
+                continue
+            key = (metadata.st_dev, metadata.st_ino)
+            self._identities[key] = _strictest_agent_access((self._identities.get(key, access), access))
+
+    def access(
+        self,
+        resolved_path: str | os.PathLike[str],
+        *,
+        include_ancestors: bool = True,
+    ) -> AgentWorkspaceAccess:
+        """Classify an already-resolved path.
+
+        Callers resolve traversal and symlinks first, so the registry judges
+        the file the tool will actually open rather than the spelling it was
+        given.  Anything outside the canonical root, or under a root the
+        registry cannot bind, is denied.  A top-down scan that has already
+        classified each parent directory may skip ``include_ancestors``.
+        """
+        if self.root is None:
+            return AgentWorkspaceAccess.DENIED
+        try:
+            relative = Path(resolved_path).relative_to(self.root)
+        except ValueError:
+            return AgentWorkspaceAccess.DENIED
+        if not relative.parts:
+            # The root directory itself is not a file; recursive searches
+            # check its children individually.
+            return AgentWorkspaceAccess.READ_WRITE
+        access = self._registry.agent_workspace_access(relative.as_posix())
+        if access is AgentWorkspaceAccess.DENIED or not self._identities:
+            return access
+        # Name folding cannot model every filesystem's equivalence rules, and
+        # hard links give one file several names.  Matching (st_dev, st_ino)
+        # against the protected paths catches any alias that opens them.
+        depths = range(len(relative.parts), 0, -1) if include_ancestors else (len(relative.parts),)
+        matched = [access]
+        for depth in depths:
+            try:
+                metadata = self.root.joinpath(*relative.parts[:depth]).lstat()
+            except OSError:
+                continue
+            identity_access = self._identities.get((metadata.st_dev, metadata.st_ino))
+            if identity_access is not None:
+                matched.append(identity_access)
+        return _strictest_agent_access(matched)
+
+
+def canonical_agent_workspace_access(
+    root: str | os.PathLike[str],
+    resolved_path: str | os.PathLike[str],
+) -> AgentWorkspaceAccess:
+    """Classify one already-resolved path for agent file and process tools."""
+    return AgentAccessIndex(root).access(resolved_path)
 
 
 def canonical_workspace_database_path(root: str | os.PathLike[str]) -> Path:

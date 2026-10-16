@@ -298,6 +298,23 @@ async def _ensure_inference_group_lookup(conn) -> None:
         "ON inference_cost_reservations (owner_id, group_lookup_key)")
 
 
+async def _ensure_inference_ledger_v2_columns(conn) -> None:
+    """Add the #1086 derived row digest and running totals (filled by the ledger writer)."""
+    reservation_columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_cost_reservations)")).fetchall()}
+    if reservation_columns and "ledger_row_digest" not in reservation_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_cost_reservations ADD COLUMN ledger_row_digest VARCHAR")
+    if reservation_columns:
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_inference_cost_reservations_row_digest "
+            "ON inference_cost_reservations (operation_id, ledger_row_digest)")
+    owner_columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_accounting_owners)")).fetchall()}
+    if owner_columns and "ledger_totals_json" not in owner_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_accounting_owners ADD COLUMN ledger_totals_json VARCHAR NOT NULL DEFAULT ''")
+
+
 async def _ensure_legacy_columns(conn) -> None:
     """Backfill columns for older local SQLite databases."""
     async def _table_columns(table_name: str) -> set[str]:
@@ -2019,6 +2036,22 @@ async def _ensure_procedure_v2_binding(conn) -> None:
         )
 
 
+async def _ensure_forgejo_form_profiles(conn) -> None:
+    """Preserve existing title/consent rows; defaults confer no form authority."""
+    result = await conn.exec_driver_sql("PRAGMA table_info(forgejo_connections)")
+    existing = {row[1] for row in result.fetchall()}
+    if not existing:
+        return
+    from src.browser.forgejo_forms import EMPTY_FORM_PROFILES
+    additions = {
+        "reviewed_form_profiles_json": "VARCHAR DEFAULT '" + EMPTY_FORM_PROFILES + "'",
+        "form_profiles_revision": "INTEGER DEFAULT 0",
+    }
+    for column, sql_type in additions.items():
+        if column not in existing:
+            await conn.exec_driver_sql(f"ALTER TABLE forgejo_connections ADD COLUMN {column} {sql_type}")
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -2040,6 +2073,7 @@ async def init_db() -> None:
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
         await _ensure_inference_group_lookup(conn)
+        await _ensure_inference_ledger_v2_columns(conn)
         await _ensure_operator_session_columns(conn)
         await _ensure_vault_owner(conn)
         await _ensure_operator_principals(conn)
@@ -2055,6 +2089,7 @@ async def init_db() -> None:
         await _ensure_repo_repair_columns(conn)
         await _ensure_mail_columns(conn)
         await _ensure_connection_sync_columns(conn)
+        await _ensure_forgejo_form_profiles(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)

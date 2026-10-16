@@ -134,10 +134,12 @@ async def selected_outputs(db,parent,manifest,callbacks,step_ids):
             if len(producer)!=1:
                 deny()
             if json.loads(producer[0].arguments_json or '{}').get('tool_id')=='write_file':
-                from src.tools.filesystem_tool import _safe_resolve,_assert_not_secret_like_path
+                from src.tools.filesystem_tool import _safe_resolve,_assert_not_secret_like_path,assert_agent_readable
                 output=body['output']
                 _assert_not_secret_like_path(output['file_path'],'partial_result_readback')
-                _safe_file_bytes(_safe_resolve(output['file_path']),expected_digest=output['content_sha256'],
+                resolved=_safe_resolve(output['file_path'])
+                assert_agent_readable(resolved,file_path=output['file_path'],operation='partial_result_readback')
+                _safe_file_bytes(resolved,expected_digest=output['content_sha256'],
                     expected_size=output['bytes_written'])
             outputs.append(SpecialistPartialOutputV1(step_id=step_id,child_task_id=reservation.child_task_id,
                 child_job_id=child.run_identity,artifact_id=record['artifact_id'],file_path=record['file_path'],

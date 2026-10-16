@@ -139,6 +139,7 @@ class TestSchedulerEngine:
                     "screen_cleanup",
                     "audio_ingress_cleanup",
                     "cordis_mail_retention",
+                    "inference_ledger_verification",
                     "work_board_dispatch",
                     "guardian_opportunity_assessment",
                     "goal_public_discovery",

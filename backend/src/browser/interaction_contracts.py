@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -42,12 +43,67 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class BrowserConnection(Strict):
+    """Read-only canonical projection; no reusable credential or write scope."""
+    owner: str = Field(min_length=1, max_length=128)
+    site_origin: Literal["https://codeberg.org"]
+    profile_ref: Literal["forgejo.issue-create.v1", "forgejo.issue-comment.v1"]
+    credential_ref: str = Field(pattern=r"^credential-binding:[a-f0-9]{64}$")
+    expiry: datetime
+    read_scope: Literal["forgejo_private_read"]
+    revision: int = Field(ge=1)
+
+
+class FormTransaction(Strict):
+    """Exact reviewed source/body and single submit; private literals live elsewhere."""
+    profile_ref: Literal["forgejo.issue-create.v1", "forgejo.issue-comment.v1"]
+    page_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    form_identity: str = Field(pattern=r"^[a-f0-9]{64}$")
+    field_digests: dict[str, str] = Field(max_length=10)
+    submit_node: Literal["new-issue:ordinary-primary", "comment-form:ordinary-primary"]
+    expected_destination: str = Field(min_length=1, max_length=256)
+    readback_contract: Literal["numeric-basic-api-full-literal.v1"]
+    encoded_body_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    mutation_allowance: Literal[1] = 1
+
+    @field_validator("mutation_allowance", mode="before")
+    @classmethod
+    def one_literal_mutation(cls,value):
+        if type(value) is not int or value!=1:
+            raise ValueError("one literal mutation required")
+        return value
+
+    @model_validator(mode="after")
+    def exact_profile(self):
+        names=set(self.field_digests)
+        create={"title","content","ref","edit_mode","search","label_ids","milestone_id","project_id","assignee_ids"}
+        allowed=(create,) if self.profile_ref=="forgejo.issue-create.v1" else ({"content"},)
+        if names not in allowed or any(not re.fullmatch(r"[a-f0-9]{64}",value) for value in self.field_digests.values()):
+            raise ValueError("exact Forgejo field digests required")
+        expected="new-issue:ordinary-primary" if self.profile_ref=="forgejo.issue-create.v1" else "comment-form:ordinary-primary"
+        if self.submit_node!=expected or type(self.mutation_allowance) is not int or self.mutation_allowance!=1:
+            raise ValueError("one exact ordinary submit required")
+        return self
+
+
+# File inputs and uploads stay unsupported (C5.3): page handlers can transfer
+# bytes at file selection, so these are refused before any page event.
+UPLOAD_ACTION_KINDS = frozenset({"upload", "set_input_files", "file_select", "choose_file", "attach_file"})
+
+
 class BrowserActionV2(Strict):
     schema_version: Literal[2] = 2
     kind: Literal["navigate", "extract", "click", "fill", "select", "check", "wait"]
     locator_ref: str | None = Field(default=None, pattern=r"^node-[a-f0-9]{32}$")
     expected_page_revision: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_value_ref: str | None = Field(default=None, pattern=r"^value-[a-f0-9]{32}$")
+
+    @model_validator(mode="before")
+    @classmethod
+    def uploads_unsupported(cls, value):
+        if isinstance(value, dict) and value.get("kind") in UPLOAD_ACTION_KINDS:
+            raise ValueError("browser_upload_unsupported")
+        return value
 
     @field_validator("schema_version", mode="before")
     @classmethod

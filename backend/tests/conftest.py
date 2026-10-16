@@ -16,7 +16,6 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
-os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 os.environ.setdefault("CAPABILITY_JOURNAL_SECRET", "test-capability-journal-secret")
 
 
@@ -249,6 +248,17 @@ def reset_bounded_snapshot_cache():
     _reset_bounded_guardian_snapshot_cache()
     yield
     _reset_bounded_guardian_snapshot_cache()
+
+
+@pytest.fixture(autouse=True)
+def inference_ledger_shadow_oracle(monkeypatch):
+    """#1086: every accounting test also checks bounded verification against
+    the pre-#1086 full-ledger decisions, and starts from a fresh process view."""
+    from src.workflows import inference_ledger
+    inference_ledger.reset_process_state()
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", True)
+    yield
+    inference_ledger.reset_process_state()
 
 
 @pytest.fixture(autouse=True)

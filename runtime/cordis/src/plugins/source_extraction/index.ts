@@ -15,7 +15,8 @@ export const FORMAT_PROVIDERS = Object.freeze({
   'rss-atom': (body: string) => feedText(body),
 });
 export type FormatProvider = keyof typeof FORMAT_PROVIDERS;
-export const SOURCE_MEDIA_TYPES = Object.freeze(['text/plain', 'text/html', 'application/rss+xml', 'application/atom+xml'] as const);
+// Feeds are often served as generic XML; those types use the same strict feed reader.
+export const SOURCE_MEDIA_TYPES = Object.freeze(['text/plain', 'text/html', 'application/rss+xml', 'application/atom+xml', 'application/xml', 'text/xml'] as const);
 export interface SourceExtractionConfig { formats: Partial<Record<(typeof SOURCE_MEDIA_TYPES)[number], FormatProvider>>; }
 
 export const MAX_NORMALIZED_BYTES = 65_536;

@@ -45,10 +45,17 @@ def test_linear_python_normalizer_equals_the_original_regex_form():
     from src.guardian.source_watch import normalize_source_text
     small = ["<a<b>c", "<>x<>", "<!--<!-- a -->b-->", "<!-->x-->y", "<script>a<script>b</script>c</script>",
              "<SCRIPT >x</ScRiPt\t>y", "<style>x</script>y</style>z", "<scriptx>a</scriptx>", "<noscript>n</noscript >",
-             "<script>unclosed", "<script x='>'>y</script>z", "<ſcript>s</script>t"]
-    for text in [*_corpus(), *_case_fold_corpus(1000), *small, *(value[:2000] for value in ADVERSARIAL.values())]:
+             "<script>unclosed", "<script x='>'>y</script>z", "<ſcript>s</script>t", *FOLD_CLOSING]
+    for text in [*_corpus(), *_case_fold_corpus(15000), *small, *(value[:2000] for value in ADVERSARIAL.values())]:
         for flag in (True, False):
             assert normalize_source_text(text, html_content=flag) == _reference_normalize(text, html_content=flag), text
+
+
+# ``İ`` lowercases to ``i`` under CPython's re.I backreference, ``ı``/``ſ`` only to
+# themselves: the closing tag of a script/style element follows that rule.
+FOLD_CLOSING = ["<ScRiPT>x</SCRİPT>y", "<scrİpt>x</script>y", "<scrİpt>x</SCRIPT>y", "<SCRİPT>x</scrİpt>y",
+                "<scrıpt>x</scrİpt>y", "<scrİpt>x</scrıpt>y", "<scrıpt>x</script>y", "<ſcript>x</script>y",
+                "<script>x</ſcript>y", "<ſtyle>x</ſtyle>y", "<noscrİpt>x</NOSCRIPT >y", "<NosCripT>m</noscrİPt >n"]
 
 
 def _case_fold_corpus(count=3000):
@@ -85,7 +92,7 @@ def test_html_provider_matches_python_normalize_source_text():
               "const cases = JSON.parse(input);"
               "process.stdout.write(JSON.stringify(cases.map(([text, html]) => normalizeSourceText(text, html))));")
     cases += _case_fold_corpus()
-    cases += ["<scrıpt>x</scrıpt>y", "<noscrıpt>x</noscrıpt>y", "a</dıv>b", "a</DİV>b",
+    cases += [*FOLD_CLOSING, "<scrıpt>x</scrıpt>y", "<noscrıpt>x</noscrıpt>y", "a</dıv>b", "a</DİV>b",
               "<a<b>c", "<>x<>", "<!--<!-- a -->b-->", "<script>a<script>b</script>c</script>", "<SCRIPT >x</ScRiPt\t>y",
               "<style>x</script>y</style>z", "<script>unclosed", "<ſcript>s</script>t", *(v[:4000] for v in ADVERSARIAL.values())]
     pairs = [[text, html] for text in cases for html in (True, False)]

@@ -699,7 +699,11 @@ export function PttAudioControl({ sessionId, disabled = false, endpoint = "/api/
         </label>
       </div>
       <label className="text-xs">Audio-only allowance (microusd, one call)<input aria-label="Audio-only allowance" type="number" min="1" max="1000000000" step="1" value={audioBudget} disabled={state !== "idle"} onChange={event => setAudioBudget(event.target.value)} /></label>
-      <p className="text-xs">Audio processing stays blocked without current endpoint, format, pricing and local decoder proof. This allowance is separate from any later Task.</p>
+      <p role="status" data-testid="voice-route-unavailable" className="text-xs">
+        Voice route unavailable: live transcription is not enabled in this build because no exact endpoint, format,
+        pricing and decoder proof is issued. Recording keeps a quarantined audio file only; type your request or use
+        paired Telegram instead. This allowance is separate from any later Task.
+      </p>
       <button
         type="button"
         disabled={captureDisabled || consentPending !== null || (!captureConsent && state === "idle") || (modelConsent && (!Number.isSafeInteger(Number(audioBudget)) || Number(audioBudget) <= 0)) || ["uploading", "processing", "confirming", "reloading", "cancelling", "requesting_capture", "review", "review_unavailable", "blocked", "unknown", "degraded", "error", "confirmed", "cancelled"].includes(state)}

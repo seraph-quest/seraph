@@ -117,13 +117,13 @@ async def test_actual_confirmed_native_message_publishes_one_review_task_without
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.asyncio
 async def test_authenticated_audio_api_separate_fresh_goal_task_action_and_exact_replay(client, execution, async_db, monkeypatch):
-    from tests.test_audio_native_execution import test_authenticated_api_capture_execution_confirmation_and_source_read
+    from tests.test_audio_native_execution import authenticated_api_corrected_transcript
     from src.api.work_board import dispatcher
     from src.db.models import AudioIngressJob, WorkBoardTask, InferenceCostReservation
     from sqlalchemy import select
     # Reuse the actual native producer's login, issued grants, physical capture,
     # final transport, settlement and exact corrected Message confirmation.
-    await test_authenticated_api_capture_execution_confirmation_and_source_read(client, execution, monkeypatch)
+    await authenticated_api_corrected_transcript(client, execution, monkeypatch)
     async with async_db() as db:
         audio = (await db.execute(select(AudioIngressJob).where(AudioIngressJob.status == "confirmed"))).scalars().one()
     service = GeneralTaskService(Registry(), planner=AsyncMock())
@@ -134,7 +134,7 @@ async def test_authenticated_audio_api_separate_fresh_goal_task_action_and_exact
     assert goal.status_code == 200, goal.text
     payload = {"confirmed_transcript_digest": audio.confirmed_transcript_digest,
         "task": {"goal_revision": goal.json()["revision"], "idempotency_key": "api-confirmed-original",
-            "input": {"goal_ref": goal.json()["id"], "intent": "Explicit corrected API intent",
+            "input": {"goal_ref": goal.json()["id"], "intent": "Corrected canonical intent",
                 "requested_output": {"type": "object"}, "inference_egress_acknowledged": True,
                 "limits": {"max_cost_microusd": 500, "max_inference_calls": 2}}}}
     first = await client.post(f"/api/audio/ptt/{audio.request_id}/task", json=payload, headers=origin)
@@ -157,7 +157,13 @@ async def test_authenticated_audio_api_separate_fresh_goal_task_action_and_exact
     assert plan.json()["plan"] is None and plan.json()["proposal_error"] == "channel_intent_review_required"
     assert plan.json()["accepted"] is False and plan.json()["no_learning"] is True
     async with async_db() as db:
-        assert len((await db.execute(select(WorkBoardTask))).scalars().all()) == 1
+        tasks = (await db.execute(select(WorkBoardTask))).scalars().all()
+        assert len(tasks) == 1
+        from src.work_board.dispatcher import _parse_typed_input
+        # The unexecuted Task carries the operator's corrected transcript, not
+        # the original provider text, and no work has run from it yet.
+        assert _parse_typed_input(tasks[0])["task_input"]["intent"] == "Corrected canonical intent"
+        assert tasks[0].status.value == "triage"
         cost = (await db.execute(select(InferenceCostReservation))).scalars().one()
         assert cost.actual_cost_microusd == 66 and cost.bound_microusd == 100
     service.planner.propose.assert_not_called()

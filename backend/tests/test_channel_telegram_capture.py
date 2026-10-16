@@ -550,3 +550,53 @@ async def test_actual_captured_task_native_pause_resume_keeps_original_attempt_a
         denied_plan = await client.get(f"/api/work-board/tasks/{task_id}/plan")
         assert denied_plan.status_code != 200
     await boundary.http.aclose()
+
+
+async def test_unpaired_sender_or_chat_and_replayed_event_create_no_work(client, async_db, setup_workspace, monkeypatch):
+    """Acceptance: an unpaired sender or a replayed provider event creates nothing."""
+    adapter, boundary, chosen, service = await selected_pair(client, monkeypatch)
+    async def task_count():
+        async with async_db() as db:
+            return len((await db.execute(select(WorkBoardTask))).scalars().all())
+    for update_id, sender, chat in ((61, 43, 77), (62, 42, 78), (63, 43, 78)):
+        foreign = await client.post("/api/telegram/updates", json={"update_id": update_id, "message": {
+            "message_id": 160 + update_id, "from": {"id": sender}, "chat": {"id": chat},
+            "text": "/task Unpaired sender must not create work"}})
+        assert foreign.status_code == 200, foreign.text
+        assert foreign.json()["status"] == "blocked", foreign.text
+        assert foreign.json()["reason_code"] == "telegram_identity_not_allowlisted"
+        assert foreign.json()["canonical_message_id"] is None and foreign.json().get("channel_task_capture") is None
+        assert await task_count() == 0
+    event = {"update_id": 64, "message": {"message_id": 164, "from": {"id": 42}, "chat": {"id": 77},
+        "text": "/task Paired original request"}}
+    first = await client.post("/api/telegram/updates", json=event)
+    assert first.status_code == 200 and first.json()["status"] == "accepted", first.text
+    task_id = first.json()["channel_task_capture"]["task_id"]
+    assert await task_count() == 1
+    replay = await client.post("/api/telegram/updates", json=event)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["channel_task_capture"]["task_id"] == task_id
+    assert replay.json()["channel_task_capture"]["idempotent_replay"] is True
+    # The same provider event id with different content is a replay, never new work.
+    altered = await client.post("/api/telegram/updates", json={**event, "message": {**event["message"],
+        "text": "/task Replayed id with different content"}})
+    assert altered.status_code == 200, altered.text
+    assert altered.json()["status"] == "blocked" and altered.json()["reason_code"] == "replay_conflict"
+    assert altered.json().get("channel_task_capture") is None
+    assert await task_count() == 1
+    # An unpaired sender cannot drive controls or reach the captured Task's private input.
+    async with async_db() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+        revision = task.task_revision
+    foreign_action = await client.post("/api/telegram/updates", json={"update_id": 65, "callback_query": {
+        "id": "foreign-callback", "from": {"id": 43}, "message": {"message_id": 1, "chat": {"id": 77}},
+        "data": f"inspect:{task_id}:{revision}"}})
+    assert foreign_action.status_code == 422, foreign_action.text
+    assert foreign_action.json()["detail"]["code"] == "telegram_callback_invalid"
+    async with async_db() as db:
+        task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
+        assert task.task_revision == revision and task.status.value == "triage"
+        assert not (await db.execute(select(WorkflowRunState))).scalars().all()
+    # Nothing was sent back to any sender for the denied events.
+    assert boundary.messages == []
+    await boundary.http.aclose()

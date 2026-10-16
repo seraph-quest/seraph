@@ -84,7 +84,7 @@ describe("OpenRouterSetupPanel", () => {
     fireEvent.click(screen.getByLabelText("Enable OpenRouter audio route"));
     change("OpenRouter audio model ID", "fixture/audio");
     change("OpenRouter audio upstream allow-list", "fixture/audio");
-    change("OpenRouter audio request cost bound", "500");
+    change("OpenRouter audio request cost bound (USD)", "0.0005");
     save();
     expect(await screen.findByRole("alert")).toHaveTextContent("Acknowledge audio egress");
     expect(onSave).not.toHaveBeenCalled();

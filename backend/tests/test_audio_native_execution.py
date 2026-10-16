@@ -213,3 +213,94 @@ async def test_authenticated_api_capture_preserved_and_unbound_model_execution_d
     assert readback.status_code == 200, readback.text
     assert readback.json()["transcript"]=={"available":False,"digest":None,"confirmed_digest":None}
     assert readback.json()["operator_session_id"] != readback.json()["session_id"]
+
+
+async def authenticated_api_corrected_transcript(client, execution, monkeypatch):
+    """Real authenticated API path to a corrected, confirmed canonical Message.
+
+    Only the absent documentary issuer (scripted by ``execution``) and the
+    final provider HTTP response are scripted. Login, durable grants, physical
+    capture, admission, settlement, review and confirmation all execute.
+    """
+    import src.api.audio as api
+    import src.guardian.audio_worker as owner_module
+    from src.db.models import Message, OperatorSession
+    from src.model_fabric.repository import model_fabric_repository
+    worker, _other_capture, calls = execution
+    monkeypatch.setattr(api, "default_audio_worker", worker)
+    monkeypatch.setattr(owner_module, "default_audio_worker", worker)
+    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
+    monkeypatch.setattr(settings, "operator_auth_cookie_secure", False)
+    documentation = []
+    async def scripted_documentation(operator, reference, expected_digest):
+        # Stands in for the not-yet-adopted documentary issuer; production
+        # keeps returning a blocked documentation code here.
+        documentation.append((reference, expected_digest))
+    monkeypatch.setattr(model_fabric_repository, "require_audio_execution_documentation", scripted_documentation)
+    origin = {"Origin": "http://localhost:3001"}
+    login = await client.post("/api/auth/login", json={"password": "isolated-native-secret"}, headers=origin)
+    assert login.status_code == 200, login.text
+    async with jobs._session() as db:
+        root = await db.get(OperatorSession, login.json()["session_id"])
+    conversation = await session_manager.get_or_create("api-corrected-conversation", owner_principal_id=root.principal_id)
+    capture_grant = await client.post("/api/audio/ptt/consent", json={"boundary": "capture"}, headers=origin)
+    assert capture_grant.status_code == 200, capture_grant.text
+    from src.llm_runtime import _provider_profile
+    profile = _provider_profile("openrouter.audio")
+    model_grant = await client.post("/api/audio/ptt/consent", json={"boundary": "model",
+        "original_audio_selection": {"action": "select_one_original_audio_call",
+            "conversation_session_id": conversation.id, "audio_budget_microusd": 100, "max_calls": 1,
+            "expected_audio_profile_hash": profile.contract_hash,
+            "documentation_attestation_ref": "scripted-documentation",
+            "expected_documentation_digest": "d" * 64}}, headers=origin)
+    assert model_grant.status_code == 200, model_grant.text
+    assert model_grant.json()["boundary"] == "cloud_upload"
+    assert documentation == [("scripted-documentation", "d" * 64)]
+    capture = await client.post("/api/audio/ptt", json={"session_id": conversation.id,
+        "audio_base64": base64.b64encode(_wav(rate=16000, seconds=.03, channels=1)).decode(),
+        "capture_consent_reference": capture_grant.json()["reference"],
+        "model_consent_reference": model_grant.json()["reference"]}, headers=origin)
+    assert capture.status_code == 200, capture.text
+    request_id = capture.json()["request_id"]
+    assert calls == []
+    processed = await client.post(f"/api/audio/ptt/{request_id}/process",
+        json={"audio_budget_microusd": 100, "max_calls": 1}, headers=origin)
+    assert processed.status_code == 200, processed.text
+    assert processed.json()["status"] == "transcript_ready"
+    assert len(calls) == 1
+    review = await client.get(f"/api/audio/ptt/{request_id}", headers=origin)
+    assert review.status_code == 200, review.text
+    assert review.json()["transcript"]["text"] == "Literal transcript"
+    original_digest = review.json()["transcript"]["digest"]
+    # The operator corrects the reviewed transcript before anything executes.
+    confirmed = await client.post(f"/api/audio/ptt/{request_id}/confirm", json={
+        "transcript": "Corrected canonical intent", "expected_transcript_digest": original_digest}, headers=origin)
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "confirmed"
+    confirmed_digest = confirmed.json()["transcript"]["confirmed_digest"]
+    assert confirmed_digest != original_digest
+    stale = await client.post(f"/api/audio/ptt/{request_id}/confirm", json={
+        "transcript": "Different late correction", "expected_transcript_digest": original_digest}, headers=origin)
+    assert stale.status_code == 409, stale.text
+    reprocess = await client.post(f"/api/audio/ptt/{request_id}/process",
+        json={"audio_budget_microusd": 100, "max_calls": 1}, headers=origin)
+    assert reprocess.status_code != 200 or reprocess.json()["status"] == "confirmed"
+    source = await client.get(f"/api/audio/ptt/{request_id}", headers=origin)
+    assert source.status_code == 200, source.text
+    assert source.json()["transcript"]["text"] == "Corrected canonical intent"
+    async with jobs._session() as db:
+        audio = (await db.execute(select(AudioIngressJob).where(AudioIngressJob.request_id == request_id))).scalars().one()
+        message = await db.get(Message, audio.message_id)
+        assert message.content == "Corrected canonical intent"
+        cost = (await db.execute(select(InferenceCostReservation).where(
+            InferenceCostReservation.job_id == audio.workflow_job_id))).scalars().one()
+        assert cost.state == "settled" and cost.actual_cost_microusd == 66
+    # Correction and re-reads never replay the original provider call.
+    assert len(calls) == 1
+    return request_id, confirmed_digest
+
+
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.asyncio
+async def test_authenticated_api_capture_execution_confirmation_and_source_read(client, execution, monkeypatch):
+    await authenticated_api_corrected_transcript(client, execution, monkeypatch)

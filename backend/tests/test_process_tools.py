@@ -913,6 +913,61 @@ def test_recursive_scan_survives_symlink_cycles(isolated_workspace):
     assert process_tools_module._directory_contains_secret_like_workspace_path(isolated_workspace / "notes") is False
 
 
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("sed", ["--expression=p", ".vault-key"]),
+        ("sed", ["-ep", ".vault-key"]),
+        ("sed", ["-nep", ".vault-key"]),
+        ("sed", ["-s", "-ep", ".vault-key"]),
+        ("sed", ["--e=p", ".vault-key"]),
+        ("sed", ["--expr=p", ".vault-key"]),
+        ("sed", ["-nf", ".vault-key", "notes/a.md"]),
+        ("sed", ["-nf.vault-key", "notes/a.md"]),
+        ("sed", ["--fil=.vault-key", "notes/a.md"]),
+        ("sed", ["--file=seraph.db", "notes/a.md"]),
+        ("grep", ["--regexp=SERAPH", ".vault-key"]),
+        ("grep", ["-e", "SERAPH", ".vault-key"]),
+        ("grep", ["-eSERAPH", ".vault-key"]),
+        ("grep", ["-f", ".vault-key", "notes/a.md"]),
+        ("grep", ["-f.vault-key", "notes/a.md"]),
+        ("grep", ["--file=.vault-key", "notes/a.md"]),
+        ("grep", ["--file", "mcp-servers.json", "notes/a.md"]),
+        ("rg", ["-e", "SERAPH", ".vault-key"]),
+        ("rg", ["--regexp=SERAPH", ".vault-key"]),
+        ("rg", ["-f", ".vault-key", "notes"]),
+        ("rg", ["--file=.vault-key", "notes"]),
+        ("rg", ["-g", ".vault-key", "SERAPH", "."]),
+        ("rg", ["--glob=seraph.db", "SERAPH", "."]),
+        ("cat", ["--", ".vault-key"]),
+        ("wc", ["--files0-from=.vault-key"]),
+        ("head", ["-n1", "SERAPH.DB"]),
+    ],
+)
+def test_every_argv_token_and_option_value_is_path_screened(isolated_workspace, command, args):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("seraph.db", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("mcp-servers.json", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command=command, args_json=json.dumps(args))
+
+    assert "SERAPH_TEST_SECRET" not in result
+    assert result.startswith("Error: ") and "secret-like" in result
+
+
+def test_a_pattern_spelled_like_a_protected_file_is_refused_but_ordinary_patterns_work(isolated_workspace):
+    _write_workspace_file("notes/a.md", "token .vault-key mention\n")
+
+    # Documented false positive: write the pattern differently instead.
+    assert run_command(command="grep", args_json='[".vault-key","notes/a.md"]') == (
+        "Error: path argument cannot target secret-like workspace files."
+    )
+    assert "mention" in run_command(command="grep", args_json='["[.]vault-key","notes/a.md"]')
+    assert "mention" in run_command(command="grep", args_json='["token","notes/a.md"]')
+    assert "mention" in run_command(command="grep", args_json='["-E","-e","secret|token","notes/a.md"]')
+
+
 def test_run_command_still_runs_ordinary_sed_scripts(isolated_workspace):
     _write_workspace_file("notes/a.md", "alpha\nbeta\n")
 

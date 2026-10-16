@@ -878,7 +878,66 @@ def _sed_sandboxed_args(executable: str, args: list[str]) -> list[str]:
     return ["--sandbox", *args]
 
 
+# Commands whose argv is screened token by token for registry-protected paths.
+_TOKEN_SCREENED_COMMANDS = frozenset({"cat", "ls", "head", "tail", "wc", "grep", "rg", "sed", "find"})
+
+
+def _argument_token_values(arg: str) -> list[str]:
+    """Every string a command could open from one argv token.
+
+    That is the token itself, the value of a ``--long=value`` option, and
+    every possible inline value of a short-option cluster (``-nep`` may mean
+    ``-n -e p``; ``-nf.vault-key`` may mean ``-n -f .vault-key``). Screening
+    all of them avoids modelling each command's option grammar.
+    """
+    values = [arg]
+    if arg.startswith("--"):
+        if "=" in arg:
+            values.append(arg.split("=", 1)[1])
+    elif arg.startswith("-") and len(arg) > 2:
+        values.extend(arg[position:] for position in range(2, len(arg)))
+    return [value for value in values if value and "\x00" not in value]
+
+
+def _reject_protected_argument_tokens(args: list[str], cwd: Path) -> None:
+    """Refuse any token (operand, assumed pattern or script, or option value)
+    that names registry-protected workspace state.
+
+    An existing path gets the full name and registry check; a token that names
+    nothing on disk is refused only when the registry itself denies that name,
+    so ordinary patterns such as ``token`` stay usable. A pattern spelled
+    exactly like a protected file (``grep .vault-key notes``) is refused too;
+    write such a pattern differently (for example ``grep '[.]vault-key'``).
+    """
+    workspace = _workspace_root()
+    index = AgentAccessIndex(workspace)
+    for arg in args:
+        for value in _argument_token_values(arg):
+            candidate = Path(value)
+            try:
+                resolved = (candidate if candidate.is_absolute() else cwd / candidate).resolve()
+                resolved.relative_to(workspace)
+            except (OSError, RuntimeError, ValueError):
+                # Outside the workspace (or unresolvable): the positional path
+                # checks below own the workspace-scope refusal.
+                continue
+            if os.path.lexists(resolved):
+                refused = _is_secret_like_workspace_path(resolved, index)
+            else:
+                refused = index.access(resolved) is AgentWorkspaceAccess.DENIED
+            if refused:
+                raise ValueError("path argument cannot target secret-like workspace files.")
+
+
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
+    _validate_command_specific_args(executable, args, cwd)
+    if Path(executable).name in _TOKEN_SCREENED_COMMANDS:
+        # Runs after the per-command checks so their specific refusals keep
+        # their wording; this pass catches whatever their grammars miss.
+        _reject_protected_argument_tokens(args, cwd)
+
+
+def _validate_command_specific_args(executable: str, args: list[str], cwd: Path) -> None:
     command_name = Path(executable).name
 
     _reject_network_capable_package_args(command_name, args)

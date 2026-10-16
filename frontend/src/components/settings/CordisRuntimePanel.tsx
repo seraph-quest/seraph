@@ -41,6 +41,7 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       <p>Composition: {snapshot.composition_digest ?? "unavailable"}</p><p>Package: {snapshot.package_digest ?? "unavailable"}</p>
       <ul>{snapshot.plugins.map(p => <li key={p.id}>{p.id}: {error ? "unknown · stale metadata" : `${p.state}${p.reason ? ` · ${p.reason}` : ""}`}</li>)}</ul>
       <p>Cleanup: {snapshot.cleanup.state} · process {snapshot.cleanup.process_reaped ? "reaped" : "unconfirmed"} · resources {snapshot.cleanup.resources_remaining ?? "unknown"} · Cordis disposal {snapshot.cleanup.cordis_disposal}</p>
+      {!error && snapshot.state !== "ready" && snapshot.recovery && <p role="status">Fix: {snapshot.recovery}</p>}
       {(error || snapshot.state !== "ready") && <p>Dependent work stays blocked until mandatory services are ready. Restore the reviewed host build and supported Node profile, then refresh. Unknown cleanup requires reconciliation before restart.</p>}
     </>}
   </section>;

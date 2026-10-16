@@ -29,7 +29,7 @@ def test_service_wire_rejects_missing_native_binding_and_authority_fields(change
 
 
 def test_service_wire_preserves_literal_canonical_identity():
-    original = frame("artifacts.read", {"artifact_ref": "art_abc", "max_bytes": 65536})
+    original = frame("artifacts.read", {"artifact_ref": "art_abc", "max_bytes": 65536, "offset": 0})
     assert validate_frame(decode_json(encode_frame(original)[4:])) == original
     assert len(SERVICE_METHODS) == 34
 
@@ -41,7 +41,7 @@ def test_canonical_ref_and_digest_reject_terminal_line_separators(suffix):
     with pytest.raises(ProtocolError):
         sha("a" * 64 + suffix)
     with pytest.raises(ProtocolError):
-        validate_request("artifacts.read", {"artifact_ref": "native-1" + suffix, "max_bytes": 2})
+        validate_request("artifacts.read", {"artifact_ref": "native-1" + suffix, "max_bytes": 2, "offset": 0})
     with pytest.raises(ProtocolError):
         validate_result("artifacts.read", {"status": "succeeded", "memory_status": "no_learning",
             "value": {"artifact_ref": "native-1", "digest": "a" * 64 + suffix, "size_bytes": 2, "content": "ok"}})
@@ -61,9 +61,9 @@ def test_canonical_ref_and_digest_preserve_exact_bounds_and_types():
 
 
 @pytest.mark.parametrize("payload", [
-    {"artifact_ref": "/etc/passwd", "max_bytes": 10},
-    {"artifact_ref": "https://private.example/a", "max_bytes": 10},
-    {"artifact_ref": "art_abc", "max_bytes": 65537},
+    {"artifact_ref": "/etc/passwd", "max_bytes": 10, "offset": 0},
+    {"artifact_ref": "https://private.example/a", "max_bytes": 10, "offset": 0},
+    {"artifact_ref": "art_abc", "max_bytes": 65537, "offset": 0},
     {"artifact_ref": "art_abc", "max_bytes": True},
     {"artifact_ref": "art_abc", "max_bytes": 10, "path": "/private"},
 ])

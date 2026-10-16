@@ -12,6 +12,15 @@ from tests.test_inference_accounting import accounting_db, setup_configuration
 from tests.test_research_native_vertical import real_auth, ResponseBytes
 from src.auth.middleware import OperatorAuthMiddleware
 from src.workflows.job_runtime import DurableJobRepository, _digest
+from tests.cordis_research import needs_cordis, research_host
+import pytest_asyncio
+
+
+@pytest_asyncio.fixture
+async def research_cordis(accounting_db):
+    """Discovery plans and extracts only through the reviewed Cordis child (#1008)."""
+    async with research_host(DurableJobRepository()) as host:
+        yield host
 
 
 @pytest.fixture
@@ -96,8 +105,9 @@ def public_http_fixture():
     "strategy_late_oversize", "strategy_changed_after_query", "markup_drift", "narrow_queries", "narrow_sources",
     "narrow_search", "narrow_inference", "narrow_output", "narrow_global_output", "narrow_success", "manifest_receipt_missing",
     "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper"])
+@needs_cordis
 @pytest.mark.asyncio
-async def test_authenticated_public_programme_logout_native_discovery(accounting_db, real_auth, public_http_fixture, monkeypatch, scenario):
+async def test_authenticated_public_programme_logout_native_discovery(accounting_db, real_auth, public_http_fixture, research_cordis, monkeypatch, scenario):
     from config.settings import settings
     from src.api import auth, goals, model_fabric_settings
     from src.guardian.goal_programmes import goal_programme_service
@@ -265,7 +275,7 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
                 return original.model_copy(update={"digest": _digest(changed), "typed_data": changed})
             return binding
     service = GoalDiscoveryService(jobs=jobs, search=DiscoverySearch(resolver=resolver, transport=transport),
-        resolver=resolver, transport=transport,
+        resolver=resolver, transport=transport, cordis=research_cordis,
         strategy_resolver=AcceptedStrategy() if scenario == "active_strategy" or scenario.startswith("strategy_") else None)
     if scenario.startswith("narrow_"):
         from copy import deepcopy

@@ -9,6 +9,7 @@ const sidebars: SidebarsConfig = {
     'seraph-vs-ironclaw-overview',
     'seraph-vs-ironclaw-detailed',
     'near-ai-trust-boundary-2026-10-05',
+    'repository-recovery-implementation-handoff-2026-10-10',
     'guardian-thesis',
     'human-model-and-memory',
     'runtime-and-reliability',

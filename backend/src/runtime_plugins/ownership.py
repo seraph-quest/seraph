@@ -75,10 +75,14 @@ class CompositionDependency:
 
 # Finite branch closures. A branch names the methods one original invocation
 # may forward; it never grants the authority those methods check.
-NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow"})
+NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow", "programme_planning", "programme_discovery"})
 READ_ORIGINS = frozenset({"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"})
 ARTIFACT_CHILDREN = ("artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append")
 WORKFLOW_CHILDREN = ("authority.resolve", "goals.read", "tasks.inspect", "tasks.checkpoint", "tasks.cancel")
+# #1008 guardian research: the planner reads its staged request and stages the
+# plan; the consumer reads staged sources, stages snapshots and reports the job.
+PLANNING_CHILDREN = ("artifacts.read", "artifacts.stage")
+DISCOVERY_CHILDREN = ("artifacts.read", "artifacts.stage", "tasks.inspect", "tasks.checkpoint")
 
 
 def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
@@ -90,6 +94,10 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
         return tuple(sorted({origin_method, *ARTIFACT_CHILDREN}))
     if native_branch == "workflow" and origin_method == "tasks.admit":
         return tuple(sorted({origin_method, *WORKFLOW_CHILDREN}))
+    if native_branch == "programme_planning" and origin_method == "research.buildPlan":
+        return tuple(sorted({origin_method, *PLANNING_CHILDREN}))
+    if native_branch == "programme_discovery" and origin_method == "research.executeAccepted":
+        return tuple(sorted({origin_method, *DISCOVERY_CHILDREN}))
     raise CompositionBindingError("composition_branch_unsupported")
 
 
@@ -105,6 +113,9 @@ def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, 
         names.add("seraph.artifacts.v1")
     if method in {"memory.applyReviewed", "memory.forget"}:
         names.add("seraph.audit.v1")
+    if method == "research.executeAccepted":
+        # The consumer extracts through the composed source provider.
+        names.add("seraph.source-extraction.v1")
     return tuple(sorted(names))
 
 

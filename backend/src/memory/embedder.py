@@ -20,7 +20,7 @@ import httpx
 
 from config.settings import settings
 from src.approval.runtime import get_current_trust_principal
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import log_integration_event_sync, read_path_audit_wait_ms
 from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration, OPENROUTER_SETUP_V2_SCHEMA_VERSION
 from src.model_fabric.proofs import proof_is_fresh
 from src.model_fabric.remote_inference_admission import (
@@ -128,12 +128,19 @@ def _embedder_name() -> str:
     return str(settings.embedding_model or "").strip() or "openrouter_embedding"
 
 
+# Inference-policy refusals (admission, route, receipt) are always audited at
+# the normal wait; only diagnostic stages on a read path are bounded (#1074).
+_READ_PATH_DIAGNOSTIC_STAGES = frozenset({"configuration", "validation", "request", "response", "metadata"})
+
+
 def _log_embedding_event(outcome: str, details: dict[str, Any] | None = None) -> None:
+    stage = (details or {}).get("stage")
     log_integration_event_sync(
         integration_type="embedding_model",
         name=_embedder_name(),
         outcome=outcome,
         details=details,
+        lock_wait_ms=read_path_audit_wait_ms() if stage in _READ_PATH_DIAGNOSTIC_STAGES else None,
     )
 
 

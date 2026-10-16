@@ -24,7 +24,12 @@ from .contracts import METHOD_DOMAINS
 DOMAINS = tuple(f"seraph.{name}.v1" for name in (
     "authority", "goals", "tasks", "capabilities", "inference", "memory",
     "artifacts", "audit", "research", "conversation", "scheduler",
-    "connections", "agent-loop", "source-extraction"))
+    "connections", "agent-loop", "source-extraction", "agent-presets", "guardian"))
+# Domains added after an install's inventory was first seeded, with the issue
+# that introduced them. Boot inserts each missing one once as its legacy owner
+# (``introduce_domains_sync``); a missing original domain is never repaired.
+DOMAIN_INTRODUCTIONS = {"seraph.agent-presets.v1": "1020", "seraph.guardian.v1": "1020"}
+PRESETS_DOMAIN = "seraph.agent-presets.v1"
 STATES = frozenset({"ready", "draining", "blocked"})
 OWNER_KINDS = frozenset({"legacy", "cordis"})
 MANIFEST_VERSION = "runtime-service-methods.v1"
@@ -76,7 +81,7 @@ class CompositionDependency:
 # Finite branch closures. A branch names the methods one original invocation
 # may forward; it never grants the authority those methods check.
 NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow", "programme_planning", "programme_discovery", "governed",
-                             "agent_loop"})
+                             "agent_loop", "guardian"})
 READ_ORIGINS = frozenset({"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"})
 ARTIFACT_CHILDREN = ("artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append")
 WORKFLOW_CHILDREN = ("authority.resolve", "goals.read", "tasks.inspect", "tasks.checkpoint", "tasks.cancel")
@@ -109,10 +114,19 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
         return (origin_method,)
     if native_branch == "agent_loop" and origin_method == "agent-loop.startTurn":
         return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
+    if native_branch == "guardian" and origin_method == "guardian.startTurn":
+        # #1020 unattended step: the same sealed-projection children as a chat step.
+        return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
     raise CompositionBindingError("composition_branch_unsupported")
 
 
-def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, ...]:
+# A chat step admitted before #1020 bound no presets owner. Such a binding is
+# read (inspect, recovery, the job CAS) exactly as it was written; every new
+# admission binds the presets.
+PRE_PRESETS_ORIGINS = frozenset({"agent-loop.startTurn"})
+
+
+def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool = True) -> tuple[str, ...]:
     """Mandatory owners of one method; a missing owner denies the call."""
     domain = METHOD_DOMAINS.get(method)
     if domain is None or type(goal_bound) is not bool:
@@ -127,24 +141,29 @@ def method_dependencies(method: str, *, goal_bound: bool = False) -> tuple[str, 
     if method in GOVERNED_ORIGINS:
         # Governed effects need the artifact and audit owners explicitly (#1018).
         names.update({"seraph.artifacts.v1", "seraph.audit.v1"})
+    if method in {"agent-loop.startTurn", "guardian.startTurn"} and (presets or method not in PRE_PRESETS_ORIGINS):
+        # Every turn step is checked against the reviewed presets (#1020).
+        names.add(PRESETS_DOMAIN)
     if method == "research.executeAccepted":
         # The consumer extracts through the composed source provider.
         names.add("seraph.source-extraction.v1")
     return tuple(sorted(names))
 
 
-def closure_dependencies(origin_method: str, native_branch: str, *, goal_bound: bool = False) -> tuple[str, ...]:
+def closure_dependencies(origin_method: str, native_branch: str, *, goal_bound: bool = False,
+                         presets: bool = True) -> tuple[str, ...]:
     domains: set[str] = set()
     for method in method_closure(origin_method, native_branch):
-        domains.update(method_dependencies(method, goal_bound=goal_bound))
+        domains.update(method_dependencies(method, goal_bound=goal_bound, presets=presets))
     return tuple(sorted(domains))
 
 
-def method_manifest_digest(origin_method: str, native_branch: str) -> str:
+def method_manifest_digest(origin_method: str, native_branch: str, *, presets: bool = True) -> str:
     methods = method_closure(origin_method, native_branch)
     source = {"schema_version": MANIFEST_VERSION, "origin_method": origin_method,
               "native_branch": native_branch, "allowed_child_methods": list(methods),
-              "child_dependencies": [[method, list(method_dependencies(method))] for method in methods]}
+              "child_dependencies": [[method, list(method_dependencies(method, presets=presets))]
+                                     for method in methods]}
     return hashlib.sha256(_canonical(source).encode()).hexdigest()
 
 
@@ -168,12 +187,19 @@ class RuntimeCompositionBinding:
                 or self.native_branch not in NATIVE_BRANCHES
                 or self.allowed_child_methods != method_closure(self.origin_method, self.native_branch)
                 or keys != tuple(sorted(set(keys)))
-                or keys != closure_dependencies(self.origin_method, self.native_branch, goal_bound=self.goal_bound)):
+                or keys != closure_dependencies(self.origin_method, self.native_branch, goal_bound=self.goal_bound,
+                                                presets=self.presets_bound)):
             raise CompositionBindingError("composition_binding_invalid")
         if (self.host_package_digest is None) != (self.host_composition_digest is None) or any(
                 value is not None and (type(value) is not str or _SHA.fullmatch(value) is None)
                 for value in (self.host_package_digest, self.host_composition_digest)):
             raise CompositionBindingError("composition_host_binding_invalid")
+
+    @property
+    def presets_bound(self) -> bool:
+        """False only for a chat step binding written before #1020 introduced the presets owner."""
+        return (self.origin_method not in PRE_PRESETS_ORIGINS
+                or any(item.runtime_domain == PRESETS_DOMAIN for item in self.dependency_vector))
 
     def allows(self, method: str) -> bool:
         return method in self.allowed_child_methods
@@ -188,7 +214,8 @@ class RuntimeCompositionBinding:
         return dict(schema_version=1, runtime_domain=self.runtime_domain, origin_method=self.origin_method,
                     native_branch=self.native_branch, allowed_child_methods=list(self.allowed_child_methods),
                     method_manifest_version=MANIFEST_VERSION,
-                    method_manifest_digest=method_manifest_digest(self.origin_method, self.native_branch),
+                    method_manifest_digest=method_manifest_digest(self.origin_method, self.native_branch,
+                                                                  presets=self.presets_bound),
                     host_package_digest=self.host_package_digest,
                     host_composition_digest=self.host_composition_digest, goal_bound=self.goal_bound,
                     dependency_vector=[item.payload() for item in self.dependency_vector])
@@ -231,7 +258,8 @@ class RuntimeCompositionBinding:
                          value["host_package_digest"], value["host_composition_digest"],
                          value["goal_bound"], value["schema_version"])
             if (value["method_manifest_version"] != MANIFEST_VERSION
-                    or value["method_manifest_digest"] != method_manifest_digest(result.origin_method, result.native_branch)
+                    or value["method_manifest_digest"] != method_manifest_digest(
+                        result.origin_method, result.native_branch, presets=result.presets_bound)
                     or value["binding_digest"] != result.binding_digest):
                 raise ValueError("digest")
             return result
@@ -334,6 +362,61 @@ def seed_legacy_inventory_sync(connection) -> int:
             "VALUES (:domain, 'legacy', 1, :digest, 'ready', NULL)"),
             {"domain": domain, "digest": legacy_composition_digest(domain)})
     return len(DOMAINS)
+
+
+async def introduce_domain(db, domain: str) -> None:
+    """The async form of one introduction, inside the caller's composition writer."""
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    if domain not in DOMAIN_INTRODUCTIONS:
+        raise CompositionBindingError("composition_domain_unknown")
+    await db.execute(text(
+        "INSERT INTO runtime_composition_states "
+        "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "
+        "VALUES (:domain, 'legacy', 1, :digest, 'ready', NULL)"),
+        {"domain": domain, "digest": legacy_composition_digest(domain)})
+    await db.execute(text(
+        "INSERT INTO audit_events (id, session_id, actor, event_type, tool_name, risk_level, policy_mode, summary, "
+        "details_json, created_at) VALUES (:id, NULL, 'system', 'runtime_composition_domain_introduced', NULL, "
+        "'low', 'full', :summary, :details, :at)"),
+        {"id": str(uuid4()), "summary": f"Runtime domain {domain} introduced as its legacy owner",
+         "details": _canonical({"runtime_domain": domain, "owner_kind": "legacy", "epoch": 1,
+                                "introduced_by": DOMAIN_INTRODUCTIONS[domain]}),
+         "at": datetime.now(timezone.utc).replace(tzinfo=None)})
+
+
+def introduce_domains_sync(connection) -> list[str]:
+    """Insert each introduced domain missing from a non-empty inventory once, as its legacy owner.
+
+    An empty inventory is seeded whole by ``seed_legacy_inventory_sync``. An
+    existing one keeps every row it has; only domains named in
+    ``DOMAIN_INTRODUCTIONS`` are added, each audited. A missing original
+    domain still denies its consumers until a fenced transition repairs it.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    existing = {row[0] for row in connection.execute(text("SELECT runtime_domain FROM runtime_composition_states"))}
+    if not existing:
+        return []
+    added = []
+    for domain, issue in DOMAIN_INTRODUCTIONS.items():
+        if domain in existing:
+            continue
+        connection.execute(text(
+            "INSERT INTO runtime_composition_states "
+            "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "
+            "VALUES (:domain, 'legacy', 1, :digest, 'ready', NULL)"),
+            {"domain": domain, "digest": legacy_composition_digest(domain)})
+        connection.execute(text(
+            "INSERT INTO audit_events (id, session_id, actor, event_type, tool_name, risk_level, policy_mode, summary, "
+            "details_json, created_at) VALUES (:id, NULL, 'system', 'runtime_composition_domain_introduced', NULL, "
+            "'low', 'full', :summary, :details, :at)"),
+            {"id": str(uuid4()), "summary": f"Runtime domain {domain} introduced as its legacy owner",
+             "details": _canonical({"runtime_domain": domain, "owner_kind": "legacy", "epoch": 1,
+                                    "introduced_by": issue}),
+             "at": datetime.now(timezone.utc).replace(tzinfo=None)})
+        added.append(domain)
+    return added
 
 
 def _boot_proved(runtime_domain: str, owner_kind: str, composition_digest: str, boot_host) -> bool:

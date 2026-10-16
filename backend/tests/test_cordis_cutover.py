@@ -18,10 +18,19 @@ from src.runtime_plugins.agent_turns import AGENT_LOOP_DOMAIN, chat_runtime_stat
 from src.runtime_plugins.bridge import CordisHost
 from src.runtime_plugins.cutover import (CUTOVER_EVENT, OPERATOR_EVENT, LegacyTurnGate, legacy_turns,
                                          run_boot_cutover, transition_domain)
-from src.runtime_plugins.ownership import CompositionBindingError
+from src.runtime_plugins.guardian_turns import GUARDIAN_DOMAIN
+from src.runtime_plugins.ownership import PRESETS_DOMAIN, CompositionBindingError
 from src.workflows.job_runtime import DurableJobRepository
 
 pytestmark = [needs_cordis, pytest.mark.asyncio]
+
+
+# #1020 adds the presets (cut over first; agent-loop's prerequisite) and guardian domains.
+MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+
+
+def _by_domain(receipts):
+    return {receipt["runtime_domain"]: receipt for receipt in receipts}
 
 
 async def _events(event_type):
@@ -36,20 +45,22 @@ async def test_fresh_workspace_cuts_chat_over_once_and_a_missing_runtime_blocks_
     await seed_composition_inventory()
     # Cordis not built or not running: the domain is cut over but blocked with the host's fix.
     stopped = CordisHost()
-    [receipt] = await run_boot_cutover(stopped)
-    assert receipt["action"] == "cut_over" and receipt["state"] == "blocked"
+    receipts = _by_domain(await run_boot_cutover(stopped))
+    assert list(receipts) == MANIFEST
+    assert all(item["action"] == "cut_over" and item["state"] == "blocked" for item in receipts.values())
     status = await chat_runtime_status(stopped)
     assert status["loop"] == "blocked" and status["owner_kind"] == "cordis"
     assert status["reason"].startswith("cordis_") and status["recovery"]
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
         # A later boot with a ready runtime completes the same cutover, never a second one.
-        [completed] = await run_boot_cutover(host)
-        assert completed["action"] == "completed" and completed["state"] == "ready"
+        completed = _by_domain(await run_boot_cutover(host))
+        assert list(completed) == MANIFEST
+        assert all(item["action"] == "completed" and item["state"] == "ready" for item in completed.values())
         status = await chat_runtime_status(host)
         assert (status["loop"], status["owner_kind"]) == ("cordis.agent-loop.v1", "cordis")
         assert await run_boot_cutover(host) == []
-        assert len(await _events(CUTOVER_EVENT)) == 1
+        assert len(await _events(CUTOVER_EVENT)) == len(MANIFEST)
 
 
 async def test_rollback_is_sticky_and_re_cutover_takes_a_higher_epoch(accounting_db, real_auth):  # noqa: F811
@@ -79,10 +90,10 @@ async def test_a_transition_never_switches_under_a_live_legacy_turn(accounting_d
     async with research_host(jobs) as host:
         legacy_turns.enter(AGENT_LOOP_DOMAIN)
         try:
-            [deferred] = await run_boot_cutover(host)
+            receipts = _by_domain(await run_boot_cutover(host))
         finally:
             legacy_turns.leave(AGENT_LOOP_DOMAIN)
-        assert deferred == {"runtime_domain": AGENT_LOOP_DOMAIN, "action": "deferred",
+        assert receipts[AGENT_LOOP_DOMAIN] == {"runtime_domain": AGENT_LOOP_DOMAIN, "action": "deferred",
                             "reason": "composition_not_quiescent"}
         # The boot step deferred the domain while the turn was live; nothing switched.
         assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents"
@@ -125,12 +136,21 @@ async def test_operator_api_requires_auth_confirmation_and_a_manifest_domain(acc
             assert unknown.status_code == 404
             stale = await client.post(path, json={**body, "expected_epoch": 7})
             assert stale.status_code == 409 and stale.json()["detail"]["code"] == "composition_owner_changed"
+            # Chat needs its presets on Cordis first (#1020).
+            early = await client.post(path, json=body)
+            assert early.status_code == 409 and early.json()["detail"]["code"] == "composition_prerequisite_not_cordis"
+            presets = await client.post("/api/runtime/composition/domains/" + PRESETS_DOMAIN + "/owner", json={
+                "target": "cordis", "expected_epoch": 1, "confirm_domain": PRESETS_DOMAIN})
+            assert presets.status_code == 200, presets.text
             moved = await client.post(path, json=body)
             assert moved.status_code == 200, moved.text
-            assert moved.json()["domains"] == [{"runtime_domain": AGENT_LOOP_DOMAIN, "prerequisites": [],
-                                                "owner_kind": "cordis", "epoch": 2, "state": "ready"}]
+            domains = _by_domain(moved.json()["domains"])
+            assert list(domains) == MANIFEST
+            assert domains[AGENT_LOOP_DOMAIN] == {"runtime_domain": AGENT_LOOP_DOMAIN,
+                                                  "prerequisites": [PRESETS_DOMAIN], "owner_kind": "cordis",
+                                                  "epoch": 2, "state": "ready"}
             listed = await client.get("/api/runtime/composition/domains")
-            assert listed.json()["domains"][0]["owner_kind"] == "cordis"
+            assert _by_domain(listed.json()["domains"])[AGENT_LOOP_DOMAIN]["owner_kind"] == "cordis"
             # A Root whose ownership continuity is under recovery may read owners but not move them.
             from dataclasses import replace
             stable = runtime_composition._operator
@@ -139,7 +159,8 @@ async def test_operator_api_requires_auth_confirmation_and_a_manifest_domain(acc
             recovering = await client.post(path, json={**body, "target": "legacy", "expected_epoch": 2})
             assert recovering.status_code == 403
             assert recovering.json()["detail"]["code"] == "operator_ownership_recovery_required"
-            assert (await client.get("/api/runtime/composition/domains")).json()["domains"][0]["epoch"] == 2
+            assert _by_domain((await client.get("/api/runtime/composition/domains")).json()["domains"])[
+                AGENT_LOOP_DOMAIN]["epoch"] == 2
 
 
 def test_overlapping_quiesced_blocks_keep_the_gate_closed_until_the_last_one_ends():
@@ -173,8 +194,8 @@ async def test_production_transitions_require_the_runtime_owner_lease(accounting
         monkeypatch.setattr(settings, "deployment_environment", "production")
         assert not production.runtime_workspace_owner_held()
         # Without the lease a production process moves nothing, at boot or live.
-        assert await run_boot_cutover(host) == [{"runtime_domain": AGENT_LOOP_DOMAIN, "action": "deferred",
-                                                 "reason": "composition_owner_lease_missing"}]
+        assert await run_boot_cutover(host) == [{"runtime_domain": domain, "action": "deferred",
+                                                 "reason": "composition_owner_lease_missing"} for domain in MANIFEST]
         with pytest.raises(CompositionBindingError) as missing:
             await transition_domain(AGENT_LOOP_DOMAIN, "cordis", host=host, actor="operator:test")
         assert missing.value.reason_code == "composition_owner_lease_missing"
@@ -182,7 +203,7 @@ async def test_production_transitions_require_the_runtime_owner_lease(accounting
         # The lifespan's lease (the real lock) admits boot and live transitions alike.
         with production.runtime_workspace_owner(_workspace(tmp_path)):
             assert production.runtime_workspace_owner_held()
-            [cut] = await run_boot_cutover(host)
+            cut = _by_domain(await run_boot_cutover(host))[AGENT_LOOP_DOMAIN]
             assert (cut["action"], cut["state"]) == ("cut_over", "ready")
             rolled = await transition_domain(AGENT_LOOP_DOMAIN, "legacy", host=host, actor="operator:test",
                                              expected_epoch=cut["epoch"])
@@ -201,6 +222,7 @@ async def test_transitions_enforce_prerequisites_and_dependents(accounting_db, r
         with pytest.raises(CompositionBindingError) as prerequisite:
             await transition_domain(dependent, "cordis", host=host, actor="operator:test")
         assert prerequisite.value.reason_code == "composition_prerequisite_not_cordis"
+        await transition_domain(PRESETS_DOMAIN, "cordis", host=host, actor="operator:test")
         await transition_domain(AGENT_LOOP_DOMAIN, "cordis", host=host, actor="operator:test")
         moved = await transition_domain(dependent, "cordis", host=host, actor="operator:test")
         assert moved["owner_kind"] == "cordis"
@@ -218,7 +240,7 @@ async def test_boot_refreshes_a_stale_cordis_digest_and_status_names_the_drift(a
     from tests.cordis_agent_loop import patched_package
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
-        [cut] = await run_boot_cutover(host)
+        cut = _by_domain(await run_boot_cutover(host))[AGENT_LOOP_DOMAIN]
         assert (cut["action"], cut["state"]) == ("cut_over", "ready")
     # A rebuilt package (one harmless byte) reports a different reviewed plugin digest.
     variant = patched_package(tmp_path, "return ['settlement'];", "return ['settlement'] ;")
@@ -226,13 +248,13 @@ async def test_boot_refreshes_a_stale_cordis_digest_and_status_names_the_drift(a
         drift = await chat_runtime_status(rebuilt)
         assert (drift["loop"], drift["reason"]) == ("blocked", "agent_loop_composition_drift")
         assert "./manage.sh -e dev local up" in drift["recovery"] and "Docker" in drift["recovery"]
-        [refreshed] = await run_boot_cutover(rebuilt)
+        [refreshed] = [item for item in await run_boot_cutover(rebuilt) if item["runtime_domain"] == AGENT_LOOP_DOMAIN]
         assert (refreshed["action"], refreshed["state"], refreshed["epoch"]) == ("digest_refreshed", "ready",
                                                                                  cut["epoch"] + 1)
         assert (await chat_runtime_status(rebuilt))["loop"] == "cordis.agent-loop.v1"
         assert await run_boot_cutover(rebuilt) == []
-        # Still one default cutover marker: a refresh is not a re-cut.
-        assert len(await _events(CUTOVER_EVENT)) == 1
+        # Still one default cutover marker per domain: a refresh is not a re-cut.
+        assert len(await _events(CUTOVER_EVENT)) == len(MANIFEST)
 
 
 async def test_a_blocked_cordis_owner_recovery_names_local_and_docker_restarts(accounting_db, real_auth):  # noqa: F811

@@ -209,6 +209,8 @@ class CordisHost:
             ))
             try:
                 self.process = await asyncio.shield(spawn)
+                # The loop that owns the child's pipes; other loops must hop onto it (#1020).
+                self.owner_loop = asyncio.get_running_loop()
                 self._task("stdout", self._read_loop())
                 self._task("stderr", self._stderr_loop())
                 response = await self._rpc("bootstrap.hello", internal=True)

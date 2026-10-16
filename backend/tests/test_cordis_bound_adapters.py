@@ -515,3 +515,42 @@ async def test_the_retention_job_purges_aged_reads_and_expires_handoffs(accounti
             assert artifacts[1].exists()
         finally:
             bound_adapters._handoff.pop("fresh-handoff", None)
+
+
+async def test_a_host_timeout_before_the_claim_with_a_live_worker_is_in_doubt(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    import asyncio
+    from src.integrations import mail_reply_runtime as runtime
+    from src.runtime_plugins import governed_services
+    async with mail_env(accounting_db, real_auth, monkeypatch) as env:
+        client, google, preview = env["client"], env["google"], env["preview"]
+        job_id = preview["job_id"]
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_execute = runtime.execute
+
+        async def held_before_claim(operator, ident, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original_execute(operator, ident, **kwargs)
+        monkeypatch.setattr(runtime, "execute", held_before_claim)
+        original = governed_services.execute_native_connection_operation
+
+        async def timed_out(**kwargs):
+            # The host answer times out while the shielded owner worker is still running.
+            call = asyncio.create_task(original(**kwargs))
+            await entered.wait()
+            call.cancel()
+            await asyncio.gather(call, return_exceptions=True)
+            raise NativeServiceBlocked("native_governed_host_unavailable")
+        monkeypatch.setattr(governed_services, "execute_native_connection_operation", timed_out)
+        response = await client.post("/api/capabilities/mail/reply-sends/" + job_id + "/cordis-execute",
+                                     json={"decision": "approved", "expected_digest": preview["preview"]["decision_digest"]})
+        detail = response.json()["detail"]
+        # No intent yet, but the worker can still claim and send: never "nothing was sent".
+        assert response.status_code == 409 and detail["code"] == "mail_reply_send_in_doubt", detail
+        assert not any(call[1].endswith("/messages/send") for call in google.calls)
+        worker = runtime._active_workers[job_id]
+        assert not worker.done()
+        release.set()
+        await asyncio.gather(worker, return_exceptions=True)
+        # The worker did go on to send, once, which is why the answer had to be "in doubt".
+        assert len([call for call in google.calls if call[1].endswith("/messages/send")]) == 1

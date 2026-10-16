@@ -457,7 +457,7 @@ async def purge_cordis_mail_results(*, owner=None, consent_id: str | None = None
     audit event. SQL selects only terminal Gmail reads with no purge audit yet, and
     the scan pages through all of them, so no number of newer runs starves an
     older unpurged read."""
-    from sqlalchemy import exists, func, select, update
+    from sqlalchemy import func, select, update
     from src.api.mail import _cleanup_mail_artifacts
     from src.db.engine import get_session
     from src.db.models import AuditEvent, MailReadConsent, WorkflowRunState
@@ -471,8 +471,11 @@ async def purge_cordis_mail_results(*, owner=None, consent_id: str | None = None
         WorkflowRunState.job_kind == GOVERNED_JOB_KIND,
         WorkflowRunState.status.not_in(("accepted", "queued", "running")),
         func.json_extract(context_json, "$.candidate.operation") == "gmail.read_message",
-        ~exists().where(AuditEvent.event_type == PURGED_EVENT,
-                        func.json_extract(purge_json, "$.job_id") == WorkflowRunState.run_identity))
+        # An uncorrelated NOT IN evaluates the purge audit once; a correlated
+        # NOT EXISTS re-scanned it per run and grew quadratically.
+        WorkflowRunState.run_identity.not_in(
+            select(func.json_extract(purge_json, "$.job_id")).where(
+                AuditEvent.event_type == PURGED_EVENT, func.json_extract(purge_json, "$.job_id").is_not(None))))
     if owner is not None:
         query = query.where(WorkflowRunState.owner_principal_id == owner.principal_id,
                             WorkflowRunState.operator_session_id == owner.session_id)

@@ -3154,6 +3154,11 @@ async def _cordis_send_failure(operator, job_id: str, reason: str) -> HTTPExcept
             "code": reason, "message": "This reply was already sent from the reply review; Cordis did not send it again.",
             "recovery_action": "reload_reply_send"})
     in_doubt = reason in SEND_IN_DOUBT
+    worker = runtime._active_workers.get(job_id)
+    if not in_doubt and worker is not None and not worker.done():
+        # The shielded owner worker outlives a host timeout or cancellation and may
+        # still claim the intent and send, so "nothing was sent" would be a guess.
+        in_doubt = True
     if not in_doubt:
         # A host timeout or cancellation can land after the send-once intent was claimed.
         try:

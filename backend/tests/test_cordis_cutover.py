@@ -15,8 +15,8 @@ from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import real_auth  # noqa: F401
 from src.runtime_plugins.agent_turns import AGENT_LOOP_DOMAIN, chat_runtime_status
 from src.runtime_plugins.bridge import CordisHost
-from src.runtime_plugins.cutover import (CUTOVER_EVENT, OPERATOR_EVENT, legacy_turns, run_boot_cutover,
-                                         transition_domain)
+from src.runtime_plugins.cutover import (CUTOVER_EVENT, OPERATOR_EVENT, legacy_turns, pending_intents,
+                                         record_operator_intent, run_boot_cutover)
 from src.runtime_plugins.ownership import CompositionBindingError
 from src.workflows.job_runtime import DurableJobRepository
 
@@ -51,29 +51,34 @@ async def test_fresh_workspace_cuts_chat_over_once_and_a_missing_runtime_blocks_
         assert len(await _events(CUTOVER_EVENT)) == 1
 
 
-async def test_rollback_is_sticky_and_re_cutover_takes_a_higher_epoch(accounting_db, real_auth):  # noqa: F811
+async def test_operator_intents_apply_at_boot_rollback_is_sticky_and_re_cutover_takes_a_higher_epoch(accounting_db, real_auth):  # noqa: F811
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
         await run_boot_cutover(host)
         cut = (await chat_runtime_status(host))["owner_epoch"]
-        rolled = await transition_domain(AGENT_LOOP_DOMAIN, "legacy", host=host, actor="operator:test",
-                                         expected_epoch=cut)
-        assert (rolled["owner_kind"], rolled["state"]) == ("legacy", "ready") and rolled["epoch"] == cut + 1
+        # The serving process only records the intent; nothing moves until the next boot.
+        await record_operator_intent(AGENT_LOOP_DOMAIN, "legacy", expected_epoch=cut, actor="operator:test")
+        assert (await chat_runtime_status(host))["loop"] == "cordis.agent-loop.v1"
+        assert (await pending_intents())[AGENT_LOOP_DOMAIN]["target"] == "legacy"
+        [applied] = await run_boot_cutover(host)
+        assert (applied["action"], applied["owner_kind"], applied["state"]) == ("intent_applied", "legacy", "ready")
+        assert applied["epoch"] == cut + 1 and await pending_intents() == {}
         assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents"
         # Boot never re-cuts a domain an operator moved.
         assert await run_boot_cutover(host) == []
         assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents"
-        again = await transition_domain(AGENT_LOOP_DOMAIN, "cordis", host=host, actor="operator:test",
-                                        expected_epoch=cut + 1)
+        await record_operator_intent(AGENT_LOOP_DOMAIN, "cordis", expected_epoch=cut + 1, actor="operator:test")
+        [again] = await run_boot_cutover(host)
         assert (again["owner_kind"], again["state"], again["epoch"]) == ("cordis", "ready", cut + 2)
         assert (await chat_runtime_status(host))["loop"] == "cordis.agent-loop.v1"
+        # A stale request is refused now; an intent overtaken before boot is rejected visibly then.
         with pytest.raises(CompositionBindingError) as stale:
-            await transition_domain(AGENT_LOOP_DOMAIN, "legacy", host=host, actor="operator:test", expected_epoch=cut)
+            await record_operator_intent(AGENT_LOOP_DOMAIN, "legacy", expected_epoch=cut, actor="operator:test")
         assert stale.value.reason_code == "composition_owner_changed"
-        assert [event["target"] for event in await _events(OPERATOR_EVENT)] == ["legacy", "cordis"]
+        assert [event["outcome"] for event in await _events(OPERATOR_EVENT)] == ["applied", "applied"]
 
 
-async def test_a_transition_never_switches_under_a_live_legacy_turn(accounting_db, real_auth):  # noqa: F811
+async def test_a_boot_step_never_switches_under_a_live_legacy_turn_and_retries(accounting_db, real_auth):  # noqa: F811
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
         legacy_turns.enter(AGENT_LOOP_DOMAIN)
@@ -83,20 +88,14 @@ async def test_a_transition_never_switches_under_a_live_legacy_turn(accounting_d
             legacy_turns.leave(AGENT_LOOP_DOMAIN)
         assert deferred == {"runtime_domain": AGENT_LOOP_DOMAIN, "action": "deferred",
                             "reason": "composition_not_quiescent"}
-        # The boot step deferred the domain while the turn was live; nothing switched.
-        assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents"
-        legacy_turns.enter(AGENT_LOOP_DOMAIN)
-        with pytest.raises(CompositionBindingError) as refused:
-            await transition_domain(AGENT_LOOP_DOMAIN, "cordis", host=host, actor="operator:test")
-        assert refused.value.reason_code == "composition_not_quiescent"
-        legacy_turns.leave(AGENT_LOOP_DOMAIN)
-        # While a transition runs, no new legacy turn starts.
+        # Nothing switched and no marker was written; the next boot retries.
+        assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents" and await _events(CUTOVER_EVENT) == []
         with legacy_turns.quiesced(AGENT_LOOP_DOMAIN):
             with pytest.raises(CompositionBindingError) as closed:
                 legacy_turns.enter(AGENT_LOOP_DOMAIN)
             assert closed.value.reason_code == "composition_transition_in_progress"
-        moved = await transition_domain(AGENT_LOOP_DOMAIN, "cordis", host=host, actor="operator:test")
-        assert moved["owner_kind"] == "cordis" and moved["state"] == "ready"
+        [cut] = await run_boot_cutover(host)
+        assert (cut["action"], cut["state"]) == ("cut_over", "ready")
 
 
 async def test_operator_api_requires_auth_confirmation_and_a_manifest_domain(accounting_db, real_auth, monkeypatch):  # noqa: F811
@@ -116,15 +115,23 @@ async def test_operator_api_requires_auth_confirmation_and_a_manifest_domain(acc
             body = {"target": "cordis", "expected_epoch": 1, "confirm_domain": AGENT_LOOP_DOMAIN}
             assert (await client.post(path, json=body)).status_code == 401
             assert (await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})).status_code == 200
+            no_origin = await client.post(path, json=body, headers={"origin": ""})
+            assert no_origin.status_code == 403
             assert (await client.post(path, json={**body, "confirm_domain": "yes"})).status_code == 422
             unknown = await client.post("/api/runtime/composition/domains/seraph.memory.v1/owner",
                                         json={**body, "confirm_domain": "seraph.memory.v1"})
             assert unknown.status_code == 404
             stale = await client.post(path, json={**body, "expected_epoch": 7})
             assert stale.status_code == 409 and stale.json()["detail"]["code"] == "composition_owner_changed"
-            moved = await client.post(path, json=body)
-            assert moved.status_code == 200, moved.text
-            assert moved.json()["domains"] == [{"runtime_domain": AGENT_LOOP_DOMAIN, "prerequisites": [],
-                                                "owner_kind": "cordis", "epoch": 2, "state": "ready"}]
+            requested = await client.post(path, json=body)
+            assert requested.status_code == 200, requested.text
+            assert requested.json()["restart_required"] is True
+            assert requested.json()["domains"] == [{"runtime_domain": AGENT_LOOP_DOMAIN, "prerequisites": [],
+                                                    "owner_kind": "legacy", "epoch": 1, "state": "ready",
+                                                    "pending_target": "cordis"}]
+            # The next boot applies it.
+            [applied] = await run_boot_cutover(host)
+            assert applied["action"] == "intent_applied" and applied["owner_kind"] == "cordis"
             listed = await client.get("/api/runtime/composition/domains")
             assert listed.json()["domains"][0]["owner_kind"] == "cordis"
+            assert listed.json()["domains"][0]["pending_target"] is None

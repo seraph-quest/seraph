@@ -28,11 +28,12 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
   }
   useEffect(() => { if (!managed) void refresh(); return () => { ++generation.current; controller.current?.abort(); }; }, [managed]);
   const [moving, setMoving] = useState(false), [moveError, setMoveError] = useState<string | null>(null);
+  const [moveNotice, setMoveNotice] = useState<string | null>(null);
   async function moveChat(target: "legacy" | "cordis") {
     if (!chat || chat.owner_epoch === null) return;
     const label = target === "legacy" ? "roll chat back to the legacy agent loop" : "cut chat over to the Cordis agent loop";
-    if (!window.confirm(`Confirm: ${label} (${CHAT_DOMAIN}). In-flight turns must finish first.`)) return;
-    setMoving(true); setMoveError(null);
+    if (!window.confirm(`Confirm: ${label} (${CHAT_DOMAIN}). The change applies when Seraph restarts.`)) return;
+    setMoving(true); setMoveError(null); setMoveNotice(null);
     try {
       const response = await apiFetch(`${API_URL}/api/runtime/composition/domains/${CHAT_DOMAIN}/owner`, {
         method: "POST", headers: { "content-type": "application/json" },
@@ -42,7 +43,7 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
         const code = detail && typeof detail === "object" && "detail" in detail && detail.detail && typeof detail.detail === "object"
           && "code" in detail.detail ? String(detail.detail.code) : `HTTP ${response.status}`;
         setMoveError(`Chat loop change refused: ${code}`);
-      }
+      } else setMoveNotice("Requested. Restart Seraph (./manage.sh -e dev local up) to apply the chat loop change.");
     } catch { setMoveError("Chat loop change failed; refresh and try again."); }
     finally { setMoving(false); void refresh(); }
   }
@@ -61,6 +62,7 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       ? <button type="button" disabled={moving} onClick={() => void moveChat("legacy")}>Roll chat back to legacy</button>
       : chat.owner_kind === "legacy" && <button type="button" disabled={moving} onClick={() => void moveChat("cordis")}>Cut chat over to Cordis</button>)}
     {moveError && <p role="status" className="text-yellow-400">{moveError}</p>}
+    {moveNotice && <p role="status">{moveNotice}</p>}
     {error && <p role="status" className="text-yellow-400">{error}</p>}
     {!snapshot && <p role="status">{busy ? "Loading host state…" : "Host state unavailable"}</p>}
     {snapshot && <>

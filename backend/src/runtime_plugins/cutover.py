@@ -11,12 +11,12 @@ fix; a later boot with a ready host completes it. Once marked, a domain is
 never re-cut by boot: an operator rollback to legacy is sticky.
 
 Operators move a domain either way through the authenticated runtime
-composition API, at a higher epoch, with an audit event. The backend holds the
-exclusive workspace owner lease for its lifetime (``runtime_workspace_owner``),
-so transitions run under that process's lifecycle fence. In-flight legacy turns
-are not bound to the owner row, so a process-local gate tracks them: a
-transition refuses while one is active, and no new legacy turn starts while a
-transition runs.
+composition API, which only persists an audited intent: the serving process
+never transitions a live owner, because the maintenance fence's exclusive lock
+conflicts with the backend's own owner lease. The next boot applies the intent
+(at a higher epoch) before chat is served. Legacy turns are not bound to the
+owner row, so a process-local gate also defers a domain's boot step while one is
+active, and no new legacy turn starts while the step runs.
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from .ownership import (DOMAINS, RECOVERY_EVENT, CompositionBindingError, Compos
 logger = logging.getLogger(__name__)
 CUTOVER_EVENT = "runtime_composition_domain_cutover"
 OPERATOR_EVENT = "runtime_composition_operator_transition"
+INTENT_EVENT = "runtime_composition_operator_intent"
 TARGETS = frozenset({"legacy", "cordis"})
 
 
@@ -150,48 +151,119 @@ async def _audit(db, event_type: str, details: dict, *, actor: str) -> None:
     await db.flush()
 
 
-async def _cut_over_domains(db) -> set[str]:
+async def _events(db, *event_types: str) -> list[dict]:
     from sqlalchemy import select
     from src.db.models import AuditEvent
-    # Either the default cutover or any operator transition marks the domain: after
-    # that, boot never moves it again (an operator rollback is sticky).
-    rows = (await db.execute(select(AuditEvent.details_json).where(
-        AuditEvent.event_type.in_((CUTOVER_EVENT, OPERATOR_EVENT))))).scalars()
-    done = set()
+    rows = (await db.execute(select(AuditEvent.details_json).where(AuditEvent.event_type.in_(event_types))
+                             .order_by(AuditEvent.id))).scalars()
+    events = []
     for raw in rows:
         try:
-            done.add(json.loads(raw or "{}").get("runtime_domain"))
+            value = json.loads(raw or "{}")
         except ValueError:
             continue
-    return done
+        if isinstance(value, dict):
+            events.append(value)
+    return events
 
 
-async def transition_domain(domain: str, target: str, *, host, actor: str, expected_epoch: int | None = None,
-                            reason: str = "operator") -> dict:
-    """Move one manifest domain to ``target`` at a higher epoch; returns the new row."""
+async def _marked_domains(db) -> set[str]:
+    # The default cutover marker, or any operator intent, marks a domain: after
+    # that, the default step never moves it again (an operator rollback is sticky).
+    return {event.get("runtime_domain") for event in await _events(db, CUTOVER_EVENT, INTENT_EVENT)}
+
+
+async def _pending_intent(db, domain: str) -> dict | None:
+    """The newest unresolved operator intent for one domain."""
+    resolved = {event.get("intent_id") for event in await _events(db, OPERATOR_EVENT)}
+    pending = [event for event in await _events(db, INTENT_EVENT)
+               if event.get("runtime_domain") == domain and event.get("intent_id") not in resolved]
+    return pending[-1] if pending else None
+
+
+async def record_operator_intent(domain: str, target: str, *, expected_epoch: int, actor: str,
+                                 reason: str = "operator") -> dict:
+    """Persist an audited operator owner change; the next boot applies it.
+
+    The serving process never transitions a live owner: the maintenance fence's
+    exclusive lock conflicts with the backend's own owner lease, so changes run
+    only in the boot cutover step, before chat is served.
+    """
+    import uuid
     from src.db.engine import get_session
-    from src.workspace.lifecycle import lifecycle_fence_marker
     if domain not in {entry.domain for entry in _MANIFEST} or target not in TARGETS:
         raise CompositionBindingError("composition_cutover_domain_invalid")
-    with legacy_turns.quiesced(domain), lifecycle_fence_marker():
-        async with get_session() as db:
-            async with composition_writer(db):
-                row = (await inventory(db)).get(domain)
-                if row is None:
-                    raise CompositionBindingError("composition_dependency_missing")
-                if expected_epoch is not None and row.epoch != expected_epoch:
-                    raise CompositionBindingError("composition_owner_changed")
-                prior = _checked_row(row).payload() | {"state": row.state}
-                await _move(db, domain, target, host)
-                current = (await inventory(db))[domain]
-                details = {"runtime_domain": domain, "prior": prior, "target": target, "reason": reason,
-                           "owner_kind": current.owner_kind, "epoch": current.epoch, "state": current.state}
-                await _audit(db, OPERATOR_EVENT if actor != "boot" else CUTOVER_EVENT, details, actor=actor)
-                return details
+    async with get_session() as db:
+        row = (await inventory(db)).get(domain)
+        if row is None:
+            raise CompositionBindingError("composition_dependency_missing")
+        if row.epoch != expected_epoch:
+            raise CompositionBindingError("composition_owner_changed")
+        intent = {"intent_id": uuid.uuid4().hex, "runtime_domain": domain, "target": target,
+                  "expected_epoch": expected_epoch, "reason": reason, "actor": actor,
+                  "prior": _checked_row(row).payload() | {"state": row.state}}
+        await _audit(db, INTENT_EVENT, intent, actor=actor)
+    return intent
+
+
+async def pending_intents() -> dict[str, dict]:
+    from src.db.engine import get_session
+    async with get_session() as db:
+        found = {}
+        for entry in _MANIFEST:
+            intent = await _pending_intent(db, entry.domain)
+            if intent is not None:
+                found[entry.domain] = intent
+        return found
+
+
+async def _boot_domain(db, entry: CutoverDomain, host) -> dict | None:
+    rows = await inventory(db)
+    row = rows.get(entry.domain)
+    if row is None:
+        return None
+    intent = await _pending_intent(db, entry.domain)
+    if intent is not None:
+        if row.epoch != intent["expected_epoch"]:
+            # The owner moved since the operator asked: the intent is refused, visibly.
+            details = {"intent_id": intent["intent_id"], "runtime_domain": entry.domain, "outcome": "rejected",
+                       "reason": "composition_owner_changed", "epoch": row.epoch}
+            await _audit(db, OPERATOR_EVENT, details, actor="runtime")
+            return {**details, "action": "intent_rejected"}
+        await _move(db, entry.domain, intent["target"], host)
+        current = (await inventory(db))[entry.domain]
+        details = {"intent_id": intent["intent_id"], "runtime_domain": entry.domain, "outcome": "applied",
+                   "target": intent["target"], "owner_kind": current.owner_kind, "epoch": current.epoch,
+                   "state": current.state}
+        # Recorded only after the transition succeeded, in the same writer.
+        await _audit(db, OPERATOR_EVENT, details, actor="runtime")
+        return {**details, "action": "intent_applied"}
+    if any(rows.get(item) is None or rows[item].owner_kind != "cordis" for item in entry.prerequisites):
+        return None
+    if entry.domain in await _marked_domains(db):
+        # A marked domain is only completed (cordis awaiting its boot proof), never re-cut.
+        if row.owner_kind != "cordis" or row.state == "ready":
+            return None
+        await _move(db, entry.domain, "cordis", host)
+        current = (await inventory(db))[entry.domain]
+        return {"runtime_domain": entry.domain, "action": "completed", "state": current.state, "epoch": current.epoch}
+    prior = _checked_row(row).payload() | {"state": row.state}
+    await _move(db, entry.domain, "cordis", host)
+    current = (await inventory(db))[entry.domain]
+    details = {"runtime_domain": entry.domain, "prior": prior, "target": "cordis", "reason": "default_cutover",
+               "owner_kind": current.owner_kind, "epoch": current.epoch, "state": current.state}
+    await _audit(db, CUTOVER_EVENT, details, actor="runtime")
+    return {**details, "action": "cut_over"}
 
 
 async def run_boot_cutover(host) -> list[dict]:
-    """Forward-only default cutover for every registered domain, once per workspace."""
+    """Apply pending operator intents, then the forward-only default cutover, per domain.
+
+    Idempotent from any row state. Each domain runs in one composition writer:
+    the transitions and their marker commit together, or a failed precondition
+    rolls everything back and the domain is retried at the next boot (blocked
+    meanwhile, with its reason).
+    """
     from src.db.engine import get_session
     from src.workspace.lifecycle import lifecycle_fence_marker
     receipts = []
@@ -200,36 +272,15 @@ async def run_boot_cutover(host) -> list[dict]:
             with legacy_turns.quiesced(entry.domain), lifecycle_fence_marker():
                 async with get_session() as db:
                     async with composition_writer(db):
-                        rows = await inventory(db)
-                        row = rows.get(entry.domain)
-                        if row is None:
-                            continue
-                        if any(rows.get(item) is None or rows[item].owner_kind != "cordis"
-                               for item in entry.prerequisites):
-                            continue
-                        marked = entry.domain in await _cut_over_domains(db)
-                        if marked:
-                            # Sticky: a marked domain is only completed, never re-cut from legacy.
-                            if row.owner_kind != "cordis" or row.state == "ready":
-                                continue
-                            await _move(db, entry.domain, "cordis", host)
-                            current = (await inventory(db))[entry.domain]
-                            receipts.append({"runtime_domain": entry.domain, "action": "completed",
-                                             "state": current.state, "epoch": current.epoch})
-                            continue
-                        prior = _checked_row(row).payload() | {"state": row.state}
-                        await _move(db, entry.domain, "cordis", host)
-                        current = (await inventory(db))[entry.domain]
-                        details = {"runtime_domain": entry.domain, "prior": prior, "target": "cordis",
-                                   "reason": "default_cutover", "owner_kind": current.owner_kind,
-                                   "epoch": current.epoch, "state": current.state}
-                        await _audit(db, CUTOVER_EVENT, details, actor="runtime")
-                        receipts.append({**details, "action": "cut_over"})
+                        receipt = await _boot_domain(db, entry, host)
+            if receipt is not None:
+                receipts.append(receipt)
         except CompositionBindingError as exc:
-            logger.warning("Cordis default cutover for %s deferred: %s", entry.domain, exc.reason_code)
+            logger.warning("Cordis owner cutover for %s deferred: %s", entry.domain, exc.reason_code)
             receipts.append({"runtime_domain": entry.domain, "action": "deferred", "reason": exc.reason_code})
     return receipts
 
 
-__all__ = ["CUTOVER_EVENT", "OPERATOR_EVENT", "RECOVERY_EVENT", "CompositionDependency", "CutoverDomain",
-           "cutover_manifest", "legacy_turns", "register_cutover_domain", "run_boot_cutover", "transition_domain"]
+__all__ = ["CUTOVER_EVENT", "INTENT_EVENT", "OPERATOR_EVENT", "RECOVERY_EVENT", "CompositionDependency", "CutoverDomain",
+           "cutover_manifest", "legacy_turns", "pending_intents", "record_operator_intent", "register_cutover_domain",
+           "run_boot_cutover"]

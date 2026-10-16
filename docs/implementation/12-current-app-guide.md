@@ -680,14 +680,20 @@ cutover marker or any operator transition is never moved by boot again, so a
 rollback is sticky. A domain whose prerequisites are not yet Cordis-owned is
 skipped. Operators use `GET /api/runtime/composition/domains` and
 `POST /api/runtime/composition/domains/{domain}/owner {target, expected_epoch,
-confirm_domain}` (authenticated HTTP only, audited as
-`runtime_composition_operator_transition`, the domain validated against the
-manifest), surfaced as one confirmed action in Settings → Cordis runtime host.
-The backend holds the exclusive workspace owner lease, so transitions run under
-its lifecycle fence. Cordis turns are bound and block a transition while live
-(`composition_not_quiescent`); legacy turns are not bound, so a process-local
-gate tracks them: a transition refuses while one runs, and no new legacy turn
-starts during a transition (`composition_transition_in_progress`).
+confirm_domain}` (authenticated HTTP only through the global Origin/cookie
+middleware; the domain validated against the manifest), surfaced as one
+confirmed action in Settings → Cordis runtime host. The request only persists
+an audited `runtime_composition_operator_intent`; the serving process never
+transitions a live owner (the maintenance fence's exclusive lock conflicts with
+the backend's own owner lease), so the next boot applies it at a higher epoch
+before chat is served and records `runtime_composition_operator_transition`
+(applied, or rejected when the owner moved meanwhile). The boot step is
+idempotent from any row state: a domain's transitions and marker commit in one
+writer, and a failed precondition (for example a live Cordis job bound to the
+row, `composition_not_quiescent`) rolls back and retries at the next boot.
+Legacy turns are not bound, so a process-local gate defers a domain's boot step
+while one is live and refuses new legacy turns while it runs
+(`composition_transition_in_progress`).
 
 One `cordis_chat_turn_v1` job owns each ingress, keyed by the ingress message
 id. Cordis readiness, the direct-chat route preflight and the turn admission run

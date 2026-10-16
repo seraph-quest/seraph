@@ -82,8 +82,9 @@ Text, vision, and embedding have separate controls.
 requires the Cordis runtime (Docker images and `./manage.sh -e dev local up`
 already build it). On the first start after upgrading, Seraph moves chat to the
 Cordis loop once; if the runtime is missing, chat shows as blocked with the exact
-fix instead of falling back. Settings → Cordis runtime host can roll chat back to
-the legacy loop (and cut it over again); a rollback is never undone by a restart.
+fix instead of falling back. Settings → Cordis runtime host can request a
+rollback of chat to the legacy loop (or a new cutover); it applies at the next
+restart, and a rollback is never undone by later restarts.
 
 Goal discovery (programme research) runs through the reviewed Cordis host. It
 needs Node 22.12+ or 24.x (npm 11.8.0, bundled with Node 24.13.1): put it on PATH

@@ -93,6 +93,7 @@ it("rolls chat back to legacy only after an explicit confirmation naming the dom
   const [, init] = vi.mocked(apiFetch).mock.calls.find(([url]) => String(url).includes("/runtime/composition/"))!;
   expect(JSON.parse(String((init as RequestInit).body))).toEqual({ target: "legacy", expected_epoch: 2, confirm_domain: "seraph.agent-loop.v1" });
   expect(confirm.mock.calls[1][0]).toContain("seraph.agent-loop.v1");
+  expect(await screen.findByText(/Restart Seraph .* to apply the chat loop change/)).toBeInTheDocument();
   confirm.mockRestore();
 });
 it("offers the cutover to Cordis from the legacy loop and surfaces a refused change", async () => {

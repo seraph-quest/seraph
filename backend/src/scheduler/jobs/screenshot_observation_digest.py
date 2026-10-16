@@ -24,7 +24,7 @@ from src.observer.screenshot_semantic_analysis import (
 )
 from src.observer.screenshot_folder_source import resolve_screenshot_folder
 from src.llm_runtime import completion_with_fallback
-from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion, report_guardian_blocked, report_guardian_succeeded
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion_fn, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.scheduler.screen_llm_policy import screen_derived_llm_decision
 
@@ -327,27 +327,22 @@ async def _llm_digest_content(payload: dict[str, Any]) -> str:
     )
     transport_messages = [{"role": "user", "content": prompt}]
     # #1020: the same call, on the guardian loop its owner row selects.
-    response = await guardian_completion(
-        "guardian.screenshot_observation_digest",
-        lambda: completion_with_fallback(
-            messages=transport_messages,
-            temperature=0.2,
-            max_tokens=800,
-            timeout=settings.agent_briefing_timeout,
-            runtime_path="screenshot_observation_digest",
-            # The active phase has one governed OpenRouter inference route.  The
-            # workload policy, rather than a legacy local-only flag, controls
-            # whether this cloud request may dispatch.
-            local_runtime_only=False,
-            request_context=build_canonical_inference_context(
-                "screenshot_observation_digest",
-                payload=transport_messages,
-                output_tokens=800,
-                timeout_seconds=settings.agent_briefing_timeout,
-            ),
+    response = await guardian_completion_fn("guardian.screenshot_observation_digest", completion_with_fallback)(
+        messages=transport_messages,
+        temperature=0.2,
+        max_tokens=800,
+        timeout=settings.agent_briefing_timeout,
+        runtime_path="screenshot_observation_digest",
+        # The active phase has one governed OpenRouter inference route.  The
+        # workload policy, rather than a legacy local-only flag, controls
+        # whether this cloud request may dispatch.
+        local_runtime_only=False,
+        request_context=build_canonical_inference_context(
+            "screenshot_observation_digest",
+            payload=transport_messages,
+            output_tokens=800,
+            timeout_seconds=settings.agent_briefing_timeout,
         ),
-        timeout_seconds=settings.agent_briefing_timeout, runtime_path="screenshot_observation_digest",
-        temperature=0.2, max_tokens=800,
     )
     return str(response.choices[0].message.content or "").strip()
 

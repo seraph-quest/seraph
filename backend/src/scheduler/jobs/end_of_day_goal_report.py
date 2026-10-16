@@ -23,7 +23,7 @@ from config.settings import settings
 from src.audit.runtime import log_integration_event, log_scheduler_job_event
 from src.db.models import GoalStatus, MemoryEpisode, MemoryEpisodeType, ScreenObservation
 from src.llm_runtime import completion_with_fallback, provider_profiles
-from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion, report_guardian_blocked, report_guardian_succeeded
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion_fn, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.observer.image_metadata import image_metadata_label
 from src.observer.screenshot_folder_source import resolve_screenshot_folder
@@ -848,27 +848,22 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
 
 async def _report_completion(transport_messages):
     # #1020: the same call, on the guardian loop its owner row selects.
-    return await guardian_completion(
-        "guardian.end_of_day_goal_report",
-        lambda: completion_with_fallback(
-            messages=transport_messages,
-            temperature=0.4,
-            max_tokens=900,
-            timeout=settings.agent_briefing_timeout,
-            runtime_path="end_of_day_goal_report",
-            # The active phase has one governed OpenRouter inference route.  The
-            # workload policy, rather than a legacy local-only flag, controls
-            # whether this cloud request may dispatch.
-            local_runtime_only=False,
-            request_context=build_canonical_inference_context(
-                "end_of_day_goal_report",
-                payload=transport_messages,
-                output_tokens=900,
-                timeout_seconds=settings.agent_briefing_timeout,
-            ),
+    return await guardian_completion_fn("guardian.end_of_day_goal_report", completion_with_fallback)(
+        messages=transport_messages,
+        temperature=0.4,
+        max_tokens=900,
+        timeout=settings.agent_briefing_timeout,
+        runtime_path="end_of_day_goal_report",
+        # The active phase has one governed OpenRouter inference route.  The
+        # workload policy, rather than a legacy local-only flag, controls
+        # whether this cloud request may dispatch.
+        local_runtime_only=False,
+        request_context=build_canonical_inference_context(
+            "end_of_day_goal_report",
+            payload=transport_messages,
+            output_tokens=900,
+            timeout_seconds=settings.agent_briefing_timeout,
         ),
-        timeout_seconds=settings.agent_briefing_timeout, runtime_path="end_of_day_goal_report",
-        temperature=0.4, max_tokens=900,
     )
 
 

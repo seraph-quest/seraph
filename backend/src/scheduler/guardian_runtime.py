@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 from time import perf_counter
 
-from src.runtime_plugins.guardian_turns import GuardianBlocked, guardian_completion
+from src.runtime_plugins.guardian_turns import GuardianBlocked, guardian_completion, guardian_completion_fn
 
 logger = logging.getLogger(__name__)
-__all__ = ["GuardianBlocked", "guardian_completion", "report_guardian_blocked", "report_guardian_succeeded"]
+__all__ = ["GuardianBlocked", "guardian_completion", "guardian_completion_fn", "report_guardian_blocked",
+           "report_guardian_succeeded"]
 
 
 async def report_guardian_blocked(job_id: str, exc: GuardianBlocked, *, started_at: float | None = None,

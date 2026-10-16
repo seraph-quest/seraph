@@ -220,18 +220,25 @@ def _persist_status_locked() -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "jobs": _last_status}, indent=2,
-                                        sort_keys=True, default=lambda value: value.isoformat()), encoding="utf-8")
-        temporary.chmod(0o600)
+        # Created private (0600) from the first byte, then atomically replaced.
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"schema_version": SCHEMA_VERSION, "jobs": _last_status}, indent=2,
+                                    sort_keys=True, default=lambda value: value.isoformat()))
+        os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     except OSError:
         logger.warning("Background inference status could not be persisted", exc_info=True)
 
 
 def _record_locked(job_id: str, value: dict[str, str]) -> None:
+    """Keep the latest status; the file is rewritten only when something besides the time changed."""
     _load_status_locked()
+    previous = _last_status.get(job_id) or {}
     _last_status[job_id] = value
-    _persist_status_locked()
+    if {key: item for key, item in previous.items() if key != "at"} != {
+            key: item for key, item in value.items() if key != "at"}:
+        _persist_status_locked()
 
 
 def record_background_inference_skip(job_id: str, reason: str = DISABLED_BY_OPERATOR) -> bool:
@@ -263,7 +270,9 @@ def record_background_inference_blocked(job_id: str, reason: str, recovery: str)
     with _lock:
         _load_status_locked()
         previous = _last_status.get(job_id) or {}
-        transition = previous.get("status") != "blocked" or previous.get("reason") != reason
+        # Only entering blocked is a transition: a reason that changes while the job stays
+        # blocked updates the status without another notification.
+        transition = previous.get("status") != "blocked"
         last_activity = previous.get("activity_at") if not transition else None
         due = True
         if last_activity:

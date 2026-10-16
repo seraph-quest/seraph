@@ -24,7 +24,7 @@ from .contracts import METHOD_DOMAINS
 DOMAINS = tuple(f"seraph.{name}.v1" for name in (
     "authority", "goals", "tasks", "capabilities", "inference", "memory",
     "artifacts", "audit", "research", "conversation", "scheduler",
-    "connections", "agent-loop", "source-extraction", "agent-presets", "guardian"))
+    "connections", "agent-presets", "agent-loop", "guardian", "source-extraction"))
 # Domains added after an install's inventory was first seeded, with the issue
 # that introduced them. Boot inserts each missing one once as its legacy owner
 # (``introduce_domains_sync``); a missing original domain is never repaired.
@@ -120,10 +120,13 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
     raise CompositionBindingError("composition_branch_unsupported")
 
 
-# A chat step admitted before #1020 bound no presets owner. Such a binding is
-# read (inspect, recovery, the job CAS) exactly as it was written; every new
-# admission binds the presets.
-PRE_PRESETS_ORIGINS = frozenset({"agent-loop.startTurn"})
+# Binding schema 1 is #1019's: no method depended on the presets owner. A chat step
+# admitted then is read (inspect, recovery, the job CAS) exactly as it was written.
+# Schema 2 (#1020) adds the presets owner to every turn step; every new admission
+# writes schema 2, and an origin introduced by #1020 exists only in schema 2.
+BINDING_SCHEMA = 2
+TURN_STEP_METHODS = frozenset({"agent-loop.startTurn", "guardian.startTurn"})
+SCHEMA_2_ORIGINS = frozenset({"guardian.startTurn"})
 
 
 def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool = True) -> tuple[str, ...]:
@@ -141,7 +144,7 @@ def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool 
     if method in GOVERNED_ORIGINS:
         # Governed effects need the artifact and audit owners explicitly (#1018).
         names.update({"seraph.artifacts.v1", "seraph.audit.v1"})
-    if method in {"agent-loop.startTurn", "guardian.startTurn"} and (presets or method not in PRE_PRESETS_ORIGINS):
+    if method in TURN_STEP_METHODS and presets:
         # Every turn step is checked against the reviewed presets (#1020).
         names.add(PRESETS_DOMAIN)
     if method == "research.executeAccepted":
@@ -181,7 +184,8 @@ class RuntimeCompositionBinding:
 
     def __post_init__(self):
         keys = tuple(item.runtime_domain for item in self.dependency_vector)
-        if (type(self.schema_version) is not int or self.schema_version != 1
+        if (type(self.schema_version) is not int or self.schema_version not in {1, BINDING_SCHEMA}
+                or (self.schema_version == 1 and self.origin_method in SCHEMA_2_ORIGINS)
                 or type(self.goal_bound) is not bool
                 or METHOD_DOMAINS.get(self.origin_method) != self.runtime_domain
                 or self.native_branch not in NATIVE_BRANCHES
@@ -197,9 +201,8 @@ class RuntimeCompositionBinding:
 
     @property
     def presets_bound(self) -> bool:
-        """False only for a chat step binding written before #1020 introduced the presets owner."""
-        return (self.origin_method not in PRE_PRESETS_ORIGINS
-                or any(item.runtime_domain == PRESETS_DOMAIN for item in self.dependency_vector))
+        """Whether this binding's schema has turn steps depend on the presets owner (#1020)."""
+        return self.schema_version >= BINDING_SCHEMA
 
     def allows(self, method: str) -> bool:
         return method in self.allowed_child_methods
@@ -211,7 +214,8 @@ class RuntimeCompositionBinding:
         return next(item.epoch for item in self.dependency_vector if item.runtime_domain == domain)
 
     def payload(self):
-        return dict(schema_version=1, runtime_domain=self.runtime_domain, origin_method=self.origin_method,
+        return dict(schema_version=self.schema_version, runtime_domain=self.runtime_domain,
+                    origin_method=self.origin_method,
                     native_branch=self.native_branch, allowed_child_methods=list(self.allowed_child_methods),
                     method_manifest_version=MANIFEST_VERSION,
                     method_manifest_digest=method_manifest_digest(self.origin_method, self.native_branch,
@@ -308,7 +312,7 @@ async def bind_invocation(db, *, method: str, native_branch: str = "base", goal_
         host_composition_digest = reviewed_composition.composition_digest
     return RuntimeCompositionBinding(METHOD_DOMAINS[method], method, native_branch, methods,
         tuple(_checked_row(rows[domain]) for domain in domains),
-        host_package_digest, host_composition_digest, goal_bound)
+        host_package_digest, host_composition_digest, goal_bound, BINDING_SCHEMA)
 
 
 async def validate_invocation(db, binding: RuntimeCompositionBinding) -> None:

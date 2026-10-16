@@ -7,7 +7,7 @@ from time import perf_counter
 from config.settings import settings
 from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
-from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion, report_guardian_blocked, report_guardian_succeeded
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion_fn, report_guardian_blocked, report_guardian_succeeded
 from src.memory.hybrid_retrieval import retrieve_hybrid_memory
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.models.schemas import WSResponse
@@ -108,23 +108,18 @@ async def run_daily_briefing() -> None:
         try:
             transport_messages = [{"role": "user", "content": prompt}]
             # #1020: the same call, on the guardian loop its owner row selects.
-            response = await guardian_completion(
-                "guardian.daily_briefing",
-                lambda: completion_with_fallback(
-                    messages=transport_messages,
-                    temperature=0.6,
-                    max_tokens=512,
-                    timeout=settings.agent_briefing_timeout,
-                    runtime_path="daily_briefing",
-                    request_context=build_canonical_inference_context(
-                        "daily_briefing",
-                        payload=transport_messages,
-                        output_tokens=512,
-                        timeout_seconds=settings.agent_briefing_timeout,
-                    ),
+            response = await guardian_completion_fn("guardian.daily_briefing", completion_with_fallback)(
+                messages=transport_messages,
+                temperature=0.6,
+                max_tokens=512,
+                timeout=settings.agent_briefing_timeout,
+                runtime_path="daily_briefing",
+                request_context=build_canonical_inference_context(
+                    "daily_briefing",
+                    payload=transport_messages,
+                    output_tokens=512,
+                    timeout_seconds=settings.agent_briefing_timeout,
                 ),
-                timeout_seconds=settings.agent_briefing_timeout, runtime_path="daily_briefing",
-                temperature=0.6, max_tokens=512,
             )
         except asyncio.TimeoutError:
             logger.warning("daily_briefing: LLM timed out after %ds", settings.agent_briefing_timeout)

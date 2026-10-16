@@ -8,7 +8,7 @@ from time import perf_counter
 from config.settings import settings
 from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
-from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion, report_guardian_blocked, report_guardian_succeeded
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion_fn, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.models.schemas import WSResponse
 
@@ -128,23 +128,18 @@ async def run_activity_digest() -> None:
         try:
             transport_messages = [{"role": "user", "content": prompt}]
             # #1020: the same call, on the guardian loop its owner row selects.
-            response = await guardian_completion(
-                "guardian.activity_digest",
-                lambda: completion_with_fallback(
-                    messages=transport_messages,
-                    temperature=0.6,
-                    max_tokens=768,
-                    timeout=settings.agent_briefing_timeout,
-                    runtime_path="activity_digest",
-                    request_context=build_canonical_inference_context(
-                        "activity_digest",
-                        payload=transport_messages,
-                        output_tokens=768,
-                        timeout_seconds=settings.agent_briefing_timeout,
-                    ),
+            response = await guardian_completion_fn("guardian.activity_digest", completion_with_fallback)(
+                messages=transport_messages,
+                temperature=0.6,
+                max_tokens=768,
+                timeout=settings.agent_briefing_timeout,
+                runtime_path="activity_digest",
+                request_context=build_canonical_inference_context(
+                    "activity_digest",
+                    payload=transport_messages,
+                    output_tokens=768,
+                    timeout_seconds=settings.agent_briefing_timeout,
                 ),
-                timeout_seconds=settings.agent_briefing_timeout, runtime_path="activity_digest",
-                temperature=0.6, max_tokens=768,
             )
         except asyncio.TimeoutError:
             logger.warning("activity_digest: LLM timed out after %ds", settings.agent_briefing_timeout)

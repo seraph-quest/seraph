@@ -8,6 +8,7 @@ denied and no provider is contacted.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 import json
 import subprocess
 from types import SimpleNamespace
@@ -419,6 +420,13 @@ async def test_existing_chat_turn_ids_survive_the_presets_upgrade(accounting_db,
         with pytest.raises(CompositionBindingError):
             RuntimeCompositionBinding(GUARDIAN_DOMAIN, "guardian.startTurn", "guardian",
                                       method_closure("guardian.startTurn", "guardian"), guardian_vector)
+        # The leniency is the schema's, not the vector's: schema 2 needs presets, schema 1 cannot carry them.
+        assert legacy_shape.schema_version == 1 and binding.schema_version == 2
+        for schema, vector in ((2, legacy_shape.dependency_vector), (1, binding.dependency_vector)):
+            with pytest.raises(CompositionBindingError):
+                RuntimeCompositionBinding(binding.runtime_domain, binding.origin_method, binding.native_branch,
+                                          binding.allowed_child_methods, vector, binding.host_package_digest,
+                                          binding.host_composition_digest, binding.goal_bound, schema)
 
 
 from tests.test_research_native_vertical import real_auth  # noqa: E402,F401
@@ -950,3 +958,126 @@ async def test_measured_unattended_turn_overhead_p95_over_100_samples(accounting
     # Non-gating by default, as #1019: asserted only on a quiet host with SERAPH_CORDIS_LATENCY_BUDGET=1.
     if os.environ.get("SERAPH_CORDIS_LATENCY_BUDGET") == "1":
         assert p95(admissions) <= 0.250 and p95(steps) <= 0.250 and p95(settlements) <= 0.250
+
+
+# ---------------------------------------------------------------- review fixes (#1020 PR1)
+
+@pytest.mark.asyncio
+async def test_api_status_reports_unreadable_guardian_routing_instead_of_failing(monkeypatch):
+    """A locked database while reading the owner rows never turns /api/status into a 500."""
+    from sqlalchemy.exc import OperationalError
+    from src import app as app_module
+
+    async def locked(*_args, **_kwargs):
+        raise OperationalError("SELECT", {}, Exception("database is locked"))
+    monkeypatch.setattr(app_module, "guardian_runtime_status", locked)
+    monkeypatch.setattr(app_module, "runtime_domains_status", locked)
+    guardian = await app_module._guardian_runtime_or_unavailable()
+    assert (guardian["loop"], guardian["reason"]) == ("blocked", "guardian_runtime_status_unavailable")
+    assert guardian["recovery"]
+    domains = await app_module._runtime_domains_or_unavailable()
+    from src.runtime_plugins.ownership import DOMAINS
+    assert [item["domain"] for item in domains] == list(DOMAINS)
+    assert {item["state"] for item in domains} == {"unavailable"}
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_an_operator_principal_without_a_live_root_is_refused_not_re_owned(accounting_db, monkeypatch):  # noqa: F811
+    """A revoked, unauthenticated or Root-less operator principal never becomes a service-owned turn."""
+    from dataclasses import replace
+    from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+    deny_sockets(monkeypatch)
+    calls = []
+
+    async def call():
+        calls.append(1)
+        return _response("must not run")
+    operator = TrustPrincipal(principal_id="operator:1", principal_type=PrincipalType.OPERATOR,
+                              grants=(AuthorityGrant.MODEL_INFERENCE,), session_id="chat-1",
+                              operator_session_id="root-1")
+    async with guardian_host() as host:
+        for broken in (replace(operator, revoked=True), replace(operator, authenticated=False),
+                       replace(operator, operator_session_id="")):
+            with pytest.raises(GuardianBlocked) as refused:
+                await guardian_completion("guardian.memory_consolidation", call, timeout_seconds=30,
+                                          runtime_path="session_consolidation", temperature=0.3, max_tokens=1024,
+                                          root=broken, host=host)
+            assert refused.value.reason_code == "native_original_root_inactive"
+        # A service principal (a scheduled catch-up) is the unattended admission.
+        async with service_principal("memory_consolidation"):
+            service = TrustPrincipal(principal_id="service:scheduler:memory_consolidation",
+                                     principal_type=PrincipalType.SERVICE)
+            await guardian_completion("guardian.memory_consolidation", call, timeout_seconds=30,
+                                      runtime_path="session_consolidation", temperature=0.3, max_tokens=1024,
+                                      root=service, host=host)
+    assert calls == [1]
+    (turn,) = await _jobs_of_kind("cordis_guardian_turn_v1")
+    assert turn["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_a_report_call_is_checked_against_its_preset_from_its_real_arguments():
+    from src.runtime_plugins.guardian_turns import guardian_completion_fn
+    calls = []
+
+    async def completion(**kwargs):
+        calls.append(kwargs)
+        return _response("never")
+    widened = guardian_completion_fn("guardian.daily_briefing", completion)
+    with pytest.raises(GuardianBlocked) as changed:
+        await widened(messages=[], temperature=0.9, max_tokens=512, timeout=30, runtime_path="daily_briefing")
+    assert changed.value.reason_code == "agent_preset_changed" and calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_caller_cancels_its_owner_loop_task():
+    from src.runtime_plugins.guardian_turns import _on_loop
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def slow():
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+    waiting = asyncio.ensure_future(_on_loop(asyncio.get_running_loop(), slow))
+    await asyncio.wait_for(started.wait(), 5)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    await asyncio.wait_for(cancelled.wait(), 5)
+
+
+@pytest.mark.asyncio
+async def test_blocked_status_notifies_on_entering_blocked_only_and_is_written_privately_on_change(
+        accounting_db, monkeypatch, tmp_path):  # noqa: F811
+    import os
+    import stat
+    from config.settings import settings
+    from src.scheduler import background_inference
+    from src.scheduler.guardian_runtime import report_guardian_blocked
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    announced, writes = [], []
+
+    async def deliver(message, **_kwargs):
+        announced.append(message.content)
+
+    async def scheduler_event(**_kwargs):
+        return None
+    monkeypatch.setattr("src.observer.delivery.deliver_or_queue", deliver)
+    monkeypatch.setattr("src.audit.runtime.log_scheduler_job_event", scheduler_event)
+    persist = background_inference._persist_status_locked
+    monkeypatch.setattr(background_inference, "_persist_status_locked", lambda: (writes.append(1), persist()))
+    # A reason that flaps while the job stays blocked is not a new announcement.
+    for reason in ("cordis_host_unavailable", "guardian_owner_blocked", "cordis_host_unavailable"):
+        await report_guardian_blocked("evening_review", GuardianBlocked(reason))
+    assert len(announced) == 1
+    path = background_inference.background_inference_status_path()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    # Repeated identical skips rewrite nothing.
+    writes.clear()
+    for _ in range(5):
+        background_inference.record_background_inference_skip("daily_briefing")
+    assert len(writes) == 1

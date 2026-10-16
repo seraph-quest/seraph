@@ -491,17 +491,23 @@ class GuardianTurn:
 
 
 def _operator_root(principal):
-    """The authenticated operator principal a trigger runs under, if it has a Root."""
+    """The operator principal a trigger runs under, or None for a service (or no) principal.
+
+    An operator principal that is revoked, unauthenticated or bound to no Root is
+    refused: its turn is never silently re-owned by the guardian service.
+    """
     from src.security.trust_contract import PrincipalType
     if principal is None:
         return None
     try:
         kind = PrincipalType(principal.principal_type)
     except (TypeError, ValueError):
+        raise GuardianBlocked("native_original_root_inactive") from None
+    if kind is not PrincipalType.OPERATOR:
         return None
-    if (kind is not PrincipalType.OPERATOR or not principal.authenticated or principal.revoked
-            or not principal.principal_id or not principal.operator_session_id):
-        return None
+    if (not principal.authenticated or principal.revoked or not principal.principal_id
+            or not principal.operator_session_id):
+        raise GuardianBlocked("native_original_root_inactive")
     return principal
 
 
@@ -562,16 +568,26 @@ async def guardian_completion(preset_id: str, call, *, timeout_seconds: float, r
 
 
 async def _on_loop(loop, factory):
-    """Run ``factory()`` on ``loop`` with the caller's context (principal, request id)."""
+    """Run ``factory()`` on ``loop`` with the caller's context (principal, request id).
+
+    The caller's cancellation is propagated to the owner-loop task, and a result
+    arriving after the caller gave up is dropped rather than set on a cancelled future.
+    """
     import concurrent.futures
     import contextvars
     context = contextvars.copy_context()
     done: concurrent.futures.Future = concurrent.futures.Future()
+    started: list = []
 
     def start():
+        if done.cancelled():
+            return
         task = loop.create_task(factory(), context=context)
+        started.append(task)
 
         def finish(item):
+            if done.done():
+                return
             if item.cancelled():
                 done.cancel()
             elif item.exception() is not None:
@@ -580,7 +596,12 @@ async def _on_loop(loop, factory):
                 done.set_result(item.result())
         task.add_done_callback(finish)
     loop.call_soon_threadsafe(start)
-    return await asyncio.wrap_future(done)
+    try:
+        return await asyncio.wrap_future(done)
+    except asyncio.CancelledError:
+        done.cancel()
+        loop.call_soon_threadsafe(lambda: [task.cancel() for task in started])
+        raise
 
 
 async def _cordis_completion(preset_id, call, *, timeout_seconds, parent, root, host, jobs):

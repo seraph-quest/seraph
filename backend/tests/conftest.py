@@ -269,6 +269,12 @@ def reset_process_singletons(monkeypatch):
     # Reset in place: many modules hold a reference to this exact object.
     context_manager.__dict__.update(fresh.__dict__)
     monkeypatch.setattr(effective_policy, "configuration_mutation_lock", asyncio.Lock())
+    # Contention backoffs from #702/#1074: a prior test's deferred touch or
+    # audited empty poll must not suppress the next test's.
+    from src.api import observer as observer_api
+    from src.auth import service as auth_service
+    monkeypatch.setattr(auth_service, "_auth_touch_retry_after", 0.0)
+    monkeypatch.setattr(observer_api, "_empty_poll_audited_at", {})
     yield
 
 

@@ -186,6 +186,28 @@ def read_context(run) -> dict:
         raise NativeServiceBlocked("native_private_context_changed") from exc
 
 
+def retained_read_result(method: str, result: dict) -> dict:
+    """The only form of a read result that may persist in a job row or artifact.
+
+    Memory text is private and forgettable, so only its record references are
+    retained; capability and connection results are already metadata only.
+    """
+    if method != "memory.retrieve":
+        return result
+    return {**result, "value": {"records": [{"record_ref": item["record_ref"]} for item in result["value"]["records"]]}}
+
+
+def sealed_read_result(context: dict) -> dict:
+    """The read journey's sealed result: its digest and retained projection only."""
+    sealed = context["result"]
+    if sealed is None:
+        raise NativeServiceBlocked("native_artifact_source_unavailable")
+    if (type(sealed) is not dict or set(sealed) != {"result_digest", "projection"}
+            or type(sealed["result_digest"]) is not str or type(sealed["projection"]) is not dict):
+        raise NativeServiceBlocked("native_private_context_changed")
+    return sealed
+
+
 def _run_candidate(run) -> dict:
     """The admitted candidate is private; only its digest is in the public job."""
     candidate = read_context(run)["candidate"]
@@ -437,7 +459,9 @@ class NativeServiceDispatcher:
             if context["result"] is not None:
                 raise NativeServiceBlocked("native_read_replay_denied")
             result = succeeded(method, await native_read_projection(db, run, candidate))
-            context["result"] = {"result_digest": _digest(result), "payload": result}
+            # Only the digest and a non-private projection rest in the job row
+            # (#1100); the full result exists only in this call's response.
+            context["result"] = {"result_digest": _digest(result), "projection": retained_read_result(method, result)}
             receipt = checkpoint_receipt("cordis-read:result", {"method": method, "result_digest": _digest(result),
                                                                 "no_learning": True}, run.fencing_token)
             await cas_run(db, run, checkpoint_context_json=_canonical(context),

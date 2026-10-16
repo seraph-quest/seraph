@@ -1,6 +1,8 @@
 """One original native read's finite private artifact and audit operations.
 
-The source is exclusively the invocation's own sealed read result. Operations
+The source is exclusively the invocation's own sealed read result, in its
+retained non-private projection: memory text never rests in the job row or the
+artifact file, so a later forget leaves no copy to scrub (#1100). Operations
 run in fixed order stage -> adopt -> read -> audit.append, each exactly once.
 Stage records its physical intent before writing; an interrupted intent stays
 visibly unresolved and is never re-executed. Every operation rechecks the
@@ -16,7 +18,7 @@ from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 
 from .contracts import succeeded
 from .dispatch import (READ_JOB_KIND, NativeServiceBlocked, _append_receipt, _canonical, _digest, _writer,
-                       cas_run, checkpoint_receipt, operation_ref, read_context,
+                       cas_run, checkpoint_receipt, operation_ref, read_context, sealed_read_result,
                        transient_storage_error)
 from .ownership import ARTIFACT_CHILDREN
 
@@ -28,9 +30,7 @@ MAX_ARTIFACT_BYTES = 65536
 
 
 def artifact_bytes(context: dict) -> bytes:
-    if context["result"] is None:
-        raise NativeServiceBlocked("native_artifact_source_unavailable")
-    content = _canonical(context["result"]["payload"]).encode("utf-8")
+    content = _canonical(sealed_read_result(context)["projection"]).encode("utf-8")
     if not 1 <= len(content) <= MAX_ARTIFACT_BYTES:
         raise NativeServiceBlocked("native_artifact_source_unsupported")
     return content
@@ -66,7 +66,7 @@ def readback(run, context: dict) -> tuple[str, bytes, str]:
 def audit_details(run, context: dict) -> dict:
     ops = context["operations"]
     return {"original_read_method": context["candidate"]["method"],
-            "sealed_result_digest": context["result"]["result_digest"],
+            "sealed_result_digest": sealed_read_result(context)["result_digest"],
             "artifact_ref": ops[0]["artifact_ref"],
             "content_digest": hashlib.sha256(artifact_bytes(context)).hexdigest(),
             "no_learning": True}
@@ -107,8 +107,7 @@ async def _current(dispatcher, db, scope, method):
         raise NativeServiceBlocked("native_artifact_branch_required")
     _artifact_grants(run)
     context = read_context(run)
-    if context["result"] is None:
-        raise NativeServiceBlocked("native_artifact_source_unavailable")
+    sealed_read_result(context)
     return run, context
 
 
@@ -250,9 +249,13 @@ async def assert_artifact_completion(db, run) -> dict:
             or event.event_type != AUDIT_EVENT_TYPE or event.summary != AUDIT_SUMMARY
             or json.loads(event.details_json or "null") != audit_details(run, context)):
         raise NativeServiceBlocked("native_artifact_audit_readback_unproven")
+    sealed = sealed_read_result(context)
+    if context["candidate"]["method"] == "memory.retrieve":
+        from .read_admission import assert_memory_records_current
+        await assert_memory_records_current(db, run, sealed["projection"]["value"])
     return {"artifact_ref": ops[0]["artifact_ref"], "file_path": reference, "content_digest": digest,
-            "audit_event_ref": event.id, "result_digest": context["result"]["result_digest"],
-            "result": context["result"]["payload"], "artifact_readback": expected_read}
+            "audit_event_ref": event.id, "result_digest": sealed["result_digest"],
+            "retained_result": sealed["projection"], "artifact_readback": expected_read}
 
 
 def assert_child_echo(run, method: str, observed: dict) -> None:
@@ -264,5 +267,5 @@ def assert_child_echo(run, method: str, observed: dict) -> None:
         if (sealed is None or sealed["method"] != method or sealed["state"] != "settled"
                 or sealed.get("result_digest") != _digest(observed)):
             raise NativeServiceBlocked("native_child_result_mismatch")
-    elif context["result"] is None or observed != context["result"]["payload"]:
+    elif context["result"] is None or _digest(observed) != sealed_read_result(context)["result_digest"]:
         raise NativeServiceBlocked("native_child_result_mismatch")

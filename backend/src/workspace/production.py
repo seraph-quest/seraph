@@ -1110,8 +1110,58 @@ def maintenance_fence(workspace: ProductionWorkspace) -> Iterator[None]:
         os.close(descriptor)
 
 
+CONTAINER_UID = 10001
+OWNERSHIP_MIGRATION = (
+    "docker compose -f docker-compose.<env>.yaml run --rm --no-deps --user root <backend service> "
+    "chown -R 10001:10001 /app/data /app/logs"
+)
+
+
+def workspace_ownership_problem(
+    root: str | os.PathLike[str],
+    *,
+    uid: int | None = None,
+    max_entries: int = 50_000,
+) -> str | None:
+    """A typed reason when a non-root runtime user does not own its workspace.
+
+    The backend image runs as uid 10001 (#1103); a workspace written by an
+    earlier root container would otherwise fail mid-write.  Root needs no
+    ownership.  Symlinks are never followed; the walk is bounded.
+    """
+    uid = os.getuid() if uid is None else uid
+    if uid == 0:
+        return None
+    path = Path(root)
+    try:
+        if path.lstat().st_uid != uid:
+            return f"workspace_ownership_mismatch:root_owned_by_{path.lstat().st_uid}"
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "workspace_ownership_mismatch:root_unreadable"
+    foreign = 0
+    seen = 0
+    for current, directories, files in os.walk(path, onerror=lambda _error: None):
+        for name in (*directories, *files):
+            seen += 1
+            if seen > max_entries:
+                break
+            try:
+                if os.lstat(os.path.join(current, name)).st_uid != uid:
+                    foreign += 1
+            except OSError:
+                foreign += 1
+        if seen > max_entries:
+            break
+    return f"workspace_ownership_mismatch:{foreign}_entries" if foreign else None
+
+
 __all__ = [
     "CANONICAL_CONTAINER_WORKSPACE",
+    "CONTAINER_UID",
+    "OWNERSHIP_MIGRATION",
+    "workspace_ownership_problem",
     "MOUNT_SOURCE_ENV",
     "PRODUCTION_BIND_ENV",
     "WORKSPACE_ENV",

@@ -17,7 +17,9 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 RUN apt update
-RUN apt install gcc g++ git curl -y
+# bubblewrap is the agent process sandbox (#1103); the backend probes it at
+# startup and before every command and blocks commands when it cannot run.
+RUN apt install gcc g++ git curl bubblewrap -y
 
 # Playwright/Chromium system dependencies
 RUN apt install -y --no-install-recommends \
@@ -34,7 +36,8 @@ ADD . /app
 WORKDIR /app
 RUN uv sync --frozen
 
-# Install Playwright Chromium browser
+# Install Playwright Chromium browser where the non-root runtime user reads it.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN uv run playwright install chromium
 
 # The backend resolves the Cordis package at /runtime/cordis (parents of
@@ -42,5 +45,17 @@ RUN uv run playwright install chromium
 COPY --from=cordis-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=cordis-build /runtime/cordis /runtime/cordis
 ENV CORDIS_NODE_PATH=/usr/local/bin/node
+
+# Non-root runtime user with a fixed uid/gid (#1103). Workspaces written by an
+# earlier root container need a one-time ownership migration:
+#   docker compose -f docker-compose.<env>.yaml run --rm --no-deps --user root \
+#     <backend service> chown -R 10001:10001 /app/data /app/logs
+# The backend refuses to start (workspace_ownership_mismatch) until then.
+RUN groupadd --system --gid 10001 seraph \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /home/seraph --create-home \
+       --shell /usr/sbin/nologin seraph \
+    && mkdir -p /app/data /app/logs \
+    && chown -R seraph:seraph /app/.venv /app/data /app/logs /home/seraph
+USER seraph
 
 CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]

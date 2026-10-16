@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -342,6 +343,24 @@ def _augment_inference_readiness(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     workspace_owner = None
+    from src.execution.process_isolation import in_container
+
+    if in_container():
+        # The image runs as uid 10001 (#1103): refuse to start on a workspace
+        # an earlier root container still owns, rather than failing mid-write,
+        # and record the agent process sandbox posture probed in here.
+        from src.workspace.production import OWNERSHIP_MIGRATION, workspace_ownership_problem
+
+        ownership = workspace_ownership_problem(settings.workspace_dir)
+        if ownership:
+            raise RuntimeError(f"{ownership}; migrate once with: {OWNERSHIP_MIGRATION}")
+        from src.tools.process_tools import _sandbox_posture
+
+        posture = await asyncio.to_thread(_sandbox_posture)
+        logging.getLogger(__name__).warning(
+            "Agent process sandbox: %s",
+            "isolated" if posture.isolated else posture.code,
+        )
     if settings.deployment_environment.strip().lower() in {"prod", "production"}:
         # The container preflight proves the /app/data bind.  Hold the same
         # lock inode for the whole backend lifetime so host backup/restore

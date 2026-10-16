@@ -366,16 +366,69 @@ def test_every_agent_factory_builds_the_interrupt_aware_agent():
     import src.agent.strategist as strategist
     for module in (factory, onboarding, specialists, strategist):
         assert module.ToolCallingAgent is ToolCallingAgent, module.__name__
-    # No other module may build smolagents' agent directly.
-    offenders = []
-    for path in Path("src").rglob("*.py"):
-        if path.as_posix() == "src/agent/tool_calling_agent.py":
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("smolagents") and any(
-                    alias.name in {"ToolCallingAgent", "CodeAgent", "MultiStepAgent"} for alias in node.names):
-                offenders.append(path.as_posix())
-    assert offenders == []
+    # No other module may reach smolagents' agent classes, by any import form.
+    offenders = {path.as_posix(): _smolagents_agent_references(path.read_text(encoding="utf-8"))
+                 for path in Path("src").rglob("*.py") if path.as_posix() != "src/agent/tool_calling_agent.py"}
+    assert {path: refs for path, refs in offenders.items() if refs} == {}
+
+
+_AGENT_CLASSES = frozenset({"ToolCallingAgent", "CodeAgent", "MultiStepAgent"})
+
+
+def _smolagents_agent_references(source: str) -> list[str]:
+    """Every way a module can name smolagents' agent classes or its agents module."""
+    import ast
+    tree = ast.parse(source)
+    module_aliases: set[str] = set()   # names bound to the smolagents package
+    agents_aliases: set[str] = set()   # names bound to smolagents.agents
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "smolagents":
+                    module_aliases.add(alias.asname or "smolagents")
+                elif alias.name == "smolagents.agents":
+                    found.append("import smolagents.agents")
+                    agents_aliases.add(alias.asname or "smolagents")
+        elif isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "smolagents":
+            if node.module == "smolagents.agents":
+                found.append(f"from {node.module} import ...")
+            for alias in node.names:
+                if alias.name in _AGENT_CLASSES or (node.module == "smolagents" and alias.name == "agents"):
+                    found.append(f"from {node.module} import {alias.name}")
+                    if alias.name == "agents":
+                        agents_aliases.add(alias.asname or "agents")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in module_aliases and (node.attr in _AGENT_CLASSES or node.attr == "agents"):
+                found.append(f"{node.value.id}.{node.attr}")
+            elif node.value.id in agents_aliases and node.attr in _AGENT_CLASSES:
+                found.append(f"{node.value.id}.{node.attr}")
+        elif isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant):
+            name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            if name in {"__import__", "import_module"} and str(node.args[0].value).startswith("smolagents.agents"):
+                found.append(f"{name}({node.args[0].value!r})")
+    return found
+
+
+@pytest.mark.parametrize("source", [
+    "from smolagents import ToolCallingAgent",
+    "from smolagents import CodeAgent as Agent",
+    "from smolagents.agents import ToolCallingAgent",
+    "from smolagents.agents import MultiStepAgent",
+    "from smolagents import agents\nagents.ToolCallingAgent",
+    "import smolagents\nsmolagents.ToolCallingAgent(tools=[], model=None)",
+    "import smolagents as sa\nsa.CodeAgent",
+    "import smolagents.agents",
+    "import importlib\nimportlib.import_module('smolagents.agents')",
+])
+def test_agent_import_guard_catches_every_import_form(source):
+    assert _smolagents_agent_references(source)
+
+
+def test_agent_import_guard_allows_unrelated_smolagents_imports():
+    assert _smolagents_agent_references(
+        "from smolagents import Tool, tool\nimport smolagents\nsmolagents.Tool\nfrom smolagents.models import ChatMessage") == []
 
 
 def test_tools_are_serialized_by_their_calling_schema_not_their_source_export():
@@ -479,3 +532,64 @@ def test_ws_real_tool_turn_executes_and_returns_the_final_answer(scripted_chat_m
         _assert_bodies_match_litellm(provider, recorded_generate)
     finally:
         _close_sync_client_with_db(patches, stack)
+
+
+# ---------------------------------------------------------------- plain-message callers keep their exact bodies
+
+def _model(*, flatten: bool):
+    from src import llm_runtime
+    return llm_runtime.FallbackLiteLLMModel(model_id="openrouter/anthropic/claude-sonnet-4",
+                                            api_base="https://openrouter.ai/api/v1", api_key="fixture",
+                                            runtime_path="chat_agent", flatten_messages_as_text=flatten)
+
+
+@pytest.mark.parametrize("flatten", [True, False])
+@pytest.mark.parametrize("messages", [
+    [{"role": "system", "content": "You draft replies."}, {"role": "user", "content": "Reply to Ann."}],
+    [{"role": "user", "content": "one"}, {"role": "user", "content": "two"}],
+    [{"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function",
+                                                            "function": {"name": "f", "arguments": "{}"}}]},
+     {"role": "tool", "tool_call_id": "c1", "content": "result"}],
+])
+def test_plain_openai_messages_are_sent_byte_identical(flatten, messages):
+    from src import llm_runtime
+    legacy = [llm_runtime._openai_message_payload(message) for message in messages]
+    prepared = _model(flatten=flatten)._provider_messages(messages)
+    assert json.dumps(prepared, sort_keys=True) == json.dumps(legacy, sort_keys=True)
+
+
+@pytest.mark.parametrize("flatten", [True, False])
+def test_agent_memory_matches_litellm_including_flatten_models(flatten):
+    from smolagents import LiteLLMModel
+    from smolagents.models import MessageRole
+    memory = [
+        ChatMessage(role=MessageRole.SYSTEM, content=[{"type": "text", "text": "system prompt"}]),
+        ChatMessage(role=MessageRole.USER, content=[{"type": "text", "text": "New task:\nhi"}]),
+        ChatMessage(role=MessageRole.TOOL_CALL, content=[{"type": "text", "text": "Calling tools: view_soul"}]),
+        ChatMessage(role=MessageRole.TOOL_RESPONSE, content=[{"type": "text", "text": "Observation:\nsoul"}]),
+        ChatMessage(role=MessageRole.ASSISTANT, content="a plain string turn"),
+    ]
+    prepared = _model(flatten=flatten)._provider_messages(memory)
+    assert {message["role"] for message in prepared} <= _OPENAI_ROLES
+    reference = LiteLLMModel(model_id="openrouter/anthropic/claude-sonnet-4", flatten_messages_as_text=flatten)
+    wrapped = [ChatMessage(role=m.role, content=[{"type": "text", "text": m.content}]) if isinstance(m.content, str)
+               else m for m in memory]
+    expected = reference._prepare_completion_kwargs(messages=wrapped, convert_images_to_image_urls=True)["messages"]
+    assert prepared == json.loads(json.dumps(expected))
+
+
+def test_plain_string_generate_on_a_flatten_model_sends_the_legacy_body(scripted_chat_model, monkeypatch):
+    """A direct caller (mail reply, calendar) on a flatten route: unchanged body, no exception."""
+    from src import llm_runtime
+    _setup, profile, _proofs = _openrouter_route()
+    principal = TrustPrincipal(principal_id="operator:test", principal_type=PrincipalType.OPERATOR,
+                               grants=(AuthorityGrant.MODEL_INFERENCE,), session_id="session-1107")
+    monkeypatch.setattr(llm_runtime, "get_current_trust_principal", lambda: principal)
+    provider = scripted_chat_model("final_answer", {"answer": "ignored"})
+    model = llm_runtime.FallbackLiteLLMModel(model_id=profile.routing_model, api_base=profile.api_base,
+                                             api_key="fixture-openrouter-key", runtime_profile=profile.id,
+                                             runtime_path="chat_agent", max_tokens=512,
+                                             flatten_messages_as_text=True)
+    messages = [{"role": "system", "content": "You draft replies."}, {"role": "user", "content": "Reply to Ann."}]
+    model.generate(messages)
+    assert provider.bodies[0]["messages"] == messages

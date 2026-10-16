@@ -1534,21 +1534,45 @@ def _openai_message_payload(message: Any) -> dict[str, Any]:
     return result
 
 
+_SMOLAGENTS_MEMORY_ROLES = frozenset({MessageRole.TOOL_CALL.value, MessageRole.TOOL_RESPONSE.value})
+
+
+def _role_value(message: Any) -> str:
+    role = _message_value(message, "role", "")
+    return str(getattr(role, "value", role))
+
+
+def _is_agent_memory(messages: list[Any]) -> bool:
+    """smolagents agent memory: ``ChatMessage`` objects or smolagents-only roles."""
+    return any(
+        isinstance(message, ChatMessage) or _role_value(message) in _SMOLAGENTS_MEMORY_ROLES
+        for message in messages
+    )
+
+
 def _provider_chat_messages(
     messages: list[Any],
     *,
     role_conversions: dict[str, str] | None,
     flatten_messages_as_text: bool,
 ) -> list[dict[str, Any]]:
-    """Agent messages exactly as smolagents' ``LiteLLMModel`` would send them.
+    """Agent memory exactly as smolagents' ``LiteLLMModel`` would send it.
 
     Agent memory uses smolagents roles (``tool-call``, ``tool-response``) that
     no OpenAI-compatible provider accepts; ``LiteLLMModel`` maps them to
     ``assistant``/``user`` and merges consecutive turns of one role. The
-    governed transport sends the result as plain string roles (#1107).
+    governed transport sends the result with plain string roles (#1107).
+    Plain string content is wrapped as one text part first, because the
+    smolagents cleaner assumes part lists.
     """
+    parts = []
+    for message in messages:
+        content = _message_value(message, "content")
+        if isinstance(content, str):
+            message = {"role": _role_value(message), "content": [{"type": "text", "text": content}]}
+        parts.append(message)
     cleaned = get_clean_message_list(
-        messages,
+        parts,
         role_conversions=role_conversions or tool_role_conversions,
         convert_images_to_image_urls=True,
         flatten_messages_as_text=flatten_messages_as_text,
@@ -3679,6 +3703,14 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         self._fallback_model = self._fallback_models[0] if self._fallback_models else None
 
     def _provider_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+        """The governed body's messages.
+
+        Agent memory is prepared as smolagents' ``LiteLLMModel`` would send it.
+        Plain OpenAI-style message dicts from direct callers (mail reply,
+        calendar, repository iteration) are sent unchanged, byte for byte.
+        """
+        if not _is_agent_memory(messages):
+            return [_openai_message_payload(message) for message in messages]
         return [
             _openai_message_payload(message)
             for message in _provider_chat_messages(

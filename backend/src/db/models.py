@@ -1003,6 +1003,56 @@ class GitHubFollowthroughConnection(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=_now, index=True)
 
 
+class ProjectSourceSnapshot(SQLModel, table=True):
+    """One bounded read-only issue/PR sync of the selected repository.
+
+    Items are stored as an immutable canonical projection with a digest per
+    item and for the whole snapshot. A snapshot grants no execution or
+    publication authority; it is evidence other owners must refresh.
+    """
+
+    __tablename__ = "project_source_snapshots"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    connection_id: str = Field(index=True)
+    connection_revision: int
+    repository: str = Field(index=True)
+    scope_json: str = Field(sa_column=Column(Text, nullable=False))
+    scope_digest: str
+    items_json: str = Field(sa_column=Column(Text, nullable=False))
+    snapshot_digest: str = Field(index=True)
+    page_count: int
+    truncated: bool = Field(default=False)
+    fetched_at: datetime = Field(default_factory=_now, index=True)
+
+
+class ProjectSourceLink(SQLModel, table=True):
+    """Navigable lineage from one exact source item revision to local work."""
+
+    __tablename__ = "project_source_links"
+    __table_args__ = (
+        Index("ux_project_source_links_target", "owner_principal_id", "link_kind", "target_id", unique=True),
+    )
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    owner_principal_id: str = Field(index=True)
+    snapshot_id: str = Field(index=True)
+    repository: str = Field(index=True)
+    item_number: int = Field(index=True)
+    item_kind: str
+    item_updated_at: str
+    item_digest: str
+    goal_id: str = Field(index=True)
+    goal_revision: int
+    finding_kind: str
+    link_kind: str = Field(index=True)
+    target_id: str = Field(index=True)
+    # The local owner a link hangs from: a publication's repair root.
+    parent_target_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=_now, index=True)
+
+
 class GuardianInboxDisposition(SQLModel, table=True):
     """Owner/session-bound disposition for one verified source packet.
 

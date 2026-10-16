@@ -32,6 +32,11 @@ from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.runtime_plugins.agent_turns import chat_runtime_status
 
 
+async def _provider_readiness(app) -> dict | None:
+    worker = getattr(app.state, "provider_worker", None)
+    return None if worker is None else await worker.readiness()
+
+
 async def _chat_runtime_or_unavailable() -> dict:
     """Runtime status never fails because the composition inventory is unreadable."""
     try:
@@ -557,9 +562,9 @@ async def _services_lifespan(app: FastAPI):
                     try:
                         if settings.cordis_node_path and cordis_host.node_path is None:
                             cordis_host.node_path = Path(settings.cordis_node_path)
-                        if await cordis_host.start():
-                            # The child's mandatory facades report what Python hosts (#1024).
-                            await cordis_host.report_providers(await app.state.provider_worker.provider_reports())
+                        # Every (re)start reports what Python hosts to the facades (#1024).
+                        cordis_host.provider_reports_source = app.state.provider_worker.current_reports
+                        await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
                     try:
@@ -573,6 +578,7 @@ async def _services_lifespan(app: FastAPI):
                     yield
                 finally:
                     session_manager.bind_task_continuity(None)
+                    cordis_host.provider_reports_source = None
                     try:
                         await cordis_host.stop()
                     finally:
@@ -701,6 +707,8 @@ def create_app() -> FastAPI:
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
             "cordis_runtime": await cordis_host.refresh_status(),
+            # Python-hosted providers, rechecked now (#1024).
+            "providers": await _provider_readiness(app),
             # Which agent loop chat runs on, from the agent-loop owner row (#1019).
             "chat_runtime": await _chat_runtime_or_unavailable(),
             # Keep the historical key for API consumers while exposing the

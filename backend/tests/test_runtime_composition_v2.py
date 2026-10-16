@@ -225,3 +225,26 @@ def test_composition_rows_epochs_and_migration_survive_cli_backup_and_restore(tm
     domains, events = _rows(restored)
     restored.dispose()
     assert domains == set(DOMAINS) and len(events) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("domain", sorted(PYTHON_HOSTED_DOMAINS))
+@pytest.mark.parametrize("change", [{"owner_kind": "cordis"}, {"composition_digest": "c" * 64},
+                                    {"owner_kind": "cordis", "composition_digest": "c" * 64}])
+async def test_a_tampered_python_hosted_row_fails_the_whole_inventory(service_db, domain, change):
+    """A restored or edited row naming another owner never passes state readiness or binding."""
+    from sqlalchemy import update
+    from src.runtime_plugins.ownership import inventory
+    from src.runtime_plugins.worker import ProviderActivationError, _state_predicate
+    async with get_session() as db:
+        await db.execute(update(RuntimeCompositionState).where(RuntimeCompositionState.runtime_domain == domain)
+                         .values(**change))
+    async with get_session() as db:
+        with pytest.raises(CompositionBindingError) as excinfo:
+            await inventory(db)
+        assert excinfo.value.reason_code == "composition_inventory_invalid"
+        with pytest.raises(CompositionBindingError):
+            await bind_invocation(db, method="memory.retrieve", native_branch="artifact")
+    with pytest.raises(ProviderActivationError) as activation:
+        await _state_predicate(run_init=False)
+    assert activation.value.reason_code == "composition_inventory_invalid"

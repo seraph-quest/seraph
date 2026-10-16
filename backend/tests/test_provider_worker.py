@@ -83,20 +83,76 @@ def test_constructing_a_worker_has_no_side_effects(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+_SESSION_BYPASS_ALLOWED = {"db/engine.py", "evals/harness.py"}
+# Constructors of an engine, a session factory or a raw session.
+_BANNED_SESSION_NAMES = {"engine", "async_session_factory", "create_async_engine", "create_engine",
+                         "async_sessionmaker", "sessionmaker"}
+# The only attributes a module alias of ``src.db.engine`` may use outside it.
+_ENGINE_MODULE_ATTRIBUTES = {"get_session", "is_database_locked", "bound_lock_wait", "check_required_tables",
+                             "StateProviderUnavailable", "state_gate", "set_state_gate",
+                             "override_session_factory", "init_db", "close_db"}
+
+
+def _dotted(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _session_bypasses(relative: str, tree) -> list[str]:
+    offenders, module_aliases = [], set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if node.module == "src.db" and alias.name == "engine":
+                    module_aliases.add(alias.asname or "engine")
+                elif alias.name in _BANNED_SESSION_NAMES:
+                    offenders.append(f"{relative}:{node.lineno}: imports {node.module}.{alias.name}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "src.db.engine" and alias.asname:
+                    module_aliases.add(alias.asname)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            base = _dotted(node.value)
+            if (base in module_aliases or base == "src.db.engine") and node.attr not in _ENGINE_MODULE_ATTRIBUTES:
+                offenders.append(f"{relative}:{node.lineno}: uses engine module attribute {node.attr}")
+            elif node.attr in _BANNED_SESSION_NAMES - {"engine"}:
+                offenders.append(f"{relative}:{node.lineno}: uses {node.attr}")
+        elif isinstance(node, ast.Name) and node.id in _BANNED_SESSION_NAMES - {"engine"}:
+            offenders.append(f"{relative}:{node.lineno}: uses {node.id}")
+        elif isinstance(node, ast.Call) and (_dotted(node.func) or "").rsplit(".", 1)[-1] == "AsyncSession":
+            offenders.append(f"{relative}:{node.lineno}: constructs AsyncSession")
+    return offenders
+
+
 def test_only_named_bypasses_construct_engines_or_session_factories():
     """Every session goes through ``get_session``'s gate except reviewed bypasses."""
-    allowed = {"db/engine.py", "evals/harness.py"}
     offenders = []
     for path in sorted((BACKEND / "src").rglob("*.py")):
         relative = path.relative_to(BACKEND / "src").as_posix()
-        if relative in allowed:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            name = (node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None)
-            if name in {"async_session_factory", "create_async_engine", "sessionmaker"}:
-                offenders.append(f"{relative}:{node.lineno}:{name}")
+        if relative not in _SESSION_BYPASS_ALLOWED:
+            offenders += _session_bypasses(relative, ast.parse(path.read_text(encoding="utf-8")))
     assert offenders == []
+
+
+@pytest.mark.parametrize("source", [
+    "from src.db import engine as e\nsession = e.AsyncSession(e.engine)",
+    "from src.db import engine\nengine.engine.begin()",
+    "import src.db.engine as database\ndatabase.async_session_factory()",
+    "from src.db.engine import async_session_factory as factory\nfactory()",
+    "from src.db.engine import engine as raw\nraw.connect()",
+    "from sqlalchemy.ext.asyncio import AsyncSession\nAsyncSession(bind=None)",
+    "from sqlalchemy.orm import sessionmaker as make\nmake()",
+    "import src.db.engine\nsrc.db.engine.engine.dispose()",
+])
+def test_the_session_guard_catches_aliased_and_attribute_bypasses(source):
+    assert _session_bypasses("probe.py", ast.parse(source))
 
 
 # ------------------------------------------------------------------ gate
@@ -275,3 +331,91 @@ async def test_every_startup_failure_releases_the_lock_engine_and_mcp(monkeypatc
     assert state_gate() == (None, None) and current_worker() is None
     with runtime_workspace_owner(root):
         pass
+
+
+# ------------------------------------------------------------------ readiness after activation
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider, predicate", [("authority", "_authority_predicate"), ("tasks", "_tasks_predicate"),
+                                                 ("goals", "_goals_predicate"), ("memory", "_memory_predicate")])
+async def test_storage_failure_in_a_table_check_is_that_providers_typed_reason(monkeypatch, provider, predicate):
+    from contextlib import asynccontextmanager
+    from sqlalchemy.exc import OperationalError
+
+    @asynccontextmanager
+    async def broken():
+        raise OperationalError("SELECT", {}, Exception("disk I/O error"))
+        yield
+    monkeypatch.setattr(settings, "vault_encryption_key", "")
+    monkeypatch.setattr(db_engine, "get_session", broken)
+    with pytest.raises(ProviderActivationError) as excinfo:
+        await getattr(worker_module, predicate)()
+    assert (excinfo.value.provider, excinfo.value.reason_code) == (provider, f"{provider}_storage_unavailable")
+
+
+@pytest.mark.asyncio
+async def test_a_degradable_storage_failure_degrades_instead_of_aborting(monkeypatch):
+    real = worker_module._missing_tables
+
+    async def failing(provider, names):
+        if provider == "goals":
+            raise ProviderActivationError("goals", "goals_storage_unavailable")
+        return await real(provider, names)
+    monkeypatch.setattr(worker_module, "_missing_tables", failing)
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    assert (worker.status["goals"].state, worker.status["goals"].reason_code) == ("degraded", "goals_storage_unavailable")
+    assert worker.snapshot()["mandatory_ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_readiness_fails_a_mandatory_provider_typed_and_recovers_it(monkeypatch):
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    original = worker_module._PREDICATES["audit"]
+
+    async def fail():
+        raise ProviderActivationError("audit", "audit_write_unavailable")
+    monkeypatch.setitem(worker_module._PREDICATES, "audit", fail)
+    snapshot = await worker.readiness()
+    assert snapshot["mandatory_ready"] is False
+    assert {item["provider"]: (item["state"], item["reason_code"]) for item in snapshot["providers"]}["audit"] == (
+        "failed", "audit_write_unavailable")
+    # Every method depending on audit now blocks typed.
+    from src.runtime_plugins.ownership import method_dependencies
+    assert domain_provider_unavailable("seraph.memory.v1", *method_dependencies("memory.forget")) == \
+        "native_provider_audit_unavailable"
+    monkeypatch.setitem(worker_module._PREDICATES, "audit", original)
+    assert (await worker.readiness())["mandatory_ready"] is True
+    worker.status["memory"].state, worker.status["memory"].reason_code = "degraded", "memory_tables_missing"
+    await worker.readiness()
+    assert worker.status["memory"].state == "active", "a degraded provider recovers when its predicate passes"
+
+
+@pytest.mark.asyncio
+async def test_dependency_wide_provider_block(monkeypatch):
+    from src.runtime_plugins.contracts import METHOD_DOMAINS
+    from src.runtime_plugins.ownership import method_dependencies
+    worker = attach(ProviderWorker())
+    for name in worker.status:
+        worker.status[name].state = "active"
+    worker.status["artifacts"].state = "degraded"
+    for method in ("audit.append", "capabilities.invoke", "inference.request", "artifacts.adopt"):
+        assert domain_provider_unavailable(METHOD_DOMAINS[method], *method_dependencies(method)) == \
+            "native_provider_artifacts_unavailable", method
+    assert domain_provider_unavailable(METHOD_DOMAINS["goals.read"], *method_dependencies("goals.read")) is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_reports_rechecked_providers(client, app, monkeypatch):
+    import src.app as app_module
+    from src.runtime_plugins.bridge import CordisHost
+    monkeypatch.setattr(app_module, "cordis_host", CordisHost())
+    worker = attach(ProviderWorker())
+    await worker.activate()
+    app.state.provider_worker = worker
+    response = await client.get("/api/runtime/status")
+    assert response.status_code == 200
+    providers = response.json()["providers"]
+    assert providers["mandatory_ready"] is True
+    assert {item["provider"] for item in providers["providers"]} == {*MANDATORY, *DEGRADABLE}

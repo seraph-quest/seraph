@@ -98,8 +98,10 @@ class CordisHost:
         self._plugins: list[dict[str, Any]] = []
         self._readiness_checked_at: int | None = None
         self.stderr_bytes = 0
-        # Host-reported provider readiness the child acknowledged (#1024).
+        # Host-reported provider readiness the child acknowledged (#1024), and
+        # the host's source of fresh reports, sent after every (re)start.
         self._provider_reports: dict[str, dict[str, Any]] = {}
+        self.provider_reports_source: Any = None
 
     @property
     def admitting(self) -> bool:
@@ -218,6 +220,9 @@ class CordisHost:
                 self._plugins = response["payload"]["plugins"]
                 self._verify_plugins(self._plugins)
                 self.state, self.reason = "ready", None
+                if self.provider_reports_source is not None:
+                    # Every boot's facades learn what Python currently hosts.
+                    await self.report_providers(await self.provider_reports_source())
                 return True
             except asyncio.CancelledError:
                 self.process = await spawn
@@ -528,9 +533,13 @@ class CordisHost:
         if process.returncode is None and not preserve_blocked:
             try:
                 for report in list(self._provider_reports.values()):
-                    # The facades report quiescing; providers stay Python-owned.
-                    await self._rpc("provider.quiesce", internal=True, deadline_at=drain_deadline,
-                                    payload={**report, "state": "quiescing", "reason_code": "host_stopping"})
+                    # Best effort: the facades report quiescing; providers stay
+                    # Python-owned, and a lost report never blocks shutdown.
+                    try:
+                        await self._rpc("provider.quiesce", internal=True, deadline_at=drain_deadline,
+                                        payload={**report, "state": "quiescing", "reason_code": "host_stopping"})
+                    except (HostBlocked, ProtocolError):
+                        break
                 self._provider_reports.clear()
                 await self._rpc("runtime.quiesce", internal=True, deadline_at=drain_deadline)
                 response = await self._rpc("runtime.shutdown", internal=True, deadline_at=drain_deadline)

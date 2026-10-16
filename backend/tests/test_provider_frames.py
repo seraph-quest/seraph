@@ -142,3 +142,40 @@ async def test_real_child_records_host_reports_and_quiesces_them_at_stop(service
     assert all(item["state"] == "quiescing" and item["reason_code"] == "host_stopping" for item in quiesced)
     order = [method for method, _ in sent]
     assert order.index("runtime.quiesce") > max(i for i, method in enumerate(order) if method == "provider.quiesce")
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_every_host_restart_reports_current_providers_and_quiesce_is_best_effort(service_db):
+    from pathlib import Path
+    from src.runtime_plugins.bridge import HostBlocked
+    from src.runtime_plugins.worker import ProviderWorker
+    worker = ProviderWorker()
+    for name in worker.status:
+        worker.status[name].state = "active"
+    worker._activated = True
+    host = CordisHost(node_path=Path(NODE))
+    sent = []
+    original = host._rpc
+
+    async def observe(method, **kwargs):
+        sent.append(method)
+        if method == "provider.quiesce":
+            raise HostBlocked("provider_report_lost")
+        return await original(method, **kwargs)
+    host._rpc = observe
+    host.provider_reports_source = worker.current_reports
+    try:
+        for _ in range(2):
+            assert await host.start(), host.snapshot()
+            assert sent.count("provider.readiness") % 7 == 0 and sent.count("provider.readiness") > 0
+            readiness_before = sent.count("provider.readiness")
+            # A lost quiesce report never blocks shutdown or reaping.
+            await host.stop()
+            assert host.snapshot()["cleanup"]["process_reaped"] is True
+            assert "runtime.quiesce" in sent and "runtime.shutdown" in sent
+            assert sent.count("provider.readiness") == readiness_before
+        assert sent.count("provider.readiness") == 14, "each restart reports all seven providers again"
+    finally:
+        if host.process is not None and not host.snapshot()["cleanup"]["process_reaped"]:
+            await host.stop()

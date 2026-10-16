@@ -64,12 +64,16 @@ class ProviderStatus:
         return {"provider": self.name, "state": self.state, "reason_code": self.reason_code}
 
 
-async def _missing_tables(names) -> list[str]:
+async def _missing_tables(provider: str, names) -> list[str]:
+    """Table presence for one provider; a storage failure is that provider's typed reason."""
     from sqlalchemy import text
     from src.db import engine as db_engine
-    async with db_engine.get_session() as db:
-        rows = (await db.execute(text(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"))).scalars().all()
+    try:
+        async with db_engine.get_session() as db:
+            rows = (await db.execute(text(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"))).scalars().all()
+    except Exception as exc:  # noqa: BLE001 - startup reports one typed reason
+        raise ProviderActivationError(provider, f"{provider}_storage_unavailable") from exc
     present = set(rows)
     return [name for name in names if name not in present]
 
@@ -140,7 +144,7 @@ async def _authority_predicate() -> None:
     if (settings.deployment_environment.strip().lower() in {"prod", "production"}
             and settings.operator_auth_secret_hash and not _pbkdf2_shape_valid(settings.operator_auth_secret_hash)):
         raise ProviderActivationError("authority", "authority_secret_hash_invalid")
-    if await _missing_tables(_AUTHORITY_TABLES):
+    if await _missing_tables("authority", _AUTHORITY_TABLES):
         raise ProviderActivationError("authority", "authority_tables_missing")
     reason = _vault_key_resolves()
     if reason is not None:
@@ -166,7 +170,7 @@ async def _audit_predicate() -> None:
 async def _tasks_predicate() -> None:
     from sqlalchemy import select
     from src.db.models import WorkflowRunState
-    if await _missing_tables(_TASK_TABLES):
+    if await _missing_tables("tasks", _TASK_TABLES):
         raise ProviderActivationError("tasks", "tasks_tables_missing")
     try:
         from src.workflows.job_runtime import durable_job_repository
@@ -177,12 +181,12 @@ async def _tasks_predicate() -> None:
 
 
 async def _goals_predicate() -> None:
-    if await _missing_tables(_GOAL_TABLES):
+    if await _missing_tables("goals", _GOAL_TABLES):
         raise ProviderActivationError("goals", "goals_tables_missing")
 
 
 async def _memory_predicate() -> None:
-    if await _missing_tables(_MEMORY_TABLES):
+    if await _missing_tables("memory", _MEMORY_TABLES):
         raise ProviderActivationError("memory", "memory_tables_missing")
 
 
@@ -267,24 +271,30 @@ class ProviderWorker:
         self._activated = True
 
     async def readiness(self) -> dict:
-        """Re-run each active provider's predicate; never activates anything."""
-        if self._activated and not self._closed:
+        """Re-run every activated provider's predicate; never activates anything.
+
+        A mandatory provider whose predicate now fails becomes ``failed`` with
+        its typed reason (its Cordis methods block); a degraded or failed
+        provider whose predicate passes again recovers to ``active``.
+        """
+        if not self._activated or self._closed:
+            return self.snapshot()
+        checks = {"state": lambda: _state_predicate(run_init=False), **_PREDICATES}
+        for name in PROVIDERS:
+            if self.status[name].state not in {"active", "degraded", "failed"}:
+                continue
             try:
-                await _state_predicate(run_init=False)
+                await checks[name]()
+                self.status[name].state, self.status[name].reason_code = "active", None
             except ProviderActivationError as exc:
-                self.status["state"].reason_code = exc.reason_code
-            for name, predicate in _PREDICATES.items():
-                if self.status[name].state not in {"active", "degraded"}:
-                    continue
-                try:
-                    await predicate()
-                    self.status[name].state, self.status[name].reason_code = "active", None
-                except ProviderActivationError as exc:
-                    if name in MANDATORY:
-                        self.status[name].reason_code = exc.reason_code
-                    else:
-                        self.status[name].state, self.status[name].reason_code = "degraded", exc.reason_code
+                self.status[name].state = "failed" if name in MANDATORY else "degraded"
+                self.status[name].reason_code = exc.reason_code
         return self.snapshot()
+
+    async def current_reports(self) -> list[dict]:
+        """Fresh readiness, as closed reports for a (re)started Cordis child."""
+        await self.readiness()
+        return await self.provider_reports()
 
     def snapshot(self) -> dict:
         return {"providers": [self.status[name].payload() for name in PROVIDERS],
@@ -349,16 +359,16 @@ def current_worker() -> ProviderWorker | None:
     return _CURRENT[0]
 
 
-def domain_provider_unavailable(runtime_domain: str) -> str | None:
-    """Typed reason when the attached worker's provider for a domain is not active."""
+def domain_provider_unavailable(*runtime_domains: str) -> str | None:
+    """Typed reason for the first domain whose attached-worker provider is not active."""
     worker = current_worker()
-    provider = DOMAIN_PROVIDERS.get(runtime_domain)
-    if worker is None or provider is None:
+    if worker is None:
         return None
-    status = worker.status[provider]
-    if status.state == "active":
-        return None
-    return f"native_provider_{provider}_unavailable"
+    for runtime_domain in runtime_domains:
+        provider = DOMAIN_PROVIDERS.get(runtime_domain)
+        if provider is not None and worker.status[provider].state != "active":
+            return f"native_provider_{provider}_unavailable"
+    return None
 
 
 __all__ = ["DEGRADABLE", "DEPENDENCIES", "MANDATORY", "PROVIDERS", "ProviderActivationError", "ProviderWorker",

@@ -313,6 +313,10 @@ class RuntimeCompositionBinding:
 
 def _checked_row(row) -> CompositionDependency:
     dependency = CompositionDependency(row.runtime_domain, row.owner_kind, row.epoch, row.composition_digest)
+    if row.runtime_domain in PYTHON_HOSTED_DOMAINS and (
+            row.owner_kind != "legacy" or row.composition_digest != legacy_composition_digest(row.runtime_domain)):
+        # A tampered or restored row can never hand a Python-hosted owner to Cordis.
+        raise CompositionBindingError("composition_inventory_invalid")
     if row.state not in STATES or (row.recovery_receipt_ref is not None
                                    and (type(row.recovery_receipt_ref) is not str
                                         or not _REF.fullmatch(row.recovery_receipt_ref))):

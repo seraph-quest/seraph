@@ -539,7 +539,8 @@ async def test_wrong_revoked_stale_or_missing_owners_deny_effects_and_private_by
         elif case == "cordis_owner_swap":
             await db.execute(update(RuntimeCompositionState).where(
                 RuntimeCompositionState.runtime_domain == "seraph.authority.v1").values(owner_kind="cordis"))
-            reason = "composition_dependency_changed"
+            # Python always hosts authority (#1024): a non-legacy row fails the inventory.
+            reason = "composition_inventory_invalid"
         elif case == "missing_dependency":
             await db.execute(delete(RuntimeCompositionState).where(
                 RuntimeCompositionState.runtime_domain == "seraph.authority.v1"))

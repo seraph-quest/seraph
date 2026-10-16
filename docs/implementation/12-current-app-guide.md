@@ -813,7 +813,13 @@ always rolled back; `tasks` checks the job and board tables and opens the
 durable job repository. Any failure aborts startup with that provider's typed
 reason (for example `state_init_db_failed`, `authority_vault_key_unavailable`,
 `audit_write_unavailable`). `goals`, `memory` and `artifacts` follow and may
-only degrade: their Cordis methods then return `native_provider_<name>_unavailable`.
+only degrade. A Cordis callback blocks with `native_provider_<name>_unavailable`
+when any provider its method depends on is degraded or failed (for example
+`audit.append` or `capabilities.invoke` while artifacts is degraded).
+`/api/runtime/status` reports `providers`, rechecked on each request: a
+mandatory provider whose predicate now fails becomes `failed` with its typed
+reason, and a degraded or failed provider whose predicate passes again
+recovers. Every Cordis child (re)start receives fresh provider reports.
 Importing the worker or `src.app` starts no consumer, connection, task, thread
 (other than the rate limiter's library timer), scheduler job or DB file.
 
@@ -838,8 +844,12 @@ a `runtime_composition_state_domain_added` audit event) only to an inventory
 that is exactly the previous 14 domains, including on the first start after a
 host-CLI restore of an older backup; an empty table is seeded whole and any
 other partial inventory is left to fail closed. The migration is forward-only:
-an older binary rejects the extra row with `composition_inventory_invalid`, so
-rolling back the binary needs a pre-upgrade backup. `state`, `authority` and
+an older binary rejects the extra row with `composition_inventory_invalid`.
+**Take a host-CLI workspace backup before upgrading**; rolling the binary back
+means restoring that backup. A `state`, `authority` or `audit` row that is not
+the legacy owner with the fixed legacy digest (a tampered or foreign restored
+row) fails the whole inventory with `composition_inventory_invalid`, so state
+activation and every binding refuse it. `state`, `authority` and
 `audit` never move to Cordis (`composition_owner_not_transferable`) and are not
 in the boot cutover manifest. An undecodable binding on a running,
 `unknown_external_effect` or `cost_liability` job refuses every owner
@@ -854,8 +864,9 @@ validators require the host, state, authority and audit plugins with
 audit on state; tasks, goals and artifacts on state and authority; memory on
 state, authority and audit), so profile configuration can neither remove a
 mandatory facade nor change a dependency. After the child starts, the host
-sends one `provider.readiness` frame per provider and `provider.quiesce` frames
-before `runtime.quiesce` at stop. Both carry only `{domain, state, epoch,
+sends one `provider.readiness` frame per provider and best-effort
+`provider.quiesce` frames before `runtime.quiesce` at stop (a lost quiesce
+report never blocks shutdown). Both carry only `{domain, state, epoch,
 composition_digest, reason_code}`, flow host to child only (a child-sent
 provider frame fences the host like any unadmitted request), and cannot
 activate or deactivate anything. Private reads recheck tombstones, the Root and

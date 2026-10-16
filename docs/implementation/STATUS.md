@@ -162,7 +162,8 @@ and aborts startup on any failure; goals, memory and artifacts may degrade to
 typed blocks. `get_session` refuses typed once state failed or shutdown began,
 and every startup failure releases the workspace lease, engine and MCP. The
 `seraph.state.v1` domain joins the composition inventory (one audited row added
-to an exact pre-#1024 inventory, forward-only), bindings move to manifest v2
+to an exact pre-#1024 inventory, forward-only: take a host-CLI backup before
+upgrading), bindings move to manifest v2
 with byte-identical v1 decoding, and state, authority and audit never move to
 Cordis. The Cordis state, authority and audit facades are mandatory with fixed
 dependencies and only record closed host-to-child provider reports. Verified

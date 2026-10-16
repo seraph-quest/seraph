@@ -433,10 +433,12 @@ class NativeServiceDispatcher:
             if method in BLOCKED_METHODS:
                 # Typed and operator-visible; no authority or private bytes used.
                 return blocked(BLOCKED_METHODS[method])
+            from .ownership import method_dependencies
             from .worker import domain_provider_unavailable
-            unavailable = domain_provider_unavailable(METHOD_DOMAINS[method])
+            unavailable = domain_provider_unavailable(METHOD_DOMAINS[method], *method_dependencies(
+                method, goal_bound=scope.binding.goal_bound, manifest_version=scope.binding.method_manifest_version))
             if unavailable is not None:
-                # A degraded goals/memory/artifacts provider (#1024) blocks typed.
+                # Any provider this method depends on that is degraded or failed (#1024) blocks typed.
                 return blocked(unavailable)
             if scope.binding.native_branch == "governed":
                 from .governed_services import dispatch_governed

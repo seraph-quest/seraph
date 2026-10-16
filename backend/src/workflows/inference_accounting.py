@@ -479,7 +479,17 @@ class InferenceAccountingRepositoryMixin:
         key anywhere blocks, as the full-list ``assert_group_lookup`` did.
         """
         await self._assert_group_keys_present(db)
-        return await self._ledger_rows(db, state, InferenceCostReservation.group_lookup_key == "g:" + group_id)
+        rows = await self._ledger_rows(db, state, InferenceCostReservation.group_lookup_key == "g:" + group_id)
+        # The key is an unhashed hint: a member hidden by editing it on an
+        # untouched row would under-count the group caps, so the read must
+        # return exactly the sealed membership count.
+        self._require_sealed_count(len(rows), state.totals["rows_by_group"].get("g:" + group_id, 0))
+        return rows
+
+    @staticmethod
+    def _require_sealed_count(observed: int, sealed: int) -> None:
+        if observed != sealed:
+            raise InferenceAccountingError("accounting_continuity_unavailable")
 
     async def _discovery_rows(self, db: Any, state, run):
         """Every row ``discovery_generation_budget`` can count or raise on."""
@@ -488,17 +498,44 @@ class InferenceAccountingRepositoryMixin:
             return []
         from sqlalchemy import or_
         discovery_jobs = select(WorkflowRunState.run_identity).where(WorkflowRunState.job_kind == DISCOVERY_KIND)
-        return await self._ledger_rows(db, state, or_(
+        rows = await self._ledger_rows(db, state, or_(
             InferenceCostReservation.owner_id == DISCOVERY_SERVICE,
             InferenceCostReservation.job_id.in_(discovery_jobs)))
+        # Every programme row is owned by the discovery service; a row hidden
+        # by editing its owner would skip the programme limits.
+        self._require_sealed_count(sum(row.owner_id == DISCOVERY_SERVICE for row in rows),
+            state.totals["rows_by_owner"].get(DISCOVERY_SERVICE, 0))
+        return rows
 
-    async def _shadow_helper(self, db: Any, call, scoped_rows) -> None:
-        """Test-only: a helper fed scoped rows must equal it fed the whole ledger."""
+    async def _shadow_helper(self, db: Any, call, scoped_rows, *, compare=None) -> None:
+        """Test-only: a helper fed scoped rows must equal it fed the whole ledger.
+
+        With ``compare``, the full-ledger result is checked by that predicate
+        instead (for decisions taken from sealed totals, not scoped rows).
+        """
         from src.workflows import inference_ledger
         if not inference_ledger.SHADOW_FULL_LEDGER:
             return
         full = list((await db.execute(select(InferenceCostReservation))).scalars())
+        if compare is not None:
+            value = await call(full)
+            if not compare(value):
+                raise AssertionError(f"sealed-total decision drift: full-ledger result {value!r}")
+            return
         await inference_ledger.shadow_compare_helper(lambda: call(scoped_rows), lambda: call(full))
+
+    @staticmethod
+    def _near_outstanding_sealed(ledger, prior, owner_id: str) -> bool:
+        """Another open near-text reservation for this owner, from sealed counts.
+
+        Not a content query: an edit to an untouched row could empty that.
+        ``prior`` (this operation's own row, already digest-verified) is not
+        "another" reservation.
+        """
+        own_open = bool(prior is not None and prior.owner_id == owner_id
+            and prior.runtime_path == "near_text_native"
+            and prior.state in {"reserved", "contact_started", "unknown"})
+        return ledger.totals["owner_near_text_open"].get(owner_id, 0) - int(own_open) > 0
 
     @staticmethod
     async def _near_outstanding(rows, owner_id: str, operation_id: str) -> bool:
@@ -609,12 +646,9 @@ class InferenceAccountingRepositoryMixin:
                     if runtime_path == "near_text_native":
                         if profile_id != "near.text" or run.job_kind != "inference.near-text.v1":
                             raise InferenceAccountingError("near_native_binding_invalid")
-                        outstanding = await self._ledger_rows(db, ledger,
-                            InferenceCostReservation.owner_id == owner_id,
-                            InferenceCostReservation.runtime_path == "near_text_native",
-                            InferenceCostReservation.state.in_(("reserved", "contact_started", "unknown")),
-                            InferenceCostReservation.operation_id != operation_id)
-                        await self._shadow_helper(db, lambda rows: self._near_outstanding(rows, owner_id, operation_id), outstanding)
+                        outstanding = self._near_outstanding_sealed(ledger, prior, owner_id)
+                        await self._shadow_helper(db, lambda rows: self._near_outstanding(rows, owner_id, operation_id),
+                            [] if not outstanding else None, compare=lambda value: value == outstanding)
                         if outstanding:
                             raise InferenceAccountingError("near_owner_outstanding_limit")
                     if prior is not None:
@@ -705,6 +739,10 @@ class InferenceAccountingRepositoryMixin:
             async with self._session() as db:
                 await self._accounting_begin(db)
                 account = await db.get(InferenceAccountingOwner, "deployment")
+                # Read before the continuity lock (the research prompt readback
+                # below may take the witness lock itself) and used only for that
+                # deny-only check; the same object is digest-verified under the
+                # lock before any decision or write (#1086 R2).
                 pending = await db.get(InferenceCostReservation, operation_id)
                 if pending is not None and pending.state == "reserved" and pending.policy_digest == policy_digest:
                     research_run = await self._fetch(db, pending.job_id)
@@ -1050,6 +1088,8 @@ class InferenceAccountingRepositoryMixin:
         if deployment_id is None:
             return {"status": "not_initialized"}
         key = (SimpleNamespace(host_root=root), SimpleNamespace(deployment_id=deployment_id))
+        if failure == inference_ledger.V1_LEDGER_SKIPPED:
+            return {"status": "skipped_v1_ledger", "revision": revision}
         if failure is None:
             inference_ledger.record_full_verification(*key)
             return {"status": "verified", "revision": revision}

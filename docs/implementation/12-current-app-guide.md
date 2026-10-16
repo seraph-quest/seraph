@@ -1529,9 +1529,11 @@ writer once the last full pass is over 20 minutes old, on the rare writers
 research readback), at startup recovery, every 10 minutes from the
 `inference_ledger_verification` scheduler job (a deferred read that latches
 accounting for the process after an in-lock re-check), and in every workspace
-CLI tool. Group-key, programme-budget and near-text scoped reads select rows by
-content columns; a row hidden from them by such an edit stays capped by the
-sealed deployment and owner totals until full verification. Startup recovery
+CLI tool. The scoped reads cannot be emptied either: a general-task group read
+must return exactly the sealed member count for that group, a discovery
+programme read the sealed count of discovery-service rows, and the near-text
+outstanding check reads a sealed per-owner count, so hiding a row by editing its
+lookup key, owner, job, state or runtime path is refused or still counted. Startup recovery
 migrates a v1 ledger forward after its full v1 check (checkpoint with no
 operations); v2 is forward-only, and an older build reports
 `accounting_continuity_unavailable` for a v2 ledger. Restored rows without a

@@ -18,13 +18,13 @@ incremental without weakening what admission trusts:
   maintenance tools). It re-validates every row's evidence and group key,
   recomputes every row digest from content and the totals from every row.
 
-Detection residual (documented in the current-app guide): the
-``group_lookup_key`` hint is private and unhashed, and scoped reads select
-rows by content columns. A row hidden from a scoped read by editing those
-columns without its digest is caught at the next full verification; until
-then the scoped checks (general-task group, discovery programme budget,
-near-text outstanding) can under-count, but they stay capped by the trusted
-deployment and owner totals.
+Scoped reads select rows by unhashed or content columns (the private
+``group_lookup_key``, owner, job). Each must return exactly the count sealed in
+the totals for its scope (per group key, discovery-service rows), and the
+near-text outstanding check reads its sealed per-owner count instead of a
+query, so a row hidden by editing an untouched row's columns is refused rather
+than under-counted. A content edit to a row no operation reads is caught at
+the next full verification and cannot change any admission decision.
 """
 
 from __future__ import annotations
@@ -55,6 +55,9 @@ _latched: dict[tuple[str, str], str] = {}
 # Test-only: also compute every hot-path decision from the full ledger with
 # the pre-#1086 code and fail on any difference.
 SHADOW_FULL_LEDGER = False
+
+
+V1_LEDGER_SKIPPED = "v1_ledger_skipped"
 
 
 class LedgerVerificationError(Exception):
@@ -384,7 +387,9 @@ def verify_offline(database_path) -> tuple[str | None, str | None, int | None]:
         connection.close()
     deployment_id, revision = account["deployment_id"], account["revision"]
     if not witness_codec.is_v2_digest(account["ledger_digest"]):
-        return deployment_id, None, revision
+        # Not verified here: a v1 ledger is fully checked by every writer
+        # until startup recovery migrates it, so no pass may be recorded.
+        return deployment_id, V1_LEDGER_SKIPPED, revision
     try:
         for row in rows:
             namespace = SimpleNamespace(**row)

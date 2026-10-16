@@ -182,9 +182,40 @@ def stored_row_digest_mismatch(rows):
 
 
 def empty_ledger_totals():
+    # The scoped counts let a writer prove that an indexed read returned every
+    # row it must see: a row hidden by editing its owner, group key or state
+    # changes the read but not these sealed counts.
     return {"schema_version": 1, "open_bound_by_state": {state: 0 for state in _OPEN_STATES},
         "owner_open_bound": {}, "settled_by_period": {}, "owner_settled_by_period": {},
-        "overruns": {}, "rows_by_period": {}, "row_count": 0}
+        "overruns": {}, "rows_by_period": {}, "row_count": 0,
+        "rows_by_owner": {}, "rows_by_group": {}, "owner_near_text_open": {}}
+
+
+_GROUP_EVIDENCE_KIND = "general_task_group_reservation.v1"
+_NEAR_TEXT_RUNTIME = "near_text_native"
+
+
+def evidence_group_key(evidence_json):
+    """The private lookup key a valid row's group evidence classifies to.
+
+    Dependency-free and deliberately lenient: full verification separately
+    rejects malformed evidence and any stored key that disagrees with it.
+    """
+    try:
+        entries = json.loads(evidence_json or "[]")
+    except (TypeError, ValueError):
+        return None
+    found = [entry for entry in entries if isinstance(entry, dict) and entry.get("kind") == _GROUP_EVIDENCE_KIND] \
+        if isinstance(entries, list) else []
+    group = found[0].get("group") if len(found) == 1 else None
+    group_id = group.get("group_id") if isinstance(group, dict) else None
+    return "g:" + group_id if isinstance(group_id, str) else None
+
+
+def _bump(mapping, key, sign):
+    mapping[key] = mapping.get(key, 0) + sign
+    if mapping[key] == 0:
+        del mapping[key]
 
 
 def apply_ledger_contribution(totals, row, sign):
@@ -207,6 +238,12 @@ def apply_ledger_contribution(totals, row, sign):
     totals["row_count"] += sign
     period = row["period_id"]
     totals["rows_by_period"][period] = totals["rows_by_period"].get(period, 0) + sign
+    _bump(totals["rows_by_owner"], owner, sign)
+    group_key = evidence_group_key(row.get("evidence_json"))
+    if group_key is not None:
+        _bump(totals["rows_by_group"], group_key, sign)
+    if state in _OPEN_STATES and row.get("runtime_path") == _NEAR_TEXT_RUNTIME:
+        _bump(totals["owner_near_text_open"], owner, sign)
     _drop_zeros(totals)
 
 

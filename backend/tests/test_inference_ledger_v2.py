@@ -328,3 +328,113 @@ async def test_null_row_digests_are_fully_verified_and_backfilled(accounting_db,
     # A NULL on a tampered row is not silently trusted.
     _sql(root, "UPDATE inference_cost_reservations SET ledger_row_digest = NULL, actual_cost_microusd = 0 WHERE operation_id = 'op-a'")
     assert "accounting_continuity_unavailable" in await _admission(broker, "op-after")
+
+
+# --- review P2: scoped reads cannot be emptied by editing untouched rows ----
+
+def _seed_rows(root, rows):
+    """Append rows as a canonical writer would: digests, sealed totals, witness."""
+    connection = sqlite3.connect(root / "seraph.db")
+    connection.row_factory = sqlite3.Row
+    template = dict(connection.execute("SELECT * FROM inference_cost_reservations LIMIT 1").fetchone())
+    for overrides in rows:
+        row = {**template, **overrides}
+        row["ledger_row_digest"] = codec.row_digest(row)
+        connection.execute(f"INSERT INTO inference_cost_reservations ({','.join(row)}) VALUES ({','.join('?' for _ in row)})",
+            tuple(row.values()))
+    account = dict(connection.execute("SELECT * FROM inference_accounting_owners").fetchone())
+    every = [dict(item) for item in connection.execute("SELECT * FROM inference_cost_reservations")]
+    account["ledger_totals_json"] = json.dumps(codec.ledger_totals(every), sort_keys=True, separators=(",", ":"))
+    account["revision"] += 1
+    account["ledger_digest"] = codec.ledger_digest(account, every)
+    connection.execute("UPDATE inference_accounting_owners SET ledger_totals_json=?, revision=?, ledger_digest=?",
+        (account["ledger_totals_json"], account["revision"], account["ledger_digest"]))
+    connection.commit()
+    connection.close()
+    workspace = ProductionWorkspace(host_root=root)
+    receipt = read_lifecycle_receipt(workspace)
+    receipt["inference_accounting"] = codec.witness(account)
+    write_lifecycle_receipt(workspace, receipt)
+
+
+async def _scoped(repository, root, call):
+    from config.settings import settings
+    from pathlib import Path
+    from src.db.models import InferenceAccountingOwner
+    from src.workflows.inference_accounting import _continuity_lock
+    async with repository._session() as db:
+        await repository._accounting_begin(db)
+        account = await db.get(InferenceAccountingOwner, "deployment")
+        with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+            ledger = await repository._open_ledger(db, workspace, account)
+            return await call(db, ledger)
+
+
+@pytest.mark.asyncio
+async def test_hidden_group_member_is_refused_not_under_counted(accounting_db, monkeypatch):
+    root, _engine, _factory = accounting_db
+    repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    group = "a" * 64
+    evidence = json.dumps([{"kind": "general_task_group_reservation.v1", "group": {"group_id": group}}])
+    _seed_rows(root, [{"operation_id": f"member-{index}", "evidence_json": evidence, "group_lookup_key": "g:" + group}
+                      for index in range(3)])
+    assert len(await _scoped(repository, root, lambda db, ledger: repository._group_rows(db, ledger, group))) == 3
+    # The lookup key is unhashed: moving a member out of the group's key must
+    # not let the group caps see two rows.
+    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = 'member-0'", "g:" + "b" * 64)
+    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
+        await _scoped(repository, root, lambda db, ledger: repository._group_rows(db, ledger, group))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column", ["owner_id", "job_id"])
+async def test_hidden_discovery_row_is_refused_not_skipped(accounting_db, monkeypatch, column):
+    from types import SimpleNamespace
+    from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE
+    root, _engine, _factory = accounting_db
+    repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    _seed_rows(root, [{"operation_id": f"remote:goal-discovery:x:{index}", "owner_id": DISCOVERY_SERVICE} for index in range(2)])
+    run = SimpleNamespace(job_kind=DISCOVERY_KIND)
+    found = await _scoped(repository, root, lambda db, ledger: repository._discovery_rows(db, ledger, run))
+    assert sorted(row.operation_id for row in found if row.owner_id == DISCOVERY_SERVICE) == [
+        "remote:goal-discovery:x:0", "remote:goal-discovery:x:1"]
+    value = "service:someone-else" if column == "owner_id" else "job-elsewhere"
+    _sql(root, f"UPDATE inference_cost_reservations SET {column} = ? WHERE operation_id = 'remote:goal-discovery:x:0'", value)
+    # An owner edit hides the row from the read (sealed count mismatch); a job
+    # edit leaves it read, and its content no longer matches its digest.
+    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
+        await _scoped(repository, root, lambda db, ledger: repository._discovery_rows(db, ledger, run))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("column, value", [("owner_id", "service:someone-else"), ("state", "released"),
+                                           ("runtime_path", "chat_agent")])
+async def test_hidden_near_text_reservation_still_counts_as_outstanding(accounting_db, monkeypatch, column, value):
+    from src.db.models import InferenceCostReservation
+    root, _engine, _factory = accounting_db
+    repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    _seed_rows(root, [{"operation_id": "near-open", "owner_id": "user:near", "runtime_path": "near_text_native",
+                       "state": "reserved", "actual_cost_microusd": None}])
+
+    async def outstanding(db, ledger):
+        prior = await db.get(InferenceCostReservation, "near-next")
+        return repository._near_outstanding_sealed(ledger, prior, "user:near")
+
+    assert await _scoped(repository, root, outstanding) is True
+    _sql(root, f"UPDATE inference_cost_reservations SET {column} = ? WHERE operation_id = 'near-open'", value)
+    # Content edits to the untouched row change nothing the decision reads.
+    assert await _scoped(repository, root, outstanding) is True
+
+
+def test_v1_ledgers_are_skipped_not_recorded_by_the_background_verifier(tmp_path):
+    database = tmp_path / "seraph.db"
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE inference_accounting_owners (deployment_id, revision, ledger_digest)")
+    connection.execute("CREATE TABLE inference_cost_reservations (operation_id)")
+    connection.execute("INSERT INTO inference_accounting_owners VALUES ('d', 3, ?)", ("0" * 64,))
+    connection.commit()
+    connection.close()
+    assert inference_ledger.verify_offline(database) == ("d", inference_ledger.V1_LEDGER_SKIPPED, 3)

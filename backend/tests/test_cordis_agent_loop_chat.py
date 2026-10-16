@@ -626,6 +626,8 @@ def test_a_cutover_between_the_route_read_and_the_legacy_gate_uses_the_new_route
     from src.runtime_plugins import agent_turns
     from src.runtime_plugins.cutover import legacy_turns, transition_domain
     with chat_env(tmp_path, monkeypatch, [final("REST on Cordis."), final("WS on Cordis.")], loop="legacy") as env:
+        # Chat's prerequisite (#1020): the reviewed presets are Cordis-owned before chat can move.
+        env.run(transition_domain("seraph.agent-presets.v1", "cordis", host=env.host, actor="operator:test"))
         real = agent_turns.chat_runtime_status
         raced = []
 

@@ -2109,7 +2109,7 @@ When the host cannot provide this (no `bwrap`, user namespaces denied, or a
 failed probe), nothing falls back silently: the posture keeps the previous
 `isolation_claim=none`/`network_isolation=not_verified` values plus
 `isolation_variant=not_isolated` and an `isolation_unavailable_reason`, the
-patch approval begins "NOT ISOLATED (<reason>):", and the tests can use the
+patch approval begins `NOT ISOLATED (<reason>):`, and the tests can use the
 network and read the Seraph user's files. The posture digest is bound into the
 approval, so a change between variants invalidates earlier approvals. Setting
 `require_isolation` (repository sandbox settings, default off) refuses to run

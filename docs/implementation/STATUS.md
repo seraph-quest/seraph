@@ -55,7 +55,7 @@ such as `/etc` and the runtime stay readable, read-only) and per-process
 CPU/address-space/file-size/process-count limits (not total memory or disk),
 recorded as `isolation_claim=bwrap_userns`. Otherwise the posture says
 `isolation_variant=not_isolated` with a reason, the approval begins "NOT
-ISOLATED (<reason>):" and the previous limitation applies: the repository's
+ISOLATED (&lt;reason&gt;):" and the previous limitation applies: the repository's
 tests run as the Seraph user, can use the network and read local files
 including `~/.ssh` and Seraph's database and vault, and a same-user process that
 detaches (for example via `systemd-run --user` or `at`) can outlive "cleanup

@@ -992,3 +992,36 @@ def test_isolated_backup_restore_restart_and_rollback_drill_preserves_state(tmp_
 
 def workspace_backup_dir_for(root: Path) -> Path:
     return root.parent / f"{root.name}.backups"
+
+
+def _cli(tmp_path, environment, *arguments):
+    completed = subprocess.run([sys.executable, str(CLI), "--base-dir", str(tmp_path), *arguments],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_background_inference_toggles_survive_backup_and_restore(tmp_path, monkeypatch):
+    from config.settings import settings
+    from src.scheduler import background_inference
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+
+    # An archive taken before any toggle exists still restores, with defaults.
+    before = _cli(tmp_path, environment, "backup", "--archive", "before-toggles.zip")
+    background_inference.write_background_inference_settings({"strategist_tick": False})
+    archive = _cli(tmp_path, environment, "backup", "--archive", "with-toggles.zip")
+    entries = {entry["logical_path"]: entry for entry in canonical_workspace_registry(root).build_manifest()["entries"]}
+    assert entries["background-inference-settings.json"]["state_class"] == "canonical"
+
+    background_inference.write_background_inference_settings({"strategist_tick": True, "daily_briefing": False})
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    restored, error = background_inference.read_background_inference_settings()
+    assert error is None
+    assert restored["strategist_tick"] is False and restored["daily_briefing"] is True
+
+    _cli(tmp_path, environment, "restore", "--archive", before["archive_path"], "--confirm")
+    assert not background_inference.background_inference_settings_path().exists()
+    defaults, error = background_inference.read_background_inference_settings()
+    assert error is None and all(defaults.values())

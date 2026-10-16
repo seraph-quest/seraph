@@ -1,13 +1,18 @@
 """Shared fixtures for the #1019 Cordis agent-loop suites.
 
-Scripted local inference only: a fixed in-memory smolagents ``Model`` returns
-the next scripted message; sockets and DNS are denied. The reviewed Cordis
-child is real, and the agent-loop owner is cut over with the production fenced
-owner transition and a boot proof from that child.
+Scripted inference only: either a fixed in-memory smolagents ``Model`` returns
+the next scripted message, or (``governed_inference``) the real
+``FallbackLiteLLMModel`` runs its canonical preflight and route selection and
+only the governed OpenRouter transport's HTTP client is answered by an
+``httpx.MockTransport`` (#1107's pattern). Sockets and DNS are denied, so no
+provider is contacted and nothing is spent. The reviewed Cordis child is real,
+and the agent-loop owner is cut over with the production fenced owner
+transition and a boot proof from that child.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 import socket
 
 from smolagents.models import ChatMessage, ChatMessageToolCall, ChatMessageToolCallFunction, Model
@@ -54,6 +59,78 @@ class ScriptedModel(Model):
         if not self.script:
             raise AssertionError("scripted model exhausted")
         return self.script.pop(0)
+
+
+class GovernedProvider:
+    """The provider behind the governed transport: replays the script as OpenRouter chat completions.
+
+    Requests leave ``_governed_openai_chat_completion`` exactly as they would for
+    OpenRouter; the real request serialization and response parsing both run.
+    ``calls`` records, per request, the offered tool names and the message count.
+    """
+
+    def __init__(self, script):
+        self.script, self.calls, self.bodies = list(script), [], []
+
+    def handle(self, request):
+        import httpx
+        assert request.url.host == "openrouter.ai", request.url
+        body = json.loads(request.content)
+        self.bodies.append(body)
+        self.calls.append({"tools": [tool["function"]["name"] for tool in body.get("tools") or []],
+                           "messages": len(body["messages"])})
+        if not self.script:
+            raise AssertionError("scripted provider exhausted")
+        message = self.script.pop(0)
+        calls = [{"id": item.id, "type": "function",
+                  "function": {"name": item.function.name, "arguments": json.dumps(item.function.arguments)}}
+                 for item in message.tool_calls or []]
+        return httpx.Response(200, json={
+            "id": f"gen-{len(self.bodies)}", "object": "chat.completion", "model": body["model"],
+            "choices": [{"index": 0, "finish_reason": "tool_calls" if calls else "stop",
+                         "message": {"role": "assistant", "content": message.content or None,
+                                     "tool_calls": calls or None}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.000001}})
+
+
+def governed_inference(monkeypatch, script) -> GovernedProvider:
+    """Chat and onboarding agents get the real governed model; only its provider HTTP is scripted."""
+    import httpx
+    from config.settings import settings
+    from src import llm_runtime
+    from src.model_fabric.configuration import openrouter_policy_for_setup
+    from src.model_fabric.repository import model_fabric_repository
+    from tests.test_agent_control_flow_propagation import _openrouter_route
+    setup, profile, proofs = _openrouter_route()
+    provider = GovernedProvider(script)
+    monkeypatch.setattr(settings, "openrouter_api_key", "fixture-openrouter-key")
+
+    def model(*, runtime_path: str = "chat_agent", temperature=None, **_kwargs):
+        return llm_runtime.FallbackLiteLLMModel(model_id=profile.routing_model, api_base=profile.api_base,
+                                                api_key="fixture-openrouter-key", runtime_profile=profile.id,
+                                                runtime_path=runtime_path, max_tokens=512,
+                                                **({} if temperature is None else {"temperature": temperature}))
+
+    async def latest_capability_proof(*, capability, **_kwargs):
+        return proofs.get(capability)
+    real_client = httpx.Client
+
+    def client(*args, **kwargs):
+        return real_client(*args, **{**kwargs, "transport": httpx.MockTransport(provider.handle)})
+    monkeypatch.setattr("src.agent.factory.get_model", model)
+    monkeypatch.setattr("src.agent.onboarding.LiteLLMModel", model)
+    monkeypatch.setattr("src.agent.onboarding.build_model_kwargs", lambda **kwargs: kwargs)
+    monkeypatch.setattr(llm_runtime, "provider_profiles", lambda *_a, **_k: {profile.id: profile})
+    monkeypatch.setattr(llm_runtime, "_fallback_targets", lambda *_a, **_k: [])
+    monkeypatch.setattr("src.model_fabric.caller_context.effective_workload_policy",
+                        lambda *_a, **_k: openrouter_policy_for_setup(setup, "chat_agent"))
+    monkeypatch.setattr(model_fabric_repository, "latest_capability_proof", latest_capability_proof)
+    monkeypatch.setattr(llm_runtime, "_execute_sync_with_gpu_admission", lambda **kwargs: kwargs["operation"]())
+    monkeypatch.setattr(llm_runtime, "_new_route_receipt_session", lambda *_a, **_k: None)
+    monkeypatch.setattr(llm_runtime, "_can_log_request", lambda *_a, **_k: False)
+    # Only the governed transport builds a synchronous httpx.Client on these paths.
+    monkeypatch.setattr(httpx, "Client", client)
+    return provider
 
 
 async def cutover_agent_loop(host, *, to: str = "cordis"):

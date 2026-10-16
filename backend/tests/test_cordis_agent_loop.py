@@ -11,7 +11,9 @@ import os
 from pathlib import Path
 
 import pytest
-from smolagents import Tool, ToolCallingAgent
+from smolagents import Tool
+
+from src.agent.tool_calling_agent import ToolCallingAgent
 
 from tests.cordis_agent_loop import (ScriptedModel, agent_loop_host, call, cutover_agent_loop, deny_sockets, final,
                                      text, tools)
@@ -397,3 +399,19 @@ async def test_over_the_call_bound_is_an_observation_and_the_surface_is_compared
         with pytest.raises(Exception) as surface:
             await asyncio.get_running_loop().run_in_executor(None, lambda: agent.run("go"))
         assert turn_failure_reason(surface.value) == "agent_turn_surface_changed"
+
+
+async def test_only_the_interrupt_aware_agent_can_be_sequenced(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    """smolagents' own agent would turn an approval pause into an observation; a turn refuses it (#1107)."""
+    from smolagents import ToolCallingAgent as SmolagentsToolCallingAgent
+    deny_sockets(monkeypatch)
+    jobs = DurableJobRepository()
+    async with agent_loop_host(jobs) as host:
+        operator = await _session()
+        turn = await _turn(operator, host, jobs)
+        plain = SmolagentsToolCallingAgent(tools=[Echo()], model=ScriptedModel([final("never")]), max_steps=3,
+                                           verbosity_level=0)
+        with pytest.raises(TurnBlocked) as refused:
+            turn.attach(plain)
+        assert refused.value.reason_code == "agent_turn_agent_unsupported"
+        assert await turn.settle("blocked", reason=refused.value.reason_code)

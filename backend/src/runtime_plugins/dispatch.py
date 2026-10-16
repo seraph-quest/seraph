@@ -55,6 +55,7 @@ BLOCKED_METHODS = MappingProxyType({
     "agent-loop.startTurn": "native_turn_producer_not_bound",
     "agent-loop.cancelTurn": "native_turn_producer_not_bound",
     "agent-loop.inspectTurn": "native_turn_producer_not_bound",
+    "guardian.startTurn": "native_turn_producer_not_bound",
     "scheduler.register": "native_scheduler_not_bound",
     "scheduler.disable": "native_scheduler_not_bound",
     "scheduler.dispatchDue": "native_scheduler_not_bound",
@@ -325,6 +326,12 @@ class NativeServiceDispatcher:
             except GoalProgrammeError as exc:
                 raise NativeServiceBlocked("native_programme_authority_changed") from exc
             return "goal-programme"
+        if isinstance(authority, dict) and authority.get("authority_type") == "guardian_turn_v1":
+            # #1020 unattended guardian turn: no operator Root exists; the live
+            # turn job (and its scheduler parent, if any) is the only authority.
+            from .guardian_turns import current_guardian_authority
+            await current_guardian_authority(db, run, authority)
+            return "guardian"
         if run.owner_kind != "user" or not isinstance(authority, dict):
             raise NativeServiceBlocked("native_authority_mode_unsupported")
         from src.auth.service import AuthFailure, authenticate_principal
@@ -380,7 +387,7 @@ class NativeServiceDispatcher:
             if scope.binding.native_branch == "governed":
                 from .governed_services import dispatch_governed
                 return await dispatch_governed(self, frame, payload, scope)
-            if scope.binding.native_branch == "agent_loop":
+            if scope.binding.native_branch in {"agent_loop", "guardian"}:
                 from .agent_turns import dispatch_turn_step
                 return await dispatch_turn_step(self, frame, payload, scope)
             if scope.binding.native_branch in {"programme_planning", "programme_discovery"}:

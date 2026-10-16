@@ -67,13 +67,22 @@ async def consolidate_session(
 
         soul = render_soul_text(await sync_soul_file_to_profile())
 
+        from src.scheduler.guardian_runtime import GuardianBlocked, report_guardian_blocked, report_guardian_succeeded
+        from src.runtime_plugins.guardian_turns import guardian_completion_fn
         try:
             extraction = await extract_session_memories(
                 session_id=session_id,
                 history_text=history,
                 soul_context=soul,
-                completion_fn=completion_with_fallback,
+                # #1020: every trigger's consolidation call runs on the guardian loop.
+                completion_fn=guardian_completion_fn("guardian.memory_consolidation", completion_with_fallback),
             )
+        except GuardianBlocked as exc:
+            # Never adopted: the fingerprint stays uncached, so a later catch-up
+            # consolidates once the guardian loop is ready again.
+            await report_guardian_blocked("memory_consolidation", exc, started_at=started_at,
+                                          details={"trigger": trigger, "workflow_name": workflow_name})
+            return ConsolidationResult(outcome="blocked", should_cache_fingerprint=False)
         except asyncio.TimeoutError:
             logger.warning(
                 "Consolidation LLM timed out after %ds for session %s",
@@ -96,6 +105,7 @@ async def consolidate_session(
                 outcome="timed_out",
                 should_cache_fingerprint=False,
             )
+        report_guardian_succeeded("memory_consolidation")
         persist_result = await persist_extracted_memories(
             extracted_memories=extraction.memories,
             session_id=session_id,

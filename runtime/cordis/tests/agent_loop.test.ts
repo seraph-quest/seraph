@@ -5,12 +5,14 @@ import { readFileSync } from 'node:fs';
 import { Composition, validateProfile } from '../src/composition.js';
 import { decodeJson } from '../src/protocol.js';
 import { decide, MAX_TOOL_CALLS } from '../src/plugins/agent_loop/index.js';
+import { PRESETS, presetDigest } from '../src/plugins/agent_presets/index.js';
 import type { ScopedRequestClient } from '../src/contracts/client.js';
 
 const profile = () => validateProfile(decodeJson(readFileSync(new URL('../../profile.json', import.meta.url))));
 const ok = (value: unknown) => ({ status: 'succeeded', memory_status: 'no_learning', value });
-const step = (kind: string, call_count = 0, step_index = 1, max_steps = 10) =>
-  ({ schema_version: 1, kind, call_count, step_index, max_steps, output_ref: 'turn-output:' + 'a'.repeat(48) });
+const chatAgent = PRESETS['chat.agent']!;
+const step = (kind: string, call_count = 0, step_index = 1, max_steps = 10, preset_id = 'chat.agent', preset_digest = presetDigest(chatAgent)) =>
+  ({ schema_version: 1, kind, call_count, step_index, max_steps, output_ref: 'turn-output:' + 'a'.repeat(48), preset_id, preset_digest });
 
 /** Fixed in-memory Python owner for one step job: serves the projection, records decisions. */
 function owner(projection: unknown) {
@@ -57,6 +59,24 @@ test('malformed, oversized or impossible projections block before any decision',
         [step('tool_calls', MAX_TOOL_CALLS + 1), 'agent_turn_step_invalid'],
         [step('final_answer', 1), 'agent_turn_step_invalid'],
         [step('max_steps', 0, 3, 10), 'agent_turn_transition_invalid']] as const) {
+      const fixture = owner(projection);
+      assert.deepEqual(await composition.invoke('agent-loop.startTurn', { turn_ref: 'cordis-svc:step' }, fixture.client),
+        { status: 'blocked', reason_code: reason, memory_status: 'no_learning' });
+      assert.deepEqual(fixture.calls.map(([method]) => method), ['artifacts.read']);
+    }
+  } finally { await composition.dispose(); }
+});
+
+test('a step must name a reviewed interactive preset with the exact digest and bounds', async () => {
+  const composition = new Composition(profile()); await composition.start();
+  try {
+    const direct = PRESETS['chat.direct']!;
+    for (const [projection, reason] of [
+        [step('final_answer', 0, 1, 10, 'chat.unknown'), 'agent_preset_unavailable'],
+        [step('final_answer', 0, 1, 10, 'chat.agent', 'b'.repeat(64)), 'agent_preset_changed'],
+        [step('final_answer', 0, 1, 1, 'guardian.strategist', presetDigest(PRESETS['guardian.strategist']!)), 'agent_preset_kind_invalid'],
+        [step('final_answer', 0, 1, 3, 'chat.direct', presetDigest(direct)), 'agent_preset_bound_exceeded'],
+        [step('tool_calls', 1, 1, 1, 'chat.direct', presetDigest(direct)), 'agent_preset_tools_denied']] as const) {
       const fixture = owner(projection);
       assert.deepEqual(await composition.invoke('agent-loop.startTurn', { turn_ref: 'cordis-svc:step' }, fixture.client),
         { status: 'blocked', reason_code: reason, memory_status: 'no_learning' });

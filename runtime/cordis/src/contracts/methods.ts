@@ -64,6 +64,7 @@ export const serviceSchemas = {
   'agent-loop.startTurn': {input: object({turn_ref: ref}), output: outputs.job},
   'agent-loop.cancelTurn': {input: object({turn_ref: ref, expected_revision: number(1)}), output: outputs.job},
   'agent-loop.inspectTurn': {input: object({turn_ref: ref}), output: outputs.inspection},
+  'guardian.startTurn': {input: object({turn_ref: ref}), output: outputs.job},
   'source-extraction.extract': {input: object({artifact_ref: ref, acquisition_receipt_ref: ref, source_slot: number(0, 3), first_line: number(1, 4096), last_line: number(1, 4096)}), output: outputs.evidence},
 } as const;
 export type ServiceMethod = keyof typeof serviceSchemas;

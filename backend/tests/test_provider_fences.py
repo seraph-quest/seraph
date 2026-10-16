@@ -137,3 +137,22 @@ async def test_provider_and_child_restart_retain_unresolved_effects_without_repl
         worker.detach()
     assert await _snapshot(identities) == before
     assert [call for call in calls if call.get("invocation_ref") in identities] == []
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_a_degraded_dependency_blocks_later_callbacks_typed(live_host):
+    """memory.retrieve itself needs no artifacts owner, but its artifact journey does."""
+    host, jobs, calls = live_host
+    operator = await _operator()
+    await _private_memory(operator)
+    worker = attach(ProviderWorker())
+    for name in worker.status:
+        worker.status[name].state = "active"
+    worker.status["artifacts"].state, worker.status["artifacts"].reason_code = "degraded", "artifacts_root_unavailable"
+    with pytest.raises(NativeServiceBlocked) as denied:
+        await execute_native_read(operator=operator, candidate=_MEMORY_READ, idempotency_key="artifacts-degraded",
+                                  host=host, jobs=jobs)
+    assert denied.value.reason_code == "native_provider_artifacts_unavailable"
+    assert [call["method"] for call in calls][-2:] == ["memory.retrieve", "artifacts.stage"]
+    assert _persisted_copies(_PRIVATE_TEXT) == []

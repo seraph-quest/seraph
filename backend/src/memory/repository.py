@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -12,7 +13,7 @@ import stat
 import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -3294,6 +3295,9 @@ class MemoryTombstoneWriteResult:
     memory: Memory
     tombstone: MemoryTombstone
     created: bool
+    # #1119: ``covered`` only once the derived lance rows are verified purged;
+    # inside the forget's own transaction it is always still ``not_covered``.
+    derived_vector_purge: str = "not_covered"
 
 
 class MemoryRepository:
@@ -6964,13 +6968,24 @@ class MemoryRepository:
         )
         async with lock:
             async with self._canonical_memory_lock:
-                return await self._mark_memory_tombstoned(
+                result = await self._mark_memory_tombstoned(
                     memory_id,
                     actor=actor,
                     reason=reason,
                     metadata_updates=metadata_updates,
                     deleted_at=deleted_at,
                 )
+        if result.derived_vector_purge == "covered":
+            return result
+        # The forget has committed; purge its lance rows in the same operator
+        # operation, outside the canonical lock. A failure leaves the ledger
+        # ``not_covered`` for the follow-up job and the receipt says so.
+        from src.memory.tombstone_vectors import derived_vector_purge_state, purge_tombstoned_vectors
+        try:
+            await purge_tombstoned_vectors()
+        except Exception:
+            logging.getLogger(__name__).warning("Memory tombstone vector purge deferred", exc_info=True)
+        return _dataclass_replace(result, derived_vector_purge=await derived_vector_purge_state(result.tombstone.memory_id))
 
     async def _mark_memory_tombstoned(
         self,
@@ -7068,6 +7083,12 @@ class MemoryRepository:
         metadata.update(updates)
         metadata["canonical_tombstone_id"] = tombstone.id
         metadata["archived_reason"] = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
+        # #1119: the lance row link moves onto the ledger in this transaction;
+        # the purge itself runs only after the caller's commit.
+        from src.memory.tombstone_vectors import purge_after_commit, queue_purge
+        if queue_purge(tombstone, memory):
+            db.add(tombstone)
+            purge_after_commit(db)
         memory.status = MemoryStatus.archived
         memory.content = _CANONICAL_MEMORY_DELETE_CONTENT
         memory.summary = _CANONICAL_MEMORY_DELETE_CONTENT
@@ -7101,6 +7122,7 @@ class MemoryRepository:
             memory=memory,
             tombstone=tombstone,
             created=created,
+            derived_vector_purge=tombstone.derived_vector_purge,
         )
 
     async def reconcile_memory_tombstones(
@@ -7214,6 +7236,8 @@ class MemoryRepository:
                         float(memory.importance or 0.0) != 0.0,
                         float(memory.reinforcement or 0.0) != 0.0,
                         memory.metadata_json != json.dumps(metadata, sort_keys=True),
+                        # A restored lance link must be purged again (#1119).
+                        memory.embedding_id is not None,
                     )
                 )
                 unredacted_source = (
@@ -7232,6 +7256,10 @@ class MemoryRepository:
                     .values(snippet=None)
                 )
                 if needs_reapply or source_redaction.rowcount > 0:
+                    from src.memory.tombstone_vectors import purge_after_commit, queue_purge
+                    if queue_purge(tombstone, memory):
+                        db.add(tombstone)
+                        purge_after_commit(db)
                     memory.status = MemoryStatus.archived
                     memory.content = _CANONICAL_MEMORY_DELETE_CONTENT
                     memory.summary = _CANONICAL_MEMORY_DELETE_CONTENT

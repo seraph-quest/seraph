@@ -139,6 +139,7 @@ class TestSchedulerEngine:
                     "screen_cleanup",
                     "audio_ingress_cleanup",
                     "inference_ledger_verification",
+                    "memory_tombstone_vector_purge",
                     "work_board_dispatch",
                     "guardian_opportunity_assessment",
                     "goal_public_discovery",

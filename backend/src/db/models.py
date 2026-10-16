@@ -2195,6 +2195,12 @@ class MemoryTombstone(SQLModel, table=True):
     actor: str = Field(default="operator", index=True)
     reason: str = Field(default="operator_delete_export")
     created_at: datetime = Field(default_factory=_now, index=True)
+    # #1119: the derived lance rows (ids only, never text) this forget must still
+    # purge, and whether that purge is verified. ``covered`` only after every
+    # listed row is gone from the lance files on disk.
+    vector_purge_ids_json: str = Field(default="[]", sa_column_kwargs={"server_default": "[]"})
+    derived_vector_purge: str = Field(default="not_covered", sa_column_kwargs={"server_default": "not_covered"})
+    vector_purged_at: Optional[datetime] = Field(default=None)
 
 
 class MemoryEntity(SQLModel, table=True):

@@ -315,6 +315,18 @@ async def _ensure_inference_ledger_v2_columns(conn) -> None:
             "ALTER TABLE inference_accounting_owners ADD COLUMN ledger_totals_json VARCHAR NOT NULL DEFAULT ''")
 
 
+async def _ensure_memory_tombstone_columns(conn) -> None:
+    """Add the #1119 derived-vector purge state; rows forgotten before it start pending."""
+    columns = {row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(memory_tombstones)")).fetchall()}
+    if not columns:
+        return
+    for column, ddl in (("vector_purge_ids_json", "VARCHAR NOT NULL DEFAULT '[]'"),
+                        ("derived_vector_purge", "VARCHAR NOT NULL DEFAULT 'not_covered'"),
+                        ("vector_purged_at", "DATETIME")):
+        if column not in columns:
+            await conn.exec_driver_sql(f"ALTER TABLE memory_tombstones ADD COLUMN {column} {ddl}")
+
+
 async def _ensure_legacy_columns(conn) -> None:
     """Backfill columns for older local SQLite databases."""
     async def _table_columns(table_name: str) -> set[str]:
@@ -2090,6 +2102,7 @@ async def init_db() -> None:
         await _ensure_mail_columns(conn)
         await _ensure_connection_sync_columns(conn)
         await _ensure_forgejo_form_profiles(conn)
+        await _ensure_memory_tombstone_columns(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)

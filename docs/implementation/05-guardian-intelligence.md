@@ -272,6 +272,31 @@ path writes the ledger and redaction atomically and invalidates the bounded
 guardian snapshot cache; repeated requests preserve the first actor, reason,
 and timestamp.
 
+A canonical forget also purges the memory's derived lance row, its text and
+vector (#1119). In the forget's transaction the ledger records the lance row
+ids (ids only, never text) and `derived_vector_purge: not_covered`, and
+`Memory.embedding_id` is cleared. After the commit, a purge rewrites each
+`memories*` lance table without those rows and drops every older lance version
+and unreferenced file, because a lance delete alone leaves the text in the data
+file. Only once the rows are verified gone does the ledger turn `covered`. The
+operator delete/export receipt reports that state: `covered` after an inline
+purge, otherwise `not_covered`. In-transaction callers (the Cordis forget and
+the task-method delete) are always `not_covered` when their receipt is sealed,
+and their purge runs after their commit. A failed or interrupted purge stays
+`not_covered` until the next forget, a tombstone reapply or the
+`memory_tombstone_vector_purge` scheduler job (every 10 minutes) verifies it. A
+tombstone reapply after a stale restore re-queues a restored lance link the
+same way.
+
+Limits:
+- A lance row shared through near-duplicate deduplication is purged with the
+  forgotten memory, so the other memory loses vector recall until it is
+  re-embedded.
+- An unlinked orphan row, from a vector write that timed out before its id was
+  recorded, is not covered.
+- A lance backup restored with no canonical link is not covered.
+- Redact-mode `forget_memory`, which is not a tombstone, does not purge.
+
 The branch-local live-control rollback guard now treats canonical delete/export
 redaction as terminal: records marked with the operator delete/export archive
 reason, the canonical redaction state, or the equivalent propagated redaction

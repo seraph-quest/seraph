@@ -1,12 +1,14 @@
 import os
 import logging
+import re
 import threading
 import uuid
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Iterable, Optional
 
 import lancedb
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync, read_path_audit_wait_ms, read_path_audits
@@ -77,6 +79,10 @@ def _active_embedding_metadata() -> EmbeddingMetadata | None:
 
 _db: Optional[lancedb.DBConnection] = None
 _db_lock = threading.Lock()
+# Serializes in-process table writes, so a purge's rewrite never drops a row
+# that ``add_memory`` appended between the purge's read and its overwrite.
+_write_lock = threading.Lock()
+_ROW_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 
 def _lance_dir() -> str:
@@ -184,7 +190,8 @@ def add_memory(
             )
         if _active_embedding_metadata() != metadata or len(vector) != metadata.dimension:
             raise EmbeddingUnavailableError("embedding_binding_changed", stage="metadata")
-        table.add([row])
+        with _write_lock:
+            table.add([row])
 
         logger.info("Added memory %s (category=%s)", memory_id[:8], category)
         _log_vector_store_event(
@@ -383,6 +390,45 @@ def search_formatted(
     except Exception:
         logger.exception("Failed to format memory search results")
         return ""
+
+
+def purge_rows(row_ids: Iterable[str]) -> dict:
+    """Remove rows from every memory table so no lance file keeps their text (#1119).
+
+    ``table.delete`` alone only marks rows deleted; their text stays in the data
+    file. Each table holding a listed row is rewritten without it, and every
+    table then drops its older versions and unreferenced files, so neither a
+    deletion-vectored fragment nor an earlier version still holds the text.
+    Raises on any failure; the caller keeps its purge pending.
+    """
+    # Lance ids are generated hex/uuid strings; anything else was never a row id.
+    ids = sorted({str(value) for value in row_ids if isinstance(value, str) and _ROW_ID.fullmatch(value)})
+    if not ids or not os.path.isdir(_lance_dir()):
+        return {"tables": 0, "purged_rows": 0}  # No lance store was ever written here.
+    db = _get_db()
+    wanted = pa.array(ids, pa.string())
+    tables = purged = 0
+    with _write_lock:
+        for name in db.table_names():
+            if name != _TABLE_NAME and not name.startswith(_TABLE_NAME_PREFIX):
+                continue
+            table = db.open_table(name)
+            tables += 1
+            data = table.to_arrow()
+            hits = pc.is_in(data["id"], value_set=wanted)
+            count = pc.sum(hits).as_py() or 0
+            if count:
+                table.add(data.filter(pc.invert(hits)), mode="overwrite")
+                purged += count
+            table.optimize(cleanup_older_than=timedelta(0), delete_unverified=True)
+            remaining = table.to_arrow().column("id")
+            if pc.sum(pc.is_in(remaining, value_set=wanted)).as_py():
+                raise RuntimeError("vector_purge_unverified")
+            if len(table.list_versions()) != 1:
+                raise RuntimeError("vector_purge_versions_retained")
+    if purged:
+        _log_vector_store_event("succeeded", details={"operation": "purge", "tables": tables, "purged_rows": purged})
+    return {"tables": tables, "purged_rows": purged}
 
 
 def _reset_vector_store_state() -> None:

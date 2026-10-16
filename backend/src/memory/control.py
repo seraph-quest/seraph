@@ -1591,6 +1591,8 @@ async def apply_memory_live_control_action(
             "created_at": tombstone_result.tombstone.created_at.isoformat(),
             "created": tombstone_result.created,
             "state": _CANONICAL_MEMORY_REDACTED_STATE,
+            # #1119: ``covered`` only once the lance text and vector are gone from disk.
+            "derived_vector_purge": tombstone_result.derived_vector_purge,
         }
         invalidate_bounded_guardian_snapshot_cache()
         changed_memory = True

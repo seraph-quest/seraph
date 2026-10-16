@@ -153,6 +153,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
     from src.scheduler.jobs.audio_ingress_cleanup import run_audio_ingress_cleanup
     from src.scheduler.jobs.inference_ledger_verification import run_inference_ledger_verification
+    from src.memory.tombstone_vectors import run_tombstone_vector_purge
 
     jobs = [
         {
@@ -308,6 +309,16 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "name": "Inference cost ledger full verification",
             "next_run_time": _startup_next_run(True, delay_seconds=120),
             "misfire_grace_time": 300,
+        },
+        {
+            # #1119: a forget whose lance purge failed or was interrupted stays
+            # ``not_covered`` only until this backstop verifies the purge.
+            "func": _async_job_wrapper(run_tombstone_vector_purge, loop, job_id="memory_tombstone_vector_purge"),
+            "trigger": IntervalTrigger(minutes=10),
+            "id": "memory_tombstone_vector_purge",
+            "name": "Forgotten memory lance purge",
+            "next_run_time": _startup_next_run(True, delay_seconds=90),
+            "misfire_grace_time": 600,
         },
     ]
 

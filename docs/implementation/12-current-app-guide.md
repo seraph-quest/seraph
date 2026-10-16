@@ -605,7 +605,11 @@ MCP, ungoverned and Vault tools are listed as blocked. Invalid arguments are
 denied at admission. A path argument that resolves (after `..` and links) to a
 Vault secret/recovery file in the workspace state registry or to a runtime-owned
 file (`seraph.db` and its sidecars, `.vault-key`) is denied as
-`native_capability_path_denied`. Policy, descriptor version and path are checked
+`native_capability_path_denied`; names compare case-folded and NFC-normalised,
+and the target is also compared by file identity (device and inode), so another
+spelling or a hard link cannot reach those files. `preview_workspace_patch` is not
+a Cordis read-only capability: its pre-encoded JSON diff could carry an escaped
+or line-split Vault value past exact-match redaction. Policy, descriptor version and path are checked
 again at effect time (`native_capability_policy_changed`). The job's grants come
 only from its sealed declared authority, and the host runs under the operator's
 current approval mode. The call records an intent (also an `intent` effect

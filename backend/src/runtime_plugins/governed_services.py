@@ -15,6 +15,7 @@ import asyncio
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import time
 
 from .contracts import succeeded
@@ -29,7 +30,9 @@ MAX_MESSAGES = 4
 MAX_MESSAGE_BYTES = 4096
 MAX_INFERENCE_TOKENS = 1024
 # Executed without an approval prompt only when the executor's effect is read-only.
-READ_ONLY_CAPABILITIES = frozenset({"read_file", "list_processes", "read_process_output", "preview_workspace_patch"})
+# preview_workspace_patch returns a pre-encoded JSON diff receipt in which an exact
+# Vault value can be escaped or split across lines; it stays approval-gated here.
+READ_ONLY_CAPABILITIES = frozenset({"read_file", "list_processes", "read_process_output"})
 # Runtime-owned files are never readable through Cordis, whatever their registry class.
 RUNTIME_OWNED_PATHS = frozenset({"seraph.db", "seraph.db-wal", "seraph.db-shm", "seraph.db-journal", ".vault-key"})
 # Concurrent Cordis inference per operator: a burst can never take the broker's
@@ -220,16 +223,42 @@ def _path_allowed(file_path) -> None:
         logical = resolved.relative_to(root.resolve()).as_posix()
     except (OSError, ValueError, RuntimeError) as exc:
         raise NativeServiceBlocked("native_capability_path_denied") from exc
-    if logical in {"", "."} or logical.split("/")[0] in RUNTIME_OWNED_PATHS:
+    # Names compare case-folded and NFC-normalised (case-insensitive filesystems), and
+    # the target is compared by file identity, so no spelling or link reaches a protected file.
+    registry = canonical_workspace_registry(root)
+    folded = _fold(logical)
+    if logical in {"", "."} or folded.split("/")[0] in {_fold(name) for name in RUNTIME_OWNED_PATHS}:
+        raise NativeServiceBlocked("native_capability_path_denied")
+    protected = {*RUNTIME_OWNED_PATHS, *(spec.logical_path for spec in registry.config.declared_paths
+                                         if spec.state_class in {WorkspaceStateClass.SECRET,
+                                                                 WorkspaceStateClass.SECRET_RECOVERY})}
+    if any(folded == _fold(path) or folded.startswith(_fold(path) + "/") for path in protected):
         raise NativeServiceBlocked("native_capability_path_denied")
     try:
-        state = canonical_workspace_registry(root).classify_path(logical)
+        target = os.stat(resolved)
+    except OSError:
+        target = None
+    if target is not None:
+        for path in protected:
+            try:
+                other = os.stat(root / path)
+            except OSError:
+                continue
+            if (other.st_dev, other.st_ino) == (target.st_dev, target.st_ino):
+                raise NativeServiceBlocked("native_capability_path_denied")
+    try:
+        state = registry.classify_path(logical)
     except UnknownWorkspacePathError:
         return  # An operator file outside every declared owner.
     except WorkspaceStateError as exc:
         raise NativeServiceBlocked("native_capability_path_denied") from exc
     if state in {WorkspaceStateClass.SECRET, WorkspaceStateClass.SECRET_RECOVERY}:
         raise NativeServiceBlocked("native_capability_path_denied")
+
+
+def _fold(path: str) -> str:
+    import unicodedata
+    return unicodedata.normalize("NFC", path).casefold()
 
 
 def _job_grants(run) -> set[str]:
@@ -323,10 +352,12 @@ async def _request_inference(jobs, run, candidate) -> dict:
     owner, mode = run.owner_principal_id, _approval_mode(run)
     if _cordis_inflight.get(owner, 0) >= CORDIS_INFERENCE_PER_OWNER:
         raise NativeServiceBlocked("cordis_inference_capacity")
-    _cordis_inflight[owner] = _cordis_inflight.get(owner, 0) + 1
-    tokens = set_runtime_context(run.session_id, mode, trust_principal=principal)
     parts: list[str] = []
+    tokens = None
     try:
+        # The slot is taken inside the try and always released in its finally.
+        _cordis_inflight[owner] = _cordis_inflight.get(owner, 0) + 1
+        tokens = set_runtime_context(run.session_id, mode, trust_principal=principal)
         try:
             from dataclasses import replace
             from src.model_fabric.configuration import read_model_fabric_configuration
@@ -363,10 +394,11 @@ async def _request_inference(jobs, run, candidate) -> dict:
             raise NativeServiceBlocked("inference_cost_unresolved") from exc
         raise NativeServiceBlocked("inference_request_failed") from exc
     finally:
-        reset_runtime_context(tokens)
         _cordis_inflight[owner] -= 1
         if not _cordis_inflight[owner]:
             _cordis_inflight.pop(owner)
+        if tokens is not None:
+            reset_runtime_context(tokens)
     text = await _redacted("".join(parts))
     snapshot = await jobs.inference_accounting_snapshot(job_id=run.run_identity)
     usage = [{key: row.get(key) for key in ("operation_id", "state", "reserved_microusd", "charged_microusd", "runtime_path")}
@@ -399,9 +431,18 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
         if context["operations"] or context["result"] is not None:
             # An interrupted effect stays an unresolved intent; it is never re-executed.
             raise NativeServiceBlocked("native_governed_replay_denied")
+        # Benign denials are no-effect blocks decided before any intent is written.
+        from src.security.trust_contract import AuthorityGrant
         if method == "capabilities.invoke":
-            # Policy is rechecked at effect time; a denial here is a no-effect block.
+            # Policy is rechecked at effect time.
             recheck_capability(candidate)
+            if AuthorityGrant.CAPABILITY_EXECUTE.value not in _job_grants(run):
+                raise NativeServiceBlocked("native_capability_grant_missing")
+        else:
+            if AuthorityGrant.MODEL_INFERENCE.value not in _job_grants(run):
+                raise NativeServiceBlocked("native_inference_grant_missing")
+            if _cordis_inflight.get(run.owner_principal_id, 0) >= CORDIS_INFERENCE_PER_OWNER:
+                raise NativeServiceBlocked("cordis_inference_capacity")
         context["operations"].append({"op": "intent", "method": method, "call_ref": frame["request_id"], "no_learning": True})
         # The intent is also an effect receipt, so stale-lease recovery classifies an
         # interrupted call as an unresolved external effect instead of a clean failure.

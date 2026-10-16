@@ -11,6 +11,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
+import os
 import socket
 from pathlib import Path
 
@@ -416,19 +417,25 @@ async def test_secret_runtime_paths_failed_reads_and_policy_changes_never_succee
         (workspace / "notes").mkdir(exist_ok=True)
         (workspace / "notes" / "credentials.txt").write_text("x")
         # Vault/secret/recovery and runtime-owned files are denied before any job or crossing.
+        # A hard link is a different name for the same protected file: denied by identity.
+        os.link(workspace / ".vault-key", workspace / "notes" / "alias.txt")
         for index, path in enumerate((".vault-key", "d/../.vault-key", "./.vault-key", "seraph.db", "seraph.db-wal",
-                                      "google_calendar_token.json", "../outside.txt", "")):
+                                      "google_calendar_token.json", "../outside.txt", "",
+                                      # Case-insensitive filesystems open these as the protected files.
+                                      ".Vault-Key", ".VAULT-KEY", "SERAPH.DB", "Google_Calendar_Token.json",
+                                      "notes/alias.txt")):
             with pytest.raises(NativeServiceBlocked) as denied:
                 await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
                                                 arguments={"file_path": path}, idempotency_key=f"vk-{index}", host=env["host"])
             assert denied.value.reason_code == "native_capability_path_denied", path
         assert env["frames"] == [] and await _governed_jobs(env["jobs"]) == []
-        # The same rule covers every path-taking read-only capability.
+        # preview_workspace_patch returns a pre-encoded JSON diff in which a Vault value can be
+        # escaped or split across lines, so it is not a Cordis read-only capability.
         with pytest.raises(NativeServiceBlocked) as preview:
             await execute_native_capability(operator=env["operator"], capability_id="native_tool:preview_workspace_patch",
-                arguments={"file_path": "d/../.vault-key", "old_text": "M", "new_text": "N", "expected_occurrences": 1},
+                arguments={"file_path": "notes/plan.txt", "old_text": "M", "new_text": "N", "expected_occurrences": 1},
                 idempotency_key="preview", host=env["host"])
-        assert preview.value.reason_code == "native_capability_path_denied"
+        assert preview.value.reason_code == "capability_requires_approval"
         # A raising handler is a failed effect: blocked, never a successful empty result.
         with pytest.raises(NativeServiceBlocked) as failed:
             await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
@@ -588,3 +595,55 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
 
 async def _usage():
     return {"usage": {"cost": "0.000001"}}
+
+
+async def test_identity_check_covers_case_insensitive_spellings_and_redaction_covers_multiline_and_non_ascii(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from config.settings import settings
+    from src.runtime_plugins import governed_services
+    from src.runtime_plugins.governed_services import execute_native_capability
+    from src.vault.repository import vault_repository
+    monkeypatch.setattr(settings, "capability_journal_secret", "test-capability-journal-secret-1018")
+    monkeypatch.setattr(settings, "capability_journal_secret_hash", "")
+    async with governed(accounting_db, monkeypatch) as env:
+        workspace = Path(settings.workspace_dir)
+        (workspace / ".vault-key").write_text("MASTER_KEY_CANARY_1018")
+        (workspace / "Notes.txt").write_text("ordinary")
+        # Simulate a case-insensitive filesystem: this spelling opens the Vault master key.
+        real_stat = os.stat
+
+        def folded_stat(path, *args, **kwargs):
+            if str(path).endswith("Notes.txt"):
+                return real_stat(workspace / ".vault-key")
+            return real_stat(path, *args, **kwargs)
+        monkeypatch.setattr(governed_services.os, "stat", folded_stat)
+        with pytest.raises(NativeServiceBlocked) as denied:
+            await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
+                                            arguments={"file_path": "Notes.txt"}, idempotency_key="folded", host=env["host"])
+        assert denied.value.reason_code == "native_capability_path_denied" and env["frames"] == []
+        monkeypatch.setattr(governed_services.os, "stat", real_stat)
+        # Multi-line and non-ASCII Vault values never leave in a capability result.
+        for index, value in enumerate(("first line\nsecond line CANARY_1018", "caf\u00e9 \"quoted\" \\ CANARY_1018")):
+            await vault_repository.store(f"cordis-1018-shape-{index}", value)
+            (workspace / f"shape-{index}.txt").write_text("before " + value + " after\n")
+            done = await execute_native_capability(operator=env["operator"], capability_id="native_tool:read_file",
+                                                   arguments={"file_path": f"shape-{index}.txt"},
+                                                   idempotency_key=f"shape-{index}", host=env["host"])
+            assert "before" in done["output"] and value not in done["output"] and value not in json.dumps(done)
+            assert "CANARY_1018" not in done["output"]
+
+
+async def test_benign_inference_denials_leave_no_intent(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from src.runtime_plugins import governed_services
+    from src.runtime_plugins.dispatch import read_context
+    from src.runtime_plugins.governed_services import execute_native_inference
+    async with governed(accounting_db, monkeypatch) as env:
+        monkeypatch.setattr(governed_services, "CORDIS_INFERENCE_PER_OWNER", 0)
+        with pytest.raises(NativeServiceBlocked) as full:
+            await execute_native_inference(operator=env["operator"], purpose="background", messages=_messages("cordis-full"),
+                                           max_tokens=64, idempotency_key="inf-full", host=env["host"])
+        assert full.value.reason_code == "cordis_inference_capacity"
+        job = (await _governed_jobs(env["jobs"]))[-1]
+        async with env["jobs"]._session() as db:
+            assert read_context(await env["jobs"]._fetch(db, job["job_id"]))["operations"] == []
+        assert job["status"] == "blocked" and job["effects"] == [] and env["model"].calls == []
+        assert governed_services._cordis_inflight == {}

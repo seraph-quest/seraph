@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import sys
 
@@ -225,7 +226,29 @@ def test_visible_preview_escapes_terminal_bidi_and_zero_width_spoofing():
     for marker in ("\\u{001B}", "\\u{000D}", "\\u{0008}", "\\u{202E}", "\\u{200B}", "\\u{2066}", "\\u{00A0}"):
         assert marker in shown
     assert shown.endswith("\\\\n")  # a literal backslash-n stays distinguishable from a newline
-    assert drafts.text_summary(tricky) == f"{len(tricky.encode())} bytes, {len(tricky)} code points, 8 shown escaped"
+    non_ascii = sum(1 for char in tricky if ord(char) > 0x7E)
+    assert drafts.text_summary(tricky) == (f"{len(tricky.encode())} bytes, {len(tricky)} code points, "
+                                           f"{non_ascii} non-ASCII, 8 shown escaped")
+
+
+@pytest.mark.parametrize("char", ["\ufe0f", "\U000e0100", "\u034f", "\u3164", "\u115f", "\u1160", "\uffa0",
+                                  "\u180e", "\u200d"])
+def test_visible_preview_escapes_invisible_non_control_characters(char):
+    shown = drafts.visible_text("a" + char + "b")
+    assert char not in shown and f"\\u{{{ord(char):04X}}}" in shown
+
+
+def test_non_utf8_replacement_file_is_a_blocked_result(tmp_path):
+    path = tmp_path / "replacement.txt"
+    path.write_bytes(b"\xff\xfe not utf-8")
+    lines: list[str] = []
+    adapter = FixtureAdapter(_control())
+    assert drafts.main(["replace", "--replacement-file", str(path)], adapter=adapter, terminal=FakeTerminal("x"),
+                       out=lines.append, sleep=lambda _: None) == 2
+    assert json.loads(lines[-1]) == {"status": "blocked", "reason": "desktop_replacement_not_utf8", "written": False}
+    assert drafts.main(["replace", "--replacement-file", str(tmp_path / "missing.txt")], adapter=adapter,
+                       terminal=FakeTerminal("x"), out=lines.append, sleep=lambda _: None) == 2
+    assert json.loads(lines[-1])["reason"] == "desktop_replacement_unreadable" and adapter.writes == []
 
 
 def test_local_cli_requires_typed_preview_confirmation(tmp_path):
@@ -238,7 +261,7 @@ def test_local_cli_requires_typed_preview_confirmation(tmp_path):
     assert code == 1 and adapter.writes == [] and '"cancelled"' in lines[-1]
     shown = "\n".join(lines)
     assert "the draft" in shown and "the report\\u{202E}" in shown and "\u202e" not in shown
-    assert "untrusted" in shown and "13 bytes, 11 code points, 1 shown escaped" in shown
+    assert "untrusted" in shown and "13 bytes, 11 code points, 1 non-ASCII, 1 shown escaped" in shown
     prefix = next(line for line in lines if line.startswith("--- end ---")).split()[4]
     code = drafts.main(["replace", "--replacement-file", str(replacement)], adapter=adapter,
                        terminal=FakeTerminal(prefix), out=lines.append, sleep=lambda _: None)
@@ -286,7 +309,9 @@ class FakeSelection:
 class FakeNode:
     def __init__(self, world, name, role, children=(), *, text=None, app=None, pid=0):
         self.world, self.name, self.role, self.children = world, name, role, list(children)
-        self.text, self.selection, self.app, self.pid, self.parent = text, None, app, pid, None
+        self.text, self.selection, self.pid, self.parent = text, None, pid, None
+        self.app = app  # an AT-SPI Application (bus_name) when the toolkit exposes it
+        self.path = None  # the D-Bus object path when exposed
         self.editable = text is not None and role != "terminal"
         for child in self.children:
             child.parent = self
@@ -489,3 +514,23 @@ def test_e2e_write_site_recheck_on_the_same_node_prevents_the_write(tmp_path):
     with pytest.raises(DesktopDraftError, match="desktop_focus_changed"):
         adapter.replace(control, 11, 20, "the report")
     assert world.calls == [] and preview.selected_text == "the draft"
+
+
+class FakeApplication:
+    bus_name = ":1.42"
+
+
+def test_e2e_stable_object_reference_detects_a_replaced_control_at_the_same_position(tmp_path):
+    world = FakeDesktop()
+    world.editor_text.app, world.editor_text.path = FakeApplication(), "/org/a11y/atspi/accessible/7"
+    world.editor.app, world.editor.path = FakeApplication(), "/org/a11y/atspi/accessible/2"
+    adapter = _atspi_adapter(world)
+    world.focus_editor()
+    control = adapter.focused()
+    assert control.control_id.endswith("@:1.42/org/a11y/atspi/accessible/7")
+    executor = DesktopDraftExecutor(adapter, paired_edge_id="local")
+    preview = executor.preview(executor.inspect()["surface"], "the report")
+    # The toolkit rebuilt the view: same position, role, text and selection, different object.
+    world.editor_text.path = "/org/a11y/atspi/accessible/9"
+    result = executor.apply(preview, confirmed_preview_digest=preview.preview_digest, replacement="the report")
+    assert result["status"] == "blocked" and result["written"] is False and world.calls == []

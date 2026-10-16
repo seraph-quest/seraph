@@ -80,7 +80,7 @@ def _download_owner(request: Request) -> dict:
 
 
 _DOWNLOAD_STATUS = {"download_not_found": 404, "browser_native_boot_proof_unavailable": 503,
-                    "browser_interaction_runtime_unavailable": 503}
+                    "browser_interaction_runtime_unavailable": 503, "browser_cleanup_witness_unavailable": 503}
 
 
 @router.post("/browser/downloads")

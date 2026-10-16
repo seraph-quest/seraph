@@ -80,12 +80,23 @@ def text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+# Characters that render as nothing (or as blank) although they are not
+# format controls: variation selectors, the combining grapheme joiner and the
+# Hangul fillers.
+_INVISIBLE = frozenset({0x034F, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x180B, 0x180C, 0x180D, 0x180F})
+
+
+def _invisible(code: int) -> bool:
+    return code in _INVISIBLE or 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
+
+
 def visible_text(text: str) -> str:
     """Show text so a preview cannot be spoofed by terminal or Unicode controls.
 
     Backslashes, controls (ANSI escapes, carriage return, backspace), format
     characters (bidi overrides, zero-width marks), separators other than the
-    plain space and unassigned/private code points are all escaped visibly.
+    plain space, unassigned/private code points, variation selectors, the
+    combining grapheme joiner and Hangul fillers are all escaped visibly.
     """
     out = []
     for char in text:
@@ -96,7 +107,8 @@ def visible_text(text: str) -> str:
             out.append("\\n\n")
         elif char == "\t":
             out.append("\\t")
-        elif category in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"} or (category == "Zs" and char != " "):
+        elif (category in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"} or (category == "Zs" and char != " ")
+              or _invisible(ord(char))):
             out.append(f"\\u{{{ord(char):04X}}}")
         else:
             out.append(char)
@@ -105,7 +117,9 @@ def visible_text(text: str) -> str:
 
 def text_summary(text: str) -> str:
     escaped = sum(1 for char in text if visible_text(char) != char)
-    return f"{len(text.encode('utf-8'))} bytes, {len(text)} code points, {escaped} shown escaped"
+    non_ascii = sum(1 for char in text if ord(char) > 0x7E)
+    return (f"{len(text.encode('utf-8'))} bytes, {len(text)} code points, {non_ascii} non-ASCII, "
+            f"{escaped} shown escaped")
 
 
 class DesktopDraftError(ValueError):
@@ -267,6 +281,27 @@ class AtspiTextAdapter:
                 return found
         return None
 
+    @staticmethod
+    def _stable_ref(node) -> str:
+        """The D-Bus object reference (bus name + object path) and any app-set
+        accessible id, when the toolkit exposes them; empty otherwise, in which
+        case identity falls back to the structural position only."""
+        parts = []
+        try:
+            path = getattr(node, "path", None)
+            bus = getattr(getattr(node, "app", None), "bus_name", None)
+            if isinstance(path, str) and path:
+                parts.append(f"{bus or ''}{path}")
+        except Exception:
+            pass
+        try:
+            accessible_id = node.get_accessible_id() if hasattr(node, "get_accessible_id") else None
+            if isinstance(accessible_id, str) and accessible_id:
+                parts.append(f"id={accessible_id}")
+        except Exception:
+            pass
+        return ("@" + "|".join(parts)) if parts else ""
+
     def _describe(self, resolved, *, require_selection: bool) -> FocusedControl:
         Atspi = self._atspi
         app, app_index, window, window_index, node, path = resolved
@@ -283,8 +318,10 @@ class AtspiTextAdapter:
         app_name = app.get_name() or ""
         return FocusedControl(
             app_id=f"{app.get_process_id()}:{app_name}", app_name=app_name,
-            window_id=f"{app_index}/{window_index}:{window.get_role_name()}", window_title=window.get_name() or "",
-            control_id="/".join(str(index) for index in path) + f":{role}", role=role, name=node.get_name() or "",
+            window_id=f"{app_index}/{window_index}:{window.get_role_name()}{self._stable_ref(window)}",
+            window_title=window.get_name() or "",
+            control_id="/".join(str(index) for index in path) + f":{role}{self._stable_ref(node)}", role=role,
+            name=node.get_name() or "",
             editable=node.get_state_set().contains(Atspi.StateType.EDITABLE), text=text,
             selection_start=start, selection_end=end)
 
@@ -539,8 +576,15 @@ def main(argv=None, *, adapter: TextAdapter | None = None, terminal=None, out=pr
     if args.command == "replace":
         if not args.replacement_file:
             parser.error("replace requires --replacement-file")
-        with open(args.replacement_file, encoding="utf-8") as handle:
-            replacement = handle.read(MAX_REPLACEMENT_BYTES + 1)
+        try:
+            with open(args.replacement_file, encoding="utf-8", errors="strict") as handle:
+                replacement = handle.read(MAX_REPLACEMENT_BYTES + 1)
+        except UnicodeDecodeError:
+            out(json.dumps({"status": "blocked", "reason": "desktop_replacement_not_utf8", "written": False}))
+            return 2
+        except OSError:
+            out(json.dumps({"status": "blocked", "reason": "desktop_replacement_unreadable", "written": False}))
+            return 2
         if terminal is None:
             if not sys.stdin.isatty():
                 out(json.dumps({"status": "blocked", "reason": "desktop_confirmation_requires_tty"}))

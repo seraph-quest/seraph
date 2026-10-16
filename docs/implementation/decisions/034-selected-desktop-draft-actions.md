@@ -55,10 +55,14 @@ and authority owners remain the only owners; no bridge contract is imported.
   closing keeps the lane quarantined (`browser_cleanup_required`). A crash
   leaves the durable witness, so later browser work stays blocked until cleanup
   is proved.
-- One request key has one outcome. The request record is sealed with a digest.
-  Replaying a completed or failed request returns the recorded result without
-  contacting the network again. A different body for the same key is refused.
-  An interrupted request reports `download_request_outcome_unknown`.
+- One request key has one outcome. The request record carries an integrity
+  checksum. Replaying a completed or failed request returns the recorded
+  result without contacting the network again. A completed replay reports
+  whether each file is still present or was revoked. A different body for the
+  same key is refused. An interrupted request reports
+  `download_request_outcome_unknown`. If the durable cleanup witness cannot be
+  written, the request fails as `browser_cleanup_witness_unavailable` before
+  any launch.
 - Content is identified from the bytes (PDF, DOCX, XLSX, CSV, plain text) and
   the claimed type must agree. The following are refused: executables and
   scripts (including after a byte-order mark); HTML, SVG, XML, script-like
@@ -75,10 +79,14 @@ and authority owners remain the only owners; no bridge contract is imported.
   artifact record with the exact source metadata (requested URL, final URL,
   redirect chain, claimed type). A failure removes everything that admission
   created.
-- Sidecar metadata is sealed with its own digest. Inspection and revocation
-  recompute the expected file name from the job, digest and filename, and the
-  artifact identity from those values. Any disagreement is refused as
-  untrusted. Inspection returns metadata and a bounded inert preview marked
+- The job directory name is derived from the job and its owner. Sidecar
+  metadata and the request record carry an unkeyed SHA-256 integrity checksum.
+  That checksum detects corruption; it is not authentication. A writer with
+  the same user ID is out of scope. Inspection and revocation recompute the
+  owner-bound directory and the expected file name from the job, owner,
+  digest and filename, and the artifact identity from those values. Editing
+  the recorded owner therefore cannot reassign a file. Any disagreement is
+  refused as untrusted. Inspection returns metadata and a bounded inert preview marked
   `untrusted_content`; Seraph never opens, renders or executes a download.
   Revocation removes the file and its record. Both are owner-scoped.
 
@@ -99,8 +107,12 @@ No upload is prepared speculatively.
 - Scope is the focused editable text control of the currently active window
   only; there is no global search, coordinate fallback, clipboard or hotkey.
   Identity is structural: process and application, the window's position in
-  that application, and the control's child path. Window titles and control
-  names are display-only.
+  that application, and the control's child path. When the toolkit exposes
+  them, the D-Bus object reference and any app-set accessible id are added.
+  Without them, a different control rebuilt at the same position with the
+  same role, text and selection cannot be distinguished. This limit sits
+  alongside the residual write window below. Window titles and control names
+  are display-only.
 - Only plain editable text roles are allowed. Password and terminal roles are
   refused, as are payment-like control names. Exact application names are
   refused for terminals, browsers (form submission), password managers and
@@ -109,9 +121,11 @@ No upload is prepared speculatively.
 - The local operator flow:
   1. A countdown lets the operator focus the target window and select the
      text; the surface is then captured.
-  2. The exact selected text and replacement are shown with control, bidi,
-     zero-width and unusual separator characters escaped visibly, plus their
-     byte and code-point counts. The text is labelled untrusted.
+  2. The exact selected text and replacement are shown with these characters
+     escaped visibly: controls, bidi, zero-width, variation selectors, the
+     combining grapheme joiner, Hangul fillers and unusual separators. Byte,
+     code-point, non-ASCII and escaped counts are shown. The text is labelled
+     untrusted. A replacement file that is not UTF-8 is a blocked result.
   3. The operator confirms by typing the preview digest prefix on the
      controlling terminal (`/dev/tty`). Non-TTY stdin is refused.
   4. The write proceeds only once focus has returned, within the countdown,

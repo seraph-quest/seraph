@@ -198,7 +198,7 @@ def test_quarantine_is_read_only_inspectable_owner_scoped_and_revocable(tmp_path
                            final_url="https://files.example/a.csv", redirect_chain=["https://files.example/r"],
                            claimed_type="text/csv", suggested_filename="a.csv", data=b"a,b\n")
     assert ref.permission == "read_only_quarantined" and ref.mime == "text/csv" and ref.size == 4
-    [metadata] = quarantine.list("job-1")
+    [metadata] = quarantine.list("job-1", owner=OWNER)
     stored = tmp_path / metadata["file_path"]
     mode = stored.stat().st_mode
     assert stat.S_IMODE(mode) == 0o400 and not mode & 0o111
@@ -215,7 +215,7 @@ def test_quarantine_is_read_only_inspectable_owner_scoped_and_revocable(tmp_path
     with pytest.raises(DownloadError, match="download_not_found"):
         quarantine.revoke(ref.artifact_id, owner=OTHER)
     assert quarantine.revoke(ref.artifact_id, owner=OWNER) is True
-    assert not stored.exists() and quarantine.list("job-1") == []
+    assert not stored.exists() and quarantine.list("job-1", owner=OWNER) == []
     with pytest.raises(DownloadError, match="download_not_found"):
         quarantine.inspect(ref.artifact_id, owner=OWNER)
 
@@ -229,7 +229,7 @@ def test_quarantine_limits_files_and_bytes_and_detects_tamper(tmp_path):
     quarantine.admit("job-1", suggested_filename="b.txt", data=b"two", **kwargs)
     with pytest.raises(DownloadError, match="download_file_limit"):
         quarantine.admit("job-1", suggested_filename="c.txt", data=b"three", **kwargs)
-    [stored] = [tmp_path / m["file_path"] for m in quarantine.list("job-1") if m["ref"]["digest"] == first.digest]
+    [stored] = [tmp_path / m["file_path"] for m in quarantine.list("job-1", owner=OWNER) if m["ref"]["digest"] == first.digest]
     os.chmod(stored, 0o600)
     stored.write_bytes(b"owe")  # same size, different bytes
     with pytest.raises(DownloadError, match="download_readback_mismatch"):
@@ -239,8 +239,8 @@ def test_quarantine_limits_files_and_bytes_and_detects_tamper(tmp_path):
 _ADMIT = dict(owner=OWNER, source_url="u", final_url="u", redirect_chain=[], claimed_type="text/plain")
 
 
-def _job_path(root, job_id="job-1"):
-    return root / dl.QUARANTINE_PREFIX / hashlib.sha256(job_id.encode()).hexdigest()[:32]
+def _job_path(root, job_id="job-1", owner=OWNER):
+    return root / dl.QUARANTINE_PREFIX / dl._job_hash(job_id, owner)
 
 
 @pytest.mark.parametrize("component", ["artifacts", "browser-downloads", "quarantine", "job"])
@@ -306,10 +306,32 @@ def test_resealed_sidecar_pointing_elsewhere_is_still_refused(tmp_path):
         quarantine.inspect(ref.artifact_id, owner=OWNER)
 
 
+@pytest.mark.parametrize("record", ["sidecar", "request"])
+def test_resealed_owner_reassignment_is_refused(tmp_path, record):
+    # The checksum is unkeyed, so a same-user edit can reseal it; ownership is
+    # still bound by the owner-derived job directory.
+    quarantine = DownloadQuarantine(tmp_path)
+    ref = quarantine.admit("job-1", suggested_filename="a.txt", data=b"secret", **_ADMIT)
+    quarantine.begin_job("job-1", owner=OWNER, grant_digest="0" * 64)
+    path = _job_path(tmp_path) / (f"{ref.artifact_id}.json" if record == "sidecar" else "request.json")
+    data = json.loads(path.read_text())
+    key = "sidecar_digest" if record == "sidecar" else "record_digest"
+    data.pop(key)
+    data.update(owner_principal_id=OTHER["principal_id"], owner_session_id=OTHER["session_id"])
+    data[key] = dl._canonical_digest(data)
+    os.chmod(path, 0o600)
+    path.write_text(json.dumps(data))
+    with pytest.raises(DownloadError, match="download_quarantine_untrusted"):
+        if record == "sidecar":
+            quarantine.inspect(ref.artifact_id, owner=OTHER)
+        else:
+            quarantine.job_record("job-1", owner=OWNER)
+
+
 def test_data_file_replaced_by_symlink_is_refused(tmp_path):
     quarantine = DownloadQuarantine(tmp_path)
     ref = quarantine.admit("job-1", suggested_filename="a.txt", data=b"secret", **_ADMIT)
-    [metadata] = quarantine.list("job-1")
+    [metadata] = quarantine.list("job-1", owner=OWNER)
     stored = tmp_path / metadata["file_path"]
     outside = tmp_path / "outside.txt"
     outside.write_bytes(b"secret")
@@ -531,7 +553,7 @@ async def test_browser_download_blocks_spoof_escape_and_html_without_adoption(se
                                           browser_launcher=lambda: browser, transport=_transport(grant))
     assert outcome.files == []
     assert {item["code"] for item in outcome.blocked} == {"download_mime_mismatch", "download_redirect_outside_grant"}
-    assert quarantine.list("job-2") == [] and server.hits.get("GET /outside.csv") is None
+    assert quarantine.list("job-2", owner=OWNER) == [] and server.hits.get("GET /outside.csv") is None
     page_grant = _grant(urls=[server.url("/page")])
     outcome = await download_public_files(page_grant, job_id="job-3", owner=OWNER, quarantine=quarantine,
                                           browser_launcher=_FakeBrowser, transport=_transport(page_grant))
@@ -748,9 +770,15 @@ async def test_replay_of_a_request_key_returns_the_outcome_without_recontact(ser
     assert second["replayed"] is True and second["files"] == first["files"] and server.hits == hits
     with pytest.raises(DownloadError, match="download_request_key_body_changed"):
         await _run(tmp_path, _FakeBrowser, _grant([server.url("/notes.docx")]))
-    with pytest.raises(DownloadError, match="download_not_found"):
-        await dl.run_download_request(grant, job_id="browser-download-x", owner=OTHER, workspace_root=tmp_path,
-                                      quarantine=DownloadQuarantine(tmp_path))
+    # Another owner never sees this request's record or files.
+    assert DownloadQuarantine(tmp_path).job_record("browser-download-x", owner=OTHER) is None
+    assert DownloadQuarantine(tmp_path).list("browser-download-x", owner=OTHER) == []
+    assert server.hits == hits
+    assert second["file_states"] == {ref["artifact_id"]: "present" for ref in first["files"]}
+    [ref] = first["files"]
+    assert DownloadQuarantine(tmp_path).revoke(ref["artifact_id"], owner=OWNER) is True
+    third = await _run(tmp_path, _blocking_launcher, grant)
+    assert third["replayed"] is True and third["file_states"] == {ref["artifact_id"]: "revoked"}
     assert server.hits == hits
 
 
@@ -762,4 +790,23 @@ async def test_busy_lane_refuses_before_any_contact(server, tmp_path):
             await _run(tmp_path, _FakeBrowser, grant)
     finally:
         holder.release()
-    assert server.hits == {} and DownloadQuarantine(tmp_path).job_record("browser-download-x") is None
+    assert server.hits == {} and DownloadQuarantine(tmp_path).job_record("browser-download-x", owner=OWNER) is None
+
+
+async def test_cleanup_witness_failure_is_recorded_and_frees_the_lane(server, tmp_path, monkeypatch):
+    from src.browser import task_lane
+    grant = _grant([server.url("/r")], [server.url("/report.csv")])
+
+    def refuse(self, job_id):
+        raise task_lane.BrowserTaskLaneError("browser lane marker write is incomplete")
+    monkeypatch.setattr(task_lane.BrowserTaskLane, "require_positive_cleanup", refuse)
+    with pytest.raises(DownloadError, match="browser_cleanup_witness_unavailable"):
+        await _run(tmp_path, _FakeBrowser, grant)
+    assert server.hits == {}
+    record = DownloadQuarantine(tmp_path).job_record("browser-download-x", owner=OWNER)
+    assert record["state"] == "failed" and record["error"] == "browser_cleanup_witness_unavailable"
+    lane = _fresh_lane(tmp_path)  # not quarantined: no launcher was entered
+    assert lane is not None
+    lane.release()
+    with pytest.raises(DownloadError, match="browser_cleanup_witness_unavailable"):
+        await _run(tmp_path, _FakeBrowser, grant)  # replays the recorded failure

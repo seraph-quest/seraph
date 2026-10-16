@@ -222,10 +222,16 @@ _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
-def _job_hash(job_id: str) -> str:
+def _job_hash(job_id: str, owner: Mapping[str, str]) -> str:
+    """The job directory is derived from the job and its owner, so ownership
+    recorded in a sidecar or request record cannot be reassigned by editing it."""
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", job_id):
         raise DownloadError("download_job_invalid")
-    return hashlib.sha256(job_id.encode()).hexdigest()[:32]
+    return _canonical_digest([job_id, owner.get("principal_id"), owner.get("session_id")])[:32]
+
+
+def _recorded_owner(record: Mapping) -> dict:
+    return {"principal_id": record.get("owner_principal_id"), "session_id": record.get("owner_session_id")}
 
 
 def _read_fd(descriptor: int, limit: int) -> tuple[bytes, os.stat_result]:
@@ -311,8 +317,8 @@ class DownloadQuarantine:
             raise
 
     @contextlib.contextmanager
-    def _job_dir(self, job_id: str, *, create: bool = False, lock: bool = False):
-        descriptor = self._walk((*QUARANTINE_PARTS, _job_hash(job_id)), create=create)
+    def _job_dir(self, job_id: str, owner: Mapping[str, str], *, create: bool = False, lock: bool = False):
+        descriptor = self._walk((*QUARANTINE_PARTS, _job_hash(job_id, owner)), create=create)
         try:
             if lock:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -336,7 +342,7 @@ class DownloadQuarantine:
         except (ValueError, KeyError, TypeError, DownloadError):
             raise DownloadError("download_quarantine_untrusted") from None
         expected_path = f"{QUARANTINE_PREFIX}/{job_hash}/{self._expected_name(ref, filename)}"
-        if (sealed != _canonical_digest(metadata) or _job_hash(job_id) != job_hash
+        if (sealed != _canonical_digest(metadata) or _job_hash(job_id, _recorded_owner(metadata)) != job_hash
                 or metadata.get("file_path") != expected_path or ref.artifact_id != artifact_id
                 or artifact_id_for(file_path=expected_path, artifact_type=ARTIFACT_TYPE, producer=PRODUCER,
                                    run_id=job_id, content_sha256=ref.digest) != artifact_id):
@@ -394,9 +400,9 @@ class DownloadQuarantine:
         mime = checked_mime(data, claimed_type, suggested_filename)
         name = safe_filename(suggested_filename, mime)
         digest = hashlib.sha256(data).hexdigest()
-        job_hash = _job_hash(job_id)
+        job_hash = _job_hash(job_id, owner)
         relative = f"{QUARANTINE_PREFIX}/{job_hash}/{digest[:16]}-{name}"
-        with self._job_dir(job_id, create=True, lock=True) as descriptor:
+        with self._job_dir(job_id, owner, create=True, lock=True) as descriptor:
             # Count and create under one exclusive job lock: never more than two.
             if len(self._sidecar_names(descriptor)) >= MAX_FILES:
                 raise DownloadError("download_file_limit")
@@ -434,10 +440,10 @@ class DownloadQuarantine:
                 raise
         return ref
 
-    def list(self, job_id: str) -> list[dict]:
+    def list(self, job_id: str, *, owner: Mapping[str, str]) -> list[dict]:
         try:
-            with self._job_dir(job_id) as descriptor:
-                job_hash = _job_hash(job_id)
+            with self._job_dir(job_id, owner) as descriptor:
+                job_hash = _job_hash(job_id, owner)
                 return [self._validated(_read_at(descriptor, name, 65536)[0], job_hash=job_hash,
                                         artifact_id=name[:-5]) for name in self._sidecar_names(descriptor)]
         except DownloadError as exc:
@@ -479,9 +485,21 @@ class DownloadQuarantine:
         return not remaining.intersection(names)
 
     # -- request records (idempotent replay without re-contact)
-    def job_record(self, job_id: str) -> dict | None:
+    def file_state(self, artifact_id: str, *, owner: Mapping[str, str]) -> str:
+        """present | revoked | untrusted, without reading the file contents."""
         try:
-            with self._job_dir(job_id) as descriptor:
+            with self._locate(artifact_id) as (descriptor, metadata):
+                self._owned(metadata, owner)
+                info = os.stat(metadata["file_path"].rsplit("/", 1)[1], dir_fd=descriptor, follow_symlinks=False)
+                return "present" if stat.S_ISREG(info.st_mode) else "untrusted"
+        except FileNotFoundError:
+            return "revoked"
+        except DownloadError as exc:
+            return "revoked" if exc.code == "download_not_found" else "untrusted"
+
+    def job_record(self, job_id: str, *, owner: Mapping[str, str]) -> dict | None:
+        try:
+            with self._job_dir(job_id, owner) as descriptor:
                 raw, _ = _read_at(descriptor, "request.json", 65536)
         except DownloadError as exc:
             if exc.code == "download_not_found":
@@ -492,23 +510,25 @@ class DownloadQuarantine:
             sealed = record.pop("record_digest")
         except (ValueError, KeyError, TypeError):
             raise DownloadError("download_quarantine_untrusted") from None
-        if sealed != _canonical_digest(record) or record.get("job_id") != job_id:
+        if (sealed != _canonical_digest(record) or record.get("job_id") != job_id
+                or _job_hash(job_id, _recorded_owner(record)) != _job_hash(job_id, owner)):
             raise DownloadError("download_quarantine_untrusted")
         return record
 
     def begin_job(self, job_id: str, *, owner: Mapping[str, str], grant_digest: str) -> None:
         record = {"job_id": job_id, "owner_principal_id": owner.get("principal_id"),
                   "owner_session_id": owner.get("session_id"), "grant_digest": grant_digest, "state": "started"}
-        with self._job_dir(job_id, create=True, lock=True) as descriptor:
+        with self._job_dir(job_id, owner, create=True, lock=True) as descriptor:
             try:
                 _write_new(descriptor, "request.json",
                            json.dumps({**record, "record_digest": _canonical_digest(record)}).encode())
             except FileExistsError:
                 raise DownloadError("download_request_in_progress") from None
 
-    def finish_job(self, job_id: str, *, outcome: dict | None = None, error: str | None = None) -> None:
-        with self._job_dir(job_id, lock=True) as descriptor:
-            record = self.job_record(job_id)
+    def finish_job(self, job_id: str, *, owner: Mapping[str, str], outcome: dict | None = None,
+                   error: str | None = None) -> None:
+        with self._job_dir(job_id, owner, lock=True) as descriptor:
+            record = self.job_record(job_id, owner=owner)
             if record is None or record["state"] != "started":
                 raise DownloadError("download_quarantine_untrusted")
             record.update(state="completed" if error is None else "failed", outcome=outcome, error=error)
@@ -765,15 +785,16 @@ async def run_download_request(grant: DownloadGrant, *, job_id: str, owner: Mapp
     from .task_runner import BrowserTaskError
     quarantine = quarantine or DownloadQuarantine()
     grant_digest = grant.digest()
-    existing = quarantine.job_record(job_id)
+    existing = quarantine.job_record(job_id, owner=owner)
     if existing is not None:
-        if (existing["owner_principal_id"], existing["owner_session_id"]) != (owner.get("principal_id"),
-                                                                               owner.get("session_id")):
-            raise DownloadError("download_not_found")
         if existing["grant_digest"] != grant_digest:
             raise DownloadError("download_request_key_body_changed")
         if existing["state"] == "completed":
-            return {"job_id": job_id, "replayed": True, **existing["outcome"]}
+            outcome = existing["outcome"]
+            # Report what still exists: a revoked file is not silently re-offered.
+            states = {ref["artifact_id"]: quarantine.file_state(ref["artifact_id"], owner=owner)
+                      for ref in outcome["files"]}
+            return {"job_id": job_id, "replayed": True, **outcome, "file_states": states}
         if existing["state"] == "failed":
             raise DownloadError(existing["error"])
         raise DownloadError("download_request_outcome_unknown")
@@ -793,16 +814,24 @@ async def run_download_request(grant: DownloadGrant, *, job_id: str, owner: Mapp
             raise
         try:
             lane.require_positive_cleanup(job_id)
+        except BrowserTaskLaneError:
+            # The durable witness could not be written; no launcher was entered.
+            quarantine.finish_job(job_id, owner=owner, error="browser_cleanup_witness_unavailable")
+            with contextlib.suppress(BrowserTaskLaneError):
+                lane.confirm_positive_cleanup(witness)
+            raise DownloadError("browser_cleanup_witness_unavailable") from None
+        try:
             outcome = await download_public_files(grant, job_id=job_id, owner=owner, quarantine=quarantine,
                                                   lane=lane, witness=witness, **options)
         except DownloadError as exc:
-            quarantine.finish_job(job_id, error=exc.code)
+            quarantine.finish_job(job_id, owner=owner, error=exc.code)
             raise
         except (ImportError, BrowserTaskError):
-            quarantine.finish_job(job_id, error="browser_interaction_runtime_unavailable")
+            quarantine.finish_job(job_id, owner=owner, error="browser_interaction_runtime_unavailable")
             raise DownloadError("browser_interaction_runtime_unavailable") from None
         result = outcome.model_dump(mode="json")
-        quarantine.finish_job(job_id, outcome=result)
-        return {"job_id": job_id, "replayed": False, **result}
+        quarantine.finish_job(job_id, owner=owner, outcome=result)
+        return {"job_id": job_id, "replayed": False, **result,
+                "file_states": {ref["artifact_id"]: "present" for ref in result["files"]}}
     finally:
         lane.release()

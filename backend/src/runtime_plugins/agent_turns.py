@@ -22,7 +22,10 @@ from contextlib import suppress
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import json
+import logging
+import secrets
 import threading
 from types import MethodType
 
@@ -32,6 +35,7 @@ from .contracts import succeeded
 from .dispatch import (NativeServiceBlocked, _append_receipt, _canonical, _digest, _run_candidate, _writer, cas_run,
                        checkpoint_receipt, read_context)
 
+logger = logging.getLogger(__name__)
 TURN_JOB_KIND = "cordis_chat_turn_v1"
 STEP_JOB_KIND = "cordis_turn_step_v1"
 TURN_CONTEXT_TAG = "cordis-turn.v1"
@@ -116,14 +120,27 @@ async def chat_runtime_status(host=None) -> dict:
     from src.db.engine import get_session
     from .bridge import cordis_host, cordis_recovery
     from .ownership import inventory
+    from .ownership import CompositionBindingError, _checked_row
     host = host or cordis_host
-    async with get_session() as db:
-        row = (await inventory(db)).get(AGENT_LOOP_DOMAIN)
-    if row is None:
-        # Startup seeds the legacy owner row and only a fenced cutover writes a Cordis
-        # owner, so an inventory without the row has never been cut over.
+    try:
+        async with get_session() as db:
+            rows = await inventory(db)
+            row = rows.get(AGENT_LOOP_DOMAIN)
+            if row is not None:
+                _checked_row(row)
+    except CompositionBindingError:
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": None,
+                "reason": "agent_loop_inventory_invalid",
+                "recovery": "Repair the runtime composition inventory (a malformed owner row fails closed)."}
+    if not rows:
+        # Only an entirely unseeded inventory has never been cut over; startup seeds
+        # every legacy owner row and only a fenced transition writes a Cordis owner.
         return {"loop": LOOP_NAMES["legacy"], "route": "chat_agent", "owner_epoch": None, "reason": None,
                 "recovery": None}
+    if row is None:
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": None,
+                "reason": "agent_loop_owner_missing",
+                "recovery": "Restore the seraph.agent-loop.v1 owner row with a fenced owner transition."}
     if row.state != "ready":
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch,
                 "reason": f"agent_loop_owner_{row.state}",
@@ -208,12 +225,17 @@ async def dispatch_turn_step(dispatcher, frame, payload, scope):
 # ---------------------------------------------------------------- memory revocation
 
 async def memory_revocation_revision(db) -> str:
-    """Content-free marker that changes whenever any memory is forgotten, archived or deleted."""
+    """Content-free marker that changes only when the operator revokes memory: a canonical
+    delete (tombstone or delete-export marker) or an operator forget. Supersede, decay and
+    other lifecycle archiving never change it."""
+    from sqlalchemy import or_
     from src.db.models import Memory, MemoryStatus
-    from src.memory.repository import _memory_tombstone_revision
-    count, latest = (await db.execute(select(func.count(Memory.id), func.max(Memory.updated_at))
-                                      .where(Memory.status != MemoryStatus.active))).one()
-    return _digest({"tombstones": await _memory_tombstone_revision(db), "inactive": count,
+    from src.memory.repository import _CANONICAL_MEMORY_DELETE_EXPORT_REASON, _memory_tombstone_revision
+    count, latest = (await db.execute(select(func.count(Memory.id), func.max(Memory.updated_at)).where(
+        Memory.status == MemoryStatus.archived,
+        or_(Memory.metadata_json.contains("operator_forget"),
+            Memory.metadata_json.contains(_CANONICAL_MEMORY_DELETE_EXPORT_REASON))))).one()
+    return _digest({"tombstones": await _memory_tombstone_revision(db), "revoked": count,
                     "latest": latest.isoformat() if latest else None})
 
 
@@ -248,6 +270,9 @@ class CordisTurn:
         self.settled = False
         self._lock = asyncio.Lock()
         self._steps = 0
+        self._surface: str | None = None
+        # Per-turn key: the child's output_ref never reveals a guessable digest of model text.
+        self._ref_key = secrets.token_bytes(32)
 
     # -------------------------------------------------------- admission
 
@@ -388,7 +413,8 @@ class CordisTurn:
                 await _current_root(db, self.operator)
             except AuthFailure as exc:
                 raise TurnBlocked("native_original_root_inactive") from exc
-            if await memory_revocation_revision(db) != self.memory_revision:
+            # Direct chat assembles no memory, so a revocation cannot reach its prompt.
+            if self.profile != "direct" and await memory_revocation_revision(db) != self.memory_revision:
                 raise TurnBlocked("agent_turn_memory_revoked")
 
     def run_sync(self, coroutine):
@@ -415,7 +441,9 @@ class CordisTurn:
             if call_count > MAX_TOOL_CALLS:
                 raise TurnBlocked("agent_turn_tool_calls_exceeded")
             projection = {"schema_version": 1, "kind": kind, "call_count": call_count, "step_index": step_index,
-                          "max_steps": self.max_steps, "output_ref": "turn-output:" + output_digest[:48]}
+                          "max_steps": self.max_steps,
+                          "output_ref": "turn-output:" + hmac.new(self._ref_key, output_digest.encode(),
+                                                                  hashlib.sha256).hexdigest()[:48]}
             expected = expected_decisions(projection)
             if expected is None:
                 raise TurnBlocked("agent_turn_transition_invalid")
@@ -477,11 +505,17 @@ class CordisTurn:
         return decisions
 
     async def pin_surface(self, digest: str) -> None:
+        if self._surface is not None:
+            if self._surface != digest:
+                raise TurnBlocked("agent_turn_surface_changed")
+            return
+
         def change(context):
             if context["surface_digest"] not in {None, digest}:
                 raise TurnBlocked("agent_turn_surface_changed")
             context["surface_digest"] = digest
         await self._write_context(change)
+        self._surface = digest
 
     # -------------------------------------------------------- tool effects
 
@@ -535,6 +569,10 @@ class CordisTurn:
                     context = self._context(run)
                     if context is None or context["settlement"] is not None:
                         raise TurnBlocked("agent_turn_context_changed")
+                    if (outcome == "succeeded" and self.profile != "direct"
+                            and await memory_revocation_revision(db) != self.memory_revision):
+                        # Output assembled from a since-revoked memory is never adopted.
+                        raise TurnBlocked("agent_turn_memory_revoked")
                     effects = json.loads(run.effect_receipts_json or "[]")
                     if message is not None:
                         from src.agent.session import MessageIngressConflictError
@@ -559,14 +597,21 @@ class CordisTurn:
                     except NativeServiceBlocked as exc:
                         raise TurnBlocked("agent_turn_attempt_changed") from exc
                     await db.commit()
+            self.settled = True
             terminal = "succeeded" if outcome == "succeeded" else "blocked"
-            await self.jobs.transition_job(self.job_id, terminal, owner=self.owner, fencing_token=self.fence,
-                                           reason=None if terminal == "succeeded" else (reason or outcome),
-                                           result={"no_learning": True, "outcome": outcome},
-                                           result_summary="Cordis chat turn settled by its Python owner")
+            try:
+                await self.jobs.transition_job(self.job_id, terminal, owner=self.owner, fencing_token=self.fence,
+                                               reason=None if terminal == "succeeded" else (reason or outcome),
+                                               result={"no_learning": True, "outcome": outcome},
+                                               result_summary="Cordis chat turn settled by its Python owner")
+            except DurableJobError:
+                # The fenced settlement and reply already committed; stale-lease recovery
+                # closes the job, and the operator still gets the committed reply.
+                logger.warning("Cordis turn %s settled but its terminal transition was refused", self.job_id)
         except TurnBlocked as exc:
-            if exc.reason_code == "turn_transcript_conflict":
-                # A different row already holds this id: never silently accepted.
+            if exc.reason_code in {"turn_transcript_conflict", "agent_turn_memory_revoked"}:
+                # A different row already holds this id, or the output used a revoked
+                # memory: never silently accepted, and the turn is closed visibly.
                 self.blocked_reason = exc.reason_code
                 with suppress(DurableJobError):
                     await self.jobs.transition_job(self.job_id, "blocked", owner=self.owner, fencing_token=self.fence,
@@ -592,15 +637,18 @@ class CordisTurn:
         run sequentially in call order (``max_tool_threads=1``); smolagents
         already records observations in call-id order, so memory and frames match.
         """
-        from smolagents.utils import AgentParsingError
+        from smolagents.utils import AgentExecutionError, AgentParsingError
         turn = self
         agent.max_tool_threads = 1
-        # The turn's tool surface (names, schemas, onboarding URL allowlist via the closure's
-        # schema/description), instructions and temperature, pinned at the first step.
-        surface = _sha(json.dumps([sorted(
-            [name, str(getattr(tool, "description", "")), getattr(tool, "inputs", {}), str(getattr(tool, "output_type", ""))]
-            for name, tool in agent.tools.items()), _sha(str(getattr(agent, "instructions", "") or "")),
-            str(getattr(agent.model, "temperature", None))], sort_keys=True, default=str))
+
+        def surface() -> str:
+            # The turn's tool surface (names, schemas, descriptions), instructions (which carry
+            # the onboarding URL allowlist) and temperature: pinned at step 1, compared after.
+            return _sha(json.dumps([sorted(
+                [name, str(getattr(tool, "description", "")), getattr(tool, "inputs", {}),
+                 str(getattr(tool, "output_type", ""))] for name, tool in agent.tools.items()),
+                _sha(str(getattr(agent, "instructions", "") or "")), str(getattr(agent.model, "temperature", None))],
+                sort_keys=True, default=str))
         original_step = agent._step_stream
         original_process = agent.process_tool_calls
         original_execute = agent.execute_tool_call
@@ -610,8 +658,8 @@ class CordisTurn:
         def step_stream(self, memory_step):
             state["step"], state["call"] = memory_step.step_number, 0
             turn.run_sync(turn.check_live())
-            if memory_step.step_number == 1:
-                turn.run_sync(turn.pin_surface(surface))
+            # Pinned at the first step and compared at every later one.
+            turn.run_sync(turn.pin_surface(surface()))
             try:
                 yield from original_step(memory_step)
             except AgentParsingError:
@@ -626,6 +674,13 @@ class CordisTurn:
             only_final = names == ["final_answer"]
             output_digest = _digest([[call.function.name, call.function.arguments] for call in calls]
                                     + [str(chat_message.content or "")])
+            if len(calls) > MAX_TOOL_CALLS:
+                # Over the per-step bound: nothing runs, and the model sees why (an observation).
+                turn.run_sync(turn.decide("parse_error", step_index=memory_step.step_number,
+                                          output_digest=output_digest))
+                raise AgentExecutionError(
+                    f"You requested {len(calls)} tool calls in one step; at most {MAX_TOOL_CALLS} are allowed. "
+                    "Make fewer calls per step.", self.logger)
             turn.run_sync(turn.decide("final_answer" if only_final else "tool_calls", step_index=memory_step.step_number,
                                       call_count=0 if only_final else len(calls), output_digest=output_digest))
             yield from original_process(chat_message, memory_step)

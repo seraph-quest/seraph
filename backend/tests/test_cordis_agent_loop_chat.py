@@ -388,3 +388,140 @@ def test_store_secret_is_denied_and_its_value_never_enters_turn_state(tmp_path, 
         assert SECRET not in env.client.portal.call(persisted)
         from src.vault.repository import vault_repository
         assert env.client.portal.call(vault_repository.get, "api") is None
+        # Nor in any WS frame, audit event, approval or transcript row.
+        from src.approval.repository import approval_repository
+        from src.audit.repository import audit_repository
+        session_id = frames[-1]["session_id"]
+        assert SECRET not in json.dumps(frames)
+        assert SECRET not in json.dumps(env.client.portal.call(lambda: audit_repository.list_events(limit=500)), default=str)
+        assert SECRET not in json.dumps(env.client.portal.call(lambda: approval_repository.list_pending(limit=100)), default=str)
+        assert SECRET not in json.dumps(env.messages(session_id))
+
+
+def test_measured_direct_chat_first_delta_legacy_vs_cordis(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    """Real first delta through the WS route (send -> first delta frame), both loops; printed,
+    and asserted against the 250 ms added-latency budget only with SERAPH_CORDIS_LATENCY_BUDGET=1."""
+    import os
+    import statistics
+    import time
+
+    async def stream(*_args, **_kwargs):
+        yield "Hi"
+
+    def drive(env):
+        samples = []
+        with patch("src.api.ws.should_use_direct_local_chat", return_value=True), \
+             patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)), \
+             patch("src.api.ws.stream_direct_local_chat", stream):
+            with env.client.websocket_connect("/ws/chat", headers=ORIGIN) as socket:
+                for index in range(20):
+                    began = time.perf_counter()
+                    socket.send_text(json.dumps({"type": "message", "message": "hi", "message_id": f"fd-{index}"}))
+                    first = None
+                    while True:
+                        frame = receive(socket)
+                        if frame["type"] == "delta" and first is None:
+                            first = time.perf_counter() - began
+                        if frame["type"] in {"final", "error"}:
+                            assert frame["type"] == "final", frame
+                            break
+                    samples.append(first)
+        return statistics.median(samples)
+    legacy, cordis = both(tmp_path, monkeypatch, lambda: [], drive)
+    print(f"MEASURED direct first delta median: legacy {legacy * 1000:.1f} ms, cordis {cordis * 1000:.1f} ms, "
+          f"added {(cordis - legacy) * 1000:.1f} ms")
+    if os.environ.get("SERAPH_CORDIS_LATENCY_BUDGET") == "1":
+        assert cordis - legacy <= 0.250
+
+
+def test_malformed_inventory_blocks_chat_visibly_instead_of_a_500(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    from sqlalchemy import update
+    from src.db.models import RuntimeCompositionState
+    with chat_env(tmp_path, monkeypatch, [final("never")], loop="cordis") as env:
+        async def corrupt():
+            from src.db.engine import get_session
+            async with get_session() as db:
+                await db.execute(update(RuntimeCompositionState).where(
+                    RuntimeCompositionState.runtime_domain == "seraph.agent-loop.v1").values(epoch=0))
+        env.client.portal.call(corrupt)
+        response = env.client.post("/api/chat", json={"message": "summarize my notes", "message_id": "bad-1"},
+                                   headers=ORIGIN)
+        assert response.status_code == 503 and response.json()["detail"]["code"] == "agent_loop_inventory_invalid"
+        frames = ws_turn(env, "summarize my notes", message_id="bad-2")
+        assert frames[-1]["type"] == "error" and frames[-1]["reason"] == "agent_loop_inventory_invalid"
+        assert env.model.calls == [] and env.messages(frames[-1]["session_id"]) == []
+
+
+def test_ws_clarify_matches_legacy(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    def script():
+        return [tools(call("clarify", {"question": "Which project?", "reason": "ambiguous", "options": "a,b"})),
+                final("Tell me which project you mean.")]
+
+    def drive(env):
+        frames = ws_turn(env, "update the project plan please")
+        return shape(frames), env.messages(frames[-1]["session_id"]), env.turns()
+    legacy, cordis = both(tmp_path, monkeypatch, script, drive)
+    assert legacy[:2] == cordis[:2] and cordis[2] in ([("succeeded", None)], [("blocked", "clarification_required")])
+
+
+def test_ws_max_steps_large_observation_and_multi_call_match_legacy(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    monkeypatch.setattr(settings, "agent_max_steps", 2)
+    big = "line of notes\n" * 3000
+
+    def script():
+        return [tools(call("read_file", {"file_path": "big.txt"}, "call-a"), call("read_file", {"file_path": "small.txt"}, "call-b")),
+                tools(call("read_file", {"file_path": "other.txt"}, "call-c")),
+                text("Summary after the step budget.")]
+
+    def drive(env):
+        (env.workspace / "big.txt").write_text(big)
+        (env.workspace / "small.txt").write_text("small notes")
+        (env.workspace / "other.txt").write_text("other notes")
+        frames = ws_turn(env, "read both of my note files and summarize")
+        return shape(frames), env.messages(frames[-1]["session_id"]), env.turns(), env.model.calls, env.tool_effects()
+    legacy, cordis = both(tmp_path, monkeypatch, script, drive)
+    assert legacy[0] == cordis[0] and legacy[1] == cordis[1] and legacy[3] == cordis[3]
+    assert cordis[0][-1][:2] == ("final", "Summary after the step budget.")
+    # The large observation reached the model and the frames untruncated, in both loops.
+    assert any(item[0] == "step" and item[1].count("line of notes") == 3000 for item in cordis[0])
+    assert [entry["tools"] != [] for entry in cordis[3]] == [True, True, False]
+    assert cordis[4] == [("read_file", "succeeded")] * 3 and cordis[2] == [("succeeded", None)]
+
+
+def test_rest_client_disconnect_cancels_the_turn(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    import threading
+    import time
+    import httpx
+    gate, entered = threading.Event(), threading.Event()
+
+    class Slow(ScriptedModel):
+        def generate(self, *args, **kwargs):
+            if len(self.calls) == 1:
+                entered.set()
+                gate.wait(10)
+            return super().generate(*args, **kwargs)
+    with chat_env(tmp_path, monkeypatch, [], loop="cordis") as env:
+        model = Slow([tools(call("read_file", {"file_path": "notes.txt"})), final("never adopted")])
+        monkeypatch.setattr("src.agent.factory.get_model", lambda **_kwargs: model)
+        (env.workspace / "notes.txt").write_text("hello")
+        cookies = dict(env.client.cookies)
+
+        async def disconnect():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=env.client.app), base_url="http://testserver",
+                                         cookies=cookies, headers=ORIGIN) as client:
+                request = asyncio.create_task(client.post("/api/chat", json={"message": "read my notes and summarize",
+                                                                             "message_id": "rest-cancel"}))
+                while not entered.is_set():
+                    await asyncio.sleep(0.02)
+                request.cancel()
+                try:
+                    await request
+                except asyncio.CancelledError:
+                    pass
+        env.client.portal.call(disconnect)
+        gate.set()
+        for _ in range(200):
+            if env.turns() and env.turns()[0][0] != "running":
+                break
+            time.sleep(0.05)
+        assert env.turns() == [("blocked", "agent_turn_cancelled")]

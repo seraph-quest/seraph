@@ -649,8 +649,10 @@ no Gmail/Calendar operation is a native capability through `capabilities.invoke`
 ### Cordis agent loop (#1019)
 
 Chat routes on the `seraph.agent-loop.v1` owner row. While the row's owner is
-`legacy` (the seeded default, and also when the row is absent) REST and WS chat
-run the existing smolagents loop unchanged. After the fenced cutover
+`legacy` (the seeded default, or an entirely unseeded inventory) REST and WS chat
+run the existing smolagents loop unchanged. A partial inventory without the row
+blocks chat as `agent_loop_owner_missing` and a malformed inventory as
+`agent_loop_inventory_invalid`, on both routes and in `/api/runtime/status`. After the fenced cutover
 (`ready -> draining -> blocked` at a higher epoch with owner `cordis` -> `ready`
 on the running child's boot proof) every chat ingress runs through the Cordis
 agent loop; a Cordis owner that is not ready, a host that is not admitting, or
@@ -684,9 +686,12 @@ parse (`native_child_result_mismatch` otherwise). A turn settles only on
 and a raising tool stay smolagents observations; max-steps exhaustion makes the
 same single tool-less final call. Before every step and tool call Python
 rechecks the turn lease, fence and bound epoch, the operator Root, the deadline,
-cancellation and the memory revocation marker: a memory forgotten, archived or
-deleted mid-turn stops the turn before the next prompt assembly
-(`agent_turn_memory_revoked`). Tool intents and outcomes (`succeeded`, `failed`,
+cancellation and the memory revocation marker, which is read at admission
+(before guardian state is built) and rechecked at settlement: an operator forget
+or canonical delete mid-turn stops the turn before the next prompt assembly and
+refuses its output (`agent_turn_memory_revoked`). Supersede, decay and other
+lifecycle archiving do not trip it, and direct chat (no memory in its prompt)
+skips it. Tool intents and outcomes (`succeeded`, `failed`,
 `no_effect` for approval/clarification gates) are receipts on the turn job; the
 reply row is inserted by its deterministic id (insert-if-absent, an existing
 different row is `turn_transcript_conflict`) in the same writer transaction as
@@ -703,8 +708,11 @@ Disclosed differences from legacy: tool calls in one model message run
 sequentially in submission order (smolagents ran them in parallel); in both
 loops memory observations are recorded sorted by tool-call id, every submitted
 call still executes when a sibling raises, and that step's observation is then
-the error alone (legacy drops sibling observations the same way). At most 12
-tool calls per step (`agent_turn_tool_calls_exceeded`). `store_secret` returns a
+the error alone (legacy drops sibling observations the same way). A step asking
+for more than 12 tool calls runs none of them and gets a model-visible
+observation saying so. The tool surface digest is pinned at step 1 and compared
+at every later step (`agent_turn_surface_changed`); the child's `output_ref` is a
+per-turn HMAC of the sealed output, never a guessable digest of model text. `store_secret` returns a
 visible denial pointing to Settings -> Vault and its value never enters turn
 state (operator decision; per-argument sensitivity redaction is follow-up work).
 Unchanged by construction: a failed max-steps final call returns smolagents'
@@ -715,9 +723,10 @@ post-turn side effects. Measured offline on a loaded host over 110 samples of
 the real path: a startTurn step p50/p95 92/106 ms, a tool's intent and outcome
 receipts 18/24 ms, and the turn admission (the only Cordis work before a
 direct-chat first delta; the sequencer runs after the stream) 31/40 ms, all
-under one 250 ms p95 budget (asserted with `SERAPH_CORDIS_LATENCY_BUDGET=1`; at
-load average ~35 the step p95 rose to about 245 ms, so shared runners assert a
-1 s regression ceiling instead).
+under one 250 ms p95 budget, and a real WS direct-chat first delta about 70 ms
+after legacy's. The budgets are asserted only with
+`SERAPH_CORDIS_LATENCY_BUDGET=1` on a quiet host; elsewhere the suite prints the
+numbers without gating (at load average ~35 the step p95 rose to ~245 ms).
 
 ### Cordis guardian research (#1008)
 

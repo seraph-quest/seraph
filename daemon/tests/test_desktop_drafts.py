@@ -17,8 +17,8 @@ from desktop_drafts import (
 
 
 def _control(**changes) -> FocusedControl:
-    base = FocusedControl(app_id="4242:gedit", app_name="gedit", window_id="frame:notes.txt",
-                          control_id="text:0:", role="text", name="", editable=True,
+    base = FocusedControl(app_id="4242:gedit", app_name="gedit", window_id="0/0:frame", window_title="notes.txt",
+                          control_id="0/1:text", role="text", name="", editable=True,
                           text="Dear team, the draft is ready.", selection_start=11, selection_end=20)
     return replace(base, **changes)
 
@@ -87,11 +87,11 @@ def test_unconfirmed_or_changed_replacement_never_writes():
 
 
 @pytest.mark.parametrize("race,reason", [
-    (lambda a: replace(a.control, window_id="frame:other.txt"), "desktop_focus_changed"),
+    (lambda a: replace(a.control, window_id="0/1:frame"), "desktop_focus_changed"),
     (lambda a: replace(a.control, app_id="77:mousepad", app_name="mousepad"), "desktop_focus_changed"),
     (lambda a: replace(a.control, selection_start=12), "desktop_selection_changed"),
     (lambda a: replace(a.control, text="Dear team, the plans is ready."), "desktop_selection_changed"),
-    (lambda a: replace(a.control, control_id="text:1:"), "desktop_selection_changed"),
+    (lambda a: replace(a.control, control_id="0/2:text"), "desktop_selection_changed"),
     (lambda a: replace(a.control, selection_start=0, selection_end=0), "desktop_selection_required"),
 ])
 def test_focus_or_selection_change_after_preview_prevents_the_write(race, reason):
@@ -104,7 +104,7 @@ def test_focus_or_selection_change_after_preview_prevents_the_write(race, reason
 
 def test_focus_change_at_the_write_site_prevents_the_write():
     adapter, executor, preview = _ready()
-    adapter.before_write = lambda a: setattr(a, "control", replace(a.control, window_id="frame:other"))
+    adapter.before_write = lambda a: setattr(a, "control", replace(a.control, window_id="0/1:frame"))
     result = executor.apply(preview, confirmed_preview_digest=preview.preview_digest, replacement="the report")
     assert result == {"status": "blocked", "reason": "desktop_focus_changed", "written": False}
     assert adapter.writes == []
@@ -115,7 +115,7 @@ def test_unknown_local_mutation_offers_inspection_and_never_reapplies():
     adapter.after_write = lambda a: setattr(a, "control", replace(a.control, text=a.control.text + " typed"))
     result = executor.apply(preview, confirmed_preview_digest=preview.preview_digest, replacement="the report")
     assert result["status"] == "unknown_local_mutation" and result["reapply_offered"] is False
-    assert result["inspect_current_text"]["text"] == "Dear team, the report is ready. typed"
+    assert result["inspect_current_text"]["untrusted_text"] == "Dear team, the report is ready. typed"
     assert len(adapter.writes) == 1
 
     adapter, executor, preview = _ready()
@@ -155,7 +155,7 @@ def test_preview_is_bound_to_the_inspected_surface_and_bounds():
         executor.preview(DesktopSurfaceRef("edge-2", surface.app_id, surface.window_id, surface.snapshot_revision), "x")
     with pytest.raises(DesktopDraftError, match="desktop_replacement_bounds"):
         executor.preview(surface, "x" * (drafts.MAX_REPLACEMENT_BYTES + 1))
-    adapter.control = replace(adapter.control, window_id="frame:elsewhere")
+    adapter.control = replace(adapter.control, window_id="1/0:frame")
     with pytest.raises(DesktopDraftError, match="desktop_focus_changed"):
         executor.preview(surface, "x")
 
@@ -174,6 +174,27 @@ def test_platform_probes_report_actual_readiness(monkeypatch):
     assert drafts.platform_adapter().probe()["reason"] == "desktop_platform_unsupported"
 
 
+@pytest.mark.parametrize("setup,reason", [
+    (dict(environ={}), "atspi_session_bus_missing"),
+    (dict(a11y_enabled=lambda: False), "atspi_accessibility_disabled"),
+    (dict(a11y_enabled=lambda: (_ for _ in ()).throw(RuntimeError("no bus"))), "atspi_accessibility_bus_unavailable"),
+    (dict(init_result=-1), "atspi_init_failed"),
+    (dict(desktop=None), "atspi_desktop_unavailable"),
+    (dict(), None),
+])
+def test_atspi_probe_really_initialises_and_reaches_the_desktop(setup, reason):
+    world = FakeDesktop()
+    atspi = FakeAtspi(world, init_result=setup.get("init_result", 0))
+    if "desktop" in setup:
+        atspi.desktop = None
+    adapter = AtspiTextAdapter(atspi=atspi, a11y_enabled=setup.get("a11y_enabled", lambda: True),
+                               environ=setup.get("environ", {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/x"}))
+    probe = adapter.probe()
+    assert probe["reason"] == reason and probe["state"] == ("ready" if reason is None else "unavailable")
+    if reason is None:
+        assert atspi.init_calls == 1
+
+
 def test_unavailable_platform_leaves_paired_edge_transport_usable(tmp_path, monkeypatch):
     from paired_edge import PairedEdgeTransport
     monkeypatch.setitem(sys.modules, "gi", None)
@@ -185,20 +206,43 @@ def test_unavailable_platform_leaves_paired_edge_transport_usable(tmp_path, monk
     assert status["action_authority"] is False and status["count"] == 0
 
 
+class FakeTerminal:
+    def __init__(self, answer, on_ask=None):
+        self.answer, self.on_ask, self.prompts = answer, on_ask, []
+
+    def ask(self, prompt):
+        self.prompts.append(prompt)
+        if self.on_ask:
+            self.on_ask()
+        return self.answer() if callable(self.answer) else self.answer
+
+
+def test_visible_preview_escapes_terminal_bidi_and_zero_width_spoofing():
+    tricky = "ok\x1b[2K\rfake\x08\u202eevil\u200b\u2066x\u00a0\\n"
+    shown = drafts.visible_text(tricky)
+    assert "\x1b" not in shown and "\r" not in shown and "\x08" not in shown
+    assert "\u202e" not in shown and "\u200b" not in shown and "\u2066" not in shown and "\u00a0" not in shown
+    for marker in ("\\u{001B}", "\\u{000D}", "\\u{0008}", "\\u{202E}", "\\u{200B}", "\\u{2066}", "\\u{00A0}"):
+        assert marker in shown
+    assert shown.endswith("\\\\n")  # a literal backslash-n stays distinguishable from a newline
+    assert drafts.text_summary(tricky) == f"{len(tricky.encode())} bytes, {len(tricky)} code points, 8 shown escaped"
+
+
 def test_local_cli_requires_typed_preview_confirmation(tmp_path):
     replacement = tmp_path / "replacement.txt"
-    replacement.write_text("the report", encoding="utf-8")
+    replacement.write_text("the report\u202e", encoding="utf-8")
     lines: list[str] = []
     adapter = FixtureAdapter(_control())
     code = drafts.main(["replace", "--replacement-file", str(replacement)], adapter=adapter,
-                       prompt=lambda _: "no", out=lines.append)
+                       terminal=FakeTerminal("no"), out=lines.append, sleep=lambda _: None)
     assert code == 1 and adapter.writes == [] and '"cancelled"' in lines[-1]
     shown = "\n".join(lines)
-    assert "the draft" in shown and "the report" in shown
-    digest_prefix = next(line for line in lines if line.startswith("Type the preview digest")).split()[5]
+    assert "the draft" in shown and "the report\\u{202E}" in shown and "\u202e" not in shown
+    assert "untrusted" in shown and "13 bytes, 11 code points, 1 shown escaped" in shown
+    prefix = next(line for line in lines if line.startswith("--- end ---")).split()[4]
     code = drafts.main(["replace", "--replacement-file", str(replacement)], adapter=adapter,
-                       prompt=lambda _: digest_prefix, out=lines.append)
-    assert code == 0 and adapter.control.text == "Dear team, the report is ready."
+                       terminal=FakeTerminal(prefix), out=lines.append, sleep=lambda _: None)
+    assert code == 0 and adapter.control.text == "Dear team, the report\u202e is ready."
     blocked: list[str] = []
 
     class Unavailable(FixtureAdapter):
@@ -207,3 +251,241 @@ def test_local_cli_requires_typed_preview_confirmation(tmp_path):
 
     assert drafts.main(["inspect"], adapter=Unavailable(_control()), out=blocked.append) == 2
     assert "atspi_typelib_missing" in blocked[0]
+
+
+def test_local_cli_refuses_confirmation_from_non_tty_stdin(tmp_path, monkeypatch):
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(drafts.sys.stdin, "isatty", lambda: False, raising=False)
+    lines: list[str] = []
+    adapter = FixtureAdapter(_control())
+    assert drafts.main(["replace", "--replacement-file", str(replacement)], adapter=adapter,
+                       out=lines.append, sleep=lambda _: None) == 2
+    assert "desktop_confirmation_requires_tty" in lines[-1] and adapter.writes == []
+
+
+# ---------------------------------------------------------------- end to end through a fake AT-SPI tree
+
+class FakeStateType:
+    ACTIVE, FOCUSED, EDITABLE = "active", "focused", "editable"
+
+
+class FakeStateSet:
+    def __init__(self, states):
+        self.states = set(states)
+
+    def contains(self, state):
+        return state in self.states
+
+
+class FakeSelection:
+    def __init__(self, start, end):
+        self.start_offset, self.end_offset = start, end
+
+
+class FakeNode:
+    def __init__(self, world, name, role, children=(), *, text=None, app=None, pid=0):
+        self.world, self.name, self.role, self.children = world, name, role, list(children)
+        self.text, self.selection, self.app, self.pid, self.parent = text, None, app, pid, None
+        self.editable = text is not None and role != "terminal"
+        for child in self.children:
+            child.parent = self
+
+    # accessible
+    def get_name(self): return self.name
+    def get_role_name(self): return self.role
+    def get_process_id(self): return self.pid
+    def get_child_count(self): return len(self.children)
+    def get_child_at_index(self, index): return self.children[index]
+
+    def get_state_set(self):
+        states = set()
+        if self.role == "frame" and self.world.active is self:
+            states.add(FakeStateType.ACTIVE)
+        if self.world.focus is self:
+            states.add(FakeStateType.FOCUSED)
+        if self.editable:
+            states.add(FakeStateType.EDITABLE)
+        return FakeStateSet(states)
+
+    def get_text_iface(self): return self if self.text is not None else None
+    def get_editable_text_iface(self): return self if self.editable else None
+
+    # text
+    def get_character_count(self): return len(self.text)
+    def get_text(self, start, end): return self.text[start:end]
+    def get_n_selections(self): return 1 if self.selection and self.selection[0] != self.selection[1] else 0
+    def get_selection(self, index): return FakeSelection(*self.selection)
+
+    # editable text
+    def delete_text(self, start, end):
+        self.world.calls.append(("delete", start, end))
+        self.text = self.text[:start] + self.text[end:]
+        self.selection = (start, start)
+        return True
+
+    def insert_text(self, position, text, length):
+        self.world.calls.append(("insert", position, text))
+        self.text = self.text[:position] + text + self.text[position:]
+        return True
+
+
+class FakeDesktop:
+    """A terminal running the CLI and a text editor holding the draft."""
+
+    def __init__(self):
+        self.calls = []
+        self.focus = self.active = None
+        self.terminal_view = FakeNode(self, "", "terminal", text="$ desktop_drafts.py replace")
+        self.terminal = FakeNode(self, "Terminal", "frame", [FakeNode(self, "", "scroll_pane", [self.terminal_view])])
+        self.editor_text = FakeNode(self, "", "text", text="Dear team, the draft is ready.")
+        self.editor_text.selection = (11, 20)
+        self.editor = FakeNode(self, "notes.txt", "frame", [FakeNode(self, "", "tool_bar"), self.editor_text])
+        self.apps = [FakeNode(self, "gnome-terminal-server", "application", [self.terminal], pid=10),
+                     FakeNode(self, "gedit", "application", [self.editor], pid=20)]
+        self.focus_terminal()
+
+    def focus_terminal(self):
+        self.active, self.focus = self.terminal, self.terminal_view
+
+    def focus_editor(self):
+        self.active, self.focus = self.editor, self.editor_text
+        self.editor.name = "notes.txt"
+
+    def get_child_count(self): return len(self.apps)
+    def get_child_at_index(self, index): return self.apps[index]
+
+
+class FakeAtspi:
+    StateType = FakeStateType
+
+    def __init__(self, world, init_result=0):
+        self.world, self.desktop, self.init_result, self.init_calls = world, world, init_result, 0
+
+    def init(self):
+        self.init_calls += 1
+        return self.init_result
+
+    def get_desktop(self, index):
+        return self.desktop
+
+
+def _atspi_adapter(world):
+    return AtspiTextAdapter(atspi=FakeAtspi(world), a11y_enabled=lambda: True,
+                            environ={"DBUS_SESSION_BUS_ADDRESS": "unix:path=/x"})
+
+
+class Script:
+    """Drives operator focus changes from the CLI's own sleep calls."""
+
+    def __init__(self, world, *, capture_after=2, refocus_after=3, on_refocus=None):
+        self.world, self.capture_after, self.refocus_after, self.on_refocus = world, capture_after, refocus_after, on_refocus
+        self.capture_sleeps = self.wait_sleeps = 0
+        self.confirmed = False
+        self.now = 0.0
+
+    def sleep(self, seconds):
+        self.now += seconds
+        if not self.confirmed:
+            self.capture_sleeps += 1
+            if self.capture_sleeps == self.capture_after:
+                self.world.focus_editor()  # operator clicks into the editor during the countdown
+        else:
+            self.wait_sleeps += 1
+            if self.wait_sleeps == self.refocus_after and self.on_refocus is not False:
+                self.world.focus_editor()  # operator returns to the editor after confirming
+                if self.on_refocus:
+                    self.on_refocus(self.world)
+
+    def clock(self):
+        return self.now
+
+    def confirm(self):
+        self.confirmed = True
+        self.world.focus_terminal()  # typing the confirmation moves focus to the terminal
+
+
+def _cli(world, tmp_path, script, *, answer=None, replacement="the report"):
+    path = tmp_path / "replacement.txt"
+    path.write_text(replacement, encoding="utf-8")
+    lines: list[str] = []
+    prefix = {}
+
+    def answer_fn():
+        return answer if answer is not None else prefix["value"]
+
+    def out(line):
+        lines.append(line)
+        if line.startswith("--- end ---"):
+            prefix["value"] = line.split()[4]
+    code = drafts.main(["replace", "--replacement-file", str(path), "--countdown", "3"],
+                       adapter=_atspi_adapter(world), terminal=FakeTerminal(answer_fn, script.confirm),
+                       out=out, sleep=script.sleep, clock=script.clock)
+    return code, lines
+
+
+def test_e2e_atspi_flow_captures_target_confirms_in_terminal_and_writes_after_refocus(tmp_path):
+    world = FakeDesktop()
+    script = Script(world)
+    code, lines = _cli(world, tmp_path, script)
+    assert code == 0, lines
+    assert world.editor_text.text == "Dear team, the report is ready."
+    assert world.calls == [("delete", 11, 20), ("insert", 11, "the report")]
+    assert '"succeeded"' in lines[-1] and "20:gedit" in "\n".join(lines)
+
+
+def test_e2e_title_change_after_write_still_reads_back_by_identity(tmp_path):
+    world = FakeDesktop()
+    original = FakeNode.insert_text
+
+    def insert_and_retitle(node, position, text, length):
+        node.world.editor.name = "*notes.txt"  # editors mark the window dirty
+        return original(node, position, text, length)
+    FakeNode.insert_text = insert_and_retitle
+    try:
+        code, lines = _cli(world, tmp_path, Script(world))
+    finally:
+        FakeNode.insert_text = original
+    assert code == 0 and '"succeeded"' in lines[-1]
+
+
+def test_e2e_capturing_the_terminal_itself_is_refused(tmp_path):
+    world = FakeDesktop()
+    world.terminal_view.selection = (0, 1)
+    code, lines = _cli(world, tmp_path, Script(world, capture_after=99))
+    assert code == 2 and "desktop_control_denied" in lines[-1] and world.calls == []
+
+
+@pytest.mark.parametrize("change,reason", [
+    (lambda w: setattr(w.editor_text, "selection", (11, 19)), "desktop_focus_not_restored"),
+    (lambda w: setattr(w.editor_text, "text", "Dear team, the plans is ready."), "desktop_focus_not_restored"),
+])
+def test_e2e_selection_change_while_confirming_prevents_the_write(tmp_path, change, reason):
+    world = FakeDesktop()
+    code, lines = _cli(world, tmp_path, Script(world, on_refocus=change))
+    assert code == 2 and reason in lines[-1] and '"written": false' in lines[-1] and world.calls == []
+    assert world.editor_text.text != "Dear team, the report is ready."
+
+
+def test_e2e_focus_never_restored_blocks_without_writing(tmp_path):
+    world = FakeDesktop()
+    code, lines = _cli(world, tmp_path, Script(world, on_refocus=False))
+    assert code == 2 and "desktop_focus_not_restored" in lines[-1] and world.calls == []
+
+
+def test_e2e_write_site_recheck_on_the_same_node_prevents_the_write(tmp_path):
+    world = FakeDesktop()
+    adapter = _atspi_adapter(world)
+    world.focus_editor()
+    executor = DesktopDraftExecutor(adapter, paired_edge_id="local")
+    preview = executor.preview(executor.inspect()["surface"], "the report")
+    control = adapter.focused()
+    # Focus moves after the executor's checks but before the node is resolved for writing.
+    world.focus_terminal()
+    with pytest.raises(DesktopDraftError, match="desktop_focus_changed|desktop_selection_required"):
+        adapter.replace(control, 11, 20, "the report")
+    world.focus_editor()
+    world.editor_text.selection = (12, 20)
+    with pytest.raises(DesktopDraftError, match="desktop_focus_changed"):
+        adapter.replace(control, 11, 20, "the report")
+    assert world.calls == [] and preview.selected_text == "the draft"

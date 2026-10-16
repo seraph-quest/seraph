@@ -79,9 +79,13 @@ def _download_owner(request: Request) -> dict:
     return {"principal_id": owner.principal_id, "session_id": owner.session_id}
 
 
+_DOWNLOAD_STATUS = {"download_not_found": 404, "browser_native_boot_proof_unavailable": 503,
+                    "browser_interaction_runtime_unavailable": 503}
+
+
 @router.post("/browser/downloads")
 async def start_browser_downloads(request: Request, body: BrowserDownloadRequest):
-    from src.browser.downloads import DownloadError, DownloadGrant, download_public_files
+    from src.browser.downloads import DownloadError, DownloadGrant, run_download_request
     from src.browser.interaction_contracts import digest
     owner = _download_owner(request)
     try:
@@ -89,21 +93,10 @@ async def start_browser_downloads(request: Request, body: BrowserDownloadRequest
     except ValueError:
         raise HTTPException(422, detail={"code": "download_grant_invalid"}) from None
     job_id = "browser-download-" + digest([owner["principal_id"], owner["session_id"], body.request_key])[:32]
-    from src.browser.task_lane import try_acquire_browser_task_lane
-    from src.browser.task_runner import BrowserTaskError
-    # Downloads occupy the one shared browser lane like every browser task.
-    lane = try_acquire_browser_task_lane(settings.workspace_dir)
-    if lane is None:
-        raise HTTPException(409, detail={"code": "browser_task_lane_busy"})
     try:
-        outcome = await download_public_files(grant, job_id=job_id, owner=owner, lane=lane)
+        return await run_download_request(grant, job_id=job_id, owner=owner)
     except DownloadError as exc:
-        raise HTTPException(409, detail={"code": exc.code}) from None
-    except (ImportError, BrowserTaskError):
-        raise HTTPException(503, detail={"code": "browser_interaction_runtime_unavailable"}) from None
-    finally:
-        lane.release()
-    return {"job_id": job_id, **outcome.model_dump(mode="json")}
+        raise HTTPException(_DOWNLOAD_STATUS.get(exc.code, 409), detail={"code": exc.code}) from None
 
 
 @router.get("/browser/downloads/{artifact_id}")

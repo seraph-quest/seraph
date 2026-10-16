@@ -2208,27 +2208,41 @@ filesystem race limits remain relevant.
 
 [ADR-034](./decisions/034-selected-desktop-draft-actions.md) owns this target.
 `POST /api/browser/downloads` takes a request key and at most two exact public
-file URLs plus the exact redirect targets allowed for them. A JavaScript-free
-isolated Chromium context reaches each URL; the bytes come from Seraph's own
-bounded transport (public HTTPS only, 10 MiB) and are identified from their
-content: PDF, DOCX, XLSX, CSV or plain text. A wrong claimed type, executable,
-HTML, an out-of-grant redirect or oversized bytes stop before adoption. Files
-land read-only in a private quarantine with their source URL, redirect chain
-and claimed type. `GET /api/browser/downloads/{artifact_id}` shows metadata and
-an inert preview; `DELETE` revokes the file. Seraph never opens or runs a
-download. Uploads, file choosers and file controls stay refused before any page
-event or network transfer. Authenticated-session downloads wait for #1013.
+HTTPS file URLs (port 443), plus the exact redirect targets allowed for them.
+A JavaScript-free isolated Chromium context reaches each URL in the shared
+browser lane. The bytes come from Seraph's own pinned, bounded transport
+(public addresses, 10 MiB) and are identified from their content: PDF, DOCX,
+XLSX, CSV or plain text. These stop before adoption: a wrong claimed type,
+executables, HTML or script-like text, OOXML macros, embedded objects or
+external links, an out-of-grant redirect, oversized bytes and the deadline.
+Files land read-only in a private quarantine with their source URL, redirect
+chain and claimed type. Replaying the same request key returns the recorded
+outcome without contacting the site again. `GET /api/browser/downloads/{artifact_id}`
+shows metadata and an inert preview marked untrusted; `DELETE` revokes the file.
+Seraph never opens or runs a download. Uploads, file choosers and file controls
+stay refused before any page event or network transfer. Authenticated-session
+downloads wait for #1013.
 
-Desktop drafts run in the local daemon only: `python daemon/desktop_drafts.py
-probe | inspect | replace --replacement-file FILE`. Replacement shows the exact
-selected text and replacement, needs the typed preview digest prefix, re-reads
-focus and selection immediately before writing, and reads the text back.
-A focus, window, text or selection change aborts with no write; an uncertain
-write is reported for inspection and never reapplied. Terminals, passwords,
-browsers, payment fields and system settings are refused. Linux needs
-`gir1.2-atspi-2.0` and a session bus; otherwise the probe reports unavailable.
-macOS reports unavailable. The paired edge status carries the probe; the core
-never dispatches desktop writes.
+Desktop drafts run in the local daemon only. Commands:
+`python daemon/desktop_drafts.py probe`, `inspect`, and
+`replace --replacement-file FILE [--countdown 5]`.
+
+To replace text, run `replace`, focus the target window and select the text
+during the countdown. The daemon then shows the exact selected text and
+replacement, with control, bidi and zero-width characters escaped and their
+byte and code-point counts. Type the shown digest prefix in the same terminal,
+then return focus to the target window. The write happens only if the same
+window, control, text and selection are back. Afterwards it reads the text
+back. Any change aborts with no write. An uncertain write is reported for
+inspection and never reapplied.
+
+Allowed controls are plain editable text roles only. A non-exhaustive deny list
+refuses terminals, passwords, browsers, password managers, authentication
+prompts, payment fields and system settings.
+
+Linux needs `gir1.2-atspi-2.0`, a session bus and accessibility enabled;
+otherwise the probe reports unavailable. macOS reports unavailable. The paired
+edge status carries the probe; the core never dispatches desktop writes.
 
 ### Profiled public form preparation (#1012)
 

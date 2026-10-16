@@ -2,20 +2,30 @@
 
 One action only: replace the currently selected text in a supported editable
 text control of the operator-selected app/window, after an exact preview, with
-a literal readback. Scope is the selected window's focused control, never a
+a literal readback. Scope is the active window's focused control, never a
 global desktop search; there is no coordinate fallback, hotkey or clipboard.
 
-Before writing, the executor re-reads focus and requires the identical app,
-window and control, the identical surrounding text and the exact selection
-digest from the preview; any change aborts with no write. Terminals, password
-fields, browsers (form submission), payment-like fields and system settings
-are refused. A failed or mismatching write is reported as an unknown local
-mutation with the current text for inspection, never reapplied.
+The local operator flow picks the target explicitly: a countdown lets the
+operator focus the target window and select the text, then the surface is
+captured. The exact preview (control characters, bidi and zero-width marks
+shown visibly) is confirmed on the controlling terminal, and the write happens
+only once focus has returned to the identical app, window and control with
+the identical text and selection; any change aborts with no write. The write
+site re-checks the same accessibility node immediately before deleting. After
+the write the control is read back by identity (never by window title).
+
+Terminals, password fields, browsers (form submission), password managers,
+authentication prompts, payment-like fields and system settings are refused by
+role and by exact application name; the name list is a deny list, not an
+exhaustive guarantee, and only plain editable text roles are allowed. A failed
+or mismatching write is reported as an unknown local mutation with the current
+text for inspection, never reapplied.
 
 Adapters advertise their actual readiness: Linux AT-SPI needs the
-``gir1.2-atspi-2.0`` typelib and a session bus; macOS Accessibility is not
-shipped yet and always reports unavailable. An unavailable adapter leaves the
-browser and the rest of the daemon usable.
+``gir1.2-atspi-2.0`` typelib, a session bus, an enabled accessibility bus and
+a reachable desktop; macOS Accessibility is not shipped and always reports
+unavailable. An unavailable adapter leaves the browser and the rest of the
+daemon usable.
 """
 from __future__ import annotations
 
@@ -25,17 +35,39 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Literal, Protocol
+import unicodedata
 
 CAPABILITY = "desktop.draft.replace_selected_text.v1"
 MAX_TEXT_BYTES = 64 * 1024
 MAX_REPLACEMENT_BYTES = 8 * 1024
+DEFAULT_COUNTDOWN_SECONDS = 5
 ALLOWED_ROLES = frozenset({"text", "entry", "paragraph", "document_text"})
 DENIED_ROLES = frozenset({"password_text", "terminal"})
-DENIED_APPS = re.compile(r"(firefox|chrom(e|ium)|brave|edge|safari|opera|vivaldi|epiphany|"
-                         r"gnome-control-center|systemsettings|system settings|kcmshell|"
-                         r"terminal|konsole|xterm|alacritty|kitty|wezterm|tilix|iterm)", re.IGNORECASE)
-PAYMENT_LIKE = re.compile(r"(card|cvv|cvc|iban|account number|routing|expir|security code|passw)", re.IGNORECASE)
+# Exact (case-insensitive) application names; never a substring match.
+DENIED_APP_NAMES = frozenset({
+    # terminals
+    "gnome-terminal", "gnome-terminal-server", "terminal", "console", "kgx", "ptyxis", "konsole", "xterm",
+    "uxterm", "alacritty", "kitty", "wezterm", "wezterm-gui", "tilix", "terminator", "xfce4-terminal",
+    "mate-terminal", "lxterminal", "qterminal", "foot", "footclient", "guake", "tilda", "terminology", "st",
+    "urxvt", "rxvt", "sakura", "blackbox", "cool-retro-term", "ghostty", "contour", "warp", "iterm2",
+    # browsers (form submission)
+    "firefox", "firefox-esr", "librewolf", "waterfox", "floorp", "zen", "chromium", "chromium-browser",
+    "google-chrome", "google chrome", "chrome", "brave", "brave-browser", "microsoft-edge", "msedge", "opera",
+    "vivaldi", "epiphany", "web", "safari", "falkon", "midori", "qutebrowser", "konqueror", "tor browser",
+    # password managers and secret stores
+    "keepassxc", "keepass", "keepass2", "1password", "bitwarden", "enpass", "seahorse", "gnome-keyring",
+    "kwalletmanager", "kwalletmanager5", "kwalletd5", "kwalletd6", "secrets", "proton pass",
+    # authentication prompts, shells and system settings
+    "polkit-gnome-authentication-agent-1", "polkit-kde-authentication-agent-1", "lxpolkit", "mate-polkit",
+    "pkexec", "gcr-prompter", "pinentry", "pinentry-gtk-2", "pinentry-gnome3", "pinentry-qt",
+    "gnome-shell", "plasmashell", "kwin_wayland", "kwin_x11", "gnome-control-center", "settings",
+    "systemsettings", "system settings", "kcmshell5", "kcmshell6", "xfce4-settings-manager",
+    "gnome-initial-setup", "software-properties-gtk",
+})
+PAYMENT_LIKE = re.compile(r"(card|cvv|cvc|iban|account number|routing|expir|security code|passw|pin\b)",
+                          re.IGNORECASE)
 
 
 def _digest(value) -> str:
@@ -46,6 +78,34 @@ def _digest(value) -> str:
 
 def text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def visible_text(text: str) -> str:
+    """Show text so a preview cannot be spoofed by terminal or Unicode controls.
+
+    Backslashes, controls (ANSI escapes, carriage return, backspace), format
+    characters (bidi overrides, zero-width marks), separators other than the
+    plain space and unassigned/private code points are all escaped visibly.
+    """
+    out = []
+    for char in text:
+        category = unicodedata.category(char)
+        if char == "\\":
+            out.append("\\\\")
+        elif char == "\n":
+            out.append("\\n\n")
+        elif char == "\t":
+            out.append("\\t")
+        elif category in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"} or (category == "Zs" and char != " "):
+            out.append(f"\\u{{{ord(char):04X}}}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def text_summary(text: str) -> str:
+    escaped = sum(1 for char in text if visible_text(char) != char)
+    return f"{len(text.encode('utf-8'))} bytes, {len(text)} code points, {escaped} shown escaped"
 
 
 class DesktopDraftError(ValueError):
@@ -75,10 +135,15 @@ class DesktopAction:
 
 @dataclass(frozen=True)
 class FocusedControl:
-    """What an adapter observed for the focused control of the focused window."""
+    """What an adapter observed for the focused control of the active window.
+
+    ``app_id``, ``window_id`` and ``control_id`` are structural identities;
+    titles and names are display-only and never part of identity.
+    """
     app_id: str
     app_name: str
     window_id: str
+    window_title: str
     control_id: str
     role: str
     name: str
@@ -86,6 +151,10 @@ class FocusedControl:
     text: str
     selection_start: int
     selection_end: int
+
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return self.app_id, self.window_id, self.control_id
 
 
 class TextAdapter(Protocol):
@@ -96,89 +165,150 @@ class TextAdapter(Protocol):
 
 # ---------------------------------------------------------------- platform adapters
 
+def _load_atspi():
+    import gi
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+    return Atspi
+
+
+def _a11y_bus_enabled() -> bool:
+    """org.a11y.Status.IsEnabled on the session bus (GNOME/KDE accessibility switch)."""
+    from gi.repository import Gio, GLib
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    reply = bus.call_sync("org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties", "Get",
+                          GLib.Variant("(ss)", ("org.a11y.Status", "IsEnabled")), GLib.VariantType("(v)"),
+                          Gio.DBusCallFlags.NONE, 2000, None)
+    return bool(reply.unpack()[0])
+
+
 class AtspiTextAdapter:
     """Linux AT-SPI2 adapter for the focused control of the active window."""
 
-    def __init__(self):
-        self._atspi = None
+    def __init__(self, *, atspi=None, a11y_enabled=None, environ=None):
+        self._atspi = atspi
         self._reason = None
-        try:
-            import gi
-            gi.require_version("Atspi", "2.0")
-            from gi.repository import Atspi
-            self._atspi = Atspi
-        except (ImportError, ValueError):
-            self._reason = "atspi_typelib_missing"
-        if self._reason is None and not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        self._a11y_enabled = a11y_enabled or _a11y_bus_enabled
+        environ = os.environ if environ is None else environ
+        if self._atspi is None:
+            try:
+                self._atspi = _load_atspi()
+            except (ImportError, ValueError):
+                self._reason = "atspi_typelib_missing"
+        if self._reason is None and not environ.get("DBUS_SESSION_BUS_ADDRESS"):
             self._reason = "atspi_session_bus_missing"
+        self._initialized = False
 
     def probe(self) -> dict:
-        state = "ready" if self._reason is None else "unavailable"
-        return {"capability": CAPABILITY, "platform": "linux", "adapter": "atspi", "state": state,
-                "reason": self._reason}
+        reason = self._reason
+        if reason is None:
+            try:
+                self._init()
+            except DesktopDraftError as exc:
+                reason = exc.code
+        return {"capability": CAPABILITY, "platform": "linux", "adapter": "atspi",
+                "state": "ready" if reason is None else "unavailable", "reason": reason}
 
-    def _require(self):
+    def _init(self):
+        """Really initialise AT-SPI and reach the desktop; readiness is never assumed."""
         if self._reason is not None:
             raise DesktopDraftError(self._reason)
-        return self._atspi
+        Atspi = self._atspi
+        if not self._initialized:
+            try:
+                if Atspi.init() not in (0, 1):  # 1: already initialised
+                    raise DesktopDraftError("atspi_init_failed")
+            except DesktopDraftError:
+                raise
+            except Exception:
+                raise DesktopDraftError("atspi_init_failed") from None
+            self._initialized = True
+        try:
+            enabled = self._a11y_enabled()
+        except Exception:
+            raise DesktopDraftError("atspi_accessibility_bus_unavailable") from None
+        if not enabled:
+            raise DesktopDraftError("atspi_accessibility_disabled")
+        try:
+            desktop = Atspi.get_desktop(0)
+            if desktop is None or desktop.get_child_count() < 0:
+                raise DesktopDraftError("atspi_desktop_unavailable")
+        except DesktopDraftError:
+            raise
+        except Exception:
+            raise DesktopDraftError("atspi_desktop_unavailable") from None
+        return Atspi, desktop
 
-    def _active(self):
-        Atspi = self._require()
-        desktop = Atspi.get_desktop(0)
-        for index in range(desktop.get_child_count()):
-            app = desktop.get_child_at_index(index)
-            for window_index in range(app.get_child_count() if app else 0):
+    def _resolve(self):
+        """The active window's focused node, resolved once, with its structural path."""
+        Atspi, desktop = self._init()
+        for app_index in range(min(desktop.get_child_count(), 256)):
+            app = desktop.get_child_at_index(app_index)
+            for window_index in range(min(app.get_child_count(), 64) if app else 0):
                 window = app.get_child_at_index(window_index)
                 if window is not None and window.get_state_set().contains(Atspi.StateType.ACTIVE):
-                    return app, window
+                    path = self._focused_path(Atspi, window, ())
+                    if path is None:
+                        raise DesktopDraftError("desktop_no_focused_control")
+                    node = window
+                    for index in path:
+                        node = node.get_child_at_index(index)
+                    return app, app_index, window, window_index, node, path
         raise DesktopDraftError("desktop_no_active_window")
 
-    def _focused_in(self, node, depth=0):
-        Atspi = self._require()
-        if node is None or depth > 64:
+    def _focused_path(self, Atspi, node, path):
+        if node is None or len(path) > 64:
             return None
-        if node.get_state_set().contains(Atspi.StateType.FOCUSED):
-            return node
+        if path and node.get_state_set().contains(Atspi.StateType.FOCUSED):
+            return path
         for index in range(min(node.get_child_count(), 512)):
-            found = self._focused_in(node.get_child_at_index(index), depth + 1)
+            found = self._focused_path(Atspi, node.get_child_at_index(index), (*path, index))
             if found is not None:
                 return found
         return None
 
-    def focused(self, *, require_selection: bool = True) -> FocusedControl:
-        Atspi = self._require()
-        app, window = self._active()
-        control = self._focused_in(window)
-        if control is None:
-            raise DesktopDraftError("desktop_no_focused_control")
-        text_iface = control.get_text_iface()
+    def _describe(self, resolved, *, require_selection: bool) -> FocusedControl:
+        Atspi = self._atspi
+        app, app_index, window, window_index, node, path = resolved
+        text_iface = node.get_text_iface()
         if text_iface is None:
             raise DesktopDraftError("desktop_control_not_text")
-        count = text_iface.get_character_count()
-        text = text_iface.get_text(0, count)
+        text = text_iface.get_text(0, text_iface.get_character_count())
         selections = text_iface.get_n_selections()
         if require_selection and selections != 1:
             raise DesktopDraftError("desktop_selection_required")
         selection = text_iface.get_selection(0) if selections == 1 else None
         start, end = (selection.start_offset, selection.end_offset) if selection is not None else (0, 0)
-        states = control.get_state_set()
-        return FocusedControl(app_id=f"{app.get_process_id()}:{app.get_name()}", app_name=app.get_name() or "",
-                              window_id=f"{window.get_role_name()}:{window.get_name()}",
-                              control_id=f"{control.get_role_name()}:{control.get_index_in_parent()}:{control.get_name()}",
-                              role=(control.get_role_name() or "").replace(" ", "_"), name=control.get_name() or "",
-                              editable=states.contains(Atspi.StateType.EDITABLE), text=text,
-                              selection_start=start, selection_end=end)
+        role = (node.get_role_name() or "").replace(" ", "_")
+        app_name = app.get_name() or ""
+        return FocusedControl(
+            app_id=f"{app.get_process_id()}:{app_name}", app_name=app_name,
+            window_id=f"{app_index}/{window_index}:{window.get_role_name()}", window_title=window.get_name() or "",
+            control_id="/".join(str(index) for index in path) + f":{role}", role=role, name=node.get_name() or "",
+            editable=node.get_state_set().contains(Atspi.StateType.EDITABLE), text=text,
+            selection_start=start, selection_end=end)
+
+    def focused(self, *, require_selection: bool = True) -> FocusedControl:
+        return self._describe(self._resolve(), require_selection=require_selection)
 
     def replace(self, control: FocusedControl, start: int, end: int, replacement: str) -> None:
-        self._require()
-        # Last check at the write site: same control, text and selection.
-        if self.focused() != control:
+        Atspi = self._atspi
+        resolved = self._resolve()
+        node = resolved[4]
+        # Verify and write on this one resolved node.
+        if self._describe(resolved, require_selection=True) != control:
             raise DesktopDraftError("desktop_focus_changed")
-        app, window = self._active()
-        node = self._focused_in(window)
-        editable = node.get_editable_text_iface() if node is not None else None
-        if editable is None:
+        editable, text_iface = node.get_editable_text_iface(), node.get_text_iface()
+        if editable is None or text_iface is None:
             raise DesktopDraftError("desktop_control_not_editable")
+        # Final re-check immediately before the first mutating call. AT-SPI has
+        # no compare-and-swap: a change between this check and delete_text, or
+        # between delete_text and insert_text, is caught only by the readback.
+        selection = text_iface.get_selection(0) if text_iface.get_n_selections() == 1 else None
+        if (not node.get_state_set().contains(Atspi.StateType.FOCUSED) or selection is None
+                or (selection.start_offset, selection.end_offset) != (start, end)
+                or text_iface.get_character_count() != len(control.text)):
+            raise DesktopDraftError("desktop_focus_changed")
         try:
             written = editable.delete_text(start, end) and editable.insert_text(
                 start, replacement, len(replacement.encode("utf-8")))
@@ -247,7 +377,8 @@ def _snapshot_revision(control: FocusedControl) -> str:
 def _denied(control: FocusedControl) -> str | None:
     if control.role in DENIED_ROLES:
         return "desktop_control_denied"
-    if DENIED_APPS.search(control.app_name) or DENIED_APPS.search(control.app_id):
+    app_name = control.app_name.strip().lower()
+    if app_name in DENIED_APP_NAMES or control.app_id.split(":", 1)[-1].strip().lower() in DENIED_APP_NAMES:
         return "desktop_app_denied"
     if PAYMENT_LIKE.search(control.name):
         return "desktop_control_denied"
@@ -276,8 +407,9 @@ class DesktopDraftExecutor:
         reason = _denied(control)
         surface = DesktopSurfaceRef(self.paired_edge_id, control.app_id, control.window_id, _snapshot_revision(control))
         selected = control.text[control.selection_start:control.selection_end]
+        # The selected text comes from another application: display it, never act on it.
         return {"surface": surface, "control_role": control.role, "supported": reason is None, "reason": reason,
-                "selection_digest": text_digest(selected), "selected_text": selected}
+                "selection_digest": text_digest(selected), "untrusted_selected_text": selected}
 
     def preview(self, surface: DesktopSurfaceRef, replacement: str) -> DesktopPreview:
         if type(replacement) is not str or len(replacement.encode("utf-8")) > MAX_REPLACEMENT_BYTES:
@@ -302,6 +434,14 @@ class DesktopDraftExecutor:
             raise DesktopDraftError("desktop_focus_changed")
         if _snapshot_revision(control) != surface.snapshot_revision:
             raise DesktopDraftError("desktop_selection_changed")
+
+    def matches(self, surface: DesktopSurfaceRef) -> bool:
+        """Is the identical surface (focus, control, text, selection) current again?"""
+        try:
+            self._same_surface(surface, self._current())
+        except DesktopDraftError:
+            return False
+        return True
 
     def apply(self, preview: DesktopPreview, *, confirmed_preview_digest: str, replacement: str) -> dict:
         """Write only if focus, control, text and selection are exactly as previewed."""
@@ -332,12 +472,11 @@ class DesktopDraftExecutor:
             # Refused at the write site before any mutation.
             return {"status": "blocked", "reason": exc.code, "written": False}
         try:
-            # Readback needs the same control, not a selection (writes collapse it).
+            # Readback needs the same control identity, not a selection (writes collapse it).
             after = self.adapter.focused(require_selection=False)
         except DesktopDraftError as exc:
             return self._unknown(exc.code)
-        if (after.app_id, after.window_id, after.control_id) != (control.app_id, control.window_id, control.control_id) \
-                or after.text != expected:
+        if after.identity != control.identity or after.text != expected:
             return self._unknown("desktop_readback_mismatch")
         return {"status": "succeeded", "written": True, "readback_digest": text_digest(after.text),
                 "replacement_digest": text_digest(replacement), "preview_digest": preview.preview_digest}
@@ -346,7 +485,7 @@ class DesktopDraftExecutor:
         """Never reapply: offer the current text for inspection instead."""
         try:
             current = self.adapter.focused(require_selection=False)
-            inspect = {"control_id": current.control_id, "text": current.text[:MAX_TEXT_BYTES]}
+            inspect = {"control_id": current.control_id, "untrusted_text": current.text[:MAX_TEXT_BYTES]}
         except DesktopDraftError as exc:
             inspect = {"error": exc.code}
         return {"status": "unknown_local_mutation", "reason": reason, "written": None,
@@ -355,13 +494,38 @@ class DesktopDraftExecutor:
 
 # ---------------------------------------------------------------- local operator CLI
 
-def main(argv=None, *, adapter: TextAdapter | None = None, prompt=input, out=print) -> int:
-    """Local-only flow: inspect, show the exact preview, confirm, write, read back."""
+class _Terminal:
+    """The controlling terminal; confirmation never comes from piped stdin."""
+
+    def __init__(self):
+        self._handle = open("/dev/tty", "r+", encoding="utf-8", errors="replace")
+
+    def ask(self, prompt: str) -> str:
+        self._handle.write(prompt)
+        self._handle.flush()
+        return self._handle.readline()
+
+    def close(self):
+        self._handle.close()
+
+
+def _countdown(seconds: int, message: str, *, out, sleep) -> None:
+    out(message)
+    for remaining in range(seconds, 0, -1):
+        out(f"  {remaining}...")
+        sleep(1)
+
+
+def main(argv=None, *, adapter: TextAdapter | None = None, terminal=None, out=print, sleep=time.sleep,
+         clock=time.monotonic) -> int:
+    """Local-only flow: pick the target, preview exactly, confirm, refocus, write, read back."""
     import argparse
     parser = argparse.ArgumentParser(description="Seraph selected desktop draft actions")
     parser.add_argument("command", choices=["probe", "inspect", "replace"])
     parser.add_argument("--replacement-file", help="UTF-8 file with the exact replacement text")
     parser.add_argument("--paired-edge-id", default="local")
+    parser.add_argument("--countdown", type=int, default=DEFAULT_COUNTDOWN_SECONDS, choices=range(2, 31),
+                        metavar="2-30")
     args = parser.parse_args(argv)
     adapter = adapter or platform_adapter()
     probe = adapter.probe()
@@ -371,26 +535,49 @@ def main(argv=None, *, adapter: TextAdapter | None = None, prompt=input, out=pri
     if probe["state"] != "ready":
         out(json.dumps({"status": "blocked", "reason": probe["reason"]}))
         return 2
-    executor = DesktopDraftExecutor(adapter, paired_edge_id=args.paired_edge_id)
-    try:
-        current = executor.inspect()
-        if args.command == "inspect":
-            out(json.dumps({**current, "surface": current["surface"].__dict__}, sort_keys=True))
-            return 0
+    replacement = None
+    if args.command == "replace":
         if not args.replacement_file:
             parser.error("replace requires --replacement-file")
         with open(args.replacement_file, encoding="utf-8") as handle:
             replacement = handle.read(MAX_REPLACEMENT_BYTES + 1)
+        if terminal is None:
+            if not sys.stdin.isatty():
+                out(json.dumps({"status": "blocked", "reason": "desktop_confirmation_requires_tty"}))
+                return 2
+            terminal = _Terminal()
+    executor = DesktopDraftExecutor(adapter, paired_edge_id=args.paired_edge_id)
+    try:
+        _countdown(args.countdown, "Focus the target window and select the text to replace. Capturing in:",
+                   out=out, sleep=sleep)
+        current = executor.inspect()
+        if args.command == "inspect":
+            out(json.dumps({**current, "surface": current["surface"].__dict__}, sort_keys=True))
+            return 0
         preview = executor.preview(current["surface"], replacement)
     except DesktopDraftError as exc:
         out(json.dumps({"status": "blocked", "reason": exc.code}))
         return 2
-    out(f"Replace in {preview.surface.app_id} / {preview.surface.window_id} ({preview.control_role}):")
-    out("--- selected ---\n" + preview.selected_text + "\n--- replacement ---\n" + preview.replacement)
-    out(f"Type the preview digest prefix {preview.preview_digest[:12]} to write; anything else cancels.")
-    if prompt("> ").strip() != preview.preview_digest[:12]:
+    out(f"Target: {visible_text(current['surface'].app_id)} / {visible_text(preview.surface.window_id)}"
+        f" ({preview.control_role}). Text below is untrusted and shown with controls escaped.")
+    out(f"--- selected ({text_summary(preview.selected_text)}) ---\n{visible_text(preview.selected_text)}")
+    out(f"--- replacement ({text_summary(preview.replacement)}) ---\n{visible_text(preview.replacement)}")
+    out(f"--- end ---\nType {preview.preview_digest[:12]} to confirm, then return focus to the target window "
+        f"within {args.countdown} seconds without changing the selection. Anything else cancels.")
+    try:
+        answer = terminal.ask("> ").strip()
+    finally:
+        if isinstance(terminal, _Terminal):
+            terminal.close()
+    if answer != preview.preview_digest[:12]:
         out(json.dumps({"status": "cancelled", "written": False}))
         return 1
+    deadline = clock() + args.countdown
+    while not executor.matches(preview.surface):
+        if clock() >= deadline:
+            out(json.dumps({"status": "blocked", "reason": "desktop_focus_not_restored", "written": False}))
+            return 2
+        sleep(0.1)
     result = executor.apply(preview, confirmed_preview_digest=preview.preview_digest, replacement=replacement)
     out(json.dumps(result, sort_keys=True))
     return 0 if result["status"] == "succeeded" else 2

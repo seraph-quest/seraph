@@ -91,13 +91,13 @@ async def test_lost_native_ack_fences_boot_without_retry_or_adopting_result():
 def _original_transport_scope(host):
     """Transport-negative fixture only; this does not fabricate native success."""
     from types import MappingProxyType
-    from src.runtime_plugins.ownership import (RuntimeCompositionBinding, CompositionDependency,
+    from src.runtime_plugins.ownership import (BINDING_SCHEMA, RuntimeCompositionBinding, CompositionDependency,
         closure_dependencies, method_closure)
     origin, branch = "capabilities.list", "artifact"
     binding = RuntimeCompositionBinding("seraph.capabilities.v1", origin, branch, method_closure(origin, branch),
         tuple(CompositionDependency(domain, "cordis", index + 1, "d" * 64)
             for index, domain in enumerate(closure_dependencies(origin, branch))),
-        host.reviewed.package_digest, host.reviewed.composition_digest)
+        host.reviewed.package_digest, host.reviewed.composition_digest, False, BINDING_SCHEMA)
     witness = MappingProxyType({"invocation_ref": "job:original", "package_digest": host.reviewed.package_digest,
         "host_composition_digest": host.reviewed.composition_digest,
         "original_deadline_at": int(time.time() * 1000) + 4000})

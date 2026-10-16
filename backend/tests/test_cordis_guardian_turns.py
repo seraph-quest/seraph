@@ -424,9 +424,11 @@ async def test_existing_chat_turn_ids_survive_the_presets_upgrade(accounting_db,
         assert after.preset_id == "chat.agent" and after.preset_digest == preset_digest("chat.agent")
         # A turn admitted by #1019 bound no presets owner: it is still read, validated and
         # recovered exactly as written, and no new admission can produce that shape.
+        # (#1024's schema 3 later added the state owner to every method; #1019 bound neither.)
         legacy_shape = RuntimeCompositionBinding(
             binding.runtime_domain, binding.origin_method, binding.native_branch, binding.allowed_child_methods,
-            tuple(item for item in binding.dependency_vector if item.runtime_domain != PRESETS_DOMAIN),
+            tuple(item for item in binding.dependency_vector
+                  if item.runtime_domain not in {PRESETS_DOMAIN, "seraph.state.v1"}),
             binding.host_package_digest, binding.host_composition_digest, binding.goal_bound)
         assert legacy_shape.presets_bound is False and binding.presets_bound is True
         from src.db.models import WorkflowRunState
@@ -448,13 +450,16 @@ async def test_existing_chat_turn_ids_survive_the_presets_upgrade(accounting_db,
         # The pre-presets shape is the chat step's alone: a guardian step without presets is invalid.
         from src.runtime_plugins.ownership import closure_dependencies, method_closure
         guardian_vector = tuple(item for item in legacy_shape.dependency_vector
-                                if item.runtime_domain in closure_dependencies("guardian.startTurn", "guardian"))
+                                if item.runtime_domain in closure_dependencies("guardian.startTurn", "guardian",
+                                                                               state=False))
         with pytest.raises(CompositionBindingError):
             RuntimeCompositionBinding(GUARDIAN_DOMAIN, "guardian.startTurn", "guardian",
                                       method_closure("guardian.startTurn", "guardian"), guardian_vector)
-        # The leniency is the schema's, not the vector's: schema 2 needs presets, schema 1 cannot carry them.
-        assert legacy_shape.schema_version == 1 and binding.schema_version == 2
-        for schema, vector in ((2, legacy_shape.dependency_vector), (1, binding.dependency_vector)):
+        # The leniency is the schema's, not the vector's: schema 2 needs presets, schema 1 cannot carry them,
+        # and only schema 3 (#1024) carries the state owner.
+        assert legacy_shape.schema_version == 1 and binding.schema_version == 3
+        for schema, vector in ((2, legacy_shape.dependency_vector), (1, binding.dependency_vector),
+                               (2, binding.dependency_vector), (3, legacy_shape.dependency_vector)):
             with pytest.raises(CompositionBindingError):
                 RuntimeCompositionBinding(binding.runtime_domain, binding.origin_method, binding.native_branch,
                                           binding.allowed_child_methods, vector, binding.host_package_digest,

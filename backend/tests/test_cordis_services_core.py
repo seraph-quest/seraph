@@ -151,7 +151,7 @@ async def test_fixed_inventory_binding_and_missing_dependency_denies_admission(s
                    row.composition_digest == legacy_composition_digest(row.runtime_domain) for row in rows)
         binding = await bind_invocation(db, method="tasks.admit", native_branch="workflow", goal_bound=True)
         assert [item.runtime_domain for item in binding.dependency_vector] == [
-            "seraph.authority.v1", "seraph.goals.v1", "seraph.tasks.v1"]
+            "seraph.authority.v1", "seraph.goals.v1", "seraph.state.v1", "seraph.tasks.v1"]
         assert binding.allowed_child_methods == ("authority.resolve", "goals.read", "tasks.admit",
                                                  "tasks.cancel", "tasks.checkpoint", "tasks.inspect")
         await db.execute(delete(RuntimeCompositionState).where(RuntimeCompositionState.runtime_domain == "seraph.goals.v1"))

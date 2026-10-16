@@ -819,6 +819,61 @@ class GitHubFollowthroughService:
         await scoped_authority()
         return response
 
+    async def read_project_items_page(self, *, owner_principal_id: str, owner_session_id: str,
+                                      connection_id: str, expected_connection_revision: int,
+                                      repository: str, page: int, per_page: int,
+                                      since: datetime | None = None) -> list[Any]:
+        """One read-only issues/PRs page of the connection's selected repository.
+
+        The live owner session and the exact connection row (identity,
+        revision, repository, active mode, credential) are rechecked before
+        and after the GET. No consent, approval or effect is involved, and
+        the response grants nothing.
+        """
+        if type(page) is not int or not 1 <= page <= 3 or type(per_page) is not int or not 1 <= per_page <= 50:
+            raise GitHubFollowthroughError("project_source_page_invalid", status_code=422)
+        repository = _repository(repository)
+
+        async def current_connection():
+            await _require_live_owner_session(owner_principal_id=owner_principal_id,
+                owner_session_id=owner_session_id, external_mutation_granted=False)
+            row = await self._get_connection_row(owner_principal_id)
+            if row is None or row.id != connection_id:
+                raise GitHubFollowthroughError("project_source_connection_missing", status_code=409)
+            if int(row.revision or 0) != expected_connection_revision:
+                raise GitHubFollowthroughError("project_source_connection_changed", status_code=409)
+            if row.repository != repository:
+                raise GitHubFollowthroughError("project_source_repository_not_selected", status_code=403)
+            if row.mode != CONNECTION_MODE_ACTIVE:
+                raise GitHubFollowthroughError("project_source_connection_not_active", status_code=409)
+            if not row.vault_key or not await vault_repository.exists(row.vault_key, owner_principal_id=owner_principal_id):
+                raise GitHubFollowthroughError("project_source_credential_missing", status_code=409)
+            return row
+
+        row = await current_connection()
+        token = await vault_repository.get(row.vault_key, owner_principal_id=owner_principal_id)
+        query = f"state=all&sort=updated&direction=desc&per_page={per_page}&page={page}"
+        if since is not None:
+            query += "&since=" + since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        async def authority_check():
+            await current_connection()
+        response = await self._request(f"/repos/{repository}/issues?{query}", method="GET", token=token,
+                                       authority_check=authority_check)
+        await current_connection()
+        if response.status_code in {401, 403}:
+            raise GitHubFollowthroughError("project_source_access_denied", status_code=409)
+        if response.status_code == 404:
+            raise GitHubFollowthroughError("project_source_repository_unavailable", status_code=409)
+        if response.status_code != 200:
+            raise GitHubFollowthroughError("project_source_read_failed", status_code=502)
+        try:
+            value = json.loads(response.content.decode("utf-8"))
+        except (UnicodeDecodeError, TypeError, ValueError) as exc:
+            raise GitHubFollowthroughError("project_source_response_invalid", status_code=502) from exc
+        if not isinstance(value, list) or len(value) > per_page:
+            raise GitHubFollowthroughError("project_source_response_invalid", status_code=502)
+        return value
+
     async def get_connection(self, owner_principal_id: str, owner_session_id: str | None = None) -> dict[str, Any]:
         async with db_engine.get_session() as db:
             row = (

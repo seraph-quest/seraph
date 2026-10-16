@@ -94,15 +94,24 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   const [repository, setRepository] = useState("");
   const [issueIndex, setIssueIndex] = useState("1");
   const [title, setTitle] = useState("");
-  const [readAck, setReadAck] = useState(false);
-  const [exactAck, setExactAck] = useState(false);
-  const [recoveryAck, setRecoveryAck] = useState(false);
+  // Each acknowledgment records the exact authority it was given against and
+  // lapses in the same render that authority changes. A reset effect ran
+  // after the commit and could erase a click made against the new state.
+  const [readAckFor, setReadAckFor] = useState<string | null>(null);
+  const [exactAckFor, setExactAckFor] = useState<string | null>(null);
+  const [recoveryAckFor, setRecoveryAckFor] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [output, setOutput] = useState<Output | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedGoal = goals.find(value => value.id === goalId);
+  const ackBinding = JSON.stringify([scope, connection?.revision, connection?.read_consent_revision, goalId,
+    selectedGoal?.revision, job?.job_id, job?.revision]);
+  const readAck = readAckFor === ackBinding, exactAck = exactAckFor === ackBinding, recoveryAck = recoveryAckFor === ackBinding;
+  const setReadAck = (value: boolean) => setReadAckFor(value ? ackBinding : null);
+  const setExactAck = (value: boolean) => setExactAckFor(value ? ackBinding : null);
+  const setRecoveryAck = (value: boolean) => setRecoveryAckFor(value ? ackBinding : null);
 
   function acceptJob(value: Job, current: number) {
     if (current !== generation.current || !scope) return;
@@ -144,8 +153,6 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     return () => { ++generation.current; abort.abort(); window.clearTimeout(timer); };
   }, [scope]);
 
-  useEffect(() => { setReadAck(false); setExactAck(false); setRecoveryAck(false); },
-    [scope, connection?.revision, connection?.read_consent_revision, goalId, selectedGoal?.revision, job?.job_id, job?.revision]);
 
   async function act(next?: Pending) {
     if (!scope || loadedScope !== scope || busy) return;

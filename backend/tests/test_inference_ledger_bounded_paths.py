@@ -145,3 +145,58 @@ async def test_programme_budget_counts_a_prior_row_whatever_its_run_row_says(mon
         return
     with pytest.raises(InferenceAccountingError, match="programme_cost_original_lineage_changed"):
         await research_accounting.discovery_generation_budget(None, db, current, [prior_row], new_bound=60)
+
+
+# --- #1095 review P3s: open-set swaps, readback tamper and concurrency ------
+
+@pytest.mark.asyncio
+async def test_open_rows_refuse_a_swap_of_states_with_equal_bounds(accounting_db, monkeypatch):
+    """Per-state sums survive swapping two equal-bound rows' states; digests do not."""
+    root, _engine, _factory = accounting_db
+    repository, broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    first = await broker._prepare_accounting(request("op-first", owner="service:op-first"))
+    await broker._prepare_accounting(request("op-second", owner="service:op-second"))
+    await broker._contact_accounting(first)
+    assert _sql(root, "SELECT operation_id, state FROM inference_cost_reservations WHERE operation_id LIKE 'op-%' "
+        "AND state != 'settled' ORDER BY operation_id") == [("op-first", "contact_started"), ("op-second", "reserved")]
+    _sql(root, "UPDATE inference_cost_reservations SET state = CASE operation_id WHEN 'op-first' THEN 'reserved' "
+        "ELSE 'contact_started' END WHERE operation_id IN ('op-first', 'op-second')")
+    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
+        await repository.recover_inference_accounting(job_id="any-job")
+
+
+async def _group_costs(repository):
+    from src.work_board.research_readback import _verified_group_costs
+    async with repository._session() as db:
+        return await _verified_group_costs(repository, db, ["child-a"], ["remote:child-a"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["ledger_row_digest", "job_id"])
+async def test_research_readback_refuses_a_tampered_group_row(accounting_db, monkeypatch, tamper):
+    from tests.test_inference_ledger_v2 import _seed_rows
+    root, _engine, _factory = accounting_db
+    repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    _seed_rows(root, [{"operation_id": "remote:child-a", "job_id": "child-a"}])
+    assert [row.operation_id for row in await _group_costs(repository)] == ["remote:child-a"]
+    value = "0" * 64 if tamper == "ledger_row_digest" else "job-elsewhere"
+    _sql(root, f"UPDATE inference_cost_reservations SET {tamper} = ? WHERE operation_id = 'remote:child-a'", value)
+    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
+        await _group_costs(repository)
+
+
+@pytest.mark.asyncio
+async def test_research_readback_is_not_made_busy_by_a_concurrent_accounting_writer(accounting_db, monkeypatch):
+    from pathlib import Path
+    from config.settings import settings
+    from tests.test_inference_ledger_v2 import _seed_rows
+    from src.workflows.inference_accounting import _continuity_lock
+    root, _engine, _factory = accounting_db
+    repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    _seed_rows(root, [{"operation_id": "remote:child-a", "job_id": "child-a"}])
+    # A writer holds the exclusive accounting flock (non-blocking for others).
+    with _continuity_lock(Path(settings.workspace_dir).resolve()):
+        assert [row.operation_id for row in await _group_costs(repository)] == ["remote:child-a"]

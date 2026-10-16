@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from config.settings import settings
 from tests.test_inference_accounting import accounting_db, setup_configuration
@@ -260,7 +260,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 await asyncio.gather(running, return_exceptions=True)
             return
         snapshot_scenarios = {"snapshot_missing_group", "snapshot_stale_goal", "snapshot_expired"}
-        recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", "restart_written_outputs", "cancel_funded_queued", *snapshot_scenarios}
+        recovery_scenarios = {"restart_before_sources", "restart_prompt_ready", "restart_funded_queued", "restart_written_outputs", "cancel_funded_queued", "cancel_hidden_open_child", *snapshot_scenarios}
         if scenario in recovery_scenarios:
             from src.workflows import research_coordinator as coordinator
             from src.workflows.research_accounting import fund_fixed_group
@@ -273,7 +273,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                 if scenario != "restart_before_sources" and scenario not in snapshot_scenarios:
                     for child_id in creation["child_ids"]:
                         await coordinator._prepare_child(jobs, child_id, owner, {}, phase_binding)
-                if scenario in {"restart_funded_queued", "restart_written_outputs", "cancel_funded_queued"}:
+                if scenario in {"restart_funded_queued", "restart_written_outputs", "cancel_funded_queued", "cancel_hidden_open_child"}:
                     phase = await resume_parent(jobs, parent_id=parent_id, owner=owner,
                         phase="research_funding", expected_binding=phase_binding)
                     phase_binding.update(phase)
@@ -344,7 +344,31 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             original_state = state.json()
             if scenario == "restart_written_outputs":
                 assert original_state["recoverable"] is True  # exact reserved physical output is visible to the Inspector
-            action = "cancel" if scenario == "cancel_funded_queued" else "recover"
+            action = "cancel" if scenario in {"cancel_funded_queued", "cancel_hidden_open_child"} else "recover"
+            if scenario == "cancel_hidden_open_child":
+                # #1095: hide one funded child's open liability from the
+                # state-indexed read by editing its state, without its digest.
+                from src.workflows import inference_ledger
+                monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+                hidden = "remote:" + original_state["children"][0]["job_id"]
+                async with factory.accounting_sessions() as db:
+                    await db.execute(text("UPDATE inference_cost_reservations SET state = 'released' WHERE operation_id = :id"),
+                        {"id": hidden})
+                refused = await client.post("/api/work-board/tasks/"+task_id+"/research/cancel",
+                    json={"expected_revision": original_state["task_revision"], "idempotency_key": "original-research-control"})
+                # The group proof reads each funded row by id and finds the
+                # digest mismatch first; finish_cancel's sealed open-set read
+                # is the second line (tests/test_inference_ledger_bounded_paths).
+                assert refused.status_code == 409 and "research_binding_unavailable" in refused.text, refused.text
+                async with factory.accounting_sessions() as db:
+                    costs = dict((await db.execute(text("SELECT operation_id, state FROM inference_cost_reservations "
+                        "WHERE operation_id LIKE 'remote:research:%'"))).all())
+                    children = list((await db.scalars(select(WorkflowRunState).where(
+                        WorkflowRunState.job_kind == "readonly_research_child"))).all())
+                # Refused, not skipped: the sibling stays held, nothing is cancelled.
+                assert sorted(costs.values()) == ["released", "reserved"] and costs[hidden] == "released"
+                assert all(child.status != "cancelled" for child in children) and len(calls) == 3
+                return
             if scenario == "restart_funded_queued":
                 from src.work_board.research_control import reserve_recovery
                 from src.work_board.research_contracts import ResearchControlRequest
@@ -472,7 +496,7 @@ async def test_current_authority_or_overrun_blocks_prefunded_sibling_and_adoptio
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scenario", ["restart_before_sources", "restart_prompt_ready", "restart_funded_queued",
-    "restart_written_outputs", "cancel_funded_queued"])
+    "restart_written_outputs", "cancel_funded_queued", "cancel_hidden_open_child"])
 async def test_explicit_native_recovery_keeps_original_attempt_deadline_and_call_rows(accounting_db, real_auth, monkeypatch, scenario):
     await test_authenticated_parent_two_children_real_public_source_and_dossier(accounting_db, real_auth, monkeypatch, scenario=scenario)
 

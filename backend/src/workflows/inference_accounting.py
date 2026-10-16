@@ -646,16 +646,7 @@ class InferenceAccountingRepositoryMixin:
                 history = json.loads(account.settings_history_json)
                 history.append({"revision": account.settings_revision, "ceiling_microusd": ceiling, "recorded_at": datetime.now(timezone.utc).isoformat()})
                 if reserve_review_microusd is not None:
-                    from src.workflows import inference_ledger
-                    from src.workspace.accounting_witness import totals_overrun_rows, unreviewed_overruns
-                    # The sealed overrun set, in creation order (#1095); empty
-                    # on bootstrap.
-                    totals = db.info[inference_ledger._SESSION_KEY].totals
-                    overruns = unreviewed_overruns(account.model_dump(mode="json"), sorted(
-                        totals_overrun_rows(totals), key=lambda row: (row["sequence"], row["operation_id"])))
-                    await self._shadow_helper(db, lambda candidates: self._overrun_ids(account, candidates),
-                        overruns, compare=lambda value: value == sorted(row["operation_id"] for row in overruns))
-                    covered = [row for row in overruns if row["actual_cost_microusd"] <= reserve_review_microusd][:128]
+                    covered = await self._reserve_review_covered(db, account, reserve_review_microusd)
                     history.append({"kind": "request_reserve_review", "revision": account.settings_revision,
                         "accounting_revision": account.revision, "bound_microusd": reserve_review_microusd,
                         "operations": [{key: row[key] for key in ("operation_id", "sequence", "revision")} for row in covered],
@@ -664,11 +655,33 @@ class InferenceAccountingRepositoryMixin:
                 await self._persist_accounting_witness(db, workspace, account)
                 return _witness(account)
 
-    @staticmethod
-    async def _overrun_ids(account, rows):
-        from src.workspace.accounting_witness import unreviewed_overruns
-        return sorted(row["operation_id"] for row in unreviewed_overruns(account.model_dump(mode="json"),
-            [_operation_payload(row) for row in rows]))
+    async def _reserve_review_covered(self, db: Any, account, bound: int):
+        """The first 128 unreviewed overruns within ``bound``, in ledger order.
+
+        From the sealed overrun set (#1095), ordered by rowid as the full-ledger
+        read was; empty on bootstrap.
+        """
+        from sqlalchemy import literal_column
+        from src.workflows import inference_ledger
+        from src.workspace.accounting_witness import totals_overrun_rows, unreviewed_overruns
+        sealed = totals_overrun_rows(db.info[inference_ledger._SESSION_KEY].totals)
+        if sealed:
+            ordered = (await db.execute(select(InferenceCostReservation.operation_id).where(
+                InferenceCostReservation.operation_id.in_([row["operation_id"] for row in sealed]))
+                .order_by(literal_column("inference_cost_reservations.rowid")))).scalars().all()
+            position = {operation_id: index for index, operation_id in enumerate(ordered)}
+            sealed.sort(key=lambda row: position.get(row["operation_id"], len(position)))
+        covered = [row for row in unreviewed_overruns(account.model_dump(mode="json"), sealed)
+            if row["actual_cost_microusd"] <= bound][:128]
+        if inference_ledger.SHADOW_FULL_LEDGER:
+            full = list((await db.execute(select(InferenceCostReservation)
+                .order_by(literal_column("inference_cost_reservations.rowid")))).scalars())
+            expected = [row for row in unreviewed_overruns(account.model_dump(mode="json"),
+                [_operation_payload(row) for row in full]) if row["actual_cost_microusd"] <= bound][:128]
+            key = ("operation_id", "sequence", "revision")
+            if [tuple(row[field] for field in key) for row in covered] != [tuple(row[field] for field in key) for row in expected]:
+                raise AssertionError(f"reserve review drift: {covered} != {expected}")
+        return covered
 
     async def reserve_inference_cost(self, *, operation_id: str, job_id: str, owner_id: str,
                                      payload_digest: str, policy_digest: str, runtime_path: str,

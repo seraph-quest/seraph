@@ -201,21 +201,53 @@ async def _verified_group_costs(jobs, db, child_ids, call_ids):
     """The research group's cost rows, bounded (#1095).
 
     The fixed slot ids plus any row naming a child job, each verified against
-    its stored digest under the continuity lock, instead of the whole ledger.
+    its stored digest. Verified as the status read is: in its own short session
+    on a deferred snapshot under the shared flock, so a concurrent accounting
+    writer can never make the proof spuriously unavailable. Writers persist the
+    witness before commit, so only a serialized re-check may conclude
+    continuity is broken; it is skipped when the caller already holds the
+    writer lock, since then no accounting writer can be between those steps.
     """
+    from src.workflows.inference_accounting import InferenceAccountingError
+    try:
+        return await _group_costs_once(jobs, child_ids, call_ids, read_only=True)
+    except InferenceAccountingError:
+        if await _holds_write_transaction(db):
+            raise
+    return await _group_costs_once(jobs, child_ids, call_ids, read_only=False)
+
+
+async def _group_costs_once(jobs, child_ids, call_ids, *, read_only):
+    from sqlalchemy.exc import OperationalError
     from src.db.models import InferenceAccountingOwner, InferenceCostReservation
-    from src.workflows.inference_accounting import _continuity_lock
-    account = await db.get(InferenceAccountingOwner, "deployment")
-    with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-        ledger = await jobs._open_ledger(db, workspace, account)
-        by_job = await jobs._ledger_rows(db, ledger, InferenceCostReservation.job_id.in_(list(child_ids)))
-        found = {row.operation_id: row for row in by_job}
-        for call_id in call_ids:
-            if call_id not in found:
-                row = await jobs._ledger_row(db, ledger, call_id)
-                if row is not None:
-                    found[call_id] = row
+    from src.workflows.inference_accounting import InferenceAccountingError, _continuity_lock
+    try:
+        async with jobs._session() as db:
+            await jobs._accounting_begin(db, read_only=read_only)
+            account = await db.get(InferenceAccountingOwner, "deployment")
+            with _continuity_lock(Path(settings.workspace_dir).resolve(), exclusive=not read_only) as workspace:
+                if account is None:
+                    raise InferenceAccountingError("accounting_continuity_unavailable")
+                ledger = await (jobs._read_ledger(db, workspace, account) if read_only
+                    else jobs._open_ledger(db, workspace, account))
+                by_job = await jobs._ledger_rows(db, ledger, InferenceCostReservation.job_id.in_(list(child_ids)))
+                found = {row.operation_id: row for row in by_job}
+                for call_id in call_ids:
+                    if call_id not in found:
+                        row = await jobs._ledger_row(db, ledger, call_id)
+                        if row is not None:
+                            found[call_id] = row
+    except OperationalError as exc:  # writer lock unavailable for the serialized re-check
+        raise InferenceAccountingError("accounting_continuity_busy") from exc
     return sorted(found.values(), key=lambda row: row.operation_id)
+
+
+async def _holds_write_transaction(db) -> bool:
+    """Whether the caller's SQLite connection already has a transaction open."""
+    connection = await db.connection()
+    raw = await connection.get_raw_connection()
+    driver = getattr(raw, "driver_connection", None)
+    return bool(getattr(driver, "in_transaction", True))
 
 
 async def verified_dossier(db, task, attempt, run):

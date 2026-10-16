@@ -389,6 +389,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                 assert proof.status_code == 200 and proof.json()["outcome"] == "passed", proof.text
             bindings, source_files = [], []
             pending_id, pending_deadline, failure_clock = None, None, None
+            latest_fetch = None
             def damage(path):
                 original = path.read_bytes()
                 if physical_failure == "unlink":
@@ -427,6 +428,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                 witness = await physical_discovery_inputs(jobs, job["job_id"])
                 snapshot = next(a["parsed"] for a in witness.artifacts.values() if a["kind"] == "snapshot")
                 assert "grants deadline:" in "\n".join(snapshot.lines)
+                latest_fetch = max(filter(None, (latest_fetch, snapshot.fetched_at)))
                 brief = next(a["parsed"] for a in witness.artifacts.values() if a["kind"] == "brief")
                 now = datetime.now(timezone.utc)
                 assert len(digest.deterministic_deadlines(witness, brief, now)) == 1
@@ -439,6 +441,13 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             assert len(calls) == 6 and len(physical_contacts) == 4
             if physical_failure:
                 from src.db.models import ProgrammeDigestReceipt, WorkBoardTask, ProgrammeFollowThrough
+                # Later digest passes run after the second original source was
+                # actually fetched, as the scheduler's wall clock always does.
+                # failure_clock was captured before that run, so after 08:00 a
+                # slow runner would otherwise present the fetch as future-dated
+                # evidence, which the digest correctly excludes (#1078).
+                digest_clock = max(failure_clock, latest_fetch)
+                assert digest.local_clock(digest_clock).date() == digest.local_clock(failure_clock).date(), "discovery crossed the owner-day boundary"
                 import src.work_board.research_artifacts as physical_artifacts
                 original_read = physical_artifacts.read_discovery
                 physical_reads = []
@@ -446,7 +455,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                     physical_reads.append(args[0])
                     return original_read(*args, **kwargs)
                 monkeypatch.setattr(physical_artifacts, "read_discovery", count_actual_reads)
-                await digest.tick(failure_clock + timedelta(seconds=1))
+                await digest.tick(digest_clock + timedelta(seconds=1))
                 async with factory.accounting_sessions() as db:
                     finalized = (await db.execute(select(ProgrammeDigestReceipt))).scalar_one()
                     assert finalized.id == pending_id and finalized.phase == "finalized"
@@ -457,7 +466,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                     assert len(final_bindings) == 1 and final_bindings[0]["job_id"] == bindings[1][2]
                     assert digest.finding_id(bindings[0][2], 0) not in final_digest["finding_ids"]
                 finalized_reads = len(physical_reads)
-                await digest.tick(failure_clock + timedelta(seconds=2))
+                await digest.tick(digest_clock + timedelta(seconds=2))
                 assert len(physical_reads) == finalized_reads  # No default-Inbox repeat source staging.
                 damage(source_files[1])
                 endpoint = "/api/guardian/inbox/programme-digests"
@@ -490,8 +499,8 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                     json={"enabled": True, "deadline_categories": ["grants"]})
                 assert opted.status_code == 200, opted.text
                 import src.observer.native_notification_queue as native_queue
-                monkeypatch.setattr(native_queue, "_utc_now", lambda: failure_clock + timedelta(seconds=3))
-                await digest.deliver_notices(failure_clock + timedelta(seconds=3))
+                monkeypatch.setattr(native_queue, "_utc_now", lambda: digest_clock + timedelta(seconds=3))
+                await digest.deliver_notices(digest_clock + timedelta(seconds=3))
                 async with factory.accounting_sessions() as db:
                     receipt = (await db.execute(select(ProgrammeDigestReceipt))).scalar_one()
                     memo = json.loads(receipt.finding_bindings_json)[0]["deadline_no_match"]
@@ -502,8 +511,8 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                     notices = list((await db.execute(select(NativeNotificationOutbox))).scalars())
                     assert len(notices) == 1 and notices[0].intervention_type == "programme_digest"
                 failure_reads = len(physical_reads)
-                await digest.tick(failure_clock + timedelta(seconds=4))
-                await digest.deliver_notices(failure_clock + timedelta(seconds=5))
+                await digest.tick(digest_clock + timedelta(seconds=4))
+                await digest.deliver_notices(digest_clock + timedelta(seconds=5))
                 assert len(physical_reads) == failure_reads  # Actual missing/integrity failure memo is negative only.
                 assert len(calls) == 6 and len(physical_contacts) == 4
                 for _, _, job_id in bindings:

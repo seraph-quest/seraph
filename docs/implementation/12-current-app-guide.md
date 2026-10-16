@@ -597,7 +597,7 @@ guardian consumer `seraph.guardian-research.v1`
 selects a format provider per media type from its closed profile config:
 `plain-text` and `html-text` (a port of `normalize_source_text`, including the
 WHATWG entity table, with a parity test) and `rss-atom`, a hand-written bounded
-reader (61,440 input bytes, depth 32, 4,096 elements, 64 items, 4 KiB per field)
+reader (256 KiB input, depth 32, 4,096 elements, 64 items, 4 KiB per field)
 that rejects DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
 declarations; feed links stay inert text. An absent planner, consumer, source
 extraction plugin or format mapping returns a typed block
@@ -634,16 +634,26 @@ result records `no_learning`. **Inspect discovery runs** adds `research_runtime`
 (live role readiness and recovery), `planning` jobs and per-run
 `research_blocked_reason`, each with its recovery text.
 
-Discovery therefore requires the Cordis host. The backend lifespan starts it with
-the `node` on its PATH (Node 22.12+ or 24.x). `./manage.sh -e dev local up|run`
-first runs a keyless preflight: it builds the reviewed package when
-`runtime/cordis` dependencies are already installed (`npm ci` with the
-lockfile and npm 11.8.0; the preflight never installs them) and otherwise prints
-the blocked reason and remediation while core startup continues. The backend
-container image does not yet contain Node or `runtime/cordis`, so containerized
-deployments show discovery as blocked. Real-child acceptance tests deny Python
-sockets/DNS and use fixed in-memory transports; CI builds the package with Node
-24.13.1 and sets `SERAPH_CORDIS_TEST_NODE`, and the suites skip elsewhere
+Discovery therefore requires the Cordis host. The backend lifespan starts it
+with `CORDIS_NODE_PATH` when set, otherwise the `node` on PATH (Node 22.12+ or
+24.x). `./manage.sh -e dev local up|run` first runs a keyless preflight with the
+same Node: when the package is missing or stale it runs `cordis build`, which
+installs locked dependencies with `npm ci --ignore-scripts` (npm 11.8.0) only
+when they are absent; otherwise it prints the blocked reason and the exact fix
+while core startup continues. Runtime status (Settings → Cordis runtime host)
+and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
+and set `CORDIS_NODE_PATH`, or run `./manage.sh -e dev cordis build`, then
+restart. The backend container image does not yet contain Node or
+`runtime/cordis`, so containerized deployments show discovery as blocked.
+
+Raw public sources up to the plan's `max_source_bytes` (256 KiB) cross to Cordis
+as one staged envelope read in bounded 64 KiB `artifacts.read` chunks at UTF-8
+aligned offsets, ending with an empty chunk; the digest covers the whole
+artifact and the frame limit is unchanged. Normalized snapshots stay capped at
+64 KiB. The guardian research invocation may make up to 64 callbacks (other
+invocations keep 16). Real-child acceptance tests deny Python sockets/DNS and
+use fixed in-memory transports; CI builds the package with Node 24.13.1 (npm
+11.8.0) and sets `SERAPH_CORDIS_TEST_NODE`, and the suites skip elsewhere
 without it.
 
 ### Bounded general document reading

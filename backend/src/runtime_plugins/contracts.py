@@ -92,7 +92,7 @@ REQUESTS = {
     "inference.request": {"request_ref": R},
     "memory.retrieve": {"query_ref": R, "limit": lambda v: integer(v, 1, 20)},
     "memory.propose": {"request_ref": R}, "memory.applyReviewed": {"review_ref": R}, "memory.forget": {"request_ref": R},
-    "artifacts.read": {"artifact_ref": R, "max_bytes": lambda v: integer(v, 1, 65536)},
+    "artifacts.read": {"artifact_ref": R, "max_bytes": lambda v: integer(v, 1, 65536), "offset": lambda v: integer(v, 0, 1048576)},
     "artifacts.stage": {"request_ref": R, "content": lambda v: v is None or text(v, 65536),
                         "content_digest": lambda v: v is None or sha(v)}, "artifacts.adopt": {"request_ref": R},
     "audit.append": {"event_ref": R}, "research.buildPlan": {"task_ref": R}, "research.executeAccepted": {"plan_ref": R},

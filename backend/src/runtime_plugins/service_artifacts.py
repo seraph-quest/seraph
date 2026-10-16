@@ -80,7 +80,7 @@ def expected_wire(run, context: dict, method: str) -> dict:
     if method == "artifacts.adopt":
         return {"request_ref": operation_ref(run.run_identity, method)}
     if method == "artifacts.read":
-        return {"artifact_ref": context["operations"][1]["artifact_ref"], "max_bytes": MAX_ARTIFACT_BYTES}
+        return {"artifact_ref": context["operations"][1]["artifact_ref"], "max_bytes": MAX_ARTIFACT_BYTES, "offset": 0}
     return {"event_ref": operation_ref(run.run_identity, method)}
 
 

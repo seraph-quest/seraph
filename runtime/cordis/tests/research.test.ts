@@ -10,7 +10,10 @@ const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const profile = () => validateProfile(decodeJson(readFileSync(new URL('../../profile.json', import.meta.url))));
 const without = (id: string): Profile => validateProfile({ ...profile(), plugins: profile().plugins.filter(spec => spec.id !== id) } as never);
 const ok = (value: unknown) => ({ status: 'succeeded', memory_status: 'no_learning', value });
-const read = (artifact_ref: string, content: string) => ok({ artifact_ref, digest: sha(content), size_bytes: Buffer.byteLength(content), content });
+const read = (artifact_ref: string, content: string, offset = 0) => {
+  const part = Buffer.from(content).subarray(offset, offset + 65536).toString();
+  return ok({ artifact_ref, digest: sha(content), size_bytes: Buffer.byteLength(part), content: part });
+};
 
 const LIMITS = { max_queries: 3, max_results: 15, max_sources: 4, max_inference_requests: 4, max_wall_seconds: 300, max_search_seconds: 20,
   max_search_bytes: 524288, max_source_bytes: 262144, max_output_bytes: 65536, cost_limit_microusd: 500 };
@@ -36,7 +39,7 @@ function nativeOwner(raw: Record<string, { media_type: string; body: string }>) 
       if (staged.has(value.artifact_ref!)) return read(value.artifact_ref!, staged.get(value.artifact_ref!)!);
       const source = raw[value.artifact_ref!];
       const slot = Object.keys(raw).indexOf(value.artifact_ref!);
-      if (source) return read(value.artifact_ref!, JSON.stringify({ schema_version: 1, source_slot: slot, ...source }));
+      if (source) return read(value.artifact_ref!, JSON.stringify({ schema_version: 1, source_slot: slot, ...source }), Number(value.offset));
     }
     if (method === 'artifacts.stage') {
       assert.equal(sha(value.content!), value.content_digest);
@@ -64,8 +67,9 @@ test('planning provider, research service and guardian consumer compose one acce
     assert.deepEqual(content.steps[0].input_refs, [{ artifact_id: 'art_brief', digest: 'b'.repeat(64), schema_version: 1 }]);
     const done = await composition.invoke('research.executeAccepted', { plan_ref: 'art_extraction' }, owner.client);
     assert.deepEqual(done, { status: 'succeeded', memory_status: 'no_learning', value: { job_ref: 'goal-discovery:job', revision: 3, state: 'running' } });
+    // Each staged source is read until its empty end chunk.
     assert.deepEqual(owner.calls.map(([method]) => method), ['artifacts.read', 'artifacts.stage', 'artifacts.read', 'tasks.inspect',
-      'artifacts.read', 'artifacts.stage', 'artifacts.read', 'artifacts.read', 'artifacts.stage', 'artifacts.read', 'tasks.inspect']);
+      'artifacts.read', 'artifacts.read', 'artifacts.stage', 'artifacts.read', 'artifacts.read', 'artifacts.read', 'artifacts.stage', 'artifacts.read', 'tasks.inspect']);
     const html = JSON.parse(owner.staged.get('art_snapshot_0')!);
     assert.equal(html.text, 'Release\nShipped & dated.');
     assert.equal(JSON.parse(owner.staged.get('art_snapshot_1')!).text, 'Feed: Log\nItem: One');

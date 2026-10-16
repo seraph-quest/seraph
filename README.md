@@ -77,6 +77,14 @@ key. To enable model work, open **Settings → Models & OpenRouter** and configu
 your key, models, allowed upstreams, explicit cloud consent, and a finite budget.
 Text, vision, and embedding have separate controls.
 
+Goal discovery (programme research) runs through the reviewed Cordis host. It
+needs Node 22.12+ or 24.x (npm 11.8.0, bundled with Node 24.13.1): put it on PATH
+or set `CORDIS_NODE_PATH` in `.env.dev`. `local up` then builds `runtime/cordis`
+when needed (running `npm ci` from its lockfile only when dependencies are
+missing) and the backend starts the host. Without it, core startup continues and
+discovery shows as blocked with the exact fix in Settings and the discovery
+panel; `./manage.sh -e dev cordis build` repeats the build.
+
 Use `./manage.sh -e dev local run` for a foreground session, particularly in
 managed development shells. Stop with `./manage.sh -e dev local down`.
 Preserve your existing `.env.dev` when returning to an installed workspace.

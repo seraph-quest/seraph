@@ -73,6 +73,8 @@ jobs:
         working-directory: runtime/cordis
         timeout-minutes: 5
         run: |
+          # runtime/cordis/scripts/toolchain.mjs gates on exactly npm 11.8.0.
+          if [ "$(npm --version)" != "11.8.0" ]; then npm install -g npm@11.8.0; fi
           test "$(npm --version)" = "11.8.0"
           npm ci --ignore-scripts
           npm run build

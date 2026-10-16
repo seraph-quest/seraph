@@ -58,16 +58,38 @@ test('malformed, DTD, entity, encoding and oversized feeds are rejected before o
   rejects('<rss><channel><item><description>' + 'word '.repeat(1000) + '</description></item></channel></rss>', 'source_output_oversize');
 });
 
+/** Fixed in-memory owner: ASCII content served in offset/max_bytes chunks. */
+export function chunk({ artifact_ref, max_bytes, offset }: {artifact_ref: string; max_bytes: number; offset: number}, content: string) {
+  const part = content.slice(offset, offset + max_bytes);
+  return { status: 'succeeded', memory_status: 'no_learning', value: { artifact_ref, digest: sha(content), size_bytes: part.length, content: part } };
+}
 function sourceClient(media_type: string, body: string, calls: string[]): ScopedRequestClient {
   const content = JSON.stringify({ schema_version: 1, source_slot: 0, media_type, body });
   return { isActive: () => true, request: async (method, input) => {
     calls.push(method);
     assert.equal(method, 'artifacts.read');
-    return { status: 'succeeded', memory_status: 'no_learning', value: { artifact_ref: (input as {artifact_ref: string}).artifact_ref,
-      digest: sha(content), size_bytes: Buffer.byteLength(content), content } };
+    return chunk(input as {artifact_ref: string; max_bytes: number; offset: number}, content);
   } };
 }
 const extract = { artifact_ref: 'art_raw0', acquisition_receipt_ref: 'discovery-source:goal-discovery:x:0', source_slot: 0, first_line: 1, last_line: 4096 };
+
+test('a 250 KiB source is read in bounded chunks with a whole-artifact digest', async () => {
+  const composition = new Composition(profile()); await composition.start();
+  const calls: string[] = [];
+  try {
+    // Typical heavy page: large inline script/markup, modest normalized text (<= 64 KiB).
+    const big = '<html><head><script>' + 'var a = 1;'.repeat(24_000) + '</script></head><body>'
+      + '<div class="c"><span>Release</span></div>'.repeat(400) + '<p>Dated evidence.</p></body></html>';
+    assert.ok(big.length > 250 * 1024 && big.length < 262_144);
+    const html = await composition.invoke('source-extraction.extract', extract, sourceClient('text/html', big, calls));
+    assert.equal(html.status, 'succeeded');
+    assert.equal(html.status === 'succeeded' && html.value.evidence.map(item => item.text).join('').endsWith('Release\nDated evidence.'), true);
+    assert.ok(calls.length >= 5 && calls.length <= 10, String(calls.length));
+    const huge = '<p>' + 'x'.repeat(700_000) + '</p>';
+    assert.deepEqual(await composition.invoke('source-extraction.extract', extract, sourceClient('text/html', huge, [])),
+      { status: 'blocked', reason_code: 'source_output_oversize', memory_status: 'no_learning' });
+  } finally { await composition.dispose(); }
+});
 
 test('one source service dispatches by configured media type; replacement needs no consumer edit', async () => {
   const base = profile();

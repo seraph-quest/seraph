@@ -54,11 +54,21 @@ def _content(payload) -> bytes:
     return raw
 
 
-def _read_result(reference, content: bytes, max_bytes: int):
-    if len(content) > max_bytes:
+def _read_result(reference, content: bytes, payload):
+    """One bounded UTF-8-aligned chunk at ``offset``; an empty chunk marks the end.
+
+    The digest always covers the whole artifact, so the reader verifies the
+    concatenation rather than trusting any single chunk.
+    """
+    offset, end = payload["offset"], min(len(content), payload["offset"] + payload["max_bytes"])
+    if offset > len(content) or (offset < len(content) and content[offset] & 0xC0 == 0x80):
+        raise NativeServiceBlocked("native_research_read_offset_invalid")
+    while end < len(content) and end > offset and content[end] & 0xC0 == 0x80:
+        end -= 1
+    if end == offset and offset < len(content):
         raise NativeServiceBlocked("native_research_read_bound_exceeded")
     return succeeded("artifacts.read", {"artifact_ref": reference.artifact_id, "digest": reference.digest,
-                                        "size_bytes": len(content), "content": content.decode("utf-8")})
+                                        "size_bytes": end - offset, "content": content[offset:end].decode("utf-8")})
 
 
 def validate_child_plan(raw: bytes, request: dict):
@@ -105,7 +115,7 @@ async def _planning(dispatcher, method, payload, scope):
         if method == "artifacts.read":
             if payload["artifact_ref"] != reference.artifact_id:
                 raise NativeServiceBlocked("native_research_reference_not_bound")
-            return _read_result(reference, request_bytes, payload["max_bytes"])
+            return _read_result(reference, request_bytes, payload)
         context = read_context(run)
         if payload["request_ref"] != PLAN_REQUEST:
             raise NativeServiceBlocked("native_research_stage_not_bound")
@@ -189,7 +199,7 @@ async def _discovery(dispatcher, method, payload, scope):
                 reference = readable.get(payload["artifact_ref"])
                 if reference is None:
                     raise NativeServiceBlocked("native_research_reference_not_bound")
-                return _read_result(reference, witness.artifacts[reference.artifact_id]["content"], payload["max_bytes"])
+                return _read_result(reference, witness.artifacts[reference.artifact_id]["content"], payload)
             if method == "tasks.checkpoint":
                 match = REJECTION.fullmatch(payload["checkpoint_ref"])
                 if match is None or match[2] not in SOURCE_REJECTIONS:

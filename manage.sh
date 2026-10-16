@@ -16,7 +16,7 @@
 #   ./manage.sh -e [dev|prod] logs      - View Docker logs.
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
 #   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
-#   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed optional Cordis host.
+#   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed Cordis host (goal research).
 #   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
@@ -75,7 +75,7 @@ function display_help() {
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
     echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
-    echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. No dependency installation."
+    echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. build runs npm ci from the lockfile only when dependencies are missing."
     echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
@@ -759,27 +759,41 @@ function cordis_cli() {
 }
 
 # Goal discovery plans and extracts only through the reviewed Cordis host (#1008).
-# The backend starts that host itself with the `node` on PATH; this preflight
-# builds the reviewed package when its locked dependencies are already installed
-# and never installs them. Core startup continues either way: an unavailable
-# runtime stays an operator-visible block, never a Python fallback.
+# Node is CORDIS_NODE_PATH from the env file when set, else `node` on PATH; the
+# backend starts the host with the same Node. This preflight runs the reviewed
+# build when the package is missing or stale (installing locked dependencies with
+# `npm ci` only when absent). Core startup continues either way: an unavailable
+# runtime stays an operator-visible block with its fix, never a Python fallback.
 function prepare_local_cordis() {
-    local status
-    if status="$(cordis_cli status 2>/dev/null)"; then
-        echo "Cordis research runtime: package available (live readiness: Settings runtime status)"
+    local status reason node_args=()
+    if [ -n "${CORDIS_NODE_PATH:-}" ]; then
+        node_args=(--node "$CORDIS_NODE_PATH")
+    fi
+    if status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
+        echo "Cordis research runtime: package available (live readiness: Settings > Cordis runtime host)"
         return 0
     fi
-    if [ -f "$SCRIPT_DIR/runtime/cordis/node_modules/typescript/bin/tsc" ]; then
-        echo "Building the reviewed Cordis research runtime ..."
-        if cordis_cli build >/dev/null 2>&1 && status="$(cordis_cli status 2>/dev/null)"; then
-            echo "Cordis research runtime: package built and available"
-            return 0
-        fi
-        status="$(cordis_cli status 2>/dev/null)"
-    fi
-    echo "Cordis research runtime unavailable: $status" >&2
-    echo "  Goal discovery is blocked (shown in the cockpit) until a reviewed Node 22.12+/24 with npm 11.8.0 is on PATH," >&2
-    echo "  'npm ci' has installed runtime/cordis from its lockfile, and './manage.sh -e $ENV cordis build' succeeds." >&2
+    reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
+    case "$reason" in
+        node_missing|node_unavailable|node_unsupported) ;;
+        *)
+            echo "Building the reviewed Cordis research runtime ($reason) ..."
+            if cordis_cli build "${node_args[@]}" >>"$LOCAL_BACKEND_LOG_FILE" 2>&1 \
+                    && status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"; then
+                echo "Cordis research runtime: package built and available"
+                return 0
+            fi
+            status="$(cordis_cli status "${node_args[@]}" 2>/dev/null)"
+            reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
+            ;;
+    esac
+    echo "Cordis research runtime unavailable (${reason:-unknown}); goal discovery is blocked and shows this in the cockpit." >&2
+    case "$reason" in
+        node_missing|node_unavailable|node_unsupported)
+            echo "  Fix: install Node 22.12+ or 24.x and set CORDIS_NODE_PATH in $ENV_FILE (or put it first on PATH), then rerun." >&2 ;;
+        *)
+            echo "  Fix: run ./manage.sh -e $ENV cordis build (see $LOCAL_BACKEND_LOG_FILE), then rerun." >&2 ;;
+    esac
     return 0
 }
 

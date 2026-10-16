@@ -45,7 +45,8 @@ export const serviceSchemas = {
   'memory.propose': {input: object({request_ref: ref}), output: outputs.proposal},
   'memory.applyReviewed': {input: object({review_ref: ref}), output: outputs.record},
   'memory.forget': {input: object({request_ref: ref}), output: outputs.record},
-  'artifacts.read': {input: object({artifact_ref: ref, max_bytes: number(1, 65536)}), output: outputs.artifactRead},
+  // ``offset`` reads a large artifact in bounded chunks; the digest always covers the whole artifact.
+  'artifacts.read': {input: object({artifact_ref: ref, max_bytes: number(1, 65536), offset: number(0, 1048576)}), output: outputs.artifactRead},
   'artifacts.stage': {input: object({request_ref: ref, content: nullable(text(65536)), content_digest: nullable(digest)}), output: outputs.artifact},
   'artifacts.adopt': {input: object({request_ref: ref}), output: outputs.adoption},
   'audit.append': {input: object({event_ref: ref}), output: outputs.receipt},

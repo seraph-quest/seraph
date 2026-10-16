@@ -16,8 +16,30 @@ from .contracts import SERVICE_METHODS, validate_request, validate_result
 from .protocol import MAX_PENDING, ProtocolError, encode_frame, read_frame, rpc_deadline
 
 STDERR_LIMIT = 65_536
-# Finite callbacks one original invocation's providers may make.
+# Finite callbacks one original invocation's providers may make. Guardian
+# research reads up to four 256 KiB sources in 64 KiB chunks (#1008).
 MAX_CALLBACKS = 16
+BRANCH_CALLBACKS = {"programme_discovery": 64}
+
+
+NODE_REASONS = frozenset({"node_missing", "node_unavailable", "node_unsupported"})
+BUILD_REASONS = frozenset({"runtime_package_missing", "runtime_build_stale", "build_receipt_invalid",
+                           "runtime_package_invalid_or_missing", "build_dependencies_missing", "package_pin_mismatch"})
+
+
+def cordis_recovery(state: str, reason: str | None) -> str | None:
+    """The exact operator fix for a host that is not ready; never a fallback."""
+    if state == "ready":
+        return None
+    if reason in NODE_REASONS:
+        return ("Install Node 22.12+ or 24.x and set CORDIS_NODE_PATH to it (or put it first on PATH), "
+                "then run ./manage.sh -e dev cordis build and restart with ./manage.sh -e dev local up.")
+    if reason in BUILD_REASONS:
+        return ("Run ./manage.sh -e dev cordis build (installs the locked runtime/cordis dependencies with npm ci "
+                "when missing), then restart with ./manage.sh -e dev local up.")
+    if state == "cleanup_unknown":
+        return "Reconcile the unknown Cordis cleanup, then restart with ./manage.sh -e dev local up."
+    return "Restart with ./manage.sh -e dev local up; if it stays blocked run ./manage.sh -e dev cordis probe."
 
 
 class HostBlocked(RuntimeError):
@@ -83,6 +105,7 @@ class CordisHost:
             readiness = "blocked"
         return {
             "runtime_role": "lifecycle_host", "state": state, "reason": reason,
+            "recovery": cordis_recovery(state, reason),
             "readiness": {"state": readiness, "checked_at": self._readiness_checked_at},
             "native_services": self._native_service_snapshot(),
             "profile_id": self.reviewed.profile["profile_id"] if self.reviewed else None,
@@ -217,7 +240,8 @@ class CordisHost:
                         raise ProtocolError("unadmitted native service request")
                     originals = [entry for entry in self._pending.values()
                                  if entry.native_binding is not None and not entry.future.done()
-                                 and entry.native_callbacks < MAX_CALLBACKS
+                                 and entry.native_callbacks < BRANCH_CALLBACKS.get(
+                                     entry.native_binding.original.binding.native_branch, MAX_CALLBACKS)
                                  and all(entry.frame[key] == frame[key] for key in (
                                      "invocation_ref", "composition_epoch", "deadline_at",
                                      "boot_nonce", "package_digest", "composition_digest"))]

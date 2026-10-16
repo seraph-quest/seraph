@@ -568,7 +568,8 @@ class GoalDiscoveryService:
             except UnicodeError:
                 body = ""
             envelope = {"schema_version": 1, "source_slot": index, "media_type": mime, "body": body}
-            # Only bounded public snapshot bytes cross to Cordis; never paths or credentials.
+            # Only bounded public snapshot bytes cross to Cordis (read in 64 KiB chunks);
+            # never paths or credentials. The body is already capped by max_source_bytes.
             if not body or len(json_bytes(envelope)) > DISCOVERY_ARTIFACT_LIMITS["raw_source"]:
                 denied.append((index, {"result_id": identifier, "reason": "source_normalized_unsupported"}))
                 continue
@@ -826,6 +827,10 @@ def research_runtime_state(host):
         "seraph.guardian-research.v1": "research_consumer_unavailable",
         "seraph.source-extraction.v1": "source_extraction_provider_unavailable"}
     if not host.admitting or host.reviewed is None:
+        from src.runtime_plugins.bridge import cordis_recovery
+        # Name the host's own reason and its exact fix (Node, build or restart).
+        if host.state in {"blocked", "cleanup_unknown"} and host.reason:
+            return {"state": "blocked", "reason": host.reason, "recovery": cordis_recovery(host.state, host.reason)}
         return {"state": "blocked", "reason": "research_runtime_unavailable", "recovery": RESEARCH_RECOVERY}
     ready = {plugin.get("id") for plugin in getattr(host, "_plugins", ()) if plugin.get("state") == "ready"}
     missing = [reason for identifier, reason in required.items() if identifier not in ready]

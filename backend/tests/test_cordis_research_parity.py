@@ -89,3 +89,19 @@ def test_python_profile_rejects_unreviewed_source_formats(change):
         spec["config"]["path"] = "/tmp"
     with pytest.raises(ProtocolError):
         validate_profile(profile)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_host_names_the_exact_fix_in_runtime_status_and_discovery(tmp_path):
+    from src.guardian.goal_discovery import research_runtime_state
+    from src.runtime_plugins.bridge import CordisHost
+    host = CordisHost(node_path=tmp_path / "absent-node")
+    assert await host.start() is False  # no child is spawned for a missing Node
+    snapshot = host.snapshot()
+    assert snapshot["state"] == "blocked" and snapshot["reason"] == "node_missing"
+    assert "Node 22.12+ or 24.x" in snapshot["recovery"] and "CORDIS_NODE_PATH" in snapshot["recovery"]
+    discovery = research_runtime_state(host)
+    assert discovery == {"state": "blocked", "reason": "node_missing", "recovery": snapshot["recovery"]}
+    from src.runtime_plugins.bridge import cordis_recovery
+    assert "./manage.sh -e dev cordis build" in cordis_recovery("blocked", "runtime_build_stale")
+    assert cordis_recovery("ready", None) is None

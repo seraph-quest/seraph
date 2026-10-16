@@ -32,7 +32,15 @@ RSS = (b'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><titl
        b'<description>&lt;p&gt;Faster sync.&lt;/p&gt;</description></item></channel></rss>')
 ATOM = (b'<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Release log</title><entry><title>Entry one</title>'
         b'<link href="https://example.com/e1"/><updated>2026-10-14T00:00:00Z</updated><summary>Dated entry</summary></entry></feed>')
-FORMATS = {"html": ("text/html", HTML), "rss": ("application/rss+xml", RSS), "atom": ("application/atom+xml", ATOM)}
+# ~250 KiB sources (below max_source_bytes 262144) whose normalized text fits the 64 KiB snapshot.
+BIG_HTML = (b"<html><head><script>" + b"var a = 1;" * 24_400 + b"</script></head><body><h1>Release 2</h1>"
+            + b'<div class="c"><span></span></div>' * 400 + b"<p>Shipped &amp; dated.</p></body></html>")
+BIG_RSS = (b'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Release feed</title>'
+           + b"".join(b"<item><title>Version %d ships</title><link>https://example.com/v%d</link><description><![CDATA["
+                      % (i, i) + b'<div class="layout"><span class="x"></span></div>' * 129 + b"<p>Dated.</p>]]></description></item>"
+                      for i in range(40)) + b"</channel></rss>")
+FORMATS = {"html": ("text/html", HTML), "rss": ("application/rss+xml", RSS), "atom": ("application/atom+xml", ATOM),
+           "big_html": ("text/html", BIG_HTML), "big_rss": ("application/rss+xml", BIG_RSS)}
 
 
 def _deny_sockets(monkeypatch):
@@ -217,9 +225,9 @@ async def test_goal_plan_job_cordis_source_canonical_artifact_readback(accountin
         assert staged_plan["steps"][2]["capability_id"] == "source.public-extract.v1"
         done = await env["service"].run(job["job_id"])
         assert done["status"] == "succeeded", done
-        # Guardian consumer: request, job, raw source, snapshot stage + readback, final job.
-        assert fixture.methods()[2:] == ["artifacts.read", "tasks.inspect", "artifacts.read", "artifacts.stage",
-                                         "artifacts.read", "tasks.inspect"]
+        # Guardian consumer: request, job, raw source (one chunk + end chunk), snapshot stage + readback, final job.
+        assert fixture.methods()[2:] == ["artifacts.read", "tasks.inspect", "artifacts.read", "artifacts.read",
+                                         "artifacts.stage", "artifacts.read", "tasks.inspect"]
         assert len(fixture.gets) == 1 and len(fixture.posts) == 1 and len(fixture.calls) == 3
         witness = await _artifacts(env, job["job_id"])
         snapshot = next(a for a in witness.artifacts.values() if a["kind"] == "snapshot")["parsed"]
@@ -249,7 +257,30 @@ async def test_goal_plan_job_cordis_source_canonical_artifact_readback(accountin
         assert readback.json()["physical_readback"] is True and readback.json()["brief"]["findings"]
         # An exact re-admission reuses the occurrence and never re-plans or re-fetches.
         assert (await _admit(env))["job_id"] == job["job_id"]
-        assert len(fixture.frames) == 8 and len(fixture.gets) == 1
+        assert len(fixture.frames) == 9 and len(fixture.gets) == 1
+
+
+@pytest.mark.parametrize("fmt", ["big_html", "big_rss"])
+async def test_sources_up_to_max_source_bytes_cross_in_bounded_chunks(accounting_db, real_auth, monkeypatch, fmt):  # noqa: F811
+    from src.runtime_plugins.protocol import MAX_FRAME
+    body = FORMATS[fmt][1]
+    assert 250 * 1024 < len(body) <= 262144
+    fixture = Fixture(FORMATS[fmt])
+    async with discovery(accounting_db, monkeypatch, fixture) as env:
+        job = await _admit(env)
+        done = await env["service"].run(job["job_id"])
+        assert done["status"] == "succeeded", done
+        witness = await _artifacts(env, job["job_id"])
+        raw = next(a for a in witness.artifacts.values() if a["kind"] == "raw_source")
+        assert json.loads(raw["content"])["body"].encode() == body
+        reads = [payload for method, payload in fixture.frames if method == "artifacts.read"
+                 and payload["artifact_ref"] == raw["reference"].artifact_id]
+        # Bounded 64 KiB chunks at increasing offsets, ending with an empty chunk; no frame-limit change.
+        assert len(reads) >= 5 and all(item["max_bytes"] == 65536 for item in reads)
+        assert [item["offset"] for item in reads] == sorted(item["offset"] for item in reads) and reads[0]["offset"] == 0
+        assert MAX_FRAME == 1_048_576
+        snapshot = next(a for a in witness.artifacts.values() if a["kind"] == "snapshot")["parsed"]
+        assert snapshot.lines[-1] in {"Shipped & dated.", "Summary: Dated."}
 
 
 # ---------------------------------------------------------------- 2: config replacement, pinned old jobs

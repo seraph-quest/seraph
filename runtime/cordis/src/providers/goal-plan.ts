@@ -27,7 +27,7 @@ export class GoalPlanProvider extends Service implements SeraphResearchPlanner {
   constructor(ctx: Context) { super(ctx, 'seraphResearchPlanner'); }
   async plan(input: Input<'research.buildPlan'>): Promise<{status: 'succeeded'; plan: Json} | Blocked> {
     const { task_ref } = validateInput('research.buildPlan', input);
-    const staged = await this.ctx.seraphArtifacts.read({ artifact_ref: task_ref, max_bytes: 65_536 });
+    const staged = await this.ctx.seraphArtifacts.read({ artifact_ref: task_ref, max_bytes: 65_536, offset: 0 });
     if (staged.status !== 'succeeded') return blocked(staged.reason_code);
     let request: Json;
     try { request = JSON.parse(staged.value.content) as Json; } catch { return blocked('research_plan_request_invalid'); }

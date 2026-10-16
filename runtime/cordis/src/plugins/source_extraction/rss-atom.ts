@@ -8,7 +8,7 @@
  */
 import { normalizeLines, normalizeSourceText } from './html.js';
 
-export const FEED_LIMITS = Object.freeze({ maxInputBytes: 61_440, maxDepth: 32, maxElements: 4096, maxItems: 64, maxFieldBytes: 4096 });
+export const FEED_LIMITS = Object.freeze({ maxInputBytes: 262_144, maxDepth: 32, maxElements: 4096, maxItems: 64, maxFieldBytes: 4096 });
 
 export class FeedRejected extends Error {
   constructor(readonly reason: 'source_feed_malformed' | 'source_feed_dtd_forbidden' | 'source_feed_entity_forbidden' | 'source_output_oversize') { super(reason); }

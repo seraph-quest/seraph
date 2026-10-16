@@ -38,7 +38,7 @@ export class GuardianResearchConsumer extends Service implements SeraphResearchC
   constructor(ctx: Context) { super(ctx, 'seraphResearchConsumer'); }
   async execute(input: Input<'research.executeAccepted'>): Promise<Result<'research.executeAccepted'>> {
     const { plan_ref } = validateInput('research.executeAccepted', input);
-    const staged = await this.ctx.seraphArtifacts.read({ artifact_ref: plan_ref, max_bytes: 65_536 });
+    const staged = await this.ctx.seraphArtifacts.read({ artifact_ref: plan_ref, max_bytes: 65_536, offset: 0 });
     if (staged.status !== 'succeeded') return blocked(staged.reason_code);
     const accepted = request(staged.value.content);
     if (!accepted) return blocked('research_extraction_request_invalid');
@@ -65,7 +65,7 @@ export class GuardianResearchConsumer extends Service implements SeraphResearchC
       const digest = createHash('sha256').update(content).digest('hex');
       const snapshot = await this.ctx.seraphArtifacts.stage({ request_ref: `snapshot:${source.source_slot}`, content, content_digest: digest });
       if (snapshot.status !== 'succeeded') return blocked(snapshot.reason_code);
-      const readback = await this.ctx.seraphArtifacts.read({ artifact_ref: snapshot.value.artifact_ref, max_bytes: 65_536 });
+      const readback = await this.ctx.seraphArtifacts.read({ artifact_ref: snapshot.value.artifact_ref, max_bytes: 65_536, offset: 0 });
       if (readback.status !== 'succeeded') return blocked(readback.reason_code);
       if (readback.value.digest !== snapshot.value.digest) return blocked('research_snapshot_readback_changed');
     }

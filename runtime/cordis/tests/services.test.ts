@@ -16,7 +16,7 @@ const input: Record<ServiceMethod, unknown> = {
   'tasks.admit': {request_ref:'native-1'}, 'tasks.inspect':{job_ref:'native-1'}, 'tasks.cancel':{job_ref:'native-1',expected_revision:1}, 'tasks.checkpoint':{checkpoint_ref:'native-1'}, 'tasks.settle':{outcome_ref:'native-1'},
   'capabilities.list':{cursor:null,limit:10}, 'capabilities.describe':{capability_id:'work.json-format.v1'}, 'capabilities.invoke':{request_ref:'native-1'}, 'inference.request':{request_ref:'native-1'},
   'memory.retrieve':{query_ref:'native-1',limit:10}, 'memory.propose':{request_ref:'native-1'}, 'memory.applyReviewed':{review_ref:'native-1'}, 'memory.forget':{request_ref:'native-1'},
-  'artifacts.read':{artifact_ref:'native-1',max_bytes:4096}, 'artifacts.stage':{request_ref:'native-1',content:null,content_digest:null}, 'artifacts.adopt':{request_ref:'native-1'}, 'audit.append':{event_ref:'native-1'},
+  'artifacts.read':{artifact_ref:'native-1',max_bytes:4096,offset:0}, 'artifacts.stage':{request_ref:'native-1',content:null,content_digest:null}, 'artifacts.adopt':{request_ref:'native-1'}, 'audit.append':{event_ref:'native-1'},
   'research.buildPlan':{task_ref:'native-1'}, 'research.executeAccepted':{plan_ref:'native-1'},
   'conversation.accept':{turn_ref:'native-1'}, 'conversation.append':{message_ref:'native-1'}, 'conversation.read':{conversation_ref:'native-1',limit:10,before_message_ref:null}, 'conversation.cancel':{turn_ref:'native-1',expected_revision:1},
   'scheduler.register':{request_ref:'native-1'}, 'scheduler.disable':{schedule_ref:'native-1',expected_revision:1}, 'scheduler.dispatchDue':{limit:10},
@@ -81,7 +81,7 @@ for (const method of SERVICE_METHODS) test(`real scoped Cordis provider forwards
   assert.ok(fibers.every(fiber => fiber.state === FiberState.ACTIVE));
   assert.ok(SERVICE_KEYS.every(key => context.get(key)));
   assert.deepEqual(await invokeService(context, method, input[method] as Input<typeof method>), blocked);
-  assert.deepEqual(calls, COMPOSED.has(method) ? [['artifacts.read',{artifact_ref:'native-1',max_bytes:65536}]] : [[method,input[method]]]);
+  assert.deepEqual(calls, COMPOSED.has(method) ? [['artifacts.read',{artifact_ref:'native-1',max_bytes:65536,offset:0}]] : [[method,input[method]]]);
   await Promise.all(fibers.map(fiber => fiber.dispose()));
   assert.equal(context.registry.size,0);
   assert.ok(SERVICE_KEYS.every(key => !context.get(key)));
@@ -104,8 +104,9 @@ test('memory evidence results use exact text digests and real receipt references
 });
 test('closed requests deny client authority, URL/path/bytes, unsafe limits and asserted extraction provenance before native contact', () => {
   for (const method of SERVICE_METHODS) for (const field of ['root_id','goal_id','route','budget','deadline_at','composition_epoch','owner_kind','authority_mode']) assert.throws(() => validateInput(method,{...input[method] as object,[field]:'injected'}));
-  for (const artifact_ref of ['/private/path','https://example.com','x'.repeat(129)]) assert.throws(() => validateInput('artifacts.read',{artifact_ref,max_bytes:1}));
-  for (const max_bytes of [0,65537,1.5,Number.MAX_SAFE_INTEGER+1]) assert.throws(() => validateInput('artifacts.read',{artifact_ref:'native-1',max_bytes}));
+  for (const artifact_ref of ['/private/path','https://example.com','x'.repeat(129)]) assert.throws(() => validateInput('artifacts.read',{artifact_ref,max_bytes:1,offset:0}));
+  for (const max_bytes of [0,65537,1.5,Number.MAX_SAFE_INTEGER+1]) assert.throws(() => validateInput('artifacts.read',{artifact_ref:'native-1',max_bytes,offset:0}));
+  for (const offset of [-1,1048577,1.5]) assert.throws(() => validateInput('artifacts.read',{artifact_ref:'native-1',max_bytes:1,offset}));
   assert.throws(() => validateInput('source-extraction.extract',{...input['source-extraction.extract'] as object,raw_bytes:'secret'}));
   assert.throws(() => validateInput('source-extraction.extract',{...input['source-extraction.extract'] as object,first_line:4,last_line:3}));
   assert.throws(() => validateResult('source-extraction.extract',{status:'succeeded',memory_status:'no_learning',value:{artifact_ref:'native-1',input_digest:'a'.repeat(64),provider_digest:'b'.repeat(64),config_digest:'c'.repeat(64),evidence:[{source_ref:'source:0',text:'é'.repeat(2049)}]}}));
@@ -167,7 +168,7 @@ test('scoped providers return positive read job artifact readback projections wi
   const goal = await composition.invoke('goals.read',{},client);
   const job = await composition.invoke('tasks.admit',{request_ref:'native-candidate-1'},client);
   const artifact = await composition.invoke('artifacts.adopt',{request_ref:'native-readback-1'},client);
-  const readback = await composition.invoke('artifacts.read',{artifact_ref:'artifact-1',max_bytes:2},client);
+  const readback = await composition.invoke('artifacts.read',{artifact_ref:'artifact-1',max_bytes:2,offset:0},client);
   assert.equal(goal.status,'succeeded'); assert.equal(job.status,'succeeded'); assert.equal(artifact.status,'succeeded');
   assert.deepEqual(readback,{status:'succeeded',memory_status:'no_learning',value:responses['artifacts.read']});
   assert.deepEqual(calls,['goals.read','tasks.admit','artifacts.adopt','artifacts.read']);

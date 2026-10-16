@@ -4,6 +4,7 @@ import json
 import logging
 import mimetypes
 import os
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -14,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import col, select
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event
+from src.audit.runtime import READ_PATH_AUDIT_WAIT_MS, log_integration_event
 from src.agent.session import session_manager
 from src.auth.service import AuthenticatedOperator
 from src.db.engine import get_session
@@ -2708,6 +2709,23 @@ async def list_native_notification_recovery(
     return {"recoveries": recoveries, "recovery_count": len(recoveries)}
 
 
+# An idle daemon polls every few seconds; one empty-poll audit row per worker
+# per window keeps the liveness signal without a write per poll (#1074).
+_EMPTY_POLL_AUDIT_WINDOW_SECONDS = 300.0
+_empty_poll_audited_at: dict[str, float] = {}
+
+
+def _empty_poll_audit_due(worker_id: str) -> bool:
+    now = time.monotonic()
+    last = _empty_poll_audited_at.get(worker_id)
+    if last is not None and now - last < _EMPTY_POLL_AUDIT_WINDOW_SECONDS:
+        return False
+    if len(_empty_poll_audited_at) >= 256:
+        _empty_poll_audited_at.clear()
+    _empty_poll_audited_at[worker_id] = now
+    return True
+
+
 @router.get("/observer/notifications/next", response_model=NativeNotificationPollResponse)
 async def get_next_native_notification(
     request: Request,
@@ -2723,12 +2741,14 @@ async def get_next_native_notification(
         operator_session_id=operator_session_id,
     )
     if notification is None:
-        await log_integration_event(
-            integration_type="observer_daemon",
-            name="notifications",
-            outcome="empty_result",
-            details={"pending_count": 0},
-        )
+        if _empty_poll_audit_due(worker_id):
+            await log_integration_event(
+                integration_type="observer_daemon",
+                name="notifications",
+                outcome="empty_result",
+                details={"pending_count": 0},
+                lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
+            )
         return {"notification": None}
 
     pending_count = await native_notification_queue.count(

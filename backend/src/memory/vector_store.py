@@ -9,7 +9,7 @@ import lancedb
 import pyarrow as pa
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import log_integration_event_sync, read_path_audit_wait_ms, read_path_audits
 from src.memory.embedder import EmbeddingMetadata, EmbeddingUnavailableError, embed, embedding_metadata
 from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, read_model_fabric_configuration
 from src.workspace import WorkspaceStateClass, canonical_workspace_registry, canonical_workspace_root
@@ -88,12 +88,13 @@ def _lance_dir() -> str:
     return str(workspace_root / "lance")
 
 
-def _log_vector_store_event(outcome: str, details: dict | None = None) -> None:
+def _log_vector_store_event(outcome: str, details: dict | None = None, *, lock_wait_ms: int | None = None) -> None:
     log_integration_event_sync(
         integration_type="vector_store",
         name=_TABLE_NAME,
         outcome=outcome,
         details=details,
+        lock_wait_ms=lock_wait_ms,
     )
 
 
@@ -215,6 +216,20 @@ def search_with_status(
     top_k: int = 0,
     category_filter: Optional[str] = None,
 ) -> tuple[list[dict], bool]:
+    """Search memories by semantic similarity on a read path (#1074).
+
+    Its diagnostic audits, including the query embedding's, are bounded and
+    deferred under contention instead of stalling a chat turn.
+    """
+    with read_path_audits():
+        return _search_with_status(query, top_k, category_filter)
+
+
+def _search_with_status(
+    query: str,
+    top_k: int = 0,
+    category_filter: Optional[str] = None,
+) -> tuple[list[dict], bool]:
     """Search memories by semantic similarity.
 
     Returns list of dicts with: id, text, category, score, created_at.
@@ -234,6 +249,7 @@ def search_with_status(
                     "category_filter": category_filter,
                     "top_k": top_k,
                 },
+                lock_wait_ms=read_path_audit_wait_ms(),
             )
             return [], False
 
@@ -266,6 +282,7 @@ def search_with_status(
                     "category_filter": category_filter,
                     "top_k": top_k,
                 },
+                lock_wait_ms=read_path_audit_wait_ms(),
             )
             return [], True
 
@@ -290,6 +307,7 @@ def search_with_status(
                     "category_filter": category_filter,
                     "top_k": top_k,
                 },
+                lock_wait_ms=read_path_audit_wait_ms(),
             )
             return [], False
 
@@ -302,6 +320,7 @@ def search_with_status(
                 "top_k": top_k,
                 "result_count": len(rows),
             },
+            lock_wait_ms=read_path_audit_wait_ms(),
         )
 
         return [
@@ -325,6 +344,7 @@ def search_with_status(
                 "top_k": top_k,
                 "error": str(exc),
             },
+            lock_wait_ms=read_path_audit_wait_ms(),
         )
         return [], True
 

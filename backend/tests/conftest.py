@@ -1,3 +1,4 @@
+import importlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -132,6 +133,13 @@ async def async_db(request, tmp_path_factory):
     import src.db.engine as canonical_engine
 
     canonical_get_session = canonical_engine.get_session
+    # Import every patched module before patching any of them. Otherwise a
+    # module first imported here binds ``from src.db.engine import
+    # get_session`` to this fixture's patched function, and that stale binding
+    # is what its own patcher later "restores". The teardown sweep below also
+    # repairs captures by modules first imported during the test body.
+    for target in _PATCH_TARGETS:
+        importlib.import_module(target.rsplit(".", 1)[0])
     patches = []
     for target in _PATCH_TARGETS:
         p = patch(target, _get_session)
@@ -261,6 +269,12 @@ def reset_process_singletons(monkeypatch):
     # Reset in place: many modules hold a reference to this exact object.
     context_manager.__dict__.update(fresh.__dict__)
     monkeypatch.setattr(effective_policy, "configuration_mutation_lock", asyncio.Lock())
+    # Contention backoffs from #702/#1074: a prior test's deferred touch or
+    # audited empty poll must not suppress the next test's.
+    from src.api import observer as observer_api
+    from src.auth import service as auth_service
+    monkeypatch.setattr(auth_service, "_auth_touch_retry_after", 0.0)
+    monkeypatch.setattr(observer_api, "_empty_poll_audited_at", {})
     yield
 
 

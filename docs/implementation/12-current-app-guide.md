@@ -1158,6 +1158,16 @@ the writer lock and takes it only to persist a newly observed accounting
 period; admission still re-checks the ledger under that lock. Native
 notification reads write only when an expiry or binding transition is due and,
 while the lock is held, present that transition as terminal until it persists.
+Chat turns and the memory panes check canonical memory tombstones in a
+read-only snapshot and take the writer lock only to re-apply one after a stale
+restore (#1074); one guardian-state build checks once, and its snapshot cache
+write waits at most 250 ms. Expired queued insights and pending approvals are
+never shown as active; their cleanup is best-effort on read. Diagnostic audits
+emitted by reads and idle daemon polls wait at most 250 ms and are otherwise
+retried in the background, not dropped (empty polls are audited once per worker
+per 5 minutes); write-path and inference-policy refusal audits keep the normal
+wait. Write transactions that hold the lock for 1 s or more are logged with
+their call site.
 
 ## Current Capability Summary
 

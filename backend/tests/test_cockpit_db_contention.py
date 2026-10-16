@@ -92,13 +92,13 @@ async def _cockpit(tmp_path, monkeypatch):
         await engine.dispose()
 
 
-async def _fan_out(client: AsyncClient) -> dict[str, tuple[int, float, object]]:
+async def _fan_out(client: AsyncClient, paths=COCKPIT_BASELINE) -> dict[str, tuple[int, float, object]]:
     async def one(path: str):
         started = time.monotonic()
         response = await client.get(path)
         return path, (response.status_code, time.monotonic() - started, response.json())
 
-    return dict(await asyncio.gather(*(one(path) for path in COCKPIT_BASELINE)))
+    return dict(await asyncio.gather(*(one(path) for path in paths)))
 
 
 @contextmanager
@@ -215,3 +215,31 @@ async def test_expired_session_fails_closed_under_a_foreign_writer(tmp_path, mon
         response = await client.get("/api/auth/session")
         assert response.status_code == 401
         assert _sql(path, "SELECT revoked_at FROM operator_sessions")[0][0] is not None
+
+
+# #1074: panes and polls that used to write (tombstone reconciliation,
+# expiry housekeeping, diagnostic audits) on every read.
+READ_PATH_PANES = (
+    "/api/operator/guardian-memory-live-control",
+    "/api/memory/recovery/status",
+    "/api/operator/guardian-state",
+    "/api/observer/continuity",
+    "/api/approvals/pending?limit=8",
+    "/api/observer/activity/today",
+)
+
+
+@pytest.mark.asyncio
+async def test_memory_panes_and_housekeeping_reads_do_not_wait_for_a_foreign_writer(tmp_path, monkeypatch):
+    async with _cockpit(tmp_path, monkeypatch) as (client, path):
+        await _fan_out(client, READ_PATH_PANES)
+        baseline = await _fan_out(client, READ_PATH_PANES)
+        assert all(status == 200 for status, _elapsed, _body in baseline.values()), baseline
+        _sql(path, "UPDATE operator_sessions SET last_seen_at = ?", _sqlite_now())
+        with _foreign_writer(path):
+            results = await _fan_out(client, READ_PATH_PANES)
+        for pane, (status, elapsed, body) in results.items():
+            assert status == 200, f"{pane} answered {status}: {body}"
+            assert elapsed - baseline[pane][1] < _WRITER_ADDED_LATENCY_BOUND_SECONDS, f"{pane} took {elapsed:.2f}s"
+        memory = results["/api/operator/guardian-memory-live-control"][2]
+        assert "degraded" not in str(memory.get("operator_status", "")), memory

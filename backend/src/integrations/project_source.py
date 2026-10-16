@@ -286,6 +286,84 @@ class ProjectSourceService:
             "status": getattr(task.status, "value", str(task.status)), "requires_review": True,
             "accepted": False, "no_learning": True})
 
+    @staticmethod
+    def watch_view_path(repository: str) -> str:
+        return "project-watch/" + repository.replace("/", "__") + ".txt"
+
+    async def write_watch_view(self, *, owner_principal_id: str, snapshot_id: str) -> dict[str, Any]:
+        """Materialize a snapshot as the workspace text an existing source watch reads.
+
+        A GuardianSourceWatch over this file (kind ``workspace_text``) turns a
+        relevant change into its normal reviewed decision packet and dossier.
+        That verified dossier is what an exact GitHub response is prepared
+        from; this view itself grants nothing.
+        """
+        from config.settings import settings
+        from pathlib import Path
+        import os
+        from src.workspace import canonical_workspace_root
+        async with self._session() as db:
+            snapshot = await db.get(ProjectSourceSnapshot, snapshot_id)
+            if snapshot is not None:
+                db.expunge(snapshot)
+        if snapshot is None or snapshot.owner_principal_id != owner_principal_id:
+            raise ProjectSourceError("project_source_snapshot_unavailable", status_code=404)
+        lines = [f"GitHub {snapshot.repository} watched issues and pull requests"]
+        for item in sorted(json.loads(snapshot.items_json), key=lambda value: value["number"]):
+            preview = " ".join(item["body"].split())[:300]
+            lines.append(f"#{item['number']} {item['kind']} {item['state']} [{', '.join(item['labels'])}] {item['title']}")
+            lines.append(f"  revision {item['updated_at']} digest {item['digest']}")
+            if preview:
+                lines.append("  " + preview)
+        relative = self.watch_view_path(snapshot.repository)
+        target = Path(canonical_workspace_root(settings.workspace_dir)) / relative
+        target.parent.mkdir(mode=0o700, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+        return {"path": relative, "snapshot_id": snapshot.id, "snapshot_digest": snapshot.snapshot_digest}
+
+    async def prepare_response(self, *, owner_principal_id: str, owner_session_id: str, source_ref: ProjectSourceRef,
+                               kind: str, goal_id: str, goal_revision: int, dossier_artifact_id: str,
+                               dossier_sha256: str, body: str, idempotency_key: str) -> dict[str, Any]:
+        """Prepare a blocker/review comment through the exact GitHub follow-through.
+
+        The item is re-read first; a changed revision stops for a decision.
+        The prepared comment awaits its own exact approval: nothing is
+        published here.
+        """
+        from src.extensions.github_followthrough import ACTION_CREATE_COMMENT, PrepareRequest as GitHubPrepareRequest
+        if kind not in {"blocker", "review_request"}:
+            raise ProjectSourceError("project_response_kind_invalid", status_code=422)
+        item = await self.snapshot_item(owner_principal_id=owner_principal_id, source_ref=source_ref)
+        row = await self._connection(owner_principal_id)
+        if row is None or row.repository != source_ref.repository:
+            raise ProjectSourceError("project_source_repository_changed", status_code=409)
+        current = project_item(row.repository, await self.adapter.read_project_item(owner_principal_id=owner_principal_id,
+            owner_session_id=owner_session_id, connection_id=row.id, expected_connection_revision=int(row.revision or 0),
+            repository=row.repository, number=source_ref.number))
+        if current["digest"] != item["digest"]:
+            raise ProjectSourceError("project_source_changed_decision_required", status_code=409)
+        view = await self.adapter.prepare(owner_principal_id=owner_principal_id, owner_session_id=owner_session_id,
+            request=GitHubPrepareRequest(conversation_id=owner_session_id, goal_id=goal_id, goal_revision=goal_revision,
+                dossier_artifact_id=dossier_artifact_id, dossier_sha256=dossier_sha256,
+                connection_revision=int(row.revision or 0), action=ACTION_CREATE_COMMENT, body=body,
+                issue_number=source_ref.number, idempotency_key=idempotency_key))
+        async with self._session() as db:
+            existing = (await db.execute(select(ProjectSourceLink).where(
+                ProjectSourceLink.owner_principal_id == owner_principal_id,
+                ProjectSourceLink.link_kind == "github_followthrough",
+                ProjectSourceLink.target_id == view["job_id"]))).scalars().first()
+            if existing is None:
+                db.add(ProjectSourceLink(owner_principal_id=owner_principal_id, snapshot_id=source_ref.snapshot_id,
+                    repository=source_ref.repository, item_number=source_ref.number, item_kind=source_ref.kind,
+                    item_updated_at=source_ref.updated_at, item_digest=source_ref.digest, goal_id=goal_id,
+                    goal_revision=goal_revision, finding_kind=kind, link_kind="github_followthrough",
+                    target_id=view["job_id"]))
+                await db.commit()
+        return view
+
     async def lineage(self, *, owner_principal_id: str, task_id: str, owner_session_id: str | None = None) -> dict[str, Any]:
         """One navigable lineage: source revision → task → repository root → patch → publication → PR.
 
@@ -358,6 +436,11 @@ def _owner(request: Request):
     return _principal_id(operator), _session_id(operator)
 
 
+def _service() -> ProjectSourceService:
+    from src.extensions import github_followthrough
+    return ProjectSourceService(adapter=github_followthrough.github_followthrough_service)
+
+
 def _http(exc: GitHubFollowthroughError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail={"code": exc.code})
 
@@ -366,7 +449,7 @@ def _http(exc: GitHubFollowthroughError) -> HTTPException:
 async def get_project_source_status(request: Request):
     try:
         principal, _ = _owner(request)
-        return await ProjectSourceService().status(owner_principal_id=principal)
+        return await _service().status(owner_principal_id=principal)
     except GitHubFollowthroughError as exc:
         raise _http(exc) from exc
 
@@ -375,7 +458,7 @@ async def get_project_source_status(request: Request):
 async def sync_project_source(scope: ProjectSourceScope, request: Request):
     try:
         principal, session = _owner(request)
-        return await ProjectSourceService().sync(owner_principal_id=principal, owner_session_id=session, scope=scope)
+        return await _service().sync(owner_principal_id=principal, owner_session_id=session, scope=scope)
     except GitHubFollowthroughError as exc:
         raise _http(exc) from exc
 
@@ -399,7 +482,7 @@ async def propose_project_finding(body: ProjectFindingRequest, request: Request)
         principal, session = _owner(request)
         if dispatcher.general_tasks is None:
             raise ProjectSourceError("general_task_inactive", status_code=503)
-        finding = await ProjectSourceService().propose_task(owner=WorkBoardOwner(principal_id=principal,
+        finding = await _service().propose_task(owner=WorkBoardOwner(principal_id=principal,
                 session_id=session), general_task_service=dispatcher.general_tasks, source_ref=body.source_ref,
             goal_id=body.goal_id, goal_revision=body.goal_revision, kind=body.kind,
             idempotency_key=body.idempotency_key,
@@ -409,11 +492,47 @@ async def propose_project_finding(body: ProjectFindingRequest, request: Request)
         raise _http(exc) from exc
 
 
+class ProjectWatchViewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    snapshot_id: str = Field(min_length=1, max_length=64)
+
+
+@project_source_router.post("/watch-view")
+async def write_project_watch_view(body: ProjectWatchViewRequest, request: Request):
+    try:
+        principal, _ = _owner(request)
+        return await _service().write_watch_view(owner_principal_id=principal, snapshot_id=body.snapshot_id)
+    except GitHubFollowthroughError as exc:
+        raise _http(exc) from exc
+
+
+class ProjectResponseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    source_ref: ProjectSourceRef
+    kind: Literal["blocker", "review_request"]
+    goal_id: str = Field(min_length=1, max_length=128)
+    goal_revision: int = Field(ge=1)
+    dossier_artifact_id: str = Field(min_length=1, max_length=512)
+    dossier_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    body: str = Field(min_length=1, max_length=20_000)
+    idempotency_key: str = Field(min_length=36, max_length=36)
+
+
+@project_source_router.post("/responses")
+async def prepare_project_response(body: ProjectResponseRequest, request: Request):
+    try:
+        principal, session = _owner(request)
+        return await _service().prepare_response(owner_principal_id=principal, owner_session_id=session,
+            **body.model_dump(exclude={"source_ref"}), source_ref=body.source_ref)
+    except GitHubFollowthroughError as exc:
+        raise _http(exc) from exc
+
+
 @project_source_router.get("/lineage/{task_id}")
 async def get_project_lineage(task_id: str, request: Request):
     try:
         principal, session = _owner(request)
-        return await ProjectSourceService().lineage(owner_principal_id=principal, task_id=task_id,
+        return await _service().lineage(owner_principal_id=principal, task_id=task_id,
             owner_session_id=session)
     except GitHubFollowthroughError as exc:
         raise _http(exc) from exc

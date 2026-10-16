@@ -31,7 +31,7 @@ def test_service_wire_rejects_missing_native_binding_and_authority_fields(change
 def test_service_wire_preserves_literal_canonical_identity():
     original = frame("artifacts.read", {"artifact_ref": "art_abc", "max_bytes": 65536, "offset": 0})
     assert validate_frame(decode_json(encode_frame(original)[4:])) == original
-    assert len(SERVICE_METHODS) == 35
+    assert len(SERVICE_METHODS) == 36
 
 
 @pytest.mark.parametrize("suffix", ["\n", "\r", "\u2028", "\u2029"])

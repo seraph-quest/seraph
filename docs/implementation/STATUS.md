@@ -102,8 +102,12 @@ inference/provider spend. Live GitHub usefulness remains
   used only while the turn, its scheduler parent and the epoch are current.
 - **Blocked guardian loop:** work stops visibly in Settings, Activity and the
   cockpit, with no fallback.
-- **Not yet migrated:** orchestrator, specialists, delegation and Board worker
-  drafts.
+- **Delegation (#1020, part 2):** with `use_delegation`, each specialist runs as
+  a durable child turn of the chat turn. It has the same Root, its own reviewed
+  preset, depth 1, at most 4 children per turn and the parent's deadline less
+  its settlement window. Its receipts are derived into the parent's, and
+  cancellation cascades to it.
+- **Not yet migrated:** Board worker drafts.
 - **Memory flushes:** a flush inside an operator's turn is admitted under that
   operator's Root.
 - **Default cutover:** the boot cutover moves the presets owner first, then

@@ -1,7 +1,7 @@
 {
  "categories": {
   "agent_turn": "Interactive chat, direct chat and onboarding: the #1019 Cordis turn (presets chat.*).",
-  "agent_turn_pr2": "Orchestrator and specialists: move to the Cordis loop in #1020 PR2.",
+  "delegated_turn": "Orchestrator turn and its specialists: each specialist call is a durable Cordis child turn (#1020 PR2, presets chat.orchestrator and specialist.*).",
   "board_worker_pr3": "WorkBoard dispatcher drafts: move to worker turns in #1020 PR3.",
   "capability_owned": "A capability's own governed Python executor on the same broker (#1020 Dependencies clause).",
   "context_helper": "Context-assembly helpers of the enclosing turn, under its principal (decision D2).",
@@ -19,23 +19,23 @@
   "daily_briefing": "guardian_turn",
   "end_of_day_goal_report": "guardian_turn",
   "evening_review": "guardian_turn",
-  "file_worker": "agent_turn_pr2",
+  "file_worker": "delegated_turn",
   "general_task_planner": "capability_owned",
-  "goal_planner": "agent_turn_pr2",
+  "goal_planner": "delegated_turn",
   "memory_embedding": "capability_owned",
-  "memory_keeper": "agent_turn_pr2",
+  "memory_keeper": "delegated_turn",
   "onboarding_agent": "agent_turn",
-  "orchestrator_agent": "agent_turn_pr2",
+  "orchestrator_agent": "delegated_turn",
   "readonly_research_child": "capability_owned",
   "screenshot_image_analysis": "capability_owned",
   "screenshot_observation_digest": "guardian_turn",
   "session_consolidation": "guardian_turn",
   "session_title_generation": "context_helper",
   "strategist_agent": "shared_route",
-  "vault_keeper": "agent_turn_pr2",
-  "web_researcher": "agent_turn_pr2",
+  "vault_keeper": "delegated_turn",
+  "web_researcher": "delegated_turn",
   "weekly_activity_review": "guardian_turn",
-  "workflow_runner": "agent_turn_pr2"
+  "workflow_runner": "delegated_turn"
  },
  "schema_version": 1,
  "sites": {
@@ -68,7 +68,7 @@
    "count": 1
   },
   "agent/factory.py::create_orchestrator::ToolCallingAgent": {
-   "category": "agent_turn_pr2",
+   "category": "delegated_turn",
    "count": 1
   },
   "agent/factory.py::get_model::FallbackLiteLLMModel": {
@@ -100,15 +100,15 @@
    "count": 1
   },
   "agent/specialists.py::_create_model::FallbackLiteLLMModel": {
-   "category": "agent_turn_pr2",
+   "category": "delegated_turn",
    "count": 1
   },
   "agent/specialists.py::_create_model::build_model_kwargs": {
-   "category": "agent_turn_pr2",
+   "category": "delegated_turn",
    "count": 1
   },
   "agent/specialists.py::create_specialist::ToolCallingAgent": {
-   "category": "agent_turn_pr2",
+   "category": "delegated_turn",
    "count": 1
   },
   "agent/strategist.py::create_strategist_agent::FallbackLiteLLMModel": {

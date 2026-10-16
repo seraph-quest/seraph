@@ -40,13 +40,20 @@ TURN_JOB_KIND = "cordis_chat_turn_v1"
 STEP_JOB_KIND = "cordis_turn_step_v1"
 # #1020 unattended guardian step: same sealed projection, its own sequencer.
 GUARDIAN_STEP_JOB_KIND = "cordis_guardian_step_v1"
+# #1020 PR2: one child admission per delegating call; the child turn's own job kind.
+DELEGATION_STEP_JOB_KIND = "cordis_delegation_step_v1"
+CHILD_TURN_JOB_KIND = "cordis_child_turn_v1"
+STEP_JOB_KINDS = {"agent_loop": STEP_JOB_KIND, "guardian": GUARDIAN_STEP_JOB_KIND, "delegation": DELEGATION_STEP_JOB_KIND}
 TURN_CONTEXT_TAG = "cordis-turn.v1"
 AGENT_LOOP_DOMAIN = "seraph.agent-loop.v1"
 PRESETS_DOMAIN = "seraph.agent-presets.v1"
 # Bounded by the child's 16-callback cap: one read, the decisions, one inspect.
 MAX_TOOL_CALLS = 12
 STEP_KINDS = ("tool_calls", "final_answer", "parse_error", "max_steps")
+# Delegated children per turn (the legacy board cap, delegation_contracts.MAX_CHILDREN).
+MAX_CHILDREN = 4
 DECISION_REFS = frozenset({f"tool_intent:{index}" for index in range(MAX_TOOL_CALLS)}
+                          | {f"child_admit:{index}" for index in range(MAX_CHILDREN)}
                           | {"continue", "settlement", "final_call"})
 PROFILES = frozenset({"agent", "onboarding", "direct"})
 # Grace after the chat timeout so the timeout reply itself can settle.
@@ -71,12 +78,18 @@ TURN_BLOCKED_MESSAGES = {
     "agent_turn_replayed": ("This message already started a turn that did not finish. "
                             "Send it again as a new message."),
     "agent_turn_profile_changed": "Chat settings changed while this turn started. Send the message again.",
-    "delegation_pending_1020": ("Delegation is not available on the Cordis agent loop yet (#1020). "
-                                "Turn off use_delegation to chat."),
+    "delegation_owner_not_ready": ("Delegation needs the seraph.delegation.v1 owner on Cordis. Cut it over in "
+                                   "Settings (it needs the agent-presets owner on Cordis first), or turn off "
+                                   "use_delegation to chat without specialists."),
+    "agent_turn_child_blocked": ("A delegated specialist stopped on the Cordis agent loop, so this turn stopped too. "
+                                 "Send the message again."),
 }
 
 
-def turn_blocked_message(reason: str) -> str:
+def turn_blocked_message(reason: str, turn: "CordisTurn | None" = None) -> str:
+    if reason == "agent_turn_child_blocked" and turn is not None and turn.child_block is not None:
+        name, child_reason = turn.child_block
+        return f"Delegated specialist {name} stopped: {child_reason}. {TURN_BLOCKED_MESSAGES[reason]}"
     return TURN_BLOCKED_MESSAGES.get(reason, f"The Cordis agent loop stopped this turn ({reason}).")
 
 
@@ -99,10 +112,10 @@ def expected_decisions(projection: dict) -> list[str] | None:
 
 
 def _preset_current(preset_id, digest, max_steps) -> bool:
-    """A chat step names its reviewed interactive preset exactly (#1020)."""
+    """A chat step names its reviewed interactive (or delegated-child) preset exactly (#1020)."""
     from src.agent.presets import PresetError, preset, preset_digest, preset_max_steps
     try:
-        return (type(preset_id) is str and preset(preset_id)["kind"] == "interactive"
+        return (type(preset_id) is str and preset(preset_id)["kind"] in {"interactive", "child"}
                 and digest == preset_digest(preset_id) and max_steps == preset_max_steps(preset_id))
     except PresetError:
         return False
@@ -191,11 +204,24 @@ async def chat_runtime_status(host=None) -> dict:
                 "reason": "agent_loop_composition_drift",
                 "recovery": f"Restart Seraph so boot records the running Cordis build ({RESTART_COMMANDS})."}
     from config.settings import settings
-    if settings.use_delegation:
+    if settings.use_delegation and _delegation_denial(rows) is not None:
+        # Specialists run as durable child turns under their own owner row (#1020 PR2).
+        reason = _delegation_denial(rows)
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
-                "reason": "delegation_pending_1020", "recovery": turn_blocked_message("delegation_pending_1020")}
+                "reason": reason, "recovery": turn_blocked_message(reason)}
     return {"loop": LOOP_NAMES["cordis"], "route": "chat_agent", "owner_epoch": row.epoch, "reason": None,
             "recovery": None, "owner_kind": "cordis"}
+
+
+def _delegation_denial(rows) -> str | None:
+    """Why a delegating (orchestrator) turn cannot run on Cordis now, if it cannot."""
+    from .delegation_turns import DELEGATION_DOMAIN
+    row = rows.get(DELEGATION_DOMAIN)
+    if row is None:
+        return "composition_dependency_missing"
+    if row.owner_kind != "cordis" or row.state != "ready":
+        return "delegation_owner_not_ready"
+    return None
 
 
 def chat_route(status: dict) -> str:
@@ -255,8 +281,7 @@ async def dispatch_turn_step(dispatcher, frame, payload, scope):
     async with dispatcher.jobs._session() as db:
         await _writer(db)
         run, _, _ = await dispatcher.current(db, scope, method)
-        expected_kind = GUARDIAN_STEP_JOB_KIND if scope.binding.native_branch == "guardian" else STEP_JOB_KIND
-        if run.job_kind != expected_kind:
+        if run.job_kind != STEP_JOB_KINDS.get(scope.binding.native_branch):
             raise NativeServiceBlocked("native_turn_candidate_not_bound")
         candidate = _run_candidate(run)
         context = read_context(run)
@@ -327,12 +352,18 @@ class CordisTurn:
     """Python owner of one Cordis chat turn."""
 
     def __init__(self, *, operator, job: dict, owner: str, fence: int, host, jobs, profile: str,
-                 max_steps: int, deadline: datetime, memory_revision: str):
+                 max_steps: int, deadline: datetime, memory_revision: str, preset_id: str | None = None,
+                 parent: "CordisTurn | None" = None):
         self.operator, self.job_id, self.owner, self.fence = operator, job["job_id"], owner, fence
         self.host, self.jobs, self.profile, self.max_steps = host, jobs, profile, max_steps
         from src.agent.presets import PROFILE_PRESETS, preset_digest
-        self.preset_id = PROFILE_PRESETS[profile]
+        self.preset_id = preset_id or PROFILE_PRESETS[profile]
         self.preset_digest = preset_digest(self.preset_id)
+        # #1020 PR2: a delegated child's parent turn, and a parent's delegation state.
+        self.parent = parent
+        self.active_child: "CordisTurn | None" = None
+        self.children_ran = 0
+        self.child_block: tuple[str, str] | None = None
         self.deadline, self.memory_revision = deadline, memory_revision
         self.loop = asyncio.get_running_loop()
         self.cancelled = threading.Event()
@@ -364,17 +395,17 @@ class CordisTurn:
         host, jobs = host or cordis_host, _jobs(jobs)
         if profile not in PROFILES:
             raise TurnBlocked("agent_turn_profile_invalid")
-        if settings.use_delegation:
-            raise TurnBlocked("delegation_pending_1020")
         if not host.admitting or host.reviewed is None:
             raise TurnBlocked("agent_turn_host_unavailable")
         operator = await _token_bound(operator)
         from src.agent.presets import PROFILE_PRESETS, preset_digest, preset_max_steps
-        max_steps = preset_max_steps(PROFILE_PRESETS[profile])
+        # With delegation on, the chat agent is the orchestrator (#1020 PR2): its own preset.
+        delegating = profile == "agent" and settings.use_delegation
+        preset_id = "chat.orchestrator" if delegating else PROFILE_PRESETS[profile]
+        max_steps = preset_max_steps(preset_id)
         candidate = {"schema_version": 1, "conversation_session_id": conversation_session_id, "message_id": message_id,
-                     "profile": profile, "max_steps": max_steps, "preset_id": PROFILE_PRESETS[profile],
-                     "preset_digest": preset_digest(PROFILE_PRESETS[profile]),
-                     "timeout_seconds": float(timeout_seconds)}
+                     "profile": profile, "max_steps": max_steps, "preset_id": preset_id,
+                     "preset_digest": preset_digest(preset_id), "timeout_seconds": float(timeout_seconds)}
         job_id = "cordis-turn:" + _digest({"root": operator.session_id, "session": conversation_session_id,
                                            "message": message_id})
         deadline = datetime.now(timezone.utc) + timedelta(seconds=float(timeout_seconds)) + SETTLEMENT_GRACE
@@ -393,6 +424,11 @@ class CordisTurn:
                 if not any(item.runtime_domain == AGENT_LOOP_DOMAIN and item.owner_kind == "cordis"
                            for item in binding.dependency_vector):
                     raise TurnBlocked("agent_loop_owner_not_cordis")
+                if delegating:
+                    from .ownership import inventory
+                    denial = _delegation_denial(await inventory(db))
+                    if denial is not None:
+                        raise TurnBlocked(denial)
                 memory_revision = await memory_revocation_revision(db)
         except CompositionBindingError as exc:
             raise TurnBlocked(exc.reason_code) from exc
@@ -422,7 +458,8 @@ class CordisTurn:
         claimed = await jobs.claim_job(job_id, owner=owner, lease_seconds=max(lease, 1),
                                        expected_revision=queued["revision"])
         turn = cls(operator=operator, job=job, owner=owner, fence=int(claimed["lease"]["fencing_token"]), host=host,
-                   jobs=jobs, profile=profile, max_steps=max_steps, deadline=deadline, memory_revision=memory_revision)
+                   jobs=jobs, profile=profile, max_steps=max_steps, deadline=deadline, memory_revision=memory_revision,
+                   preset_id=preset_id)
         await turn._write_context(lambda context: None, initial=True)
         return turn, False
 
@@ -442,6 +479,16 @@ class CordisTurn:
         except CompositionBindingError as exc:
             raise TurnBlocked("agent_turn_epoch_changed") from exc
         return run
+
+    async def binding_current(self) -> None:
+        """This turn's bound owner vector is still the current one (also after it settled)."""
+        from .ownership import CompositionBindingError, RuntimeCompositionBinding, validate_invocation
+        async with self.jobs._session() as db:
+            run = await self.jobs._fetch(db, self.job_id)
+            try:
+                await validate_invocation(db, RuntimeCompositionBinding.from_json(run.composition_binding_json))
+            except CompositionBindingError as exc:
+                raise TurnBlocked("agent_turn_epoch_changed") from exc
 
     def _context(self, run) -> dict:
         value = json.loads(run.checkpoint_context_json) if run.checkpoint_context_json else None
@@ -476,12 +523,23 @@ class CordisTurn:
         current, deadline open, and no memory revoked since the turn began."""
         if self.cancelled.is_set():
             raise TurnBlocked("agent_turn_cancelled")
+        if self.parent is not None and self.parent.cancelled.is_set():
+            raise TurnBlocked("agent_turn_parent_cancelled")
         if datetime.now(timezone.utc) >= self.deadline:
             raise TurnBlocked("agent_turn_deadline_expired")
         from src.auth.ownership import _current_root
         from src.auth.service import AuthFailure
         async with self.jobs._session() as db:
             await self._fetch_live(db)
+            if self.parent is not None:
+                # A child acts only while its parent is the same live, unsettled attempt.
+                try:
+                    run = await self.parent._fetch_live(db)
+                except TurnBlocked as exc:
+                    raise TurnBlocked("agent_turn_parent_inactive") from exc
+                context = self.parent._context(run)
+                if context is None or context["settlement"] is not None:
+                    raise TurnBlocked("agent_turn_parent_inactive")
             try:
                 await _current_root(db, self.operator)
             except AuthFailure as exc:
@@ -502,32 +560,45 @@ class CordisTurn:
 
     def cancel(self) -> None:
         self.cancelled.set()
+        if self.active_child is not None:
+            self.active_child.cancel()
 
     # -------------------------------------------------------- one step decision
 
     async def decide(self, kind: str, *, step_index: int, call_count: int = 0, output_digest: str) -> list[str]:
         """One short sequencer invocation; returns the verified decisions."""
+        await self.check_live()
+        if call_count > MAX_TOOL_CALLS:
+            raise TurnBlocked("agent_turn_tool_calls_exceeded")
+        projection = {"schema_version": 1, "kind": kind, "call_count": call_count, "step_index": step_index,
+                      "max_steps": self.max_steps, "preset_id": self.preset_id, "preset_digest": self.preset_digest,
+                      "output_ref": "turn-output:" + hmac.new(self._ref_key, output_digest.encode(),
+                                                              hashlib.sha256).hexdigest()[:48]}
+        expected = expected_decisions(projection)
+        if expected is None:
+            raise TurnBlocked("agent_turn_transition_invalid")
+        candidate = {"schema_version": 1, "method": "agent-loop.startTurn", "turn_ref": self.job_id,
+                     "projection": projection}
+        decisions, step_job = await self._sequence(
+            origin_method="agent-loop.startTurn", native_branch="agent_loop", candidate=candidate,
+            key=f"turn-step:{_sha(self.job_id)[:40]}:{step_index}:{kind}", expected=expected,
+            deadline_at=self.deadline, effect_type="cordis_turn_step")
+        self._steps += 1
+        await self._write_context(lambda context: context["steps"].append(
+            {"step_index": step_index, "kind": kind, "decisions": decisions, "step_job": step_job}))
+        return decisions
+
+    async def _sequence(self, *, origin_method: str, native_branch: str, candidate: dict, key: str,
+                        expected: list[str], deadline_at: datetime, effect_type: str) -> tuple[list[str], str]:
+        """Admit, claim and invoke one sequencer step job; its staged decisions must equal ``expected``."""
         from .bridge import HostBlocked
         from .service_jobs import _block, admit_service_job, claim_service_job, open_invocation
         try:
-            await self.check_live()
-            if call_count > MAX_TOOL_CALLS:
-                raise TurnBlocked("agent_turn_tool_calls_exceeded")
-            projection = {"schema_version": 1, "kind": kind, "call_count": call_count, "step_index": step_index,
-                          "max_steps": self.max_steps, "preset_id": self.preset_id, "preset_digest": self.preset_digest,
-                          "output_ref": "turn-output:" + hmac.new(self._ref_key, output_digest.encode(),
-                                                                  hashlib.sha256).hexdigest()[:48]}
-            expected = expected_decisions(projection)
-            if expected is None:
-                raise TurnBlocked("agent_turn_transition_invalid")
-            candidate = {"schema_version": 1, "method": "agent-loop.startTurn", "turn_ref": self.job_id,
-                         "projection": projection}
-            key = f"turn-step:{_sha(self.job_id)[:40]}:{step_index}:{kind}"
             try:
                 job, replayed = await admit_service_job(
-                    operator=self.operator, origin_method="agent-loop.startTurn", native_branch="agent_loop",
+                    operator=self.operator, origin_method=origin_method, native_branch=native_branch,
                     candidate=candidate, idempotency_key=key, reviewed_composition=self.host.reviewed, jobs=self.jobs,
-                    deadline_at=self.deadline)
+                    deadline_at=deadline_at)
             except NativeServiceBlocked as exc:
                 raise TurnBlocked(exc.reason_code) from exc
             if job["status"] != "accepted":
@@ -538,8 +609,7 @@ class CordisTurn:
         except NativeServiceBlocked as exc:
             raise TurnBlocked(exc.reason_code) from exc
         try:
-            result = await self.host.request_service("agent-loop.startTurn", {"turn_ref": job["job_id"]},
-                                                     original_scope=scope)
+            result = await self.host.request_service(origin_method, {"turn_ref": job["job_id"]}, original_scope=scope)
             if result["status"] != "succeeded":
                 raise NativeServiceBlocked(result["reason_code"])
             async with self.jobs._session() as db:
@@ -550,13 +620,14 @@ class CordisTurn:
                 if result["value"] != echo or decisions != expected:
                     # The child staged anything but Python's own parse: never adopted.
                     raise NativeServiceBlocked("native_child_result_mismatch")
-                digest = _digest({"projection": projection, "decisions": decisions})
+                digest = _digest({"projection": candidate["projection"], "decisions": decisions})
                 now = datetime.now(timezone.utc).isoformat()
-                readback = {"effect_id": "cordis-turn-step:" + run.run_identity, "receipt_kind": "readback",
-                            "effect_type": "cordis_turn_step", "status": "succeeded",
-                            "target_path": "cordis-turn-step:" + digest, "content_sha256": digest,
+                tag = effect_type.replace("_", "-")
+                readback = {"effect_id": f"{tag}:" + run.run_identity, "receipt_kind": "readback",
+                            "effect_type": effect_type, "status": "succeeded",
+                            "target_path": f"{tag}:" + digest, "content_sha256": digest,
                             "target_digest": digest, "verified_at": now, "recorded_at": now,
-                            "readback_id": "cordis-turn-step-readback:" + run.run_identity, "reconciled": True,
+                            "readback_id": f"{tag}-readback:" + run.run_identity, "reconciled": True,
                             "reconciliation_status": "resolved", "fencing_token": run.fencing_token,
                             "details": {"verified": True, "no_learning": True}}
                 await cas_run(db, run, effect_receipts_json=_append_receipt(run.effect_receipts_json, readback,
@@ -564,7 +635,7 @@ class CordisTurn:
                 await db.commit()
             await self.jobs.transition_job(job["job_id"], "succeeded", owner=owner, fencing_token=fence,
                                            result={"no_learning": True, "decisions": decisions},
-                                           result_summary="Cordis agent-loop step decided; no_learning")
+                                           result_summary="Cordis sequencer step decided; no_learning")
         except (NativeServiceBlocked, HostBlocked) as exc:
             reason = getattr(exc, "reason_code", None) or "native_turn_host_unavailable"
             await _block(self.jobs, scope, reason)
@@ -572,10 +643,7 @@ class CordisTurn:
         except asyncio.CancelledError:
             await asyncio.shield(_block(self.jobs, scope, "native_turn_cancelled"))
             raise
-        self._steps += 1
-        await self._write_context(lambda context: context["steps"].append(
-            {"step_index": step_index, "kind": kind, "decisions": decisions, "step_job": job["job_id"]}))
-        return decisions
+        return decisions, job["job_id"]
 
     async def pin_surface(self, digest: str) -> None:
         if self._surface is not None:
@@ -604,8 +672,10 @@ class CordisTurn:
         await self._write_context(lambda context: None,
                                   effects=lambda items: _append_receipt(_canonical(items), intent, key="effect_id"))
 
-    async def tool_outcome(self, *, step_index: int, call_index: int, tool_name: str, outcome: str) -> None:
-        """Resolve one intent: ``succeeded``, ``failed`` (an error observation) or ``no_effect``."""
+    async def tool_outcome(self, *, step_index: int, call_index: int, tool_name: str, outcome: str,
+                           details: dict | None = None) -> None:
+        """Resolve one intent: ``succeeded``, ``failed`` (an error observation), ``no_effect`` or, for a
+        delegating call whose child left an effect unresolved, ``unknown``."""
         effect_id = self._effect_id(step_index, call_index)
         now = datetime.now(timezone.utc).isoformat()
 
@@ -617,7 +687,8 @@ class CordisTurn:
                 "effect_id": effect_id, "receipt_kind": "effect", "effect_type": "cordis_turn_tool",
                 "status": outcome, "target_path": "native_tool:" + tool_name, "target_digest": _sha(tool_name),
                 "recorded_at": now, "fencing_token": self.fence, "reconciled": True,
-                "reconciliation_status": "resolved", "details": {"tool_name": tool_name, "no_learning": True}}])
+                "reconciliation_status": "unresolved" if outcome == "unknown" else "resolved",
+                "details": {"tool_name": tool_name, "no_learning": True, **(details or {})}}])
         await self._write_context(lambda context: None, effects=effects)
 
     async def effects(self) -> list[dict]:
@@ -627,7 +698,8 @@ class CordisTurn:
 
     # -------------------------------------------------------- settlement
 
-    async def settle(self, outcome: str, *, reason: str | None = None, message: dict | None = None) -> bool:
+    async def settle(self, outcome: str, *, reason: str | None = None, message: dict | None = None,
+                     report_digest: str | None = None) -> bool:
         """Fenced settlement: the transcript row (insert-if-absent) and the turn CAS commit
         in one writer transaction, then the terminal transition. Returns whether it settled."""
         from src.agent.session import session_manager
@@ -662,6 +734,22 @@ class CordisTurn:
                                         "readback_id": "cordis-turn-reply-readback:" + row.id, "reconciled": True,
                                         "reconciliation_status": "resolved", "fencing_token": self.fence,
                                         "details": {"verified": True, "no_learning": True}})
+                    if report_digest is not None and outcome == "succeeded":
+                        # A delegated child writes no transcript row: its verified output is the report
+                        # the parent adopts as the delegating call's observation.
+                        now = datetime.now(timezone.utc).isoformat()
+                        effects.append({"effect_id": "cordis-child-report:" + self.job_id, "receipt_kind": "readback",
+                                        "effect_type": "cordis_child_report", "status": "succeeded",
+                                        "target_path": "child-report:" + report_digest,
+                                        "content_sha256": report_digest, "target_digest": report_digest,
+                                        "verified_at": now, "recorded_at": now,
+                                        "readback_id": "cordis-child-report-readback:" + self.job_id,
+                                        "reconciled": True, "reconciliation_status": "resolved",
+                                        "fencing_token": self.fence, "details": {"verified": True, "no_learning": True}})
+                    if outcome != "succeeded":
+                        # A tool (or delegated child) still mid-call when the turn stops is an
+                        # unresolved liability: recorded unknown, never re-run.
+                        effects = _unknown_open_intents(effects)
                     context["settlement"] = {"outcome": outcome, "reason": reason,
                                              "message_id": message["message_id"] if message else None}
                     try:
@@ -671,6 +759,9 @@ class CordisTurn:
                         raise TurnBlocked("agent_turn_attempt_changed") from exc
                     await db.commit()
             self.settled = True
+            if outcome != "succeeded":
+                # Descendants first, while this turn is still their live parent (#1020 PR2).
+                await self._cancel_children(reason or outcome)
             terminal = "succeeded" if outcome == "succeeded" else "blocked"
             try:
                 await self.jobs.transition_job(self.job_id, terminal, owner=self.owner, fencing_token=self.fence,
@@ -695,6 +786,190 @@ class CordisTurn:
             return False
         self.settled = True
         return True
+
+    async def _cancel_children(self, reason: str) -> None:
+        """Cancel every live delegated child through the durable owner; a mid-call child tool stays unknown."""
+        from src.db.models import WorkflowRunState
+        from src.workflows.job_runtime import DurableJobError
+        child = self.active_child
+        if child is not None:
+            child.cancel()
+            with suppress(TurnBlocked, DurableJobError):
+                await child._write_context(lambda context: None, effects=lambda items: _canonical(
+                    _unknown_open_intents(items)))
+        async with self.jobs._session() as db:
+            children = (await db.execute(select(WorkflowRunState.run_identity).where(
+                WorkflowRunState.parent_run_identity == self.job_id,
+                WorkflowRunState.status.in_(("accepted", "queued", "running", "paused",
+                                             "awaiting_approval"))))).scalars().all()
+        for child_id in children:
+            with suppress(DurableJobError):
+                await self.jobs.cancel_job_tree(child_id, reason=reason)
+
+    # -------------------------------------------------------- delegation (#1020 PR2)
+
+    async def admit_child(self, *, name: str, preset_id: str, step_index: int, call_index: int,
+                          child_index: int) -> "CordisTurn":
+        """Stage ``delegation.startChild``, then admit the child turn: a durable child of this turn
+        with the same Root and authority, its reviewed preset, and this turn's deadline less the
+        settlement window it needs to adopt the child's report and reply."""
+        from src.agent.presets import preset_digest, preset_max_steps
+        from src.db.engine import get_session
+        from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
+        from .ownership import CompositionBindingError, bind_invocation
+        from .service_jobs import _grants
+        await self.check_live()
+        deadline = self.deadline - SETTLEMENT_GRACE
+        projection = {"schema_version": 1, "kind": "child_admit", "child_index": child_index,
+                      "max_children": MAX_CHILDREN, "preset_id": preset_id, "preset_digest": preset_digest(preset_id)}
+        candidate = {"schema_version": 1, "method": "delegation.startChild", "turn_ref": self.job_id,
+                     "projection": projection}
+        await self._sequence(origin_method="delegation.startChild", native_branch="delegation", candidate=candidate,
+                             key=f"delegation-step:{_sha(self.job_id)[:40]}:{step_index}:{call_index}",
+                             expected=[f"child_admit:{child_index}"], deadline_at=deadline,
+                             effect_type="cordis_delegation_step")
+        try:
+            async with get_session() as db:
+                binding = await bind_invocation(db, method="delegation.startChild", native_branch="delegation",
+                                                reviewed_composition=self.host.reviewed)
+        except CompositionBindingError as exc:
+            raise TurnBlocked(exc.reason_code) from exc
+        from .delegation_turns import DELEGATION_DOMAIN
+        if not any(item.runtime_domain == DELEGATION_DOMAIN and item.owner_kind == "cordis"
+                   for item in binding.dependency_vector):
+            raise TurnBlocked("delegation_owner_not_ready")
+        job_id = "cordis-turn:" + _digest({"parent": self.job_id, "step": step_index, "call": call_index})
+        child_candidate = {"schema_version": 1, "specialist": name, "preset_id": preset_id,
+                           "preset_digest": preset_digest(preset_id), "max_steps": preset_max_steps(preset_id),
+                           "parent_turn": self.job_id}
+        authority = {"principal": self.operator.principal.principal_id, "owner_kind": "user",
+                     "session_id": self.operator.session_id, "grants": _grants(self.operator.principal),
+                     "parent_job_id": self.job_id}
+        spec = DurableJobSpec(
+            identity=DurableJobIdentity(job_id=job_id, owner_kind="user",
+                                        owner_principal_id=self.operator.principal.principal_id,
+                                        job_kind=CHILD_TURN_JOB_KIND, capability_version="1",
+                                        idempotency_scope="cordis-child-turn", idempotency_key=_sha(job_id)[:64]),
+            inputs=child_candidate, session_id=self.operator.session_id, operator_session_id=self.operator.session_id,
+            declared_authority=authority, deadline_at=deadline, max_attempts=1, composition_binding=binding,
+            parent_job_id=self.job_id, parent_fencing_token=self.fence,
+            run_fingerprint=_digest({"candidate": child_candidate, "kind": CHILD_TURN_JOB_KIND}))
+        from src.workflows.job_runtime import DurableJobError
+        try:
+            job = await self.jobs.admit_job(spec)
+            if job["status"] != "accepted" or (job.get("receipt") or {}).get("status") == "deduped":
+                raise TurnBlocked("agent_turn_child_replayed")
+            queued = await self.jobs.transition_job(job_id, "queued", expected_revision=job["revision"])
+            lease = int((deadline - datetime.now(timezone.utc)).total_seconds()) + 1
+            claimed = await self.jobs.claim_job(job_id, owner=self.owner, lease_seconds=max(lease, 1),
+                                                expected_revision=queued["revision"])
+        except DurableJobError as exc:
+            raise TurnBlocked("agent_turn_parent_inactive") from exc
+        child = type(self)(operator=self.operator, job=job, owner=self.owner, fence=int(claimed["lease"]["fencing_token"]),
+                           host=self.host, jobs=self.jobs, profile="child", max_steps=preset_max_steps(preset_id),
+                           deadline=deadline, memory_revision=self.memory_revision, preset_id=preset_id, parent=self)
+        await child._write_context(lambda context: None, initial=True)
+        return child
+
+    def delegate(self, agent, tool_name: str, arguments, *, step_index: int, call_index: int, execute):
+        """Run one managed-agent call as a durable child turn (from the agent's worker thread).
+
+        Refusals before admission (nesting, the per-turn cap, no time left) are observations,
+        exactly as legacy limits are, and do not count toward the cap. A host, epoch or preset
+        failure stops the parent (``agent_turn_child_blocked``) instead of becoming an observation.
+        """
+        from src.agent.presets import PresetError, require_child, specialist_preset_id
+        from src.agent.tool_calling_agent import control_flow_interrupt
+        managed = agent.managed_agents[tool_name]
+        if self.parent is not None or getattr(managed, "managed_agents", None):
+            return "Error: Nested delegation is not allowed."
+        if self.children_ran >= MAX_CHILDREN:
+            return f"Error: Delegation limit reached for this turn ({MAX_CHILDREN})."
+        if self.deadline - SETTLEMENT_GRACE <= datetime.now(timezone.utc):
+            return "Error: Not enough turn time left to delegate."
+        tool_names = list(getattr(managed, "tools", {}) or {})
+        tool_names = [name for name in tool_names if name != "final_answer"]
+        if not tool_names:
+            return "Error: No specialists are currently available for delegation."
+        model = getattr(managed, "model", None)
+        try:
+            preset_id = specialist_preset_id(tool_name)
+            require_child(preset_id, name=tool_name, runtime_path=getattr(model, "_runtime_path", None),
+                          temperature=(getattr(model, "kwargs", None) or {}).get("temperature"),
+                          max_steps=int(getattr(managed, "max_steps", 0)), tool_names=tool_names,
+                          rule_tools=_mcp_rule_tools(tool_name) if preset_id == "specialist.mcp" else None)
+        except PresetError as exc:
+            self.child_block = (tool_name, exc.reason_code)
+            raise TurnBlocked("agent_turn_child_blocked") from exc
+        self.run_sync(self.tool_intent(step_index=step_index, call_index=call_index, tool_name=tool_name))
+        try:
+            child = self.run_sync(self.admit_child(name=tool_name, preset_id=preset_id, step_index=step_index,
+                                                   call_index=call_index, child_index=self.children_ran))
+        except TurnBlocked as exc:
+            self.child_block = (tool_name, exc.reason_code)
+            self.run_sync(self.tool_outcome(step_index=step_index, call_index=call_index, tool_name=tool_name,
+                                            outcome="no_effect"))
+            raise TurnBlocked("agent_turn_child_blocked") from exc
+        self.active_child = child
+        restore = child.attach(managed)
+        try:
+            try:
+                result = execute(tool_name, arguments)
+            finally:
+                restore()
+                self.active_child = None
+                if child._steps:
+                    self.children_ran += 1
+        except BaseException as exc:
+            interrupt = control_flow_interrupt(exc)
+            blocked = turn_failure_reason(exc)
+            if interrupt is not None:
+                # Approval or clarification inside the child: the child stops; the parent pauses
+                # with the same interrupt after recording whatever the child already committed.
+                self.run_sync(child.settle("approval_required", reason=type(interrupt).__name__))
+            elif blocked is not None:
+                self.run_sync(child.settle("blocked", reason=blocked))
+                self.child_block = (tool_name, blocked)
+            else:
+                self.run_sync(child.settle("failed", reason=type(exc).__name__))
+            self._record_child(child, tool_name, step_index, call_index)
+            if self.cancelled.is_set():
+                # This turn's own cancellation reached the child first: the turn is cancelled, not blocked.
+                raise TurnBlocked("agent_turn_cancelled") from exc
+            if blocked is not None and interrupt is None:
+                raise TurnBlocked("agent_turn_child_blocked") from exc
+            raise
+        settled = self.run_sync(child.settle("succeeded", report_digest=_sha(str(result))))
+        self._record_child(child, tool_name, step_index, call_index)
+        if not settled:
+            self.child_block = (tool_name, child.blocked_reason or "agent_turn_child_settlement_refused")
+            raise TurnBlocked("agent_turn_child_blocked")
+        # Adopted only while this turn is still live, the child's owners (delegation, agent loop,
+        # presets) are still the epochs it ran under, and its preset is the reviewed one.
+        self.run_sync(self.check_live())
+        try:
+            self.run_sync(child.binding_current())
+        except TurnBlocked as exc:
+            self.child_block = (tool_name, exc.reason_code)
+            raise TurnBlocked("agent_turn_child_blocked") from exc
+        from src.agent.presets import preset_digest
+        if child.preset_digest != preset_digest(preset_id):
+            self.child_block = (tool_name, "agent_preset_changed")
+            raise TurnBlocked("agent_turn_child_blocked")
+        return result
+
+    def _record_child(self, child: "CordisTurn", tool_name: str, step_index: int, call_index: int) -> None:
+        """The delegating call's receipt, derived from the child's own effect receipts (its job row)."""
+        job = self.run_sync(self.jobs.get_job(child.job_id))
+        effects = [{"tool_name": (item.get("details") or {}).get("tool_name"), "effect_id": item.get("effect_id"),
+                    "status": item.get("status")}
+                   for item in job["effects"] if item.get("effect_type") == "cordis_turn_tool"]
+        statuses = {item["status"] for item in effects}
+        outcome = ("unknown" if statuses & {"intent", "unknown"} else
+                   "succeeded" if "succeeded" in statuses else "no_effect")
+        self.run_sync(self.tool_outcome(step_index=step_index, call_index=call_index, tool_name=tool_name,
+                                        outcome=outcome, details={"child_job_id": child.job_id,
+                                                                  "child_effects": effects}))
 
     async def interrupt(self, message: dict | None) -> bool:
         """WS disconnect: cancel the turn and write the one fenced interrupted row."""
@@ -724,7 +999,7 @@ class CordisTurn:
             # the onboarding URL allowlist) and temperature: pinned at step 1, compared after.
             return _sha(json.dumps([sorted(
                 [name, str(getattr(tool, "description", "")), getattr(tool, "inputs", {}),
-                 str(getattr(tool, "output_type", ""))] for name, tool in agent.tools.items()),
+                 str(getattr(tool, "output_type", ""))] for name, tool in {**agent.tools, **agent.managed_agents}.items()),
                 _sha(str(getattr(agent, "instructions", "") or "")), str(getattr(agent.model, "temperature", None))],
                 sort_keys=True, default=str))
         original_step = agent._step_stream
@@ -769,6 +1044,13 @@ class CordisTurn:
                 return original_execute(tool_name, arguments)
             step_index, call_index = state["step"], state["call"]
             state["call"] += 1
+            if tool_name in self.managed_agents:
+                # A specialist runs as a durable child turn of this one (#1020 PR2).
+                return turn.delegate(self, tool_name, arguments, step_index=step_index, call_index=call_index,
+                                     execute=original_execute)
+            if tool_name == "delegate_task":
+                # A delegated child never delegates again; a parent delegates only through its specialists.
+                return "Error: Nested delegation is not allowed."
             if tool_name == "store_secret":
                 # Disclosed regression: the value never enters a Cordis-route effect.
                 return ("store_secret is not available on the Cordis agent loop. "
@@ -791,14 +1073,49 @@ class CordisTurn:
             turn.run_sync(turn.check_live())
             return original_max_steps(task, *args, **kwargs)
 
+        saved = {name: agent.__dict__.get(name) for name in
+                 ("_step_stream", "process_tool_calls", "execute_tool_call", "_handle_max_steps_reached")}
         agent._step_stream = MethodType(step_stream, agent)
         agent.process_tool_calls = MethodType(process_tool_calls, agent)
         agent.execute_tool_call = MethodType(execute_tool_call, agent)
         agent._handle_max_steps_reached = MethodType(handle_max_steps, agent)
 
+        def restore() -> None:
+            # A specialist instance may be delegated to again: each call attaches its own child turn.
+            for name, value in saved.items():
+                if value is None:
+                    agent.__dict__.pop(name, None)
+                else:
+                    agent.__dict__[name] = value
+        return restore
+
     async def decide_direct(self, final_text: str) -> None:
         """Direct chat: one tool-less inference whose sealed output is final by construction."""
         await self.decide("final_answer", step_index=1, output_digest=_sha(final_text))
+
+
+def _unknown_open_intents(items: list) -> list:
+    """Mark every still-open tool intent unknown: it may have taken effect and is never re-run."""
+    marked = []
+    for item in items:
+        if isinstance(item, dict) and item.get("effect_type") == "cordis_turn_tool" and item.get("status") == "intent":
+            item = {**item, "status": "unknown", "reconciliation_status": "unresolved"}
+        marked.append(item)
+    return marked
+
+
+def _mcp_rule_tools(name: str) -> set[str]:
+    """The ``specialist.mcp`` rule surface: that server's tools after today's policy filter."""
+    from src.agent.specialists import mcp_specialist_runtime_path
+    from src.tools.mcp_manager import mcp_manager
+    from src.tools.policy import filter_tools, get_current_mcp_policy_mode, get_current_tool_policy_mode
+    for server in mcp_manager.get_config():
+        server_name = str(server.get("name") or "")
+        if server_name and mcp_specialist_runtime_path(server_name) == name and mcp_manager.is_connected(server_name):
+            return {tool.name for tool in filter_tools(mcp_manager.get_server_tools(server_name),
+                                                       get_current_tool_policy_mode(), is_mcp=True,
+                                                       mcp_mode=get_current_mcp_policy_mode())}
+    return set()
 
 
 def turn_failure_reason(exc: BaseException) -> str | None:

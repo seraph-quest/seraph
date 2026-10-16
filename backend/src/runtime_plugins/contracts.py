@@ -22,6 +22,7 @@ METHOD_DOMAINS = {
         ("connections", ("inspect", "invokeBoundAdapter")),
         ("agent-loop", ("startTurn", "cancelTurn", "inspectTurn")),
         ("guardian", ("startTurn",)),
+        ("delegation", ("startChild",)),
         ("source-extraction", ("extract",)),
     ) for method in methods}
 }
@@ -106,6 +107,7 @@ REQUESTS = {
     "agent-loop.startTurn": {"turn_ref": R}, "agent-loop.cancelTurn": {"turn_ref": R, "expected_revision": I},
     "agent-loop.inspectTurn": {"turn_ref": R},
     "guardian.startTurn": {"turn_ref": R},
+    "delegation.startChild": {"turn_ref": R},
     "source-extraction.extract": {"artifact_ref": R, "acquisition_receipt_ref": R,
         "source_slot": lambda v: integer(v, 0, 3), "first_line": lambda v: integer(v, 1, 4096), "last_line": lambda v: integer(v, 1, 4096)},
 }
@@ -144,6 +146,7 @@ RESULTS = {
     "agent-loop.startTurn": JOB, "agent-loop.cancelTurn": JOB,
     "agent-loop.inspectTurn": {**JOB, "artifact_refs": lambda v: refs(v, 16)},
     "guardian.startTurn": JOB,
+    "delegation.startChild": JOB,
     "source-extraction.extract": {"artifact_ref": R, "input_digest": sha, "provider_digest": sha, "config_digest": sha,
         "evidence": lambda v: rows(v, 64, {"source_ref": R, "text": lambda s: text(s, 4096)})},
 }

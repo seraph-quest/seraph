@@ -29,8 +29,11 @@ def test_every_registered_route_has_one_owner_category():
     from src.model_fabric.caller_context import CANONICAL_ROUTE_SPECS
     assert set(INVENTORY["routes"]) == set(CANONICAL_ROUTE_SPECS)
     assert set(INVENTORY["routes"].values()) <= set(INVENTORY["categories"])
-    # Presets never invent a route: each names a registered one.
-    assert {value["runtime_path"] for value in PRESETS.values()} <= set(CANONICAL_ROUTE_SPECS)
+    # Presets never invent a route: each names a registered one. The MCP rule preset names the
+    # per-server pattern ``mcp_<server>``, whose concrete routes are the specialist route family.
+    fixed = {value["runtime_path"] for value in PRESETS.values() if "<" not in value["runtime_path"]}
+    assert fixed <= set(CANONICAL_ROUTE_SPECS)
+    assert [value["runtime_path"] for value in PRESETS.values() if "<" in value["runtime_path"]] == ["mcp_<server>"]
 
 
 def _functions_using(names: set[str]) -> set[tuple[str, str]]:

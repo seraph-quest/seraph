@@ -76,6 +76,13 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
         if candidate["method"] != origin_method:
             raise NativeServiceBlocked("native_turn_candidate_changed")
         job_kind = STEP_JOB_KIND
+    elif native_branch == "delegation":
+        from .delegation_turns import validate_delegation_candidate
+        from .agent_turns import DELEGATION_STEP_JOB_KIND
+        candidate = validate_delegation_candidate(candidate)
+        if candidate["method"] != origin_method:
+            raise NativeServiceBlocked("native_turn_candidate_changed")
+        job_kind = DELEGATION_STEP_JOB_KIND
     else:
         raise NativeServiceBlocked("native_branch_unsupported")
     job_id = "cordis-svc:" + _digest({"root": operator.session_id, "kind": job_kind, "key": idempotency_key})

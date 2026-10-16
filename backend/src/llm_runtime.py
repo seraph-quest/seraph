@@ -1589,11 +1589,11 @@ def _transport_json_value(value: Any) -> Any:
         return {str(key): _transport_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_transport_json_value(item) for item in value]
-    if isinstance(value, Tool):
-        # The tool-calling schema actually sent to the provider. ``Tool.to_dict``
-        # is smolagents' save-to-source export: it validates the class as a
-        # standalone tool and refuses Seraph's wrapper tools, which failed every
-        # canonical agent turn that offered tools (#1107).
+    if isinstance(value, Tool) or _is_managed_agent(value):
+        # The tool-calling schema actually sent to the provider (a managed specialist
+        # is offered as a tool, #1020). ``Tool.to_dict`` is smolagents' save-to-source
+        # export: it refuses Seraph's wrapper tools, which failed every canonical
+        # agent turn that offered tools (#1107).
         return get_tool_json_schema(value)
     for method_name in ("model_dump", "to_dict", "dict"):
         method = getattr(value, method_name, None)
@@ -4974,3 +4974,9 @@ async def stream_completion_with_fallback(
         hooks=hooks,
     ):
         yield delta
+
+
+def _is_managed_agent(value: Any) -> bool:
+    """A named managed agent, which smolagents offers to its manager as a tool."""
+    return (bool(getattr(value, "name", None)) and isinstance(getattr(value, "inputs", None), dict)
+            and callable(getattr(value, "run", None)) and hasattr(value, "managed_agents"))

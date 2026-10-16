@@ -871,10 +871,71 @@ first. Agent-loop and guardian follow, each with presets as a prerequisite.
   composition writer, then cut over.
 - An operator rollback of either new domain is sticky, as for agent-loop.
 
-**Not part of this slice:** orchestrator, specialists and delegation (#1020
-part 2), and the Board worker drafts (part 3). A source inventory test maps
-every model and turn site to its owner category. It runs beside the
-transport-level dispatch inventory and does not replace it.
+**Not part of this slice:** the Board worker drafts (#1020 part 3). A source
+inventory test maps every model and turn site to its owner category. It runs
+beside the transport-level dispatch inventory and does not replace it.
+
+### Cordis orchestrator and delegated specialists (#1020, part 2)
+
+With `use_delegation` on, the chat agent is the orchestrator. On the Cordis
+loop it runs under the reviewed `chat.orchestrator` preset, and its only tools
+are the specialists.
+
+**Each specialist call becomes a durable child turn.** The child is a
+`cordis_child_turn_v1` job, recorded as a child of the chat turn:
+- It is owned by the same operator and Root, with the parent's authority.
+- Its deadline is the parent's deadline less the 30 s the parent needs to
+  settle.
+- The reviewed `delegation.startChild` sequencer admits it. That sequencer may
+  stage only `child_admit:<index>`.
+- Its steps then run on the agent-loop sequencer, under its own
+  `specialist.*` preset.
+
+**Presets.** Fixed specialists have exact tool lists. MCP specialists and
+`workflow_runner` use rule presets: the concrete tools are computed at
+admission and pinned in the child's surface digest. A child whose temperature,
+step bound, route or tools differ from its preset is never admitted.
+
+**Limits.** Each of these returns an observation, as legacy limits do:
+- children never delegate again ("Nested delegation is not allowed.");
+- at most 4 children run per turn;
+- no child starts once the turn's own time has run out.
+
+A refusal before a child ran a step does not count toward the cap.
+
+**Receipts.** The child's tool receipts are on its own job row. The parent's
+receipt for the delegating call is derived from them:
+- `no_effect` when the child committed nothing;
+- `succeeded` when the child committed effects, even before an approval stop;
+- `unknown` when a child effect is unresolved.
+
+**Approvals and clarifications.** These propagate from the child through the
+parent unchanged (#1107/#1115). The parent pauses, and the operator's resume
+starts a new turn.
+
+**Fencing.** Cancelling, interrupting or blocking the parent cancels the live
+children through the durable owner (`cancel_job_tree`). A tool still mid-call
+is recorded `unknown` on both the child and the parent.
+
+The child's report is adopted only if all of these hold:
+- the child settled `succeeded`;
+- the parent is still live;
+- the Root is current;
+- the delegation, agent-loop and presets owners are still at the child's
+  epochs.
+
+**Blocked delegation.** A host, epoch or preset failure in a child stops the
+parent visibly: "Delegated specialist <name> stopped: <reason>". Delegation
+needs the `seraph.delegation.v1` owner on Cordis; its prerequisite is the
+presets owner. Otherwise chat reports `delegation_owner_not_ready` with the
+fix, and there is no fallback.
+
+**Legacy fixes in this slice.** Two bugs made delegation chat fail on both
+loops:
+- the orchestrator read each specialist's tools as a list;
+- the governed transport could not describe a specialist as a tool.
+
+Both are fixed.
 
 ### Cordis guardian research (#1008)
 

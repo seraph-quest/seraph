@@ -1133,7 +1133,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             await cordis_blocked(turn_reason or "agent_turn_failed")
             logger.exception("Agent execution failed")
             safe_detail = await redact_secrets_in_text(
-                turn_blocked_message(turn_reason) if turn_reason else f"Agent error: {e}")
+                turn_blocked_message(turn_reason, cordis_turn) if turn_reason else f"Agent error: {e}")
             await log_agent_run_event(
                 session_id=session.id,
                 transport="rest",

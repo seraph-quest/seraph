@@ -36,7 +36,7 @@ import secrets
 from types import SimpleNamespace
 import uuid
 
-from .cutover import legacy_turns, register_cutover_domain
+from .cutover import legacy_turns
 from .dispatch import NativeServiceBlocked, _append_receipt, _canonical, _digest, _writer, cas_run, read_context
 
 logger = logging.getLogger(__name__)
@@ -50,9 +50,6 @@ CONTEXT_TAG = "cordis-guardian-turn.v1"
 STEP_TIMEOUT = timedelta(seconds=30)
 SETTLEMENT_GRACE = timedelta(seconds=30)
 LOOP_NAMES = {"cordis": "cordis.guardian.v1", "legacy": "legacy.guardian", "blocked": "blocked"}
-# Default cutover order (#1019 manifest): after the presets every turn binds.
-# Boot moves the guardian domain once to Cordis; an operator rollback is sticky.
-register_cutover_domain(GUARDIAN_DOMAIN, prerequisites=(PRESETS_DOMAIN,))
 
 
 class GuardianBlocked(Exception):

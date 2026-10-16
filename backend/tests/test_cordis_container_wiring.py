@@ -24,6 +24,9 @@ def test_compose_passes_runtime_cordis_as_a_named_build_context():
         # Backend context unchanged; Compose resolves additional contexts from the project directory.
         assert build["context"] == "./backend" and build["dockerfile"] == "./Dockerfile"
         assert build["additional_contexts"] == {"cordis": "./runtime/cordis"}
+        environment = yaml.safe_load((REPO / f"docker-compose.{name}.yaml").read_text())["services"][service]["environment"]
+        # Compose `environment` overrides `env_file`, so a host CORDIS_NODE_PATH cannot replace the image's Node.
+        assert environment["CORDIS_NODE_PATH"] == "/usr/local/bin/node"
         assert (REPO / build["additional_contexts"]["cordis"] / "package-lock.json").is_file()
 
 

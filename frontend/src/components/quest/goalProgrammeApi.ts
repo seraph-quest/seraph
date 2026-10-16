@@ -61,6 +61,11 @@ export interface DiscoveryRun {
 }
 
 const REASON = /^[a-z0-9_]{1,128}$/;
+const reasonText = (value: unknown) => typeof value === "string" && value.length <= 256;
+/** An unexpected reason never hides the block: it renders as a fixed code instead. */
+export function displayReason(value: string | null): string {
+  return value !== null && REASON.test(value) ? value : "unrecognized_research_block";
+}
 
 /** Live Cordis research role readiness (#1008); blocked has a recovery, never a fallback. */
 export interface ResearchRuntime { state: "ready" | "blocked"; reason: string | null; recovery: string | null }
@@ -72,7 +77,7 @@ export function isResearchRuntime(value: unknown): value is ResearchRuntime {
   if (!value || typeof value !== "object") return false;
   const item = value as Partial<ResearchRuntime>;
   return (item.state === "ready" && item.reason === null && item.recovery === null)
-    || (item.state === "blocked" && typeof item.reason === "string" && REASON.test(item.reason) && typeof item.recovery === "string");
+    || (item.state === "blocked" && reasonText(item.reason) && typeof item.recovery === "string");
 }
 export function isResearchPlanning(value: unknown): value is ResearchPlanning {
   if (!value || typeof value !== "object") return false;
@@ -82,7 +87,7 @@ export function isResearchPlanning(value: unknown): value is ResearchPlanning {
     && typeof item.programme_id === "string" && /^[a-f0-9]{32}$/.test(item.programme_id)
     && typeof item.occurrence_day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(item.occurrence_day)
     && typeof item.status === "string" && item.no_learning === true
-    && (item.blocked_reason === null || (typeof item.blocked_reason === "string" && REASON.test(item.blocked_reason)))
+    && (item.blocked_reason === null || reasonText(item.blocked_reason))
     && (item.recovery === null || typeof item.recovery === "string");
 }
 
@@ -109,7 +114,7 @@ export function isDiscoveryRun(value: unknown): value is DiscoveryRun {
       "search_redirect_wrapper_invalid", "search_result_url_unsupported", "search_title_unsupported",
     ].includes(item.search_blocked_reason))
     && (item.research_blocked_reason === undefined || item.research_blocked_reason === null
-      || (typeof item.research_blocked_reason === "string" && REASON.test(item.research_blocked_reason)))
+      || reasonText(item.research_blocked_reason))
     && item.no_learning === true && (item.recovery === null || typeof item.recovery === "string")
     && (item.outcome === null || (Boolean(item.outcome) && ["findings", "quiet", "empty"].includes(item.outcome!.state)
       && typeof item.outcome!.coverage === "string" && item.outcome!.freshness === "current" && item.outcome!.no_learning === true));

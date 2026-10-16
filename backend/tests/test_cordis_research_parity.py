@@ -22,6 +22,35 @@ FRAGMENTS = [
 ]
 
 
+ADVERSARIAL = {"unclosed_tags": "<a" * 131072, "unclosed_comments": "<!--" * 65536, "unclosed_scripts": "<script>" * 32768,
+               "unclosed_script_open": "<script " * 32768, "whitespace_run": " " * 262143 + "x",
+               "alternating": "<script>x</style>" * 15000, "charref_digits": "&#" + "0" * 262140}
+
+
+def _reference_normalize(content, *, html_content=False):
+    """The original regex form of normalize_source_text (quadratic on unclosed input)."""
+    import html
+    value = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
+    if html_content:
+        value = re.sub(r"<!--.*?-->", "", value, flags=re.S)
+        value = re.sub(r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", "\n", value, flags=re.I | re.S)
+        value = re.sub(r"</(p|div|li|h[1-6]|br|tr|section|article)>", "\n", value, flags=re.I)
+        value = re.sub(r"<[^>]+>", "", value)
+        value = html.unescape(value)
+    lines = [" ".join(line.split()) for line in value.split("\n")]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def test_linear_python_normalizer_equals_the_original_regex_form():
+    from src.guardian.source_watch import normalize_source_text
+    small = ["<a<b>c", "<>x<>", "<!--<!-- a -->b-->", "<!-->x-->y", "<script>a<script>b</script>c</script>",
+             "<SCRIPT >x</ScRiPt\t>y", "<style>x</script>y</style>z", "<scriptx>a</scriptx>", "<noscript>n</noscript >",
+             "<script>unclosed", "<script x='>'>y</script>z", "<ſcript>s</script>t"]
+    for text in [*_corpus(), *small, *(value[:2000] for value in ADVERSARIAL.values())]:
+        for flag in (True, False):
+            assert normalize_source_text(text, html_content=flag) == _reference_normalize(text, html_content=flag), text
+
+
 def _corpus():
     rng = random.Random(1008)
     cases = ["", "plain text", "  a \t b \r\n\r\n c　d ", "<html><h1>T</h1><p>One&nbsp;&amp; two</p></html>"]
@@ -39,6 +68,8 @@ def test_html_provider_matches_python_normalize_source_text():
               "for await (const chunk of process.stdin) input += chunk;"
               "const cases = JSON.parse(input);"
               "process.stdout.write(JSON.stringify(cases.map(([text, html]) => normalizeSourceText(text, html))));")
+    cases += ["<a<b>c", "<>x<>", "<!--<!-- a -->b-->", "<script>a<script>b</script>c</script>", "<SCRIPT >x</ScRiPt\t>y",
+              "<style>x</script>y</style>z", "<script>unclosed", "<ſcript>s</script>t", *(v[:4000] for v in ADVERSARIAL.values())]
     pairs = [[text, html] for text in cases for html in (True, False)]
     completed = subprocess.run([NODE, "--input-type=module", "-e", script], input=json.dumps(pairs), capture_output=True,
                                text=True, env={"LANG": "C.UTF-8", "TZ": "UTC"}, timeout=60, check=True)
@@ -121,3 +152,27 @@ def test_uninstalled_dependencies_are_named_with_their_install_fix(tmp_path):
         reviewed_composition(root=root, node_path=Path(NODE))
     assert missing.value.reason == "build_dependencies_missing"
     assert "npm ci --prefix runtime/cordis --ignore-scripts" in cordis_recovery("blocked", missing.value.reason)
+
+
+@needs_cordis
+def test_adversarial_256_kib_pages_normalize_in_bounded_time_in_both_owners():
+    import time
+    from src.guardian.source_watch import SourceWatchError, normalize_source_text
+    for name, text in ADVERSARIAL.items():
+        started = time.perf_counter()
+        try:
+            normalize_source_text(text, html_content=True)
+        except (SourceWatchError, ValueError):
+            pass  # Oversized output / html.unescape's digit limit are typed rejections, not stalls.
+        assert time.perf_counter() - started < 2, name
+    module = (PACKAGE / "dist/src/plugins/source_extraction/html.js").as_uri()
+    script = ("import { normalizeSourceText } from " + json.dumps(module) + ";"
+              "let input = ''; process.stdin.setEncoding('utf8');"
+              "for await (const chunk of process.stdin) input += chunk;"
+              "const out = {}; for (const [name, text] of Object.entries(JSON.parse(input))) {"
+              "const started = performance.now(); normalizeSourceText(text, true); out[name] = performance.now() - started; }"
+              "process.stdout.write(JSON.stringify(out));")
+    completed = subprocess.run([NODE, "--input-type=module", "-e", script], input=json.dumps(ADVERSARIAL), capture_output=True,
+                               text=True, env={"LANG": "C.UTF-8", "TZ": "UTC"}, timeout=60, check=True)
+    timings = json.loads(completed.stdout)
+    assert set(timings) == set(ADVERSARIAL) and all(ms < 2000 for ms in timings.values()), timings

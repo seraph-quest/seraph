@@ -17,7 +17,7 @@ import hashlib
 import json
 import re
 
-from .contracts import succeeded
+from .contracts import blocked, succeeded
 from .dispatch import (NativeServiceBlocked, _append_receipt, _canonical, _digest, _run_candidate, _writer, cas_run,
                        read_context)
 
@@ -26,8 +26,36 @@ SNAPSHOT_REQUEST = re.compile(r"snapshot:([0-3])\Z")
 REJECTION = re.compile(r"source-rejected:([0-3]):([a-z_]{1,64})\Z")
 # Source-content rejections the consumer may record per slot (mirror of guardian.ts).
 SOURCE_REJECTIONS = frozenset({"source_feed_malformed", "source_feed_dtd_forbidden", "source_feed_entity_forbidden",
-                               "source_output_oversize", "source_normalized_empty", "source_envelope_invalid"})
+                               "source_output_oversize", "source_normalized_empty", "source_envelope_invalid",
+                               "source_output_invalid"})
 MAX_SNAPSHOT_BYTES = 65536
+# The only reason codes a research block may record or show. A child's
+# reason_code is untrusted text: anything else becomes research_provider_blocked.
+OPERATOR_REASONS = frozenset({
+    *SOURCE_REJECTIONS, "source_output_invalid", "source_format_provider_unavailable",
+    "source_extraction_provider_unavailable", "research_plan_provider_unavailable", "research_consumer_unavailable",
+    "research_plan_output_invalid", "research_plan_request_invalid", "research_extraction_request_invalid",
+    "research_job_not_executable", "research_snapshot_readback_changed", "research_plan_binding_changed",
+    "research_plan_limits_widened", "research_plan_input_changed", "research_plan_output_cap_widened",
+    "research_plan_rejected", "research_runtime_unavailable", "research_composition_binding_missing",
+    "research_consumer_incomplete", "research_provider_blocked", "programme_planning_requires_recovery", "stale_output",
+    "native_owner_storage_busy", "native_child_result_mismatch", "native_programme_authority_changed",
+    "native_programme_authority_invalid", "native_programme_lineage_changed", "native_original_job_authority_changed",
+    "native_original_binding_unavailable", "native_original_attempt_changed", "native_original_frame_changed",
+    "native_original_host_changed", "native_original_host_unavailable", "native_original_invocation_replay_denied",
+    "native_original_scope_changed", "native_original_scope_missing", "native_original_job_cas_changed",
+    "native_composition_binding_missing", "native_method_not_in_closure", "native_method_candidate_not_bound",
+    "native_job_reference_not_bound", "native_artifact_inventory_exceeded", "native_checkpoint_reference_not_bound",
+    "native_receipt_replay_denied", "native_research_branch_changed", "native_research_content_digest_changed",
+    "native_research_content_required", "native_research_read_bound_exceeded", "native_research_read_offset_invalid",
+    "native_research_reference_not_bound", "native_research_replay_denied", "native_research_request_changed",
+    "native_research_request_missing", "native_research_snapshot_invalid", "native_research_stage_not_bound",
+    "native_private_context_changed", "composition_dependency_changed", "composition_dependency_missing",
+    "composition_dependency_unavailable", "composition_binding_invalid", "composition_owner_changed"})
+
+
+def operator_reason(code) -> str:
+    return code if type(code) is str and code in OPERATOR_REASONS else "research_provider_blocked"
 PLAN_BINDING_KEYS = ("plan_id", "programme_id", "programme_revision", "goal_id", "goal_revision", "grant_id",
                      "grant_revision", "public_brief_digest", "route_epoch", "strategy_binding", "issued_at",
                      "deadline_at", "idempotency_key")
@@ -173,6 +201,7 @@ async def _discovery(dispatcher, method, payload, scope):
     from src.work_board.research_parent import DISCOVERY_KIND
     from src.workflows.research_guard import discovery_writer_scope
     from src.workflows.research_sources import physical_discovery_inputs
+    from src.work_board.research_artifacts import DISCOVERY_ARTIFACT_LIMITS, json_bytes
     jobs, job_id = dispatcher.jobs, scope.witness["invocation_ref"]
     witness = await physical_discovery_inputs(jobs, job_id)
     async with discovery_writer_scope(witness=witness):
@@ -234,19 +263,42 @@ async def _discovery(dispatcher, method, payload, scope):
                     or value["config_digest"] != pins["source_config_digest"]):
                 raise NativeServiceBlocked("stale_output")
             text = value["text"]
-            if not text or len(text.encode("utf-8")) > MAX_SNAPSHOT_BYTES or "\r" in text:
-                raise NativeServiceBlocked("source_output_oversize" if text else "source_normalized_empty")
-            selection = next(item for item in witness.artifacts.values() if item["kind"] == "selection")["parsed"]
-            manifest = next(item for item in witness.artifacts.values() if item["kind"] == "manifest")["parsed"]
-            result_id = selection.selected_result_ids[slot]
-            url = next(item.exact_url for item in manifest.results if item.result_id == result_id)
             envelope = _strict_json(raw[slot]["content"])
-            try:
-                snapshot = PublicSnapshotV1(result_id=result_id, url=url, digest=hashlib.sha256(text.encode()).hexdigest(),
-                                            lines=text.split("\n"), fetched_at=datetime.now(timezone.utc),
-                                            mime=envelope["media_type"])
-            except ValueError as exc:
-                raise NativeServiceBlocked("native_research_snapshot_invalid") from exc
+            provider = (pins.get("formats") or {}).get(envelope["media_type"])
+            if provider in {"plain-text", "html-text"}:
+                # Python owns the reference normalizer for these providers: the
+                # output must be exactly what it produces from the staged bytes.
+                from src.guardian.source_watch import SourceWatchError, normalize_source_text
+                try:
+                    expected = normalize_source_text(envelope["body"], html_content=provider == "html-text")
+                except (SourceWatchError, ValueError):
+                    expected = None
+                if expected != text:
+                    raise NativeServiceBlocked("stale_output")
+            # rss-atom output is provider-attested: Python bounds it but has no reference parser.
+            rejection = ("source_normalized_empty" if not text else "source_output_invalid" if "\r" in text
+                         else "source_output_oversize" if len(text.encode("utf-8")) > MAX_SNAPSHOT_BYTES else None)
+            snapshot = None
+            if rejection is None:
+                selection = next(item for item in witness.artifacts.values() if item["kind"] == "selection")["parsed"]
+                manifest = next(item for item in witness.artifacts.values() if item["kind"] == "manifest")["parsed"]
+                result_id = selection.selected_result_ids[slot]
+                url = next(item.exact_url for item in manifest.results if item.result_id == result_id)
+                try:
+                    snapshot = PublicSnapshotV1(result_id=result_id, url=url, digest=hashlib.sha256(text.encode()).hexdigest(),
+                                                lines=text.split("\n"), fetched_at=datetime.now(timezone.utc),
+                                                mime=envelope["media_type"])
+                except ValueError as exc:
+                    raise NativeServiceBlocked("native_research_snapshot_invalid") from exc
+                if len(json_bytes(snapshot.model_dump(mode="json"))) > min(
+                        witness.plan.limits.max_output_bytes, DISCOVERY_ARTIFACT_LIMITS["snapshot"]):
+                    rejection = "source_output_oversize"
+            if rejection is not None:
+                # Content the snapshot cannot hold rejects only this slot, durably.
+                context["operations"].append({"op": "source_rejected", "slot": slot, "reason": rejection, "no_learning": True})
+                await cas_run(db, run, checkpoint_context_json=_canonical(context))
+                await db.commit()
+                return blocked(rejection)
             await db.rollback()
     # The existing artifact owner rechecks lease, fence, programme authority and caps.
     artifact = await write_discovery_output(jobs, job_id, scope.witness["lease_owner"], scope.witness["fence"],

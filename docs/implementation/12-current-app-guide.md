@@ -627,8 +627,15 @@ artifact (media type and UTF-8 body only, no URL, path or credential), then one
 request and raw sources, extract them, stage each normalized snapshot and read
 it back. A snapshot is adopted through the existing discovery artifact owner
 only when it binds the raw digest and the job's pinned source provider and
-config digests; feed/size rejections are recorded per source slot and appear as
-unavailable coverage. The canonical `DiscoveryBriefV1`, Inbox digest and Work
+config digests. For the `plain-text` and `html-text` providers Python also
+recomputes `normalize_source_text` over the staged bytes and rejects any
+difference as `stale_output`; `rss-atom` output is provider-attested (Python
+bounds it but has no reference feed parser). Both normalizers strip comments,
+script/style blocks and tags with linear scans, so unclosed constructs cannot
+stall the shared child. Feed, size and line-ending rejections are recorded per
+source slot and appear as unavailable coverage. Block reasons shown to the
+operator come from a fixed Python allowlist; any other child reason is recorded
+as `research_provider_blocked`. The canonical `DiscoveryBriefV1`, Inbox digest and Work
 Board projection are unchanged, the first run still returns findings, and every
 result records `no_learning`. **Inspect discovery runs** adds `research_runtime`
 (live role readiness and recovery), `planning` jobs and per-run

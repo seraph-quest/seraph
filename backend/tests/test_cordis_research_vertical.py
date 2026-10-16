@@ -493,3 +493,49 @@ async def test_missing_provider_is_an_operator_visible_block_without_fallback(ac
         assert run["recovery"] and run["outstanding_held"] is True
         assert not any(a["kind"] == "snapshot" for a in (await _artifacts(env, job["job_id"])).artifacts.values())
         assert len(fixture.calls) == 2  # no brief inference; no silent Python extraction fallback
+
+
+# ---------------------------------------------------------------- critic fixes
+
+async def test_unreviewed_child_reason_is_recorded_as_a_fixed_code(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from src.guardian.goal_discovery import ResearchRuntimeBlocked
+    fixture = Fixture(FORMATS["html"])
+    async with discovery(accounting_db, monkeypatch, fixture) as env:
+        original = env["host"].request_service
+
+        async def odd_planner(method, payload, *, original_scope):
+            if method == "research.buildPlan":
+                return {"status": "blocked", "reason_code": "research.Plan:x", "memory_status": "no_learning"}
+            return await original(method, payload, original_scope=original_scope)
+        monkeypatch.setattr(env["host"], "request_service", odd_planner)
+        with pytest.raises(ResearchRuntimeBlocked, match="research_provider_blocked"):
+            await _admit(env)
+        history = (await env["inspect"]()).json()
+        assert history["planning"][0]["blocked_reason"] == "research_provider_blocked"
+        assert "research.Plan" not in json.dumps(history)
+
+
+async def test_html_output_differing_from_the_python_normalizer_is_rejected(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from src.guardian.goal_discovery import ResearchRuntimeBlocked
+    fixture = Fixture(FORMATS["html"])
+    async with discovery(accounting_db, monkeypatch, fixture) as env:
+        job = await _admit(env)
+        # Python's reference now disagrees with the provider's text: a forged/stale output.
+        monkeypatch.setattr("src.guardian.source_watch.normalize_source_text", lambda *_a, **_k: "Different text")
+        with pytest.raises(ResearchRuntimeBlocked, match="stale_output"):
+            await env["service"].run(job["job_id"])
+        assert not any(a["kind"] == "snapshot" for a in (await _artifacts(env, job["job_id"])).artifacts.values())
+
+
+async def test_snapshot_too_large_to_store_rejects_only_its_slot(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    # 4096 short lines: normalized text fits 64 KiB, but the PublicSnapshotV1 JSON does not.
+    fixture = Fixture(("text/plain", "\n".join(["abcdefghijklmno"] * 4096).encode()))
+    async with discovery(accounting_db, monkeypatch, fixture) as env:
+        job = await _admit(env)
+        done = await env["service"].run(job["job_id"])
+        assert done["status"] == "degraded", done
+        witness = await _artifacts(env, job["job_id"])
+        assert not any(a["kind"] == "snapshot" for a in witness.artifacts.values())
+        brief = next(a for a in witness.artifacts.values() if a["kind"] == "brief")["parsed"]
+        assert brief["coverage"]["unavailable"] == [{"result_id": brief["coverage"]["unavailable"][0]["result_id"],
+                                                     "reason": "source_output_oversize"}]

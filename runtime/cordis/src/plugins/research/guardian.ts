@@ -16,7 +16,7 @@ import type { Json } from '../../protocol.js';
 const blocked = (reason_code: string) => ({ status: 'blocked', reason_code, memory_status: 'no_learning' }) as const;
 // Source-content rejections are recorded per slot; anything else blocks the step.
 export const SOURCE_REJECTIONS = Object.freeze(['source_feed_malformed', 'source_feed_dtd_forbidden', 'source_feed_entity_forbidden',
-  'source_output_oversize', 'source_normalized_empty', 'source_envelope_invalid']);
+  'source_output_oversize', 'source_normalized_empty', 'source_envelope_invalid', 'source_output_invalid']);
 
 interface Source { source_slot: number; artifact_ref: string; acquisition_receipt_ref: string; }
 function request(content: string): { job_ref: string; sources: Source[] } | undefined {
@@ -50,21 +50,35 @@ export class GuardianResearchConsumer extends Service implements SeraphResearchC
     const extraction = this.ctx.get('seraphSourceExtraction');
     if (!extraction) return blocked('source_extraction_provider_unavailable');
     for (const source of accepted.sources) {
+      // Rejected content is recorded per slot and never adopted.
+      const reject = async (reason: string) => {
+        const recorded = await this.ctx.seraphTasks.checkpoint({ checkpoint_ref: `source-rejected:${source.source_slot}:${reason}` });
+        return recorded.status === 'succeeded' ? undefined : blocked(recorded.reason_code);
+      };
       const extracted = await extraction.extract({ artifact_ref: source.artifact_ref, acquisition_receipt_ref: source.acquisition_receipt_ref,
         source_slot: source.source_slot, first_line: 1, last_line: 4096 });
       if (extracted.status !== 'succeeded') {
         if (!SOURCE_REJECTIONS.includes(extracted.reason_code)) return blocked(extracted.reason_code);
-        // Rejected content is recorded per slot and never adopted.
-        const recorded = await this.ctx.seraphTasks.checkpoint({ checkpoint_ref: `source-rejected:${source.source_slot}:${extracted.reason_code}` });
-        if (recorded.status !== 'succeeded') return blocked(recorded.reason_code);
+        const failed = await reject(extracted.reason_code);
+        if (failed) return failed;
         continue;
       }
       const { input_digest, provider_digest, config_digest, evidence } = extracted.value;
       const content = canonicalJson({ schema_version: 1, source_slot: source.source_slot, input_digest, provider_digest, config_digest,
         text: evidence.map(item => item.text).join('') } as Json);
+      // The staged envelope must fit one bounded frame field; larger output rejects only this slot.
+      if (Buffer.byteLength(content, 'utf8') > 65_536) {
+        const failed = await reject('source_output_oversize');
+        if (failed) return failed;
+        continue;
+      }
       const digest = createHash('sha256').update(content).digest('hex');
       const snapshot = await this.ctx.seraphArtifacts.stage({ request_ref: `snapshot:${source.source_slot}`, content, content_digest: digest });
-      if (snapshot.status !== 'succeeded') return blocked(snapshot.reason_code);
+      if (snapshot.status !== 'succeeded') {
+        // Python already recorded a content rejection for this slot; continue with the rest.
+        if (SOURCE_REJECTIONS.includes(snapshot.reason_code)) continue;
+        return blocked(snapshot.reason_code);
+      }
       const readback = await this.ctx.seraphArtifacts.read({ artifact_ref: snapshot.value.artifact_ref, max_bytes: 65_536, offset: 0 });
       if (readback.status !== 'succeeded') return blocked(readback.reason_code);
       if (readback.value.digest !== snapshot.value.digest) return blocked('research_snapshot_readback_changed');

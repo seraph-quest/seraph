@@ -7,14 +7,59 @@ import { HTML5_ENTITIES } from './html-entities.js';
 
 // Python str.isspace() / re ``\s`` for str patterns.
 const WS = '\\t\\n\\x0b\\x0c\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
-const COMMENT = /<!--[\s\S]*?-->/gu;
 // Python ``\b`` after a word character: the next character is not alnum/_.
-const SCRIPT = new RegExp(`<(script|style|noscript)(?![\\p{L}\\p{N}_])[^>]*>[\\s\\S]*?</\\1[${WS}]*>`, 'giu');
+const SCRIPT_OPEN = /<(script|style|noscript)(?![\p{L}\p{N}_])/giu;
 const BLOCK_CLOSE = /<\/(p|div|li|h[1-6]|br|tr|section|article)>/giu;
-const TAG = /<[^>]+>/gu;
 const CHARREF = /&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)/gu;
 const RUNS = new RegExp(`[${WS}]+`, 'u');
-const EDGE = new RegExp(`^[${WS}]+|[${WS}]+$`, 'gu');
+
+// Linear equivalents of ``<!--.*?-->``, ``<(script|style|noscript)\b[^>]*>.*?</\1\s*>``
+// and ``<[^>]+>`` (identical output to the Python owner): an unclosed construct is
+// scanned once instead of once per opening, so adversarial pages cannot stall the child.
+function stripComments(value: string): string {
+  let out = '', cursor = 0, start: number;
+  while ((start = value.indexOf('<!--', cursor)) >= 0) {
+    const end = value.indexOf('-->', start + 4);
+    if (end < 0) break; // No later opening can close either.
+    out += value.slice(cursor, start); cursor = end + 3;
+  }
+  return out + value.slice(cursor);
+}
+function stripScripts(value: string): string {
+  let out = '', cursor = 0;
+  const closing = new Map<string, [number, number]>();
+  SCRIPT_OPEN.lastIndex = 0;
+  let opening: RegExpExecArray | null;
+  while ((opening = SCRIPT_OPEN.exec(value)) !== null) {
+    const start = opening.index, nameEnd = value.indexOf('>', start + opening[0].length);
+    if (nameEnd < 0) break; // ``[^>]*>`` can never complete for this or any later opening.
+    const name = opening[1]!, key = name.toLowerCase();
+    let cached = closing.get(key);
+    if (cached === undefined || (cached[0] !== -1 && cached[0] < nameEnd + 1)) {
+      // Python's ``\1`` under re.I compares lower() per character (so ``ſ`` is not ``s``).
+      const letters = Array.from(name, c => /^[A-Za-z]$/.test(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : c).join('');
+      const pattern = new RegExp(`</${letters}[${WS}]*>`, 'gu');
+      pattern.lastIndex = nameEnd + 1;
+      const found = pattern.exec(value);
+      cached = found ? [found.index, found.index + found[0].length] : [-1, -1];
+      closing.set(key, cached);
+    }
+    if (cached[0] < 0) { SCRIPT_OPEN.lastIndex = start + 1; continue; }
+    out += value.slice(cursor, start) + '\n';
+    cursor = SCRIPT_OPEN.lastIndex = cached[1];
+  }
+  return out + value.slice(cursor);
+}
+function stripTags(value: string): string {
+  let out = '', cursor = 0, position = 0, start: number;
+  while ((start = value.indexOf('<', position)) >= 0) {
+    const end = value.indexOf('>', start + 1);
+    if (end < 0) break;
+    if (end === start + 1) { position = start + 1; continue; } // ``<>`` needs one character.
+    out += value.slice(cursor, start); cursor = position = end + 1;
+  }
+  return out + value.slice(cursor);
+}
 
 const INVALID_CHARREFS: Readonly<Record<number, string>> = Object.freeze({
   0x00: '�', 0x0d: '\r', 0x80: '€', 0x81: '\x81', 0x82: '‚', 0x83: 'ƒ', 0x84: '„',
@@ -60,17 +105,17 @@ export function unescapeHtml(value: string): string {
 
 /** Collapse whitespace runs per line and drop empty lines (Python ``str.split``). */
 export function normalizeLines(value: string): string {
-  const lines = value.split('\n').map(line => line.replace(EDGE, '').split(RUNS).filter(Boolean).join(' '));
-  return lines.filter(Boolean).join('\n').replace(EDGE, '');
+  // Joined non-empty runs have no edge whitespace, so Python's final strip() is a no-op.
+  return value.split('\n').map(line => line.split(RUNS).filter(Boolean).join(' ')).filter(Boolean).join('\n');
 }
 
 export function normalizeSourceText(content: string, htmlContent: boolean): string {
   let value = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   if (htmlContent) {
-    value = value.replace(COMMENT, '');
-    value = value.replace(SCRIPT, '\n');
+    value = stripComments(value);
+    value = stripScripts(value);
     value = value.replace(BLOCK_CLOSE, '\n');
-    value = value.replace(TAG, '');
+    value = stripTags(value);
     value = unescapeHtml(value);
   }
   return normalizeLines(value);

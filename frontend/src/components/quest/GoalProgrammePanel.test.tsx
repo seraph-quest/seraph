@@ -85,6 +85,22 @@ describe("Goal programme cockpit journey", () => {
     expect(screen.getByRole("button", { name: /Read selected discovery brief/ })).toBeDisabled();
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("/brief"))).toBe(false);
   });
+  it("keeps an unexpected research reason visible as a fixed code instead of hiding the history", async () => {
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,
+      current_day_only: true, no_learning: true, planning: [],
+      research_runtime: { state: "blocked", reason: "research.Plan:x", recovery: "Restore the provider." },
+      runs: [{ job_id: `goal-discovery:${"a".repeat(32)}`, programme_id: "b".repeat(32), goal_revision: 4, grant_revision: 3,
+        occurrence_day: "2026-10-14", status: "blocked", deadline_at: "2026-10-14T12:05:00Z", external_effect_state: "settled",
+        outstanding_held: true, accounting_liability: false, research_blocked_reason: "<b>child text</b>",
+        outcome: null, no_learning: true, recovery: "Inspect the original occurrence; provider replay is forbidden." }] }) : base(url, init));
+    renderEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect discovery runs" }));
+    expect(await screen.findByText(/Research runtime blocked: unrecognized_research_block\. Restore the provider\./)).toBeInTheDocument();
+    expect(screen.getByText(/Research blocked: unrecognized_research_block/)).toBeInTheDocument();
+    expect(screen.queryByText(/Discovery history incomplete/)).toBeNull();
+    expect(document.body.textContent).not.toMatch(/child text|research\.Plan/);
+  });
   it("shows the canonical untouched cancellation cause without offering replay or private read", async () => {
     const base = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation(async (url, init) => url.endsWith("/discovery") ? response({ goal_id: goal.id,

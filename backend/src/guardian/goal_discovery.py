@@ -36,6 +36,20 @@ RESEARCH_RECOVERY = ("Restore the reviewed Cordis research runtime and its plann
     "replayed and a new occurrence is admitted on the next eligible day.")
 
 
+RECOVERY_BY_REASON = {
+    "research_composition_binding_missing": ("This occurrence was admitted before discovery ran through Cordis and "
+        "cannot execute; it is never replayed. A new occurrence is admitted on the next eligible day."),
+    "stale_output": ("The reviewed research providers or their configuration changed after this occurrence was "
+        "admitted; it is never replayed. A new occurrence uses the current composition on the next eligible day."),
+}
+
+
+def _reason_code(value):
+    """Operator projections carry only finite reason codes."""
+    import re
+    return value if type(value) is str and re.fullmatch(r"[a-z0-9_]{1,128}", value) else "research_provider_blocked"
+
+
 class ResearchRuntimeBlocked(ValueError):
     """Operator-visible Cordis research block; there is no Python fallback."""
     def __init__(self, reason: str):
@@ -290,7 +304,8 @@ class GoalDiscoveryService:
                 result={"plan_ref": sealed["plan_ref"], "plan_provider_digest": host.reviewed.plugin_digests.get("seraph.goal-plan.v1"),
                     "no_learning": True}, result_summary="Cordis research plan validated and staged; no_learning")
         except (NativeServiceBlocked, HostBlocked) as exc:
-            reason = exc.reason_code if isinstance(exc, NativeServiceBlocked) else "research_runtime_unavailable"
+            from src.runtime_plugins.research_dispatch import operator_reason
+            reason = operator_reason(exc.reason_code) if isinstance(exc, NativeServiceBlocked) else "research_runtime_unavailable"
             await _block(self.jobs, scope, reason)
             raise ResearchRuntimeBlocked(reason) from exc
         return await self._sealed_plan(plan_job_id, programme.id, job_id)
@@ -589,7 +604,7 @@ class GoalDiscoveryService:
         from src.runtime_plugins.bridge import HostBlocked
         from src.runtime_plugins.composition import plugin_config_digest
         from src.runtime_plugins.dispatch import NativeServiceBlocked, read_context
-        from src.runtime_plugins.research_dispatch import rejected_slots
+        from src.runtime_plugins.research_dispatch import operator_reason, rejected_slots
         from src.runtime_plugins.service_jobs import open_invocation
         host, _ = await self._current_composition(job_id)
         reviewed = host.reviewed
@@ -601,7 +616,9 @@ class GoalDiscoveryService:
             "consumer_digest": reviewed.plugin_digests.get("seraph.guardian-research.v1"),
             "source_provider_digest": reviewed.plugin_digests.get(extraction_id),
             "source_config_digest": plugin_config_digest(extraction_id, reviewed.profile)
-                if any(spec["id"] == extraction_id for spec in reviewed.profile["plugins"]) else None}
+                if any(spec["id"] == extraction_id for spec in reviewed.profile["plugins"]) else None,
+            # Which format provider handles each media type, so Python can recheck its own normalizer's output.
+            "formats": next((spec["config"]["formats"] for spec in reviewed.profile["plugins"] if spec["id"] == extraction_id), {})}
         request = await self._write(job_id, owner, fence, "extraction",
             {"schema_version": 1, "job_ref": job_id, "pins": pins, "sources": sources})
         try:
@@ -610,11 +627,12 @@ class GoalDiscoveryService:
             result = await host.request_service("research.executeAccepted",
                 {"plan_ref": request.reference.artifact_id}, original_scope=scope)
         except NativeServiceBlocked as exc:
-            raise ResearchRuntimeBlocked(exc.reason_code) from exc
+            raise ResearchRuntimeBlocked(operator_reason(exc.reason_code)) from exc
         except HostBlocked as exc:
             raise ResearchRuntimeBlocked("research_runtime_unavailable") from exc
         if result["status"] != "succeeded":
-            raise ResearchRuntimeBlocked(result["reason_code"])
+            # The child's reason_code is untrusted text; record only reviewed codes.
+            raise ResearchRuntimeBlocked(operator_reason(result["reason_code"]))
         current = await self.jobs.get_job(job_id)
         if result["value"] != {"job_ref": job_id, "revision": current["revision"], "state": current["status"]}:
             raise ResearchRuntimeBlocked("native_child_result_mismatch")
@@ -761,10 +779,12 @@ class GoalDiscoveryService:
                     "outstanding_held": held, "accounting_liability": liability,
                     "denial_cause": run.result_summary if run.status == "cancelled" else None,
                     "search_blocked_reason": run.failure_reason if run.failure_reason in SEARCH_BLOCK_REASONS else None,
-                    "research_blocked_reason": run.failure_reason if run.status == "blocked"
+                    "research_blocked_reason": _reason_code(run.failure_reason) if run.status == "blocked"
                         and run.failure_reason not in SEARCH_BLOCK_REASONS else None,
                     "outcome": outcome, "no_learning": True,
-                    "recovery": "Review original Goal, programme, route and unresolved receipts; provider replay is forbidden." if held else None})
+                    "recovery": (RECOVERY_BY_REASON.get(run.failure_reason,
+                        "Review original Goal, programme, route and unresolved receipts; provider replay is forbidden.")
+                        if held else None)})
             from src.work_board.research_parent import PLANNING_KIND, planning_authority
             planning = []
             for run in (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == PLANNING_KIND)
@@ -776,7 +796,7 @@ class GoalDiscoveryService:
                 planning.append({"job_id": run.run_identity, "discovery_job_id": plan_authority.discovery_job_id,
                     "programme_id": plan_authority.programme_binding.programme_id,
                     "occurrence_day": plan_authority.occurrence_day, "status": run.status,
-                    "blocked_reason": run.failure_reason if run.status == "blocked" else None,
+                    "blocked_reason": _reason_code(run.failure_reason) if run.status == "blocked" else None,
                     "recovery": RESEARCH_RECOVERY if held else None, "no_learning": True})
         return {"goal_id": goal_id, "runs": runs, "planning": planning,
             "research_runtime": research_runtime_state(self._cordis()), "current_day_only": True, "no_learning": True}

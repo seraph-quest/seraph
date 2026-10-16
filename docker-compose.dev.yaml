@@ -26,6 +26,8 @@ services:
       - .env.dev
     environment:
       SERAPH_DAEMON_STATUS_FILE: /app/data/daemon-status.json
+      # The image's reviewed Node; a host value in the shared env file never applies here.
+      CORDIS_NODE_PATH: /usr/local/bin/node
     networks:
       - seraph-network-dev
     ports:

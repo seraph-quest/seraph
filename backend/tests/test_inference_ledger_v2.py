@@ -388,6 +388,23 @@ async def test_hidden_group_member_is_refused_not_under_counted(accounting_db, m
 
 
 @pytest.mark.asyncio
+async def test_swapped_group_member_is_refused_not_counted_in_its_place(accounting_db, monkeypatch):
+    root, _engine, _factory = accounting_db
+    repository, _broker = await _ledger(root, operations=(("op-a", "0.000020"),))
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", False)
+    group, other = "a" * 64, "c" * 64
+    evidence = lambda group_id: json.dumps([{"kind": "general_task_group_reservation.v1", "group": {"group_id": group_id}}])
+    _seed_rows(root, [{"operation_id": f"member-{index}", "evidence_json": evidence(group), "group_lookup_key": "g:" + group}
+                      for index in range(2)] + [{"operation_id": "outsider", "evidence_json": evidence(other),
+                                                 "group_lookup_key": "g:" + other, "bound_microusd": 1}])
+    # Move a member out and a cheap non-member in: the count is unchanged.
+    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = 'member-0'", "g:" + other)
+    _sql(root, "UPDATE inference_cost_reservations SET group_lookup_key = ? WHERE operation_id = 'outsider'", "g:" + group)
+    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
+        await _scoped(repository, root, lambda db, ledger: repository._group_rows(db, ledger, group))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("column", ["owner_id", "job_id"])
 async def test_hidden_discovery_row_is_refused_not_skipped(accounting_db, monkeypatch, column):
     from types import SimpleNamespace

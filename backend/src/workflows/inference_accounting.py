@@ -481,8 +481,13 @@ class InferenceAccountingRepositoryMixin:
         await self._assert_group_keys_present(db)
         rows = await self._ledger_rows(db, state, InferenceCostReservation.group_lookup_key == "g:" + group_id)
         # The key is an unhashed hint: a member hidden by editing it on an
-        # untouched row would under-count the group caps, so the read must
-        # return exactly the sealed membership count.
+        # untouched row would under-count the group caps. Every returned row is
+        # digest-verified, so requiring its sealed evidence to name this group
+        # and the count to equal the sealed membership makes the read exact
+        # (a non-member swapped in under the key cannot stand in for a member).
+        from src.workspace.accounting_witness import evidence_group_key
+        if any(evidence_group_key(row.evidence_json) != "g:" + group_id for row in rows):
+            raise InferenceAccountingError("accounting_continuity_unavailable")
         self._require_sealed_count(len(rows), state.totals["rows_by_group"].get("g:" + group_id, 0))
         return rows
 

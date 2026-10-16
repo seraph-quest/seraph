@@ -94,7 +94,10 @@ import {
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
 import { deriveSeraphPresenceMetadataState } from "./seraphPresence";
-import { PttAudioControl } from "../chat/PttAudioControl";
+import { PttAudioControl, type PttTaskRecovery } from "../chat/PttAudioControl";
+import { TelegramCaptureControl } from "./TelegramCaptureControl";
+import { ChannelOutputReview } from "./ChannelOutputReview";
+import { ChannelTaskReview } from "./ChannelTaskReview";
 import { partialInspectionKey, partialJobHasExactReceipt, type PartialArtifactInspectionBinding, type PartialArtifactInspectionRequest, type PartialArtifactInspectionReceipt } from "./partialArtifactInspection";
 import { WorkBoardPanel, type WorkBoardArtifactInspectRequest } from "./WorkBoardPanel";
 
@@ -7907,6 +7910,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [guardianSelection, setGuardianSelection] = useState<{ ownerKey: string | null; item: GuardianInboxItem } | null>(null);
   const guardianInboxRef = useRef<GuardianInboxPanelHandle | null>(null);
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
+  const [channelOutputHandle, setChannelOutputHandle] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get("channel_output"));
+  const channelOutputInspectionRef = useRef<{ generation: number; taskId: string } | null>(null);
+  const [channelReviewHandle, setChannelReviewHandle] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get("channel_review"));
+  const channelReviewTaskRef = useRef<string | null>(null);
+  const [discardChannelReviewTaskId, setDiscardChannelReviewTaskId] = useState<string | null>(null);
+  const pttTaskRecoveryRef = useRef<PttTaskRecovery | null>(null);
+  useEffect(() => {
+    const refreshHandle = () => {
+      const query = new URLSearchParams(window.location.search);
+      setChannelOutputHandle(query.get("channel_output"));
+      setChannelReviewHandle(query.get("channel_review"));
+    };
+    window.addEventListener("popstate", refreshHandle);
+    return () => window.removeEventListener("popstate", refreshHandle);
+  }, []);
   const attentionAuth = useOptionalOperatorAuth();
   const attentionSession = attentionAuth?.session;
   const attentionOwner = attentionSession && Date.parse(attentionSession.absolute_expires_at) > Date.now() && Date.parse(attentionSession.idle_expires_at) > Date.now()
@@ -8116,6 +8136,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const loadGoalLoop = useQuestStore((s) => s.loadGoalLoop);
   const refreshGoals = useQuestStore((s) => s.refresh);
   const activeGoalsForCockpit = useMemo(() => activeGoalCandidates(goalTree), [goalTree]);
+  useEffect(() => {
+    const retained = pttTaskRecoveryRef.current;
+    if (retained && (retained.scope !== JSON.stringify([operatorAuth.principalId, operatorAuth.sessionId, sessionId])
+      || activeGoalsForCockpit.find(goal => goal.id === retained.task.input.goal_ref)?.revision !== retained.task.goal_revision)) {
+      pttTaskRecoveryRef.current = null;
+    }
+  }, [operatorAuth.principalId, operatorAuth.sessionId, sessionId, activeGoalsForCockpit]);
   const currentGoal = useMemo(() => findCurrentGoal(goalTree), [goalTree]);
 
   const handleResetWorkspace = useCallback(() => {
@@ -16342,6 +16369,40 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
   return (
     <div className="cockpit-shell">
+      <ChannelTaskReview handle={channelReviewHandle} ownerPrincipalId={operatorAuth.principalId}
+        ownerSessionId={operatorAuth.sessionId}
+        goalScope={JSON.stringify(activeGoalsForCockpit.map(goal => [goal.id, goal.revision, goal.owner_session_id, goal.status]))}
+        onVerified={receipt => {
+          setDiscardChannelReviewTaskId(null);
+          channelReviewTaskRef.current = receipt.taskId;
+          setFocusTaskId(receipt.taskId); selectCockpitSection("work");
+        }}
+        onDiscard={() => {
+          const prior = channelReviewTaskRef.current;
+          if (prior) {
+            setDiscardChannelReviewTaskId(prior);
+            setFocusTaskId(current => current === prior ? null : current);
+          }
+          channelReviewTaskRef.current = null;
+        }} />
+      <ChannelOutputReview handle={channelOutputHandle} ownerPrincipalId={operatorAuth.principalId}
+        ownerSessionId={operatorAuth.sessionId}
+        goalScope={JSON.stringify(activeGoalsForCockpit.map(goal => [goal.id, goal.revision, goal.owner_session_id, goal.status]))}
+        onVerified={receipt => {
+          setFocusTaskId(receipt.taskId); selectCockpitSection("work");
+          inspectWorkBoardArtifact({ reference: receipt.reference, ownerSessionId: receipt.ownerSessionId,
+            workflowRunId: receipt.workflowRunId, parentWorkflowRunId: null });
+          channelOutputInspectionRef.current = { generation: workBoardInspectionGenerationRef.current, taskId: receipt.taskId };
+        }}
+        onDiscard={() => {
+          const prior = channelOutputInspectionRef.current;
+          if (prior && prior.generation === workBoardInspectionGenerationRef.current) {
+            workBoardInspectionGenerationRef.current += 1;
+            setSelectedInspector(null);
+            setFocusTaskId(current => current === prior.taskId ? null : current);
+          }
+          channelOutputInspectionRef.current = null;
+        }} />
       <header className="cockpit-topbar">
         <div className="cockpit-brand">
           <div className="cockpit-eyebrow cockpit-brandmark">SERAPH</div>
@@ -17666,6 +17727,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               ownerPrincipalId={attentionOwner?.principalId ?? null}
               ownerSessionId={attentionOwner?.sessionId ?? null}
               focusTaskId={focusTaskId}
+              discardFocusedTaskId={discardChannelReviewTaskId}
               onFocusTaskHandled={() => setFocusTaskId(null)}
               onSelectedTaskChange={setSelectedProcedureSourceTask}
               onOpenApprovals={() => focusPane("approvals_pane")}
@@ -18158,8 +18220,13 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                   )}
                 </div>
                 <PttAudioControl
+                  taskRecovery={pttTaskRecoveryRef}
                   sessionId={sessionId}
                   disabled={isAgentBusy}
+                  ownerPrincipalId={operatorAuth.principalId}
+                  ownerSessionId={operatorAuth.sessionId}
+                  goals={activeGoalsForCockpit}
+                  onTaskCreated={(taskId) => { setFocusTaskId(taskId); selectCockpitSection("work"); }}
                 />
               </section>
               </CockpitWorkspaceWindow>
@@ -18178,6 +18245,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               >
               <section className="cockpit-panel cockpit-panel--embedded">
                 <div className="cockpit-sublist">
+                  <TelegramCaptureControl ownerPrincipalId={operatorAuth.principalId} ownerSessionId={operatorAuth.sessionId} goals={activeGoalsForCockpit} />
                   <div className="cockpit-operator-row">
                     <span className="cockpit-key">continuity details</span>
                     <span className="cockpit-operator-link">{renderDeepLoadState("presence")}</span>

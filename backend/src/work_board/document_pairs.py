@@ -120,6 +120,9 @@ def metadata(row):
             BUILD_CAPABILITY: "document-build.v1"}.get(row.capability_id)
         if expected is None or value["schema"] != expected or len(row.document_metadata_json) > 8192:
             raise ValueError()
+        if value.get("channel_ingest"):
+            from src.work_board.document_channel_ingest import validate_channel_metadata
+            validate_channel_metadata(row, value)
         return value
     except (TypeError, ValueError, KeyError):
         raise BoardError("document_pair_metadata_invalid", "The private pair needs reconciliation", status_code=409) from None
@@ -178,6 +181,9 @@ async def owned(db, owner, identifier, *, revision=None, capability=CAPABILITY):
 async def authority(db, owner, row, value, staged_root, *, ingest=False):
     if value["root"] != staged_root:
         raise BoardError("document_pair_root_changed", "The original workspace changed", status_code=409)
+    if value.get("channel_ingest") and value["phase"] == "sealed":
+        from src.work_board.document_channel_ingest import check_channel_source_association
+        await check_channel_source_association(db, owner, row, value)
     # Long-lived readers must not adopt against a cached pre-execution Goal.
     from src.db.models import Goal
     await db.get(Goal, row.goal_id, populate_existing=True)
@@ -275,6 +281,8 @@ def read_private(path, receipt, *, maximum):
         stat = os.fstat(fd)
         if not _private_input_file_metadata(stat) or stat.st_size != receipt["cipher_size"] or stat.st_size > (maximum+1024)*2:
             raise ValueError("private document ciphertext metadata changed")
+        if ("device" in receipt or "inode" in receipt) and (stat.st_dev, stat.st_ino) != (receipt.get("device"), receipt.get("inode")):
+            raise ValueError("private document ciphertext inode changed")
         chunks=[]; remaining=stat.st_size
         while remaining:
             chunk=os.read(fd,min(65536,remaining))
@@ -382,6 +390,9 @@ def original_upload_lease(row, value):
 
 async def reconcile_upload(db, owner, identifier, revision, *, capability=SOURCE_CAPABILITY):
     row, value = await owned(db, owner, identifier, revision=revision, capability=capability)
+    if value.get("channel_ingest"):
+        from src.work_board.document_channel_ingest import reconcile_channel_source
+        return await reconcile_channel_source(db, owner, identifier, revision)
     if value["root"] != dict(root_binding()):
         raise BoardError("document_pair_root_changed", "Cleanup uses the original workspace", status_code=409)
     if not value.get("live_writer") or value["live_writer"].get("slot") not in {"source", "pdf", "csv"}:
@@ -412,6 +423,8 @@ async def acquire_upload(db, owner, identifier, revision, slot, *, capability=CA
     staged_root=dict(root_binding()); token=uuid.uuid4().hex
     await _begin_immediate(db)
     row,value=await owned(db,owner,identifier,revision=revision,capability=capability)
+    if value.get("channel_ingest"):
+        raise BoardError("channel_document_original_source_required", "Use the original selected document acquisition", status_code=409)
     await authority(db,owner,row,value,staged_root,ingest=True)
     if slot not in ({"source"} if capability == SOURCE_CAPABILITY else {"pdf","csv"}) or value["phase"] not in {"reserved","uploading"} or slot in value["sources"]:
         raise BoardError("document_pair_slot_unavailable", "This source slot cannot be overwritten", status_code=409)
@@ -499,6 +512,10 @@ async def upload(db,owner,identifier,revision,slot,stream,*,capability=CAPABILIT
 
 async def complete(db,owner,identifier,revision,*,capability=CAPABILITY):
     row,value=await owned(db,owner,identifier,revision=revision,capability=capability)
+    if value.get("channel_ingest"):
+        if value["phase"] == "sealed" and row.metadata_digest == _metadata_digest(row):
+            return projection(row)
+        raise BoardError("channel_document_first_seal_required", "Only verified original acquisition may seal this source", status_code=409)
     staged_root=dict(root_binding()); await authority(db,owner,row,value,staged_root,ingest=True)
     if value["phase"]=="sealed": return projection(row)
     slots = ("source",) if capability == SOURCE_CAPABILITY else ("pdf", "csv")
@@ -585,6 +602,12 @@ def cleanup_generation(row,value):
 
 
 async def reset_unbound(db,owner,identifier,revision,*,retry,capability=CAPABILITY):
+    initial, initial_value = await owned(db, owner, identifier, revision=revision, capability=capability)
+    if initial_value.get("channel_ingest"):
+        if retry:
+            raise BoardError("channel_document_acquisition_not_retryable", "Original channel acquisition cannot retry or renew", status_code=409)
+        from src.work_board.document_channel_ingest import delete_channel_source
+        return await delete_channel_source(db, owner, identifier, revision)
     staged_root=dict(root_binding());await _begin_immediate(db)
     row,value=await owned(db,owner,identifier,revision=revision,capability=capability)
     if value["root"]!=staged_root:raise BoardError("document_pair_root_changed","Cleanup must use the exact original workspace",status_code=409)

@@ -12,6 +12,7 @@ interface TelegramStatus {
   transit: ConsentState | null;
   transport_mode: string;
   live_transport: boolean;
+  last_error: string | null;
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {
@@ -33,6 +34,7 @@ export function normalizeTelegramStatus(value: unknown): TelegramStatus | null {
       : null,
     transport_mode: typeof record.transport_mode === "string" ? record.transport_mode : "unknown",
     live_transport: record.live_transport === true,
+    last_error: typeof record.last_error === "string" && record.last_error.length <= 128 ? record.last_error : null,
   };
 }
 
@@ -117,6 +119,11 @@ export function TelegramPairingPanel() {
       {status && paired && (
         <div className="mb-1 text-retro-text/70">
           user {status.operator_id ?? "unknown"} · chat {status.chat_id ?? "unknown"} · token {status.token_fingerprint ? "fingerprint " + status.token_fingerprint : "not stored"} · transit consent {status.transit?.state ?? "missing"}{status.transit?.expires_at ? " until " + status.transit.expires_at : ""}
+        </div>
+      )}
+      {status?.last_error && (
+        <div className="mb-1 text-retro-text/70" data-testid="telegram-last-error">
+          Last Telegram error: {status.last_error.replace(/_/g, " ")}. Review the affected task in Work.
         </div>
       )}
       <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-2">

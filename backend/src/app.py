@@ -407,6 +407,14 @@ async def lifespan(app: FastAPI):
         # is fail-closed and operator-visible; a failed recovery is not hidden as
         # a healthy startup.
         try:
+            # Retention for Cordis-originated Gmail reads (#1092): revoked, expired or
+            # TTL-elapsed encrypted owner artifacts are deleted at startup as well.
+            from src.runtime_plugins.bound_adapters import purge_cordis_mail_results
+
+            await purge_cordis_mail_results()
+        except Exception:
+            logging.getLogger(__name__).warning("Cordis mail result purge deferred at startup", exc_info=True)
+        try:
             from src.workflows.job_runtime import durable_job_repository
 
             recovered_jobs = await durable_job_repository.recover_stale_jobs()
@@ -438,9 +446,9 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception(
                 "Routine install restart recovery failed; partial staging remains non-discoverable"
             )
-        # Audio quarantine files and unconfirmed transcript state are process-local
-        # and must never resume after a crash.  Run the durable cleanup before any
-        # scheduler work can admit a stale audio job.
+        # The existing Python audio owner recovers its paired native Workflow
+        # lease before legacy quarantine cleanup. Contacted jobs retain their
+        # original liability; private settled reviews survive until expiry.
         try:
             from src.guardian.audio_worker import cleanup_audio_ingress_jobs
 
@@ -453,6 +461,19 @@ async def lifespan(app: FastAPI):
         except Exception:
             logging.getLogger(__name__).exception(
                 "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
+            )
+        try:
+            from src.model_fabric.repository import ModelFabricRepository
+
+            documentary_cleanup = await ModelFabricRepository().cleanup_settled_audio_documentation()
+            if documentary_cleanup['inspected']:
+                logging.getLogger(__name__).warning(
+                    "Audio documentary cleanup inspected %d; deleted %d; unknown charged %d",
+                    documentary_cleanup['inspected'], documentary_cleanup['deleted'], documentary_cleanup['unknown'],
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Audio documentary cleanup failed; private staging remains charged"
             )
         ensure_soul_exists()
         init_llm_logging()

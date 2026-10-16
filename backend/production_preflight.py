@@ -148,6 +148,30 @@ def _process_sandbox_check() -> Check:
     return Check("process_sandbox", "blocked", str(remedy))
 
 
+def _channel_signing_check(env: Mapping[str, str]) -> Check:
+    """Channel capture origins and output links need resolvable MAC material.
+
+    An explicit raw server secret overrides; otherwise the backend derives the
+    key from the vault key, which it generates on first use when absent. Only
+    an unreadable or non-regular key file can leave the key unresolvable.
+    """
+    if any(_secret_configured(_value(env, name)) for name in ("CAPABILITY_JOURNAL_SECRET", "OPERATOR_AUTH_SECRET")):
+        return Check("channel_signing_key", "ready", "explicit server secret signs channel origins and links")
+    if _secret_configured(_value(env, "VAULT_ENCRYPTION_KEY")):
+        return Check("channel_signing_key", "ready", "derived from the configured vault key")
+    key = Path(_value(env, "WORKSPACE_DIR") or DEFAULT_WORKSPACE).expanduser() / ".vault-key"
+    try:
+        if key.is_symlink() or (key.exists() and not key.is_file()):
+            return Check("channel_signing_key", "invalid", "workspace vault key is not a regular file")
+        if key.exists():
+            if not os.access(key, os.R_OK):
+                return Check("channel_signing_key", "unavailable", "workspace vault key is not readable")
+            return Check("channel_signing_key", "ready", "derived from the workspace vault key")
+    except OSError as exc:
+        return Check("channel_signing_key", "unavailable", f"workspace vault key check failed: {type(exc).__name__}")
+    return Check("channel_signing_key", "ready", "derived from the workspace vault key, generated on first use")
+
+
 def _production_mount_check(env: Mapping[str, str]) -> Check:
     """Verify the Compose backend sees the one canonical container mount."""
     try:
@@ -227,6 +251,7 @@ def build_preflight_report(env: Mapping[str, str] | None = None) -> dict[str, ob
     if in_container():
         checks += [_workspace_ownership_check(values), _process_sandbox_check()]
     if production:
+        checks.append(_channel_signing_check(values))
         if _bool(_value(values, "SERAPH_PRODUCTION_MOUNT_CHECK"), default=False):
             checks.append(_production_mount_check(values))
         else:

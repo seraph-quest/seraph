@@ -167,8 +167,17 @@ The following architecture decisions are normative:
 30. [ADR-030: Bounded iterative repository work and original-producer recovery](./decisions/030-bounded-iterative-repository-work.md)
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
 32. [ADR-032: Repository crash recovery evidence](./decisions/032-repository-crash-recovery-evidence.md) (supersedes selected ADR-030 recovery clauses)
+33. [ADR-033: Optional governed OpenRouter audio transcription](./decisions/033-governed-optional-audio-route.md)
 34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
 36. [ADR-036: OS-enforced workspace view for agent commands](./decisions/036-agent-process-sandbox.md)
+
+ADR-033 extends only the versioned setup.v3 target with one optional disabled
+audio route. Existing setup.v1/v2 and text, vision and embedding contracts stay
+in force. Source-attested exact endpoint/codec and finite chat-audio pricing,
+original audio native ownership and a separately selected Goal/Task allowance
+are mandatory. Paired-channel Task capture is **Partial**; live audio stays
+disabled as an explicit "Voice route unavailable" state, and scripted mechanics do
+not establish operational voice readiness.
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

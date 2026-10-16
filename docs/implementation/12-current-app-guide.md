@@ -651,13 +651,54 @@ receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
 and no service returns secrets. A changed attempt, deadline or Root never seals
 output, and unloading the host leaves the job's intent and cost liability for
 recovery while a re-admission reuses the held job.
-`connections.invokeBoundAdapter` admits a job for a canonical connection reference,
-its expected revision and an operation from a closed table
-(`calendar.read_events`, `gmail.read_messages`); the call requires the caller's
-current, ready, unchanged connection row and then fails closed as
-`native_adapter_operation_not_composed`, recorded on the blocked job, without
-touching a credential or effect. Composing those adapters is follow-up work, and
-no Gmail/Calendar operation is a native capability through `capabilities.invoke`.
+`connections.invokeBoundAdapter` (#1092) admits one governed job for an operation
+from a closed table with closed per-operation arguments, and runs it through the
+existing Python owner; the child only ever receives the job reference:
+
+- `gmail.read_message` (an `active` `gmail_readonly` connection, a bound message,
+  its source consent and revisions) runs `api/mail.read_bound_message`: the mail
+  source control job and lease, the consent and label-scope fences, the Vault
+  credential decrypted only inside the adapter after every authority callback,
+  and a body bounded to 8 KiB.
+- `calendar.read_events` (an `active` `calendar_readonly` connection and its read
+  consent) runs `api/calendar.read_consented_events` with
+  `publish_selection=False`: a Cordis read only observes and never publishes the
+  `selected` bindings `/calendar/prep` treats as authority. Only consented fields
+  are returned, cut to an equal per-event budget so the result fits 64 KiB.
+- `gmail.send_reviewed_reply` (a paused reply-send job) is admitted only by the
+  authenticated `POST /api/capabilities/mail/reply-sends/{job_id}/cordis-execute`,
+  which makes the operator's approval decision in the same request (CSRF is the
+  global Origin/cookie middleware) after checking that the Cordis host can run,
+  the arguments admit and the reply awaits its decision (`mail_reply_not_awaiting_send`
+  otherwise, with nothing decided); it runs `mail_reply_runtime.execute` under
+  `run_owned` and succeeds only when this invocation claimed the send-once intent
+  and the sent-mailbox readback carries its fence. A send already made from the
+  UI is `mail_reply_already_sent`. A send that fails to start after the decision
+  is `mail_reply_approved_not_sent`: nothing was sent and the approval stands, so
+  the operator sends from the reply review or cancels. Once the send-once intent
+  exists, or while the owner's send worker is still running (it outlives a host
+  timeout and may still claim it), any failure (an unverified readback, a host
+  timeout, a cancellation) is `mail_reply_send_in_doubt`, "verify in Sent", never
+  a plain refusal.
+
+Every owner check (session, connection state and revision, consent, binding,
+approval) runs before the intent, so a revoked or expired consent, a stale
+revision, an expired lease or a revoked session make no provider request. The
+governed job stores digests only; the labelled plaintext (`origin:
+external_untrusted`, `instruction_authority: false`, a `prompt_injection`
+receipt that never relaxes anything) reaches the Python caller once, in memory.
+Gmail's only plaintext at rest is the owner's existing encrypted control
+artifact under `artifacts/mail/private/`, which no Cordis capability can read;
+for Cordis-originated reads, whatever their outcome (the owner job id is derived
+from the governed run), it is deleted when the consent is revoked or expires, or
+after 24 hours: in the revoke route, at each adapter admission (this owner), at
+startup and every 15 minutes (`cordis_mail_retention`), each purge audited as
+`cordis_adapter_result_purged`. The sweep selects only terminal Cordis Gmail reads
+with no purge audit and pages through all of them, so newer runs never starve an
+older read. The in-memory plaintext is dropped on failure and after five minutes
+if no caller takes it; the periodic sweep expires it too. Backups taken before that keep the ciphertext until
+the backup itself is pruned. No Gmail/Calendar operation is a native capability
+through `capabilities.invoke`.
 
 ### Cordis guardian research (#1008)
 
@@ -1132,14 +1173,78 @@ costs, and embedding usefulness remain externally unverified.
   refused (HTTP 409) and the panel asks for every job's value plus an explicit
   confirmation (`replace_unreadable: true`). The `memory_consolidation` toggle
   gates every consolidation trigger (scheduled catch-up, post-response,
-  workflow completion, pre-compaction and session end). Explicitly outside the
-  toggles: `guardian_opportunity_assessment` (runs only for operator-queued
-  opportunities with their own funded reservation), chat title generation
-  (one text call per new conversation, chat-triggered) and
-  `screenshot_folder_analysis` (vision route, gated by its purpose consent and
-  source settings).
+  workflow completion, pre-compaction and session end).
+  `guardian_opportunity_assessment` (#1112) is an analysis-only toggle: off,
+  its tick still closes expired candidates, adopts already-contacted results
+  and keeps Unknown handling, but starts no assessment or second attempt; a
+  queued candidate keeps `reason_code` `disabled_by_operator` (or
+  `background_inference_settings_unreadable`) until its deadline, then closes
+  as `assessment_deadline_expired`. A paused tick never overwrites an operator
+  cancel (`cancel_requested`, `assessment_cancel_requested`,
+  `operator_cancelled`), so after re-enabling, the admission authority check
+  still refuses the cancelled row. `screenshot_folder_analysis` (#1112, vision
+  route) is a whole-job toggle; pending screenshots wait until it is on again.
+  While it is off, the skip is audited once per transition (into the skip, or
+  to a different reason) and then at most hourly, because the job polls every
+  second; the panel's `last_skip` still updates on every run. Both toggles are
+  read when work starts, not mid-call: an assessment whose execution task was
+  started before the switch still makes its one call, and a screenshot tick
+  already running finishes its current batch. Both are event-driven, so the
+  panel shows their basis ("per queued item") instead of a calls/day figure.
+  Explicitly outside the toggles: chat title generation (one text call per new
+  conversation, chat-triggered) and
+  `POST /api/observer/screen-artifacts/{id}/reanalyze`, an explicit operator
+  action on one screenshot that runs even while `screenshot_folder_analysis`
+  is off.
 
 ### Local cockpit interaction boundaries
+
+Paired-channel Task capture ([#1022](https://github.com/seraph-quest/seraph/issues/1022))
+is **Partial**:
+
+- **Telegram capture.** With an authenticated capture selection on the existing
+  pairing (Settings → Telegram), a `/task` message from the paired user and chat
+  creates exactly one review-only Triage Task under the selected Goal. The
+  provider event id is reserved before creation, so a replay returns the same
+  Task, and the same id with different content is refused as `replay_conflict`.
+  Messages from an unpaired user or chat are blocked with
+  `telegram_identity_not_allowlisted` and create nothing.
+- **Telegram controls.** Exact-revision inspect, pause, resume, cancel and "open
+  exact cockpit review" act on the captured Task; there is no remote approval or
+  replacement attempt. Work continues in the cockpit, where the plan is reviewed,
+  edited and promoted as for any Task. A small document attachment enters C6
+  quarantine only through the explicit document selection.
+- **Voice.** Live voice shows **Voice route unavailable** in push-to-talk: no
+  exact endpoint, codec and pricing proof is issued, so model consent cannot be
+  granted ([ADR-033](./decisions/033-governed-optional-audio-route.md)). Enabling
+  the live route is tracked follow-up work. The correction path is implemented:
+  an operator reviews the transcript, saves one corrected canonical Message, and a
+  separate explicit fresh Goal/Task action captures that corrected text as an
+  unexecuted review-only intent without replaying the original call or
+  transferring audio costs. Tests exercise this with a scripted transcription at
+  the owned transport.
+- Audio documentation source objects under `.model-fabric/` are declared cache
+  workspace state: backups and restores succeed with or without them, and they
+  are never archived. Their canonical attestation rows stay in `seraph.db`; after
+  a restore, a missing object fails closed with
+  `audio_documentation_source_missing` until the documentation is staged again.
+- **Channel signing.** Capture origins and cockpit output links are HMAC-signed
+  with a key derived (HKDF, `seraph.channel-capture.v1`) from the workspace vault
+  key, so a stock production deployment with only `OPERATOR_AUTH_SECRET_HASH`
+  needs no new setting. `CAPABILITY_JOURNAL_SECRET`, then `OPERATOR_AUTH_SECRET`,
+  overrides that source when set; the stored password hash is never used. An
+  unreadable vault key fails closed with `channel_output_signer_unavailable`, and
+  `production_preflight.py` reports it as `channel_signing_key`. Changing the
+  source (setting or removing an override, or replacing the vault key) is not
+  migrated: earlier capture origins fail closed with
+  `channel_capture_origin_changed` and need operator recovery, and earlier output
+  links (valid for at most five minutes) fail with
+  `channel_output_handle_invalid`. A failed Telegram button control returns
+  `telegram_canonical_control_unavailable` and keeps its typed cause in Telegram
+  status (`last_error`, shown in Settings → Telegram).
+
+Live Telegram delivery, provider operation and native macOS/Safari capture remain
+unverified by these provider-free checks.
 
 The managed development cockpit may be opened over local HTTP for text and
 operator controls. Browser microphone capture follows the browser secure

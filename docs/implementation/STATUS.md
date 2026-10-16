@@ -835,6 +835,22 @@ revision. Live Telegram remains unverified; see
 
 ## Legend
 
+Paired-channel Task capture ([#1022](https://github.com/seraph-quest/seraph/issues/1022))
+is **Partial**. A paired Telegram `/task` message creates one review-only Task
+that can be inspected, paused, resumed or cancelled from Telegram and continued in
+the cockpit; unpaired senders and replayed provider events create nothing. Live
+voice is an explicit "Voice route unavailable" state under
+[ADR-033](./decisions/033-governed-optional-audio-route.md) until a source-attested
+endpoint, codec and pricing proof exists (tracked follow-up). Transcript
+correction updates the unexecuted intent through one corrected canonical Message
+and a separate fresh Goal/Task action, tested with a scripted transcription; it
+never replays the original call or transfers audio liability. Channel origins
+and output links are signed with a key derived from the workspace vault key
+(explicit `CAPABILITY_JOURNAL_SECRET`/`OPERATOR_AUTH_SECRET` overrides), so stock
+deployments need no new setting. Live Telegram,
+provider and native capture operation remain unverified. See the
+[current app guide](./12-current-app-guide.md#local-cockpit-interaction-boundaries).
+
 - `[x]` shipped on `develop`
 - `[ ]` not fully shipped on `develop`
 - in-flight branch work should be tracked in open PRs, not in this file

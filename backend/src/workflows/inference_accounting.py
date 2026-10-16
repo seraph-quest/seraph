@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, localcontext
 import fcntl
 import hashlib
 import json
@@ -117,7 +117,11 @@ def account_charge_microusd(payload: object) -> tuple[int | None, str | None]:
         amount = Decimal(str(value))
         if not amount.is_finite() or amount < 0 or amount > Decimal(1000):
             return None, operation_id
-        return int((amount * 1_000_000).to_integral_value(rounding=ROUND_CEILING)), operation_id
+        # Multiplication must not round away a positive fractional micro-dollar
+        # before the authoritative upward rounding. Preserve every input digit.
+        with localcontext() as context:
+            context.prec = max(28, len(amount.as_tuple().digits) + 7)
+            return int((amount * 1_000_000).to_integral_value(rounding=ROUND_CEILING)), operation_id
     except (ValueError, InvalidOperation, OverflowError):
         return None, operation_id
 
@@ -301,6 +305,11 @@ class InferenceAccountingRepositoryMixin:
                     if _provider_contact_denied(row):
                         # Broker teardown/restart cannot forgive a committed
                         # denial or turn it into a fresh provider opportunity.
+                        if run.job_kind == "audio_transcription_v1":
+                            from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+                            _, audio = await guard_audio_pair(db, run, require_current=False)
+                            await advance_audio_pair(db, run, audio, changes={"status": "blocked",
+                                "error_code": "provider_contact_denied", "transcript": None})
                         run.status = "blocked"
                         run.failure_reason = "provider_contact_denied"
                         run.lease_owner = None
@@ -317,6 +326,18 @@ class InferenceAccountingRepositoryMixin:
                     # ephemeral chat/probe/embedding job. Its owner must start
                     # a fresh bounded operation explicitly.
                     typed_resume = False
+                    if never_contacted and run.job_kind == "audio_transcription_v1":
+                        from src.workflows.audio_native import guard_audio_pair
+                        try:
+                            native, _audio = await guard_audio_pair(db, run, physical=True)
+                            effects = json.loads(run.effect_receipts_json)
+                            typed_resume = (row.operation_id == native.operation_id
+                                and row.policy_digest == native.policy_digest
+                                and _utc(row.deadline_at) > observed
+                                and all(item.get("effect_type") == "remote_inference_admission"
+                                    and item.get("status") in {"intent", "blocked"} for item in effects))
+                        except (ValueError, RuntimeError, PermissionError, OSError):
+                            typed_resume = False
                     if never_contacted and run.job_kind in {"calendar_meeting_prep", "mail_reply_draft"} and _utc(row.deadline_at) > observed:
                         from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkBoardInputArtifact
                         from src.work_board.dispatcher import _parse_typed_input
@@ -370,6 +391,11 @@ class InferenceAccountingRepositoryMixin:
                         run.status = "cost_liability"
                     row.revision += 1
                     row.updated_at = observed.replace(tzinfo=None)
+                    if run.job_kind == "audio_transcription_v1":
+                        from src.workflows.audio_native import guard_audio_pair, advance_audio_pair
+                        _binding, audio = await guard_audio_pair(db, run, require_current=False)
+                        await advance_audio_pair(db, run, audio, changes={"status": "queued" if typed_resume else "blocked",
+                            "transport_status": row.state, "transcript": None})
                     history = json.loads(row.evidence_json)
                     history.append({"kind": "restart_recovery", "state": row.state, "reason": row.recovery_reason,
                         "recorded_at": observed.isoformat(), "memory_status": "no_learning"})
@@ -395,7 +421,7 @@ class InferenceAccountingRepositoryMixin:
     async def _accounting_resume_claim_allowed(self, db, run) -> bool:
         from src.model_fabric.effective_policy import current_inference_policy
         rows = list((await db.execute(select(InferenceCostReservation).where(InferenceCostReservation.job_id == run.run_identity))).scalars())
-        return bool(run.job_kind in {"calendar_meeting_prep", "mail_reply_draft"} and len(rows) == 1
+        return bool(run.job_kind in {"calendar_meeting_prep", "mail_reply_draft", "audio_transcription_v1"} and len(rows) == 1
             and rows[0].state == "reserved" and rows[0].recovery_reason == "typed_owner_precontact_resume"
             and _utc(rows[0].deadline_at) > datetime.now(timezone.utc)
             and rows[0].policy_digest == current_inference_policy()[1])
@@ -642,6 +668,16 @@ class InferenceAccountingRepositoryMixin:
                     if run.status != "running" or run.owner_principal_id != owner_id or deadline <= observed:
                         raise InferenceAccountingError("accounting_job_authority_invalid")
                     prior = await self._ledger_row(db, ledger, operation_id)
+                    if run.job_kind == "audio_transcription_v1":
+                        from src.workflows.audio_native import accounting_pair, utc as audio_utc
+                        native = await accounting_pair(db, run)
+                        job_rows = await self._ledger_rows(db, ledger, InferenceCostReservation.job_id == job_id)
+                        if (operation_id != native.operation_id or policy_digest != native.policy_digest
+                            or profile_id != "openrouter.audio" or bound > native.audio_budget_microusd
+                            or _utc(deadline) != audio_utc(native.original_deadline_at)
+                            or (prior is not None and prior.recovery_reason != "typed_owner_precontact_resume")
+                            or any(item.operation_id != operation_id for item in job_rows)):
+                            raise InferenceAccountingError("audio_original_reservation_invalid")
                     from src.workflows.research_accounting import discovery_generation_budget
                     discovery_rows = await self._discovery_rows(db, ledger, run)
                     programme_budget = await discovery_generation_budget(self, db, run, discovery_rows,
@@ -770,6 +806,11 @@ class InferenceAccountingRepositoryMixin:
                     if run.job_kind == "readonly_research_child":
                         from src.workflows.research_guard import assert_research_parent_current
                         await assert_research_parent_current(db, run)
+                    if run.job_kind == "audio_transcription_v1":
+                        from src.workflows.audio_native import guard_audio_pair
+                        native, _audio = await guard_audio_pair(db, run, physical=True)
+                        if operation_id != native.operation_id or row.policy_digest != native.policy_digest or row.bound_microusd > native.audio_budget_microusd:
+                            raise InferenceAccountingError("audio_contact_binding_invalid")
                     from src.workflows.job_runtime import _assert_canonical_goal_fence
                     await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
                         owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
@@ -864,6 +905,11 @@ class InferenceAccountingRepositoryMixin:
                             row.state = "contact_started"
                             row.contact_started_at = now
                             history.append({"kind": "provider_contact_started", "fencing_token": fencing_token, "recorded_at": now.isoformat()})
+                        if run.job_kind == "audio_transcription_v1":
+                            from src.workflows.audio_native import accounting_pair
+                            await accounting_pair(db, run, changes={
+                                "admission_operation_id": operation_id if not denial else None,
+                                "transport_status": "contact_started" if not denial else "blocked"})
                         row.updated_at = now
                         row.revision += 1
                         row.evidence_json = _json(history)
@@ -969,6 +1015,11 @@ class InferenceAccountingRepositoryMixin:
                     row.recovery_reason = "provider_cost_readback_required" if actual is None else "provider_charge_exceeded_reservation" if actual > row.bound_microusd else None
                 now = datetime.now(timezone.utc).replace(tzinfo=None)
                 history = json.loads(row.evidence_json)
+                audio_run = await self._fetch(db, row.job_id)
+                if audio_run.job_kind == "audio_transcription_v1":
+                    from src.workflows.audio_native import accounting_pair
+                    await accounting_pair(db, audio_run, require_current=False,
+                        changes={"transport_status": row.state})
                 history.append({"kind": row.state, "reason": reason, "actual_cost_microusd": actual,
                     "provenance": "manual_externally_unverified" if operator_id else "near_billing_costs" if billing is not None else "provider_account_usage" if actual is not None else "unresolved_provider_contact",
                     **({"billing_response_sha256": billing.response_sha256,

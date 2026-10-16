@@ -659,6 +659,58 @@ current, ready, unchanged connection row and then fails closed as
 touching a credential or effect. Composing those adapters is follow-up work, and
 no Gmail/Calendar operation is a native capability through `capabilities.invoke`.
 
+### Cordis agent loop (#1019)
+
+Chat routes on the `seraph.agent-loop.v1` owner row. While the row's owner is
+`legacy` (the seeded default, and also when the row is absent) REST and WS chat
+run the existing smolagents loop unchanged. After the fenced cutover
+(`ready -> draining -> blocked` at a higher epoch with owner `cordis` -> `ready`
+on the running child's boot proof) every chat ingress runs through the Cordis
+agent loop; a Cordis owner that is not ready, a host that is not admitting, or
+`use_delegation=true` (`delegation_pending_1020`) blocks chat visibly with the
+exact fix and never falls back to legacy. Rollback is another higher epoch.
+`/api/runtime/status` reports `chat_runtime {loop, route, owner_epoch, reason,
+recovery}`, the Settings Cordis panel shows it, and the WS status line names the
+loop (`cordis.agent-loop.v1` or `legacy.smolagents`).
+
+One `cordis_chat_turn_v1` job owns each ingress, keyed by the ingress message
+id; it is admitted right after `reserve_ingress_message`, so a duplicate message
+keeps today's `chat_message_duplicate` 409 and never creates a second turn. The
+turn runs the same agent legacy builds (prompts, `get_model` owner, wrapped
+`get_tools` surface, onboarding surface, approvals and frames). At each step
+boundary a short `agent-loop.startTurn` invocation on its own step job asks the
+reviewed sequencer for the transition: the child reads only a sealed projection
+(step kind, call count, step index, budget; never text, a tool name or an
+argument) and stages finite decisions (`tool_intent:<n>`, `continue`,
+`settlement`, `final_call`), which Python accepts only when they equal its own
+parse (`native_child_result_mismatch` otherwise). A turn settles only on
+`final_answer`; a reply without a tool call, an unknown tool, invalid arguments
+and a raising tool stay smolagents observations; max-steps exhaustion makes the
+same single tool-less final call. Before every step and tool call Python
+rechecks the turn lease, fence and bound epoch, the operator Root, the deadline,
+cancellation and the memory revocation marker: a memory forgotten, archived or
+deleted mid-turn stops the turn before the next prompt assembly
+(`agent_turn_memory_revoked`). Tool intents and outcomes (`succeeded`, `failed`,
+`no_effect` for approval/clarification gates) are receipts on the turn job; the
+reply row is inserted by its deterministic id (insert-if-absent, an existing
+different row is `turn_transcript_conflict`) in the same writer transaction as
+the turn's fenced settlement CAS, so a stale epoch or lost lease adopts nothing.
+A WS disconnect or cancelled handler, a REST client disconnect and a timeout
+cancel the turn at its next boundary; the turn owner writes the single
+interrupted row. Restart never resumes a turn: stale-lease recovery keeps its
+committed and `intent` (unknown) tool effects visible. Direct chat keeps every
+current value (messages, limits, preflight before admission, REST non-streaming
+and WS streamed deltas, redaction, `direct-openrouter-chat` label); Python owns
+the stream and the sequencer settles it after the final text is sealed.
+
+Disclosed differences from legacy: tool calls in one model message run
+sequentially in call order (smolagents ran them in parallel; memory and frames
+are ordered by call id in both); at most 12 tool calls per step
+(`agent_turn_tool_calls_exceeded`); `store_secret` returns a visible denial
+pointing to Settings -> Vault and its value never enters turn state. Measured
+offline on a loaded host: about 125 ms added per step (cap 250 ms) and about
+40 ms before a direct-chat first delta (cap 300 ms).
+
 ### Cordis guardian research (#1008)
 
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2

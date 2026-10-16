@@ -592,10 +592,12 @@ class CordisTurn:
         from smolagents.utils import AgentParsingError
         turn = self
         agent.max_tool_threads = 1
-        surface = _digest(sorted(
-            [name, getattr(tool, "description", ""), getattr(tool, "inputs", {}), getattr(tool, "output_type", "")]
-            for name, tool in agent.tools.items()) + [_sha(str(getattr(agent, "instructions", "") or "")),
-                                                      str(getattr(agent.model, "temperature", None))])
+        # The turn's tool surface (names, schemas, onboarding URL allowlist via the closure's
+        # schema/description), instructions and temperature, pinned at the first step.
+        surface = _sha(json.dumps([sorted(
+            [name, str(getattr(tool, "description", "")), getattr(tool, "inputs", {}), str(getattr(tool, "output_type", ""))]
+            for name, tool in agent.tools.items()), _sha(str(getattr(agent, "instructions", "") or "")),
+            str(getattr(agent.model, "temperature", None))], sort_keys=True, default=str))
         original_step = agent._step_stream
         original_process = agent.process_tool_calls
         original_execute = agent.execute_tool_call

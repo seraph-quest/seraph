@@ -868,6 +868,8 @@ class GeneralTaskService:
         return await self._publish_envelope(db, owner, request, envelope,
             publication_authority_check=publication_authority_check,
             publication_authority_scope=publication_authority_scope,
+            repository_source_check=repository_source_check,
+            repository_source_scope=repository_source_scope,
             _specialist_context=_specialist_context, _procedure_invocation=_procedure_invocation)
 
     async def capture_intent(self, db, owner, request: GeneralTaskCreate, *, capture):
@@ -932,6 +934,7 @@ class GeneralTaskService:
                                 publication_authority_check=None,
                                 publication_authority_scope=None,
                                 origin_session_id=None, capture_origin=None,
+                                repository_source_check=None, repository_source_scope=None,
                                 _specialist_context=None, _procedure_invocation=None):
         """Publish the exact sealed input through the original artifact/Task owners."""
         from src.work_board.input_artifacts import prepare_input_artifact

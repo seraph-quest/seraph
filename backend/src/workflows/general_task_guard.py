@@ -878,6 +878,20 @@ def protected_checkpoint_ids(history):
     return protected
 
 
+def _live_root_for_sql():
+    """Workspace Root identity for SQL-side checks.
+
+    Callers that staged a captured Source frame outside SQL use its lexical
+    root; ordinary callers without a frame (for example repository work) keep
+    the existing direct root binding, exactly as before capture existed.
+    """
+    from src.work_board.channel_capture import _SOURCE_FRAME, _staged_source_root_for_sql
+    if _SOURCE_FRAME.get() is not None:
+        return dict(_staged_source_root_for_sql())
+    from src.work_board.pipelines import root_binding
+    return root_binding()
+
+
 def requires_native_writer(run):
     return run.job_kind == GENERAL_TASK_NATIVE_CHILD_KIND or (
         run.job_kind == "agent.task.v1" and read_manifest(run) is not None)
@@ -991,10 +1005,9 @@ def append_general_task_parent_gate(conditions, run, *, now, _repository_complet
         return False
     try:
         binding = child_binding(run)
-        from src.work_board.channel_capture import _staged_source_root_for_sql
         from src.work_board.pipeline_contracts import digest
         if _repository_completion_witness is None:
-            live_root_digest = digest(dict(_staged_source_root_for_sql()))
+            live_root_digest = digest(_live_root_for_sql())
         else:
             from src.workflows.repo_repair_source import _recovered_repository_native_root_digest
             live_root_digest = _recovered_repository_native_root_digest(
@@ -1323,7 +1336,7 @@ async def _current_original_sql(jobs, db, parent_id, *, manifest=None):
         parent.authority_digest, task.task_id, attempt.attempt_id, task.owner_principal_id,
         task.owner_session_id, task.goal_id, task.goal_revision, task.input_artifact_id,
         task.typed_input_digest, selected.group_id, selected.group_digest, selected.selected_grant_digest,
-        digest(dict(_staged_source_root_for_sql())), _as_utc(parent.deadline_at).isoformat(),
+        digest(_live_root_for_sql()), _as_utc(parent.deadline_at).isoformat(),
         selected.original_deadline_at.isoformat()])
     if (artifact is None or artifact.owner_principal_id != task.owner_principal_id
         or artifact.owner_session_id != task.owner_session_id or artifact.goal_id != task.goal_id
@@ -2407,8 +2420,7 @@ async def _cancel_original(jobs, db, parent_id, *, observation=False):
             raise DurableJobLeaseError("original cancelled workspace Root seals disagree")
         root_digest = next(iter(original_roots))
     else:
-        from src.work_board.channel_capture import _staged_source_root_for_sql
-        root_digest = _digest(dict(_staged_source_root_for_sql()))
+        root_digest = _digest(_live_root_for_sql())
     creation = _digest(["general-task.creation.v1", parent.run_identity, parent.input_digest,
         parent.authority_digest, task.task_id, attempt.attempt_id, task.owner_principal_id,
         task.owner_session_id, task.goal_id, task.goal_revision, task.input_artifact_id,

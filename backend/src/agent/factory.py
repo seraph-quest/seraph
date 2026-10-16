@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from smolagents import ToolCallingAgent
-
 from config.settings import settings
+from src.agent.tool_calling_agent import ToolCallingAgent
 from src.guardian.state import GuardianState
 from src.agent.prompt_compaction import PromptSection, compact_prompt_sections
 from src.llm_runtime import (

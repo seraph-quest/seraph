@@ -488,6 +488,8 @@ class TestChatAPI:
     @patch("src.api.chat.create_onboarding_agent")
     @patch("src.api.chat.approval_repository.merge_details")
     async def test_chat_approval_required(self, mock_merge_details, mock_onboarding, mock_create_agent, mock_search, client):
+        # A mocked agent.run hides how a real agent loop treats tool exceptions;
+        # tests/test_agent_control_flow_propagation.py drives a real agent (#1107).
         mock_agent = MagicMock()
         mock_agent.run.side_effect = ApprovalRequired(
             approval_id="approval-123",
@@ -510,6 +512,7 @@ class TestChatAPI:
     @patch("src.api.chat.build_agent")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_chat_clarification_required(self, mock_onboarding, mock_create_agent, mock_search, client):
+        # Mocked agent.run; the real-agent path is in test_agent_control_flow_propagation.py (#1107).
         mock_agent = MagicMock()
         mock_agent.run.side_effect = ClarificationRequired(
             question="Which city should I check?",

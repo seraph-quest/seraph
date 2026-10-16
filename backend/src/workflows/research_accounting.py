@@ -122,12 +122,18 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
 
 
 async def rebind_funded_child(jobs, *, request, owner, fencing_token, policy_digest, profile_id, bound):
-    """Rebind the exact untouched row to a fresh child lease; never reserve again."""
+    """Rebind the exact untouched row to a fresh child lease; never reserve again.
+
+    Runs on every research child call, so it uses the bounded verification
+    (#1086): the funded rows and the request row are read by id and each is
+    checked against its stored digest.
+    """
+    from src.db.models import InferenceAccountingOwner
     async with jobs._session() as db:
         await jobs._accounting_begin(db)
-        account, rows = await jobs._accounting_rows(db)
+        account = await db.get(InferenceAccountingOwner, "deployment")
         with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-            jobs._assert_accounting_continuity(workspace, account, rows)
+            ledger = await jobs._open_ledger(db, workspace, account)
             child = await jobs._fetch(db, request.job_id)
             jobs._assert_lease(child, owner=owner, fencing_token=fencing_token)
             await assert_research_parent_current(db, child)
@@ -136,14 +142,14 @@ async def rebind_funded_child(jobs, *, request, owner, fencing_token, policy_dig
             creation = payload_checkpoint(parent, "research:creation")
             expected_calls = ["remote:"+item for item in creation["child_ids"]]
             for slot, operation_id in enumerate(expected_calls):
-                funded = next((item for item in rows if item.operation_id == operation_id), None)
+                funded = await jobs._ledger_row(db, ledger, operation_id)
                 if (funded is None or funded.job_id != creation["child_ids"][slot]
                     or not any(item.get("kind") == "research_group_reservation"
                         and item.get("creation_digest") == creation["creation_digest"]
                         and item.get("slot") == slot and item.get("group_call_ids") == expected_calls
                         for item in json.loads(funded.evidence_json))):
                     raise InferenceAccountingError("research_group_readback_incomplete")
-            row = next((item for item in rows if item.operation_id == request.operation_id), None)
+            row = await jobs._ledger_row(db, ledger, request.operation_id)
             if (child.job_kind != CHILD_KIND or child.status != "running" or row is None
                 or row.state != "reserved" or row.contact_started_at is not None or row.recovery_reason
                 or row.job_id != child.run_identity or row.owner_id != request.owner_id
@@ -163,7 +169,7 @@ async def rebind_funded_child(jobs, *, request, owner, fencing_token, policy_dig
                     "creation_digest": ready["creation_digest"], "memory_status": "no_learning"})
                 row.evidence_json = _json(history)
                 db.add(row)
-                await jobs._persist_accounting_witness(db, workspace, account, rows)
+                await jobs._persist_accounting_witness(db, workspace, account, [row])
             return _operation_payload(row)
 
 

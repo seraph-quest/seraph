@@ -64,6 +64,34 @@ server-captured base and the tested tree. It must also reproduce the tested byte
 when applied to a fresh base copy outside the workspace, so a test that commits or
 configures Git textconv cannot misreport its change.
 
+**Project issues and pull requests to goal tasks: Partial (#1017).** An explicit
+sync reads only the connected repository's issues and pull requests: at most 50
+items over 3 pages, newest updates first, with no webhooks, comments, reviews or
+diffs. Every task, publication and comment reference keeps the exact item
+revision and digest. A finding becomes an inert Triage task. The item text is
+quoted as untrusted data, and the task gets no execution authority until the
+operator accepts it. An accepted change runs as ordinary `repository_work`, and
+its tested patch publishes through the existing exact PR publication. One
+lineage links the source revision, the task, the repository root, each
+iteration's patch digest, the publication and the verified PR.
+
+The publication approval binds the accepted source revision. The item is read
+again at prepare, when the approval resumes, and immediately before the first
+GitHub write. A changed title, body, state or labels, a closed item, another
+repository, a moved base or a changed patch stops the publication before any
+GitHub write. Comment activity alone, including Seraph's own prepared comment,
+does not. Completed local work is kept. A changed revision needs an explicit
+operator acceptance and a fresh approval. Synced items can also be written as
+workspace text that an ordinary source watch reads. That watch's verified
+packet, bound to the exact snapshot it observed, then prepares a blocker or
+review comment through the existing exact GitHub follow-through. The comment
+awaits its own approval and is not posted.
+Lost connection, repository or credential access blocks new reads and keeps
+local artifacts. The status endpoint lists the connection's actual
+limitations. Verified with offline local GitHub fixtures and zero
+inference/provider spend. Live GitHub usefulness remains
+**external-unverified**.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current
@@ -116,6 +144,16 @@ including inference, Memory mutations, research, conversation/agent-loop,
 scheduler and bound adapters, return typed `blocked` results. Memory
 composition-snapshot accounting is not shipped. See the
 [guide section](./12-current-app-guide.md#cordis-typed-service-bridge-1007).
+
+**Cordis governed capabilities and inference** from
+[#1018](https://github.com/seraph-quest/seraph/issues/1018) is **Partial**:
+`capabilities.invoke` (adopted read-only native capabilities through
+`CapabilityExecutionHost`) and `inference.request` (two canonical Cordis routes
+through the shared broker and ledger) have Python owners with sealed results,
+bounded Vault-redacted output and job-bound accounting;
+`connections.invokeBoundAdapter` validates the current connection reference and
+a closed operation table, then fails closed (no adapter is composed yet). See the
+[guide section](./12-current-app-guide.md#cordis-governed-capabilities-and-inference-1018).
 
 **Cordis guardian research** from
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal
@@ -310,8 +348,13 @@ batches of at most 128. Historical financial seals retain their original typed
 defaults and field presence without resealing. The private hint grants no
 authority and is not a direct-database-tamper integrity seal. Stopped stdlib
 workspace backup/restore accepts the sole added hint column; restored NULL hints
-require canonical startup migration before accounting readiness. This does not
-bound the existing global `_accounting_rows` deployment-ledger baseline.
+require canonical startup migration before accounting readiness. Since #1086
+the hot accounting writers and status reads no longer load the deployment
+ledger: they verify the witness, the root of stored row digests and the rows
+they touch, and admit against digest-sealed running totals; full verification
+(every row) runs per process on first write, when over 20 minutes stale, on
+rare writers, at startup and every 10 minutes in the background. The rare
+writers still load the whole ledger.
 
 Private handoff publication derives at most twelve specialist callback identities
 from validated original-group reservations and uses exact unique run-identity

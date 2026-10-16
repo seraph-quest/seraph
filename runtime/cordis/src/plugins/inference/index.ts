@@ -10,5 +10,7 @@ export class SeraphInferenceService extends NativeProxy implements SeraphInferen
 }
 /** Trusted composition injects the original invocation-scoped transport. */
 export function createPlugin(client: ScopedRequestClient): Plugin.Object<Record<string, never>> {
-  return { name: 'seraph.inference.v1', provide: ['seraphInference'], apply(ctx) { new SeraphInferenceService(ctx, client); } };
+  return { name: 'seraph.inference.v1', provide: ['seraphInference'],
+    // Governed services exist only while their authority, task, artifact and audit owners do (#1018).
+    inject: ['seraphAuthority', 'seraphTasks', 'seraphArtifacts', 'seraphAudit'], apply(ctx) { new SeraphInferenceService(ctx, client); } };
 }

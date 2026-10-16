@@ -201,19 +201,33 @@ journey (and, for guardian research, the bounded callbacks described in
 [Cordis guardian research (#1008)](#cordis-guardian-research-1008)). That journey admits one `runtime_service_read_v1` job, performs the
 read, stages the sealed result as a private 0600 workspace file (intent before
 effect), adopts and reads it back, appends one `runtime_service_observed` audit
-event and settles the job with explicit `no_learning`. The child's answer to
-each call must equal the result Python sealed for it (task answers must equal
+event and settles the job with explicit `no_learning`. Only a keyed result
+digest and a non-private projection are ever persisted, in the job row and in
+that file: a `memory.retrieve` result keeps each record reference and a keyed
+digest of its served text, never the text itself, so a forget, revoke or backup
+leaves no read-result copy to scrub (#1100). The digests are HMACs under a
+per-install key derived from the vault key, which backups never archive, so a
+retained digest cannot confirm a guessed forgotten summary. The completion
+transaction rechecks each record through the owner's list-safe summary path,
+which reads the tombstone ledger directly. A record forgotten, redacted or
+tombstoned mid-journey (including a restored row whose reapply is still
+pending) blocks the job with `native_memory_record_withdrawn`; an edited record
+blocks it with `native_memory_record_changed`, and unavailable redaction with
+`native_memory_redaction_unavailable`. The read is then not served. The child's answer to
+each call must equal the result Python sealed for it (the read's answer must
+match its sealed digest; task answers must equal
 the value Python builds from the durable job row, including the checkpoint
 receipt's recorded revision); any difference blocks the job with
 `native_child_result_mismatch`, and only Python-owned values are returned. An
 exact retry reuses the same job and never re-executes; an interrupted stage
 stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle`,
-`capabilities.invoke`, `inference.request`, `memory.propose`,
+`memory.propose`,
 `memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
 `agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
 `source-extraction.extract`) return a typed `blocked` reason as Python callbacks
 (`research.*` and `source-extraction.extract` are Cordis-owned since #1008 and
-only originated by Python), also listed in
+only originated by Python; `capabilities.invoke` and `inference.request` have
+governed Python owners since #1018), also listed in
 the runtime status `native_services` block. No HTTP route yet exposes the bridge
 to the browser, and the Memory composition-snapshot accounting amendments
 recorded on #1007 are not implemented. The acceptance tests deny every Python
@@ -586,6 +600,65 @@ document attempt or bypass its retry and positive cleanup requirements.
 new target architecture is owned by the Constitution and ADRs
 
 
+### Cordis governed capabilities and inference (#1018)
+
+[#1018](https://github.com/seraph-quest/seraph/issues/1018) binds
+`seraph.capabilities.v1` and `seraph.inference.v1` to reviewed Python owners in
+`backend/src/runtime_plugins/governed_services.py`. These providers (and
+`seraph.connections.v1`) inject the authority, task, artifact and audit services
+explicitly, so a composition without those owners never registers them, and an
+absent provider's methods return `service_provider_not_composed`.
+
+`capabilities.invoke` admits one `runtime_service_governed_v1` job whose closed
+candidate names a descriptor and its exact arguments digest. Descriptors come
+from `factory.get_tools` (stable `native_tool:<name>` id and version, closed
+input schema, effect class, limits, permissions and executor). Only adopted,
+read-only `CapabilityExecutionHost` capabilities are invocable; approval-gated,
+MCP, ungoverned and Vault tools are listed as blocked. Invalid arguments are
+denied at admission. A path argument that resolves (after `..` and links) to a
+Vault secret/recovery file in the workspace state registry or to a runtime-owned
+file (`seraph.db` and its sidecars, `.vault-key`) is denied as
+`native_capability_path_denied`; names compare case-folded and NFC-normalised,
+and the target is also compared by file identity (device and inode), so another
+spelling or a hard link cannot reach those files. `preview_workspace_patch` is not
+a Cordis read-only capability: its pre-encoded JSON diff could carry an escaped
+or line-split Vault value past exact-match redaction. Policy, descriptor version and path are checked
+again immediately before the effect, in the governed dispatch before the intent is
+recorded (`native_capability_policy_changed`), so a denial there leaves no intent. The job's grants come
+only from its sealed declared authority, and the host runs under the operator's
+current approval mode. The call records an intent (also an `intent` effect
+receipt, so stale-lease recovery never reports a clean failure), runs the host
+under the job's runtime trust context and fence, and seals Python's result; the
+provider's answer must echo it. A handler that raises is `native_capability_failed`;
+output over 16 KiB is truncated with a marker. A cancelled or unexpectedly
+failing owner settles its claimed job as blocked (`native_governed_cancelled`,
+`native_governed_failed`) and keeps the intent for reconciliation.
+
+`inference.request` maps a closed purpose (`interactive` or `background`) to the
+canonical routes `cordis_interactive_inference` and `cordis_background_inference`
+and runs `stream_completion_with_fallback`, that is `execute_streaming` behind
+the single `remote_inference_admission_broker`, bound to the job's lease.
+Interactive work keeps its priority over queued background work; cancelling a
+queued request releases its reservation without contact; a lost response after
+contact stays an `unknown` cost liability. By broker design that uncertain
+result keeps the serial slot until it is reconciled, so the next request (Cordis
+or chat) waits instead of risking a double charge. Outbound messages are
+Vault-redacted (fail closed) before JSON encoding, and Cordis inference is capped
+at four concurrent requests per operator (`cordis_inference_capacity`) so a burst
+cannot take the broker's per-owner admission slots chat needs. Routes need a
+declared and proven streaming capability, as chat does. Python returns bounded frames, the sealed
+receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
+and no service returns secrets. A changed attempt, deadline or Root never seals
+output, and unloading the host leaves the job's intent and cost liability for
+recovery while a re-admission reuses the held job.
+`connections.invokeBoundAdapter` admits a job for a canonical connection reference,
+its expected revision and an operation from a closed table
+(`calendar.read_events`, `gmail.read_messages`); the call requires the caller's
+current, ready, unchanged connection row and then fails closed as
+`native_adapter_operation_not_composed`, recorded on the blocked job, without
+touching a credential or effect. Composing those adapters is follow-up work, and
+no Gmail/Calendar operation is a native capability through `capabilities.invoke`.
+
 ### Cordis guardian research (#1008)
 
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2
@@ -597,9 +670,16 @@ guardian consumer `seraph.guardian-research.v1`
 selects a format provider per media type from its closed profile config:
 `plain-text` and `html-text` (a port of `normalize_source_text`, including the
 WHATWG entity table, with a parity test) and `rss-atom`, a hand-written bounded
-reader (256 KiB input, depth 32, 4,096 elements, 64 items, 4 KiB per field)
-that rejects DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
-declarations; feed links stay inert text. An absent planner, consumer, source
+reader (256 KiB input, depth 32, 4,096 elements, 64 items) that rejects
+DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
+declarations; feed links stay inert text. A text field longer than 4 KiB is cut
+on a code point boundary and ends with `…` instead of rejecting the feed; an
+over-long link is dropped rather than cut, so no altered URL is emitted. Script
+and style bodies inside Atom xhtml are not content. One UTF-8
+byte order mark may precede the declaration. Atom `type="xhtml"` content keeps
+its text in document order with breaks at block elements; `type="text"` stays
+literal and `type="html"` and RSS descriptions are normalized as HTML. Feeds
+served as `application/xml` or `text/xml` use the same reader. An absent planner, consumer, source
 extraction plugin or format mapping returns a typed block
 (`research_plan_provider_unavailable`, `research_consumer_unavailable`,
 `source_extraction_provider_unavailable`, `source_format_provider_unavailable`);
@@ -609,7 +689,13 @@ is the only way to replace a provider; consumer code is unchanged.
 Admission stages a bounded planning request (identities, revisions, public
 brief reference/digest, route epoch, strategy binding, issue time, original
 deadline and the limit/output ceilings) and admits one goal-less
-`goal_discovery_planning_v1` service job per occurrence. Its single
+`goal_discovery_planning_v1` service job per occurrence. The discovery history
+lists only the current UTC day's planning jobs for that Goal's programmes, found
+by their derived occurrence IDs rather than by scanning every planning row. A plan
+from an earlier day that did not succeed is not shown: planning only stages an
+inert plan (no contact, inference, cost or external effect), it is never re-run,
+and it admitted no discovery job, so it has no `runs` row either. Its recovery is
+the current research runtime state and a new occurrence on the next eligible day. Its single
 `research.buildPlan` invocation may only read that request and stage one plan;
 Python checks every binding field against the request, every limit and output
 cap against the ceiling, then `validate_goal_research_plan`, and writes its own
@@ -631,7 +717,9 @@ config digests. For the `plain-text` and `html-text` providers Python also
 recomputes `normalize_source_text` over the staged bytes (before taking the
 job writer) and rejects a differing output for that slot only
 (`source_output_mismatch`); the HTML provider matches Python's `re.I` tag-name
-case folding (`ı`/`İ`/`ſ`) with explicit character classes; `rss-atom` output is provider-attested (Python
+case folding (`ı`/`İ`/`ſ`) with explicit character classes, and a script/style
+closing tag accepts exactly the characters whose CPython simple lowercase equals
+the opening tag's (`i`/`I`/`İ` together; `ı` and `ſ` only themselves); `rss-atom` output is provider-attested (Python
 bounds it but has no reference feed parser). Both normalizers strip comments,
 script/style blocks and tags with linear scans, so unclosed constructs cannot
 stall the shared child. Feed, size and line-ending rejections are recorded per
@@ -654,10 +742,11 @@ exact fix while core startup continues. Runtime status (Settings → Cordis runt
 and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
 and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
 `./manage.sh -e dev cordis build`, then restart. The backend container image
-builds `runtime/cordis` in a pinned `node:24.13.1-bookworm-slim` stage (Compose
-`additional_contexts`, npm 11.8.0, `npm ci --ignore-scripts`, `npm run build`)
-and copies that Node binary and the built package to `/runtime/cordis`, the
-path the backend resolves.
+builds `runtime/cordis` in a `node:24.13.1-bookworm-slim` stage pinned by its
+image digest (Compose `additional_contexts`, which needs Docker Compose 2.17 or
+newer, npm 11.8.0, `npm ci --ignore-scripts`, `npm run build`) and copies that
+Node binary and the built package to `/runtime/cordis`, the path the backend
+resolves.
 
 Raw public sources up to the plan's `max_source_bytes` (256 KiB) cross to Cordis
 as one staged envelope read in bounded 64 KiB `artifacts.read` chunks at UTF-8
@@ -1536,9 +1625,36 @@ hint is not a grant or integrity seal against arbitrary direct database edits.
 The stopped workspace CLI accepts the old schema and its sole added private
 hint column for backup/restore and continuity readback. Restore leaves that hint
 NULL; canonical startup migration must classify it before governed accounting
-is ready. Other unexpected columns still fail closed. These bounded specialist
-reads do not bound the existing global `_accounting_rows` baseline, which still
-loads the deployment ledger.
+is ready. Other unexpected columns still fail closed.
+
+**Ledger verification (#1086).** Reserve, contact, settle and status reads no
+longer load or re-hash the deployment ledger. Each reservation stores a private
+derived `ledger_row_digest` of its financial content. The account record holds
+running totals (open bound by state, settled amount by period, per owner, the
+overrun set and rows per period), and the `v2:` account digest covers that
+record plus the ordered root of every stored row digest. A hot writer checks the
+external witness, recomputes that root and the account digest, verifies every
+row it reads or changes against its digest before resealing it, and admits only
+against the sealed totals. Editing ledger history therefore cannot free capacity
+or clear the overrun latch. Deleted, inserted or re-sealed rows, totals edits,
+witness rollback and an older database are refused on the next operation.
+A content-only edit to a row no operation touches is found by full
+verification. That re-validates every row's evidence, key, content digest and
+the totals, and runs on the first accounting writer of each process, on any
+writer once the last full pass is over 20 minutes old, on the rare writers
+(recovery, settings saves, denial quiescence, research funding/rebind/cancel,
+research readback), at startup recovery, every 10 minutes from the
+`inference_ledger_verification` scheduler job (a deferred read that latches
+accounting for the process after an in-lock re-check), and in every workspace
+CLI tool. The scoped reads cannot be emptied either: a general-task group read
+must return exactly the sealed member count for that group, a discovery
+programme read the sealed count of discovery-service rows, and the near-text
+outstanding check reads a sealed per-owner count, so hiding a row by editing its
+lookup key, owner, job, state or runtime path is refused or still counted. Startup recovery
+migrates a v1 ledger forward after its full v1 check (checkpoint with no
+operations); v2 is forward-only, and an older build reports
+`accounting_continuity_unavailable` for a v2 ledger. Restored rows without a
+stored digest are fully verified and backfilled before they are trusted.
 
 Private handoff publication discovers at most twelve distinct specialist
 callback identities from validated original-group reservations, then checks each
@@ -2264,6 +2380,58 @@ has no OS confinement. Provider/account usefulness, live OpenRouter quality,
 and Docker resource enforcement remain **external-unverified**. The original
 repository is not claimed changed,
 and this capability remains Partial within those explicit proof limits.
+
+### Project issues and pull requests (C4.3 #1017) {#project-issues-and-pull-requests-1017}
+
+Project follow-through is **Partial**. It uses the existing GitHub connection and
+adds no new write authority. Routes live under
+`/api/capabilities/github/project-source`:
+
+- `GET` returns the sync status and the connection's actual limitations: selected
+  repository only, a bounded read window, polling only, unverified token scope,
+  bodies truncated at 6000 bytes, and no comments or reviews read. It also names
+  a missing credential, a disabled connection or reconcile-only mode.
+- `POST /sync` (`ProjectSourceScope`) reads the selected repository only, by
+  default 50 items over 3 pages. It stores an immutable snapshot whose items each
+  carry a revision (`updated_at`) and a content digest over the title, body,
+  state and labels. Comment activity moves the revision but not the digest.
+  Another repository is refused. Lost access blocks the read and keeps earlier
+  snapshots and local artifacts.
+- `POST /findings` (`ProjectFinding`) turns one snapshot item into an inert
+  Triage task. The item is quoted as untrusted data between a fence derived
+  from the item digest and request key; any `<<<`/`>>>` run in the source is
+  split, so the source cannot end the quote. It gives no authority.
+  Planning egress needs an explicit acknowledgement, and the snapshot is
+  checked for drift first.
+- `POST /watch-view` writes a snapshot as workspace text under `project-watch/`.
+  An ordinary `workspace_text` source watch on that file produces its own
+  reviewed decision packet and verified dossier.
+- `POST /responses` prepares a `blocker` or `review_request` comment on the exact
+  issue or PR through the existing GitHub follow-through `prepare`. The caller
+  names only the watch `packet_id`; the goal and dossier are the packet's own.
+  The packet must be verified, owned by this session, and come from a watch on
+  this repository's view whose observed text is exactly the referenced
+  snapshot's view (`project_response_packet_not_bound` otherwise). The item is
+  re-read first, and a changed revision stops with
+  `project_source_changed_decision_required`. The comment waits for its own
+  approval and is never posted here.
+- `GET /lineage/{task_id}` reads the chain from each owner: the source revision,
+  the task, the repository roots and each iteration's patch digest, and only
+  this task's publications (those of its own repair roots) with approval state,
+  the approved and tested patch digests, the bound source revision and the
+  verified PR. An unreadable unrelated root is counted, never fatal.
+
+When an accepted change task's repair is published, the preview binds
+`project_source` (the task-bound and accepted digests). The item is read again
+at prepare, when the approval resumes (outside the configuration lock), and
+immediately before the first GitHub write. A changed or closed item stops the
+publication before any write (`awaiting_approval` at resume, `blocked` before
+the first write) and keeps the completed repair. The operator can accept
+the new revision with `acknowledged_project_source_digest` on a fresh prepare,
+and that needs a fresh approval. A connection pointing at another repository
+refuses with `project_source_repository_changed`. A moved base or a changed
+patch is refused by the existing Source and publication checks. An unknown
+publication outcome uses the existing readback reconcile and never a second PR.
 
 ### Reviewed public evidence pipelines (#914) {#reviewed-public-evidence-pipelines-914-branch-local-target}
 

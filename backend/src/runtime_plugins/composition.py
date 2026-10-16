@@ -121,7 +121,8 @@ KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.authority.v1', 'seraph.goals.v1', 'seraph
 PLUGIN_CONFIG_FIELDS: dict[str, frozenset[str]] = {identifier: frozenset() for identifier in KNOWN_PLUGINS}
 PLUGIN_CONFIG_FIELDS["seraph.source-extraction.v1"] = frozenset({"formats"})
 # Mirror of runtime/cordis/src/plugins/source_extraction/index.ts.
-SOURCE_MEDIA_TYPES = ("text/plain", "text/html", "application/rss+xml", "application/atom+xml")
+SOURCE_MEDIA_TYPES = ("text/plain", "text/html", "application/rss+xml", "application/atom+xml",
+                      "application/xml", "text/xml")
 SOURCE_FORMAT_PROVIDERS = frozenset({"plain-text", "html-text", "rss-atom"})
 # Provider implementations beyond each domain's own index/contract files.
 EXTRA_PLUGIN_FILES = {

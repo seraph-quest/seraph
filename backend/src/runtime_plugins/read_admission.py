@@ -135,6 +135,35 @@ async def _memory_projection(run, candidate: dict, *, repository=None) -> dict:
     return value
 
 
+async def assert_memory_records_current(db, run, value: dict) -> None:
+    """Serve retrieved records only while each still reads exactly as served.
+
+    Runs in the completion transaction through the owner's own list-safe
+    summary path, which reads the tombstone ledger directly. A forgotten,
+    archived, redacted or tombstoned record (including a restored row whose
+    redaction reapply is pending) is withdrawn; an edited record, or one whose
+    redaction is now unavailable, has changed. Either denies the read (#1100).
+    """
+    import hmac
+    from src.memory.repository import current_memory_record_summaries
+    from .dispatch import NativeServiceBlocked, read_result_key, sealed_record_digest
+    records = value["records"]
+    if not records:
+        return
+    current = await current_memory_record_summaries(
+        db, owner_session_id=run.operator_session_id, memory_ids=[item["record_ref"] for item in records])
+    key = read_result_key()
+    for item in records:
+        if item["record_ref"] not in current:
+            raise NativeServiceBlocked("native_memory_record_withdrawn")
+        summary, truncated = current[item["record_ref"]]
+        if summary == REDACTION_UNAVAILABLE:
+            raise NativeServiceBlocked("native_memory_redaction_unavailable")
+        if truncated or not hmac.compare_digest(
+                sealed_record_digest("" if summary is None else summary, key=key), item["text_mac"]):
+            raise NativeServiceBlocked("native_memory_record_changed")
+
+
 async def native_read_projection(db, run, candidate: dict) -> dict:
     candidate = validate_read_candidate(candidate)
     if candidate["method"] in {"capabilities.list", "capabilities.describe"}:

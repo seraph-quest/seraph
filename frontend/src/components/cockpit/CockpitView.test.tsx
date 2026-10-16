@@ -13570,10 +13570,10 @@ describe("CockpitView", () => {
       if (url.includes("/api/extensions/scaffold") && init?.method === "POST") {
         return Promise.resolve(mockResponse({
           status: "scaffolded",
-          path: "/tmp/seraph-test/extensions/research-pack",
+          path: "/workspace/extensions/research-pack",
           created_files: ["manifest.yaml", "skills/research-pack.md"],
           preview: {
-            path: "/tmp/seraph-test/extensions/research-pack",
+            path: "/workspace/extensions/research-pack",
             extension_id: "seraph.research-pack",
             display_name: "Research Pack",
             ok: true,
@@ -13613,7 +13613,7 @@ describe("CockpitView", () => {
     });
 
     await waitFor(() => {
-      expect(within(studio).getByLabelText("Extension package path")).toHaveValue("/tmp/seraph-test/extensions/research-pack");
+      expect(within(studio).getByLabelText("Extension package path")).toHaveValue("/workspace/extensions/research-pack");
       expect(within(studio).getByText("Research Pack scaffolded with 2 files")).toBeInTheDocument();
     });
   }, 15000);
@@ -13672,10 +13672,10 @@ describe("CockpitView", () => {
       if (url.includes("/api/extensions/scaffold") && init?.method === "POST") {
         return Promise.resolve(mockResponse({
           status: "scaffolded_invalid",
-          path: "/tmp/seraph-test/extensions/research-pack",
+          path: "/workspace/extensions/research-pack",
           created_files: ["manifest.yaml", "skills/research-pack.md"],
           preview: {
-            path: "/tmp/seraph-test/extensions/research-pack",
+            path: "/workspace/extensions/research-pack",
             extension_id: "seraph.research-pack",
             display_name: "Research Pack",
             ok: false,

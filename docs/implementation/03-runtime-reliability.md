@@ -147,7 +147,7 @@ New runtime work should be activated through GitHub issues and the GitHub Projec
     - result: `1 passed`
   - `cd backend && .venv/bin/python -m pytest tests/test_run_backend_test_shard.py tests/test_backend_test_shards.py -q`
     - result: `15 passed`
-  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario provider_routing_decision_audit --indent 0`
+  - `cd backend && UV_CACHE_DIR=/tmp/uv-cache OPENROUTER_API_KEY=test-key uv run python -m src.evals.harness --scenario provider_routing_decision_audit --indent 0`
     - result: `passed`
 - subagent review:
   - focused read-only subagent review was run on the runtime/eval seam and on the API/shard-runner seam

@@ -416,7 +416,10 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                     # Overrun freezes unfinished work; it must not erase that
                     # already completed child's result or unclipped charge.
                     assert len(completed) == 1 and completed[0].job_kind == "readonly_research_child"
-                    assert completed[0].run_identity.endswith(":child:0") and completed[0].finished_at is not None
+                    # Both children race for the sole remote lane, so either
+                    # slot may be first: the completed child is the contacted one.
+                    assert "remote:" + completed[0].run_identity == contacted[0]["operation_id"]
+                    assert completed[0].finished_at is not None
                 else:
                     assert not completed
                 assert next(row for row in rows if row.job_kind == "research_dossier").status != "succeeded"

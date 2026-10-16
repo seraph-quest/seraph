@@ -35,12 +35,12 @@ TASK_JOB_KIND = "runtime_service_task_v1"
 SUPPORTED_METHODS = frozenset({
     "authority.resolve", "goals.read", "tasks.admit", "tasks.inspect", "tasks.checkpoint", "tasks.cancel",
     "capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve",
-    "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"})
+    "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append",
+    # #1018 governed executors (CapabilityExecutionHost, model fabric + shared broker).
+    "capabilities.invoke", "inference.request"})
 # Operator-visible reasons for every method without a native owner here.
 BLOCKED_METHODS = MappingProxyType({
     "tasks.settle": "native_settlement_python_owner_only",
-    "capabilities.invoke": "native_capability_invoke_not_bound",
-    "inference.request": "native_inference_purpose_not_bound",
     "memory.propose": "native_memory_mutation_deferred",
     "memory.applyReviewed": "native_memory_mutation_deferred",
     "memory.forget": "native_memory_mutation_deferred",
@@ -378,6 +378,9 @@ class NativeServiceDispatcher:
             if method in BLOCKED_METHODS:
                 # Typed and operator-visible; no authority or private bytes used.
                 return blocked(BLOCKED_METHODS[method])
+            if scope.binding.native_branch == "governed":
+                from .governed_services import dispatch_governed
+                return await dispatch_governed(self, frame, payload, scope)
             if scope.binding.native_branch in {"programme_planning", "programme_discovery"}:
                 # Guardian research callbacks (#1008) have their own Python owner.
                 from .research_dispatch import dispatch_research

@@ -12,5 +12,7 @@ export class SeraphCapabilitiesService extends NativeProxy implements SeraphCapa
 }
 /** Trusted composition injects the original invocation-scoped transport. */
 export function createPlugin(client: ScopedRequestClient): Plugin.Object<Record<string, never>> {
-  return { name: 'seraph.capabilities.v1', provide: ['seraphCapabilities'], apply(ctx) { new SeraphCapabilitiesService(ctx, client); } };
+  return { name: 'seraph.capabilities.v1', provide: ['seraphCapabilities'],
+    // Governed services exist only while their authority, task, artifact and audit owners do (#1018).
+    inject: ['seraphAuthority', 'seraphTasks', 'seraphArtifacts', 'seraphAudit'], apply(ctx) { new SeraphCapabilitiesService(ctx, client); } };
 }

@@ -11,5 +11,7 @@ export class SeraphConnectionsService extends NativeProxy implements SeraphConne
 }
 /** Trusted composition injects the original invocation-scoped transport. */
 export function createPlugin(client: ScopedRequestClient): Plugin.Object<Record<string, never>> {
-  return { name: 'seraph.connections.v1', provide: ['seraphConnections'], apply(ctx) { new SeraphConnectionsService(ctx, client); } };
+  return { name: 'seraph.connections.v1', provide: ['seraphConnections'],
+    // Governed services exist only while their authority, task, artifact and audit owners do (#1018).
+    inject: ['seraphAuthority', 'seraphTasks', 'seraphArtifacts', 'seraphAudit'], apply(ctx) { new SeraphConnectionsService(ctx, client); } };
 }

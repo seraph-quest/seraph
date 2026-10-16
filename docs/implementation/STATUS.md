@@ -110,6 +110,15 @@ scheduler and bound adapters, return typed `blocked` results. Memory
 composition-snapshot accounting is not shipped. See the
 [guide section](./12-current-app-guide.md#cordis-typed-service-bridge-1007).
 
+**Cordis governed capabilities and inference** from
+[#1018](https://github.com/seraph-quest/seraph/issues/1018) is **Partial**:
+`capabilities.invoke` (adopted read-only native capabilities through
+`CapabilityExecutionHost`) and `inference.request` (two canonical Cordis routes
+through the shared broker and ledger) have Python owners with sealed results,
+bounded Vault-redacted output and job-bound accounting;
+`connections.invokeBoundAdapter` remains a typed block. See the
+[guide section](./12-current-app-guide.md#cordis-governed-capabilities-and-inference-1018).
+
 **Cordis guardian research** from
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal
 discovery planning and public source extraction run only through the composed

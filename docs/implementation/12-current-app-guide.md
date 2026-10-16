@@ -208,12 +208,13 @@ receipt's recorded revision); any difference blocks the job with
 `native_child_result_mismatch`, and only Python-owned values are returned. An
 exact retry reuses the same job and never re-executes; an interrupted stage
 stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle`,
-`capabilities.invoke`, `inference.request`, `memory.propose`,
+`memory.propose`,
 `memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
 `agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
 `source-extraction.extract`) return a typed `blocked` reason as Python callbacks
 (`research.*` and `source-extraction.extract` are Cordis-owned since #1008 and
-only originated by Python), also listed in
+only originated by Python; `capabilities.invoke` and `inference.request` have
+governed Python owners since #1018), also listed in
 the runtime status `native_services` block. No HTTP route yet exposes the bridge
 to the browser, and the Memory composition-snapshot accounting amendments
 recorded on #1007 are not implemented. The acceptance tests deny every Python
@@ -585,6 +586,39 @@ document attempt or bypass its retry and positive cleanup requirements.
 **Scope:** current `develop` baseline and its named partial proof boundaries;
 new target architecture is owned by the Constitution and ADRs
 
+
+### Cordis governed capabilities and inference (#1018)
+
+[#1018](https://github.com/seraph-quest/seraph/issues/1018) binds
+`seraph.capabilities.v1` and `seraph.inference.v1` to reviewed Python owners in
+`backend/src/runtime_plugins/governed_services.py`. These providers (and
+`seraph.connections.v1`) inject the authority, task, artifact and audit services
+explicitly, so a composition without those owners never registers them, and an
+absent provider's methods return `service_provider_not_composed`.
+
+`capabilities.invoke` admits one `runtime_service_governed_v1` job whose closed
+candidate names a descriptor and its exact arguments digest. Descriptors come
+from `factory.get_tools` (stable `native_tool:<name>` id and version, closed
+input schema, effect class, limits, permissions and executor). Only adopted,
+read-only `CapabilityExecutionHost` capabilities are invocable; approval-gated,
+MCP, ungoverned and Vault tools are listed as blocked. Invalid arguments are
+denied at admission. The call records an intent, runs the host under the job's
+runtime trust context and fence, and seals Python's result; the provider's
+answer must echo it.
+
+`inference.request` maps a closed purpose (`interactive` or `background`) to the
+canonical routes `cordis_interactive_inference` and `cordis_background_inference`
+and runs `stream_completion_with_fallback`, that is `execute_streaming` behind
+the single `remote_inference_admission_broker`, bound to the job's lease.
+Interactive work keeps its priority over queued background work; cancelling a
+queued request releases its reservation without contact; a lost response after
+contact stays an `unknown` cost liability. Routes need a declared and proven
+streaming capability, as chat does. Python returns bounded frames, the sealed
+receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
+and no service returns secrets. A changed attempt, deadline or Root never seals
+output, and unloading the host leaves the job's intent and cost liability for
+recovery while a re-admission reuses the held job. `connections.invokeBoundAdapter`
+stays a typed block until a finite adapter operation is composed.
 
 ### Cordis guardian research (#1008)
 

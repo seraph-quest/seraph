@@ -11322,31 +11322,35 @@ class WorkBoardDispatcher:
             # the original admission. Resolve that persisted admission rather
             # than rebuilding a spec, deadline or authority during recovery.
             from src.workflows.general_task_guard import _current, _assert_joint_manifest
+            from src.work_board.channel_capture import staged_captured_source_identity
             expected_job_id = f"work-board:{task.task_id}:{attempt.attempt_id}"
-            async with self.session_provider() as db:
-                from src.workflows.specialist_delegation import is_specialist_root,assert_specialist_root_current
-                from src.workflows.general_task_guard import read_manifest
-                parent = await self.jobs._fetch(db,expected_job_id)
-                if is_specialist_root(parent) and read_manifest(parent) is None:
-                    from src.workflows.specialist_lifecycle import verify_unclaimed_specialist
-                    await verify_unclaimed_specialist(db,parent,task,attempt)
-                    current_task,current_attempt = task,attempt
-                else:
-                    from src.workflows.general_task_guard import stage_positive_parent
-                    await stage_positive_parent(self.jobs, db, expected_job_id)
-                    parent, current_task, current_attempt, manifest, _ = await _current(self.jobs, db, expected_job_id)
-                    _assert_joint_manifest(parent, current_task, current_attempt, manifest)
-                if (current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
-                    or current_task.task_revision != task.task_revision
-                    or current_attempt.fencing_token != attempt.fencing_token):
-                    raise DurableJobIdempotencyConflict("original native board binding changed")
-                expected = dict(owner_principal_id=parent.owner_principal_id,
-                    goal_id=parent.goal_id, goal_revision=parent.goal_revision,
-                    idempotency_scope="work-board-attempt", idempotency_key=f"{task.task_id}:{attempt.attempt_id}",
-                    expected_job_id=expected_job_id, owner_kind="user", service_id=None,
-                    session_id=parent.session_id, operator_session_id=parent.operator_session_id,
-                    job_kind="agent.task.v1", capability_version="1", input_digest=parent.input_digest,
-                    authority_digest=parent.authority_digest, run_fingerprint=parent.run_fingerprint)
+            # Recovery reaches this outside any request frame; stage the
+            # Source identity the positive parent journal is scoped to.
+            with staged_captured_source_identity():
+                async with self.session_provider() as db:
+                    from src.workflows.specialist_delegation import is_specialist_root,assert_specialist_root_current
+                    from src.workflows.general_task_guard import read_manifest
+                    parent = await self.jobs._fetch(db,expected_job_id)
+                    if is_specialist_root(parent) and read_manifest(parent) is None:
+                        from src.workflows.specialist_lifecycle import verify_unclaimed_specialist
+                        await verify_unclaimed_specialist(db,parent,task,attempt)
+                        current_task,current_attempt = task,attempt
+                    else:
+                        from src.workflows.general_task_guard import stage_positive_parent
+                        await stage_positive_parent(self.jobs, db, expected_job_id)
+                        parent, current_task, current_attempt, manifest, _ = await _current(self.jobs, db, expected_job_id)
+                        _assert_joint_manifest(parent, current_task, current_attempt, manifest)
+                    if (current_task.task_id != task.task_id or current_attempt.attempt_id != attempt.attempt_id
+                        or current_task.task_revision != task.task_revision
+                        or current_attempt.fencing_token != attempt.fencing_token):
+                        raise DurableJobIdempotencyConflict("original native board binding changed")
+                    expected = dict(owner_principal_id=parent.owner_principal_id,
+                        goal_id=parent.goal_id, goal_revision=parent.goal_revision,
+                        idempotency_scope="work-board-attempt", idempotency_key=f"{task.task_id}:{attempt.attempt_id}",
+                        expected_job_id=expected_job_id, owner_kind="user", service_id=None,
+                        session_id=parent.session_id, operator_session_id=parent.operator_session_id,
+                        job_kind="agent.task.v1", capability_version="1", input_digest=parent.input_digest,
+                        authority_digest=parent.authority_digest, run_fingerprint=parent.run_fingerprint)
             found = await lookup(**expected)
             return expected_job_id if isinstance(found, Mapping) else None
         if capability_id == "browser.public-task.v1":

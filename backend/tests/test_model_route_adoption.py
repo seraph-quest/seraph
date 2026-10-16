@@ -55,6 +55,7 @@ EXPECTED_CANONICAL_ROUTES = {
     "file_worker",
     "workflow_runner",
     "readonly_research_child",
+    "audio_transcription",
 }
 
 

@@ -596,6 +596,18 @@ def _register_native_journal(db, identity, journal):
     _LIVE_NATIVE_JOURNALS[id(journal)] = journal
 
 
+async def _stage_specialist_root(db, root):
+    """A specialist root's checks reread its delegation's original claim
+    receipt; stage it through that callback's own journal first."""
+    from src.workflows.specialist_delegation import is_specialist_root
+    if root is None or not is_specialist_root(root):
+        return
+    invocation = json.loads(root.declared_authority_json or "{}").get("specialist_delegation_invocation_id")
+    callback = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == invocation))
+    if callback is not None:
+        await stage_native_journal(db, callback)
+
+
 async def stage_native_journal(db, run, *, additional=()):
     """Stage retained receipt proofs at the fixed owner's pre-writer boundary."""
     import asyncio
@@ -604,8 +616,10 @@ async def stage_native_journal(db, run, *, additional=()):
     from src.work_board.contracts import GeneralTaskArtifactRef
     if run.job_kind != GENERAL_TASK_NATIVE_CHILD_KIND:
         return
-    await assert_general_task_child_phase_current(db, run)
     binding = child_binding(run)
+    await _stage_specialist_root(db, await db.scalar(select(WorkflowRunState).where(
+        WorkflowRunState.run_identity == binding.parent_job_id)))
+    await assert_general_task_child_phase_current(db, run)
     parent = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == binding.parent_job_id))
     assert_original_parent_authority(parent)
     manifest = read_manifest(parent)
@@ -649,6 +663,7 @@ async def stage_positive_parent(jobs, db, parent_id, *, manifest=None):
     from src.work_board.general_task_runtime_artifacts import verify_general_task_manifest, stage_retained_native_artifact
     from src.db.models import WorkBoardInputArtifact
     current_parent = await jobs._fetch(db, parent_id)
+    await _stage_specialist_root(db, current_parent)
     current_manifest = read_manifest(current_parent) or manifest
     parent, task, attempt, manifest = await _current_original_sql(jobs, db, parent_id, manifest=current_manifest)
     await check_current_captured_task_source(db, WorkBoardOwner(
@@ -668,6 +683,28 @@ async def stage_positive_parent(jobs, db, parent_id, *, manifest=None):
     journal = _VerifiedParentJournal(
         parent_id, parent.fencing_token, parent.checkpoint_receipts_json, parent.declared_authority_json,
         _PHASE_SQL_SEAL, staged, _checked_source_frame(), asyncio.current_task(), envelope, pins)
+    _register_native_journal(db, parent_id, journal)
+
+
+async def stage_parent_receipts(jobs, db, parent_id):
+    """Stage only the parent's retained step receipts for a stop-only writer.
+
+    Unlike stage_positive_parent this grants no Source permission, so an
+    operator pause stays available after its captured Source is retired.
+    """
+    import asyncio
+    from src.work_board.channel_capture import _checked_source_frame
+    from src.work_board.contracts import GeneralTaskArtifactRef
+    from src.work_board.general_task_runtime_artifacts import stage_retained_native_artifact
+    await _stage_specialist_root(db, await jobs._fetch(db, parent_id))
+    parent, _task, _attempt, manifest = await _current_original_sql(jobs, db, parent_id)
+    staged = tuple(stage_retained_native_artifact(GeneralTaskArtifactRef(
+        artifact_id=i, digest=d, schema_version=s), parent_job_id=parent_id,
+        creation_digest=manifest.creation_digest) for i, d, s in zip(manifest.step_receipt_artifact_ids,
+            manifest.step_receipt_digests, manifest.step_receipt_schemas))
+    journal = _VerifiedParentJournal(
+        parent_id, parent.fencing_token, parent.checkpoint_receipts_json, parent.declared_authority_json,
+        _PHASE_SQL_SEAL, staged, _checked_source_frame(), asyncio.current_task())
     _register_native_journal(db, parent_id, journal)
 
 
@@ -3185,7 +3222,7 @@ async def pause_parent(jobs, parent_id, *, operator_owner, expected_task_revisio
         # Stage the parent's retained receipts once. Closed children admitted
         # under an earlier plan revision are not phase-current, so staging
         # through each child would refuse a valid pause.
-        await stage_positive_parent(jobs, db, parent_id)
+        await stage_parent_receipts(jobs, db, parent_id)
         await db.rollback()
         await _begin_sqlite_immediate(db)
         if authority_check is not None:

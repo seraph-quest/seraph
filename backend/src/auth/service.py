@@ -8,13 +8,16 @@ import hashlib
 import hmac
 import secrets
 import asyncio
+import time
+import logging
 import threading
 import weakref
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 
 from config.settings import settings
-from src.db.engine import get_session
+from src.db.engine import bound_lock_wait, get_session, is_database_locked
 from src.db.models import OperatorSession
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
@@ -109,8 +112,19 @@ _VERIFY_LIMIT = asyncio.Semaphore(2)
 # once per process-local interval.  The database row remains authoritative;
 # this lock only coalesces the stale-touch write path.
 _AUTH_TOUCH_INTERVAL = timedelta(seconds=30)
+# The touch and the expiry revocation are bookkeeping writes on an already
+# validated read. Under a foreign SQLite writer they wait this long and then
+# defer instead of holding every authenticated request for the busy timeout.
+_AUTH_BOOKKEEPING_WAIT_MS = 250
+# After a deferral, skip touches briefly so sustained contention costs one
+# bounded wait per interval rather than one per poll. Validation is unaffected.
+_AUTH_TOUCH_BACKOFF_SECONDS = 2.0
+_auth_touch_retry_after = 0.0
 _AUTH_TOUCH_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _AUTH_TOUCH_LOCKS_GUARD = threading.Lock()
+
+
+logger = logging.getLogger(__name__)
 
 
 def _auth_touch_lock() -> asyncio.Lock:
@@ -481,24 +495,74 @@ async def _find_session_record(
     return None, "session_revoked"
 
 
+async def _commit_auth_bookkeeping(db) -> bool:
+    """Commit a touch or expiry revocation; lock contention defers it.
+
+    Callers have already enforced revocation and both expiries on this read,
+    so only the bookkeeping write is best-effort. A deferred touch leaves the
+    stored idle expiry unchanged (the session is not extended this time) and a
+    deferred expiry revocation still fails the request closed.
+    """
+    global _auth_touch_retry_after
+    await bound_lock_wait(db, _AUTH_BOOKKEEPING_WAIT_MS)
+    try:
+        await db.commit()
+    except OperationalError as exc:
+        if not is_database_locked(exc):
+            raise
+        await db.rollback()
+        _auth_touch_retry_after = time.monotonic() + _AUTH_TOUCH_BACKOFF_SECONDS
+        logger.info("operator session bookkeeping deferred: database busy")
+        return False
+    return True
+
+
+def _touch_admitted() -> bool:
+    """A touch is neither in flight nor backing off after a deferral."""
+    return not _auth_touch_lock().locked() and time.monotonic() >= _auth_touch_retry_after
+
+
+async def _touch_record(
+    db,
+    record: OperatorSession | None,
+    now: datetime,
+    *,
+    token_hash: str | None = None,
+) -> AuthenticatedOperator | None:
+    if record is None:
+        await _commit_auth_bookkeeping(db)
+        return None
+    # Classify ownership before the touch is pending so its read queries
+    # cannot autoflush the write (and misreport contention as legacy state).
+    continuity, recovery_action = await _ownership_metadata(db, record)
+
+    def operator() -> AuthenticatedOperator:
+        return _operator_for_record(
+            record,
+            token_hash=token_hash,
+            ownership_continuity=continuity,
+            ownership_recovery_action=recovery_action,
+        )
+
+    validated = operator()
+    if not _touch_is_due(record, now):
+        await _commit_auth_bookkeeping(db)
+        return validated
+    record.last_seen_at = now
+    record.idle_expires_at = min(
+        now + timedelta(seconds=settings.operator_auth_idle_seconds),
+        _aware(record.absolute_expires_at),
+    )
+    db.add(record)
+    return operator() if await _commit_auth_bookkeeping(db) else validated
+
+
 async def _touch_token(token_hash: str) -> AuthenticatedOperator:
     async with _auth_touch_lock():
         now = datetime.now(timezone.utc)
         async with get_session() as db:
             record, error = await _find_token_record(db, token_hash, now)
-            if record is not None and _touch_is_due(record, now):
-                absolute_expires_at = _aware(record.absolute_expires_at)
-                record.last_seen_at = now
-                record.idle_expires_at = min(
-                    now + timedelta(seconds=settings.operator_auth_idle_seconds),
-                    absolute_expires_at,
-                )
-                db.add(record)
-            operator = (
-                await _operator_from_record(db, record, token_hash=token_hash)
-                if record is not None
-                else None
-            )
+            operator = await _touch_record(db, record, now, token_hash=token_hash)
         if error:
             raise AuthFailure(error)
         assert operator is not None
@@ -533,6 +597,8 @@ async def authenticate_token(token: str | None, *, touch: bool = True) -> Authen
     now = datetime.now(timezone.utc)
     async with get_session() as db:
         record, error = await _find_token_record(db, token_hash, now)
+        if record is None:
+            await _commit_auth_bookkeeping(db)
         operator = (
             await _operator_from_record(db, record, token_hash=token_hash)
             if record is not None
@@ -542,8 +608,10 @@ async def authenticate_token(token: str | None, *, touch: bool = True) -> Authen
     if error:
         raise AuthFailure(error)
     assert operator is not None
-    if touch_due:
+    if touch_due and _touch_admitted():
         return await _touch_token(token_hash)
+    # A touch in flight (or just deferred) covers this validated request;
+    # queueing every request behind one stalled bookkeeping write is #702.
     return operator
 
 
@@ -592,12 +660,14 @@ async def _authenticate_session(
             now,
             follow_replacements=follow_replacements,
         )
+        if record is None:
+            await _commit_auth_bookkeeping(db)
         operator = await _operator_from_record(db, record) if record is not None else None
         touch_due = bool(record is not None and touch and _touch_is_due(record, now))
     if error:
         raise AuthFailure(error)
     assert operator is not None
-    if touch_due:
+    if touch_due and _touch_admitted():
         return await _touch_session(session_id, follow_replacements=follow_replacements)
     return operator
 
@@ -616,15 +686,7 @@ async def _touch_session(
                 now,
                 follow_replacements=follow_replacements,
             )
-            if record is not None and _touch_is_due(record, now):
-                absolute_expires_at = _aware(record.absolute_expires_at)
-                record.last_seen_at = now
-                record.idle_expires_at = min(
-                    now + timedelta(seconds=settings.operator_auth_idle_seconds),
-                    absolute_expires_at,
-                )
-                db.add(record)
-            operator = await _operator_from_record(db, record) if record is not None else None
+            operator = await _touch_record(db, record, now)
         if error:
             raise AuthFailure(error)
         assert operator is not None

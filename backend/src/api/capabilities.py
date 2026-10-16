@@ -544,8 +544,13 @@ def _starter_pack_activation_would_change_state(
     return False
 
 
-def _starter_pack_install_item_statuses(pack: dict[str, Any]) -> list[dict[str, Any]]:
-    catalog_skills = catalog_skill_by_name()
+def _starter_pack_install_item_statuses(
+    pack: dict[str, Any],
+    *,
+    catalog_skills: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if catalog_skills is None:
+        catalog_skills = catalog_skill_by_name()
     mcp_status = {
         str(server["name"]): server
         for server in _mcp_status_list(get_current_mcp_policy_mode())
@@ -685,11 +690,15 @@ def _recommended_actions(
     native_tools: list[dict[str, Any]],
     mcp_servers: list[dict[str, Any]],
     tool_mode: str,
+    catalog: dict[str, list[dict[str, Any]]] | None = None,
+    catalog_skills: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     tool_status = {str(tool["name"]): tool for tool in native_tools}
     starter_pack_index = _starter_pack_index()
-    catalog = load_catalog_items()
-    catalog_skills = catalog_skill_by_name()
+    if catalog is None:
+        catalog = load_catalog_items()
+    if catalog_skills is None:
+        catalog_skills = catalog_skill_by_name(catalog)
     catalog_items: list[dict[str, Any]] = []
     recommendations: list[dict[str, Any]] = []
     seen_recommendations: set[str] = set()
@@ -934,9 +943,11 @@ def _starter_pack_recommended_actions(
     native_tools: list[dict[str, Any]],
     tool_mode: str,
     workflows_by_name: dict[str, dict[str, Any]],
+    catalog_skills: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
-    catalog_skills = catalog_skill_by_name()
+    if catalog_skills is None:
+        catalog_skills = catalog_skill_by_name()
     seen_install_items: set[str] = set()
     if pack.get("availability") != "ready" and _starter_pack_activation_would_change_state(
         pack,
@@ -1374,9 +1385,11 @@ def _attach_workflow_actions(
     native_tools: list[dict[str, Any]],
     skills_by_name: dict[str, dict[str, Any]],
     tool_mode: str,
+    catalog_skills: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     tool_status = {str(tool["name"]): tool for tool in native_tools}
-    catalog_skills = catalog_skill_by_name()
+    if catalog_skills is None:
+        catalog_skills = catalog_skill_by_name()
     for workflow in workflows:
         actions: list[dict[str, Any]] = []
         blocked_skill_tools: list[str] = []
@@ -1628,13 +1641,16 @@ def _starter_pack_statuses(
     workflows_by_name: dict[str, dict[str, Any]],
     native_tools: list[dict[str, Any]],
     tool_mode: str,
+    catalog_skills: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     packs: list[dict[str, Any]] = []
+    if catalog_skills is None:
+        catalog_skills = catalog_skill_by_name()
     for pack in _load_starter_packs():
         skill_names = [str(item) for item in pack.get("skills", [])]
         workflow_names = [str(item) for item in pack.get("workflows", [])]
         install_items = [str(item) for item in pack.get("install_items", [])]
-        install_item_statuses = _starter_pack_install_item_statuses(pack)
+        install_item_statuses = _starter_pack_install_item_statuses(pack, catalog_skills=catalog_skills)
 
         ready_skills = [name for name in skill_names if skills_by_name.get(name, {}).get("availability") == "ready"]
         ready_workflows = [
@@ -1714,6 +1730,7 @@ def _starter_pack_statuses(
                 native_tools=native_tools,
                 tool_mode=tool_mode,
                 workflows_by_name=workflows_by_name,
+                catalog_skills=catalog_skills,
             ),
         })
     return packs
@@ -1914,11 +1931,16 @@ def _build_capability_overview() -> dict[str, Any]:
     skills, skills_by_name = _skill_status_map(available_tool_names)
     workflows, workflows_by_name = _workflow_status_map(available_tool_names, active_skill_names)
     mcp_servers = _mcp_status_list(mcp_mode)
+    # Loading the catalog rescans every catalog extension package; one overview
+    # must scan it once, not once per starter pack (#702).
+    catalog = load_catalog_items()
+    catalog_skills = catalog_skill_by_name(catalog)
     starter_packs = _starter_pack_statuses(
         skills_by_name=skills_by_name,
         workflows_by_name=workflows_by_name,
         native_tools=native_tools,
         tool_mode=tool_mode,
+        catalog_skills=catalog_skills,
     )
     explicit_runbooks = _load_explicit_runbooks()
     _attach_tool_actions(native_tools)
@@ -1928,6 +1950,7 @@ def _build_capability_overview() -> dict[str, Any]:
         native_tools=native_tools,
         skills_by_name=skills_by_name,
         tool_mode=tool_mode,
+        catalog_skills=catalog_skills,
     )
     _attach_mcp_actions(mcp_servers, mcp_mode=mcp_mode)
     catalog_items, recommendations, runbooks = _recommended_actions(
@@ -1938,6 +1961,8 @@ def _build_capability_overview() -> dict[str, Any]:
         native_tools=native_tools,
         mcp_servers=mcp_servers,
         tool_mode=tool_mode,
+        catalog=catalog,
+        catalog_skills=catalog_skills,
     )
     marketplace_flows = _marketplace_flows(
         starter_packs=starter_packs,

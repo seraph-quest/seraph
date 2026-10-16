@@ -18,19 +18,77 @@ Complete instructions for getting Seraph fully running with all features.
 
 ## Configuration
 
-All settings live in `.env.dev` at the project root. The only **required** value is your API key:
+Seraph starts without a provider key. Deployment settings live in `.env.dev` at
+the project root, but the governed OpenRouter route is configured in the app,
+not through environment model variables.
 
-```bash
-OPENROUTER_API_KEY=<openrouter_api_key>
-```
+### OpenRouter (Settings → Models & OpenRouter)
+
+1. Open **Settings → Models & OpenRouter** and fill in the **text** route:
+   an OpenRouter model ID (`provider/model`), an explicit upstream allow-list,
+   and the write-only API key (stored in the vault; only a fingerprint is shown).
+2. Keep the default text capabilities (`text`, `tool use`, `structured output`,
+   `streaming`): direct chat streams and agent turns call tools.
+3. Optionally set **Context window tokens**; it is independent of max output
+   tokens and defaults to 65,536 when left blank. The value is your assertion
+   about the model: Seraph does not check it against the model's real context
+   length, so set it no higher than the model supports.
+4. Enter the **monthly ceiling** and the per-call **request cost bound** in
+   dollars (the micro-USD value is previewed; the bound is prefilled at $0.50),
+   acknowledge cloud egress, and save. Saving and status reads never call a
+   provider.
+
+   The request bound is a reservation, not a provider-side price cap: the
+   output is capped by max output tokens, but OpenRouter bills what the call
+   actually costs. **If a call is billed above its bound, Seraph records the
+   overrun and blocks every further OpenRouter call** (chat, agent turns and
+   background jobs) until you review it: **Inference accounting** shows each
+   overrun charge and the minimum bound; raise the request bound to at least
+   that amount and save the setup again (a lower bound is refused with the
+   required minimum), then press **Prove route** again, because the new bound
+   changes the route. Chat names this as "an earlier call was billed above its
+   request cost bound". Size the bound for a full prompt window plus the output
+   cap: the panel previews that worst case in tokens and, if you enter the
+   model's $/M prices (preview only, not saved), in dollars, and warns when the
+   bound is below it.
+5. In the canary section, choose a **proof lifetime** (1, 8 or 24 hours) and
+   press **Prove route**. It runs one canary per required capability plus
+   `health` and `latency_ms`. Each canary is a real, billed OpenRouter call.
+   The chat composer shows the remaining proof lifetime; when a proof expires,
+   chat says which capability to re-prove instead of a generic setup error.
+
+Vision and embedding routes are separate and need their own purpose
+acknowledgement. `OPENROUTER_API_KEY` in the environment is used only when a
+saved setup explicitly references it; a key entered in Settings is stored in the
+vault. `DEFAULT_MODEL` and the routing variables below do not select the
+governed route.
+
+### Background inference
+
+Once the text route is ready, scheduled jobs may call it: strategist tick
+(about 96 calls/day at the default 15-minute interval), memory consolidation,
+daily briefing, evening review, activity digest, weekly review, end-of-day
+report analysis and the screenshot observation digest. They are on by default.
+**Settings → Models & OpenRouter → Background inference** lists each job with
+its approximate calls/day and lets you switch it off; a switched-off job makes
+no model call and shows `skipped: disabled by operator`. The memory
+consolidation switch also stops the consolidation that otherwise runs after a
+reply, after a workflow, before context compaction and when a session is
+deleted. Not covered by these switches: guardian opportunity assessment (runs
+only for an opportunity you queued, with its own funded reservation), chat
+title generation (one text call per new conversation) and screenshot folder
+analysis (vision route, gated by its own consent and source settings). If the
+stored switches become unreadable, every scheduled model call pauses and the
+panel asks you to set every job and confirm before replacing them.
+`SCHEDULER_ENABLED=false` still stops all scheduled work, including Work
+dispatch.
 
 ### Optional model settings
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEFAULT_MODEL` | `openrouter/anthropic/claude-sonnet-4` | LLM model for the agent (any OpenRouter model) |
-| `MODEL_TEMPERATURE` | `0.7` | Sampling temperature |
-| `MODEL_MAX_TOKENS` | `4096` | Max tokens per response |
+| `MODEL_TEMPERATURE` | `0.7` | Sampling temperature for legacy callers |
+| `MODEL_MAX_TOKENS` | `4096` | Max tokens per response requested by chat |
 | `AGENT_MAX_STEPS` | `10` | Max reasoning steps per turn |
 | `DEBUG` | `false` | Enable debug logging |
 
@@ -97,7 +155,7 @@ These control when proactive features run (briefings, reviews, working hours):
 | `ACTIVITY_DIGEST_HOUR` | `20` | Hour for the daily screen activity digest |
 | `WEEKLY_REVIEW_HOUR` | `18` | Hour for the Sunday weekly activity review |
 | `SCREEN_OBSERVATION_RETENTION_DAYS` | `90` | Days to keep screen observations before cleanup |
-| `SCHEDULER_ENABLED` | `true` | Enable/disable background scheduler |
+| `SCHEDULER_ENABLED` | `true` | Enable/disable background scheduler (per-job model toggles are in Settings → Models & OpenRouter) |
 
 ### Optional observer settings
 
@@ -558,7 +616,7 @@ localStorage.clear()
 |---|---|---|
 | `curl: (7) Failed to connect to localhost:8004` | Backend not running | `./manage.sh -e dev up -d` and check `./manage.sh -e dev logs -f backend-dev` |
 | `local up` reports started, then `local status` says stopped and `pids/` is empty | Managed Codex/Desktop command session cleaned up background children after the command returned | Use `./manage.sh -e dev local run` for live observation, keep it open, verify health with `curl -sS http://127.0.0.1:8004/health`, and stop with `./manage.sh -e dev local down` |
-| `OPENROUTER_API_KEY` error in logs | Missing or invalid API key | Set `OPENROUTER_API_KEY` in `.env.dev` and rebuild: `./manage.sh -e dev up -d` |
+| `credential_missing` or chat blocked before any provider request | Missing key, route, consent or proof | Open Settings → Models & OpenRouter, save the key and text route, then press Prove route; the chat error names the exact missing step |
 | Daemon: "No window title" / title is always None | Accessibility permission not granted | Grant in **System Settings > Privacy & Security > Accessibility** |
 | Daemon: "Backend not reachable" | Backend not running or wrong URL | Start backend first; check `--url` flag |
 | Daemon still capturing after stopping services | Daemon runs outside Docker and isn't stopped by `docker compose down` | Run `./manage.sh -e dev daemon stop` or `kill <pid>` |

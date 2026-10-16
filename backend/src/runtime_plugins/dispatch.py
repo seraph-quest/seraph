@@ -35,15 +35,13 @@ TASK_JOB_KIND = "runtime_service_task_v1"
 SUPPORTED_METHODS = frozenset({
     "authority.resolve", "goals.read", "tasks.admit", "tasks.inspect", "tasks.checkpoint", "tasks.cancel",
     "capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve",
+    "memory.propose", "memory.applyReviewed", "memory.forget",
     "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append",
     # #1018 governed executors (CapabilityExecutionHost, model fabric + shared broker).
     "capabilities.invoke", "inference.request", "connections.invokeBoundAdapter"})
 # Operator-visible reasons for every method without a native owner here.
 BLOCKED_METHODS = MappingProxyType({
     "tasks.settle": "native_settlement_python_owner_only",
-    "memory.propose": "native_memory_mutation_deferred",
-    "memory.applyReviewed": "native_memory_mutation_deferred",
-    "memory.forget": "native_memory_mutation_deferred",
     # Cordis owns research planning/execution (#1008); Python originates these
     # calls and never serves them as callbacks.
     "research.buildPlan": "native_research_plan_not_bound",
@@ -440,6 +438,10 @@ class NativeServiceDispatcher:
                 # Guardian research callbacks (#1008) have their own Python owner.
                 from .research_dispatch import dispatch_research
                 return await dispatch_research(self, frame, payload, scope)
+            if method in {"memory.propose", "memory.applyReviewed", "memory.forget"}:
+                # Operator-admitted mutations (#1064) have their own owner.
+                from .memory_mutations import dispatch_memory_mutation
+                return await dispatch_memory_mutation(self, frame, payload, scope)
             if method in {"artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"}:
                 from .service_artifacts import dispatch_artifact_operation
                 return await dispatch_artifact_operation(self, frame, payload, scope)

@@ -220,9 +220,29 @@ the value Python builds from the durable job row, including the checkpoint
 receipt's recorded revision); any difference blocks the job with
 `native_child_result_mismatch`, and only Python-owned values are returned. An
 exact retry reuses the same job and never re-executes; an interrupted stage
-stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle`,
-`memory.propose`,
-`memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
+stays visibly unresolved as an `intent` effect. Operator-admitted memory mutations (#1064): `memory.propose`,
+`memory.applyReviewed` (`accept`/`reject` only) and `memory.forget` each run as
+one `runtime_service_memory_v1` job with a single crossing. The admission is
+the operator's review: it repeats the memory routes' operator checks, binds the
+proposal revision, task/goal revisions and a keyed MAC over the reviewed
+acceptance binding (sanitised text digest, correction target, capability,
+decision effect, kind), requires the client-supplied preview digest, and for a
+forget requires an explicit irreversibility acknowledgement (receipt label
+`delete_permanently`; the reversible archive stays a native cockpit action).
+Only operator HTTP handlers may import the admission module (a guard test
+enforces it), and no HTTP route calls it yet. The child's callback must name
+the job id; the existing M5 owner or canonical tombstone then runs inside the
+same immediate writer as the job CAS (a forget writes its audit row in that
+session, clears every bounded snapshot row and invalidates the snapshot cache
+after commit). Candidates, sealed results and receipts carry ids, revisions and
+keyed MACs only, never memory or preview text. Completion proves the committed
+effect by canonical readback rather than current authority, so a Root revoked
+after commit does not strand it; a child lost after commit completes from the
+readback without replay. At most four live mutation jobs exist per Root and per
+principal. No inference is used. Forget receipts state
+`derived_vector_purge: not_covered`: the lance index's own text copy is #1119.
+All other methods (`tasks.settle`,
+`research.*`, `conversation.*`,
 `agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
 `source-extraction.extract`) return a typed `blocked` reason as Python callbacks
 (`research.*` and `source-extraction.extract` are Cordis-owned since #1008 and

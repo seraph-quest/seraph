@@ -427,9 +427,9 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception(
                 "Routine install restart recovery failed; partial staging remains non-discoverable"
             )
-        # Audio quarantine files and unconfirmed transcript state are process-local
-        # and must never resume after a crash.  Run the durable cleanup before any
-        # scheduler work can admit a stale audio job.
+        # The existing Python audio owner recovers its paired native Workflow
+        # lease before legacy quarantine cleanup. Contacted jobs retain their
+        # original liability; private settled reviews survive until expiry.
         try:
             from src.guardian.audio_worker import cleanup_audio_ingress_jobs
 
@@ -442,6 +442,19 @@ async def lifespan(app: FastAPI):
         except Exception:
             logging.getLogger(__name__).exception(
                 "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
+            )
+        try:
+            from src.model_fabric.repository import ModelFabricRepository
+
+            documentary_cleanup = await ModelFabricRepository().cleanup_settled_audio_documentation()
+            if documentary_cleanup['inspected']:
+                logging.getLogger(__name__).warning(
+                    "Audio documentary cleanup inspected %d; deleted %d; unknown charged %d",
+                    documentary_cleanup['inspected'], documentary_cleanup['deleted'], documentary_cleanup['unknown'],
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Audio documentary cleanup failed; private staging remains charged"
             )
         ensure_soul_exists()
         init_llm_logging()

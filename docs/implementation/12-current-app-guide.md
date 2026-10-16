@@ -1150,6 +1150,53 @@ costs, and embedding usefulness remain externally unverified.
 
 ### Local cockpit interaction boundaries
 
+Paired-channel Task capture ([#1022](https://github.com/seraph-quest/seraph/issues/1022))
+is **Partial**:
+
+- **Telegram capture.** With an authenticated capture selection on the existing
+  pairing (Settings → Telegram), a `/task` message from the paired user and chat
+  creates exactly one review-only Triage Task under the selected Goal. The
+  provider event id is reserved before creation, so a replay returns the same
+  Task, and the same id with different content is refused as `replay_conflict`.
+  Messages from an unpaired user or chat are blocked with
+  `telegram_identity_not_allowlisted` and create nothing.
+- **Telegram controls.** Exact-revision inspect, pause, resume, cancel and "open
+  exact cockpit review" act on the captured Task; there is no remote approval or
+  replacement attempt. Work continues in the cockpit, where the plan is reviewed,
+  edited and promoted as for any Task. A small document attachment enters C6
+  quarantine only through the explicit document selection.
+- **Voice.** Live voice shows **Voice route unavailable** in push-to-talk: no
+  exact endpoint, codec and pricing proof is issued, so model consent cannot be
+  granted ([ADR-033](./decisions/033-governed-optional-audio-route.md)). Enabling
+  the live route is tracked follow-up work. The correction path is implemented:
+  an operator reviews the transcript, saves one corrected canonical Message, and a
+  separate explicit fresh Goal/Task action captures that corrected text as an
+  unexecuted review-only intent without replaying the original call or
+  transferring audio costs. Tests exercise this with a scripted transcription at
+  the owned transport.
+- Audio documentation source objects under `.model-fabric/` are declared cache
+  workspace state: backups and restores succeed with or without them, and they
+  are never archived. Their canonical attestation rows stay in `seraph.db`; after
+  a restore, a missing object fails closed with
+  `audio_documentation_source_missing` until the documentation is staged again.
+- **Channel signing.** Capture origins and cockpit output links are HMAC-signed
+  with a key derived (HKDF, `seraph.channel-capture.v1`) from the workspace vault
+  key, so a stock production deployment with only `OPERATOR_AUTH_SECRET_HASH`
+  needs no new setting. `CAPABILITY_JOURNAL_SECRET`, then `OPERATOR_AUTH_SECRET`,
+  overrides that source when set; the stored password hash is never used. An
+  unreadable vault key fails closed with `channel_output_signer_unavailable`, and
+  `production_preflight.py` reports it as `channel_signing_key`. Changing the
+  source (setting or removing an override, or replacing the vault key) is not
+  migrated: earlier capture origins fail closed with
+  `channel_capture_origin_changed` and need operator recovery, and earlier output
+  links (valid for at most five minutes) fail with
+  `channel_output_handle_invalid`. A failed Telegram button control returns
+  `telegram_canonical_control_unavailable` and keeps its typed cause in Telegram
+  status (`last_error`, shown in Settings → Telegram).
+
+Live Telegram delivery, provider operation and native macOS/Safari capture remain
+unverified by these provider-free checks.
+
 The managed development cockpit may be opened over local HTTP for text and
 operator controls. Browser microphone capture follows the browser secure
 context rule: `http://localhost` is eligible, while a LAN HTTP origin such as

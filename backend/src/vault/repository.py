@@ -69,6 +69,28 @@ class VaultRepository:
                 return None
             return SecretSnapshot(decrypt(secret.encrypted_value), secret_binding_digest(secret), secret_identity(secret))
 
+    async def bounded_snapshot(self, key: str, *, owner_principal_id: str) -> SecretSnapshot | None:
+        """Single owner/name lookup; oversized ciphertext never reaches Python."""
+        from sqlalchemy import case, func
+        from types import SimpleNamespace
+        if not isinstance(key, str) or not 1 <= len(key) <= 128 or any(ord(c) < 32 for c in key):
+            raise ValueError("audio_metadata_key_name_invalid")
+        bounded = case((func.octet_length(Secret.encrypted_value) <= 16384, Secret.encrypted_value), else_=None)
+        async with get_session() as db:
+            item = (await db.execute(select(Secret.id, Secret.key, Secret.owner_principal_id,
+                Secret.updated_at, bounded).where(Secret.key == key,
+                Secret.owner_principal_id == owner_principal_id, Secret.revoked_at.is_(None)).limit(1))).first()
+        if item is None:
+            return None
+        if item[4] is None:
+            raise ValueError("audio_metadata_credential_oversized")
+        secret = SimpleNamespace(id=item[0], key=item[1], owner_principal_id=item[2],
+            updated_at=item[3], encrypted_value=item[4])
+        value = decrypt(secret.encrypted_value)
+        if not value or len(value.encode()) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value):
+            raise ValueError("audio_metadata_credential_invalid")
+        return SecretSnapshot(value, secret_binding_digest(secret), secret_identity(secret))
+
     async def store(
         self,
         key: str,

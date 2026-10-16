@@ -671,7 +671,6 @@ class GeneralTaskService:
             raise BoardError("communication_fixed_plan_required", "Communications preparation requires its fixed source-only plan", status_code=422)
         if (request.input.document_source is not None or request.input.document_build is not None) and request.plan is None:
             raise BoardError("document_local_plan_required", "Document preparation requires an explicit local plan", status_code=422)
-        from src.work_board.input_artifacts import prepare_input_artifact
         from sqlalchemy import select
         from src.db.models import WorkBoardTask, WorkBoardEvent
         from src.work_board.repository import BoardMutation
@@ -872,6 +871,79 @@ class GeneralTaskService:
                     await original_publication_check(check_db)
             original_publication_check = publication_authority_check
             publication_authority_check = communication_publication_check
+        return await self._publish_envelope(db, owner, request, envelope,
+            publication_authority_check=publication_authority_check,
+            publication_authority_scope=publication_authority_scope,
+            repository_source_check=repository_source_check,
+            repository_source_scope=repository_source_scope,
+            _specialist_context=_specialist_context, _procedure_invocation=_procedure_invocation)
+
+    async def capture_intent(self, db, owner, request: GeneralTaskCreate, *, capture):
+        """Publish one source-sealed intent for local review, without planning."""
+        from sqlalchemy import select
+        from src.db.models import WorkBoardTask, WorkBoardEvent
+        from src.work_board.repository import BoardMutation
+        from src.work_board.dispatcher import _parse_typed_input
+        from src.work_board.channel_capture import check_capture_publication, current_workspace_digest
+        reservation = await check_capture_publication(db, owner, request, capture)
+        staged_workspace = current_workspace_digest()
+        existing = await db.scalar(select(WorkBoardTask).where(
+            WorkBoardTask.owner_principal_id == owner.principal_id,
+            WorkBoardTask.owner_session_id == owner.session_id,
+            WorkBoardTask.idempotency_scope == "general-task",
+            WorkBoardTask.idempotency_key == request.idempotency_key))
+        if existing is not None:
+            # Source authority precedes the private artifact read, including replay.
+            async with capture.source_scope():
+                from src.work_board.repository import _begin_sqlite_immediate
+                await _begin_sqlite_immediate(db)
+                await check_capture_publication(db, owner, request, capture)
+                existing = await db.scalar(select(WorkBoardTask).where(
+                    WorkBoardTask.owner_principal_id == owner.principal_id,
+                    WorkBoardTask.owner_session_id == owner.session_id,
+                    WorkBoardTask.idempotency_scope == "general-task",
+                    WorkBoardTask.idempotency_key == request.idempotency_key)
+                    .execution_options(populate_existing=True))
+                if existing is None:
+                    raise BoardError("channel_capture_task_changed", "Original capture Task is unavailable", status_code=409)
+                from src.work_board.channel_capture import check_capture_origin
+                await check_capture_origin(db, owner, existing, expected_reservation=reservation,
+                    _workspace_digest=staged_workspace, _identity=capture.identity)
+                original = GeneralTaskEnvelope.model_validate(_parse_typed_input(existing))
+                if (original.task_input != reservation.task_input
+                    or original.proposal_group != reservation.proposal_group
+                    or original.proposal_error != "channel_intent_review_required"
+                    or existing.origin_session_id != reservation.conversation_session_id
+                    or existing.goal_revision != reservation.goal_revision):
+                    raise BoardError("channel_capture_idempotency_conflict", "Original capture Task changed", status_code=409)
+                event = await db.scalar(select(WorkBoardEvent).where(WorkBoardEvent.task_id == existing.task_id)
+                    .order_by(WorkBoardEvent.event_id.desc()).limit(1))
+                if event is None:
+                    raise BoardError("general_task_event_unavailable", "Task publication needs recovery", status_code=409)
+                await db.commit()
+                return BoardMutation(existing, event, idempotent_replay=True)
+        await self.repository._validate_goal(db, owner, goal_id=reservation.task_input.goal_ref,
+            goal_revision=reservation.goal_revision)
+        envelope = GeneralTaskEnvelope(task_input=reservation.task_input,
+            proposal_error="channel_intent_review_required",
+            strategy=await self.strategy(owner, reservation.task_input.goal_ref),
+            evidence=await self.evidence(db, owner, reservation.task_input.evidence_refs),
+            proposal_group=reservation.proposal_group)
+        async def source_check(db):
+            await check_capture_publication(db, owner, request, capture)
+        return await self._publish_envelope(db, owner, request, envelope,
+            publication_authority_check=source_check,
+            publication_authority_scope=capture.source_scope,
+            origin_session_id=reservation.conversation_session_id, capture_origin=capture)
+
+    async def _publish_envelope(self, db, owner, request, envelope, *,
+                                publication_authority_check=None,
+                                publication_authority_scope=None,
+                                origin_session_id=None, capture_origin=None,
+                                repository_source_check=None, repository_source_scope=None,
+                                _specialist_context=None, _procedure_invocation=None):
+        """Publish the exact sealed input through the original artifact/Task owners."""
+        from src.work_board.input_artifacts import prepare_input_artifact
         from src.work_board.general_task_proposal import seal_proposal_publication
         publication = await seal_proposal_publication(db, owner, envelope, goal_revision=request.goal_revision)
         specialist_witness = None
@@ -921,6 +993,7 @@ class GeneralTaskService:
                 idempotency_scope="general-task", idempotency_key=request.idempotency_key,
                 requires_review=_specialist_context is None,
                 origin_thread_id=_specialist_context.callback.run_identity if _specialist_context is not None else None),
+                origin_session_id=origin_session_id,
                 publication_authority_check=(checked_publication
                     if repository_source_check is not None or publication_authority_check is not None else None),
                 accepted_method_stage=accepted_method_stage,
@@ -928,6 +1001,9 @@ class GeneralTaskService:
                 _procedure_invocation=_procedure_invocation)
             if _procedure_invocation is not None and not mutation.idempotent_replay:
                 await _procedure_invocation.publish(db, mutation.task)
+            if capture_origin is not None:
+                from src.work_board.channel_capture import publish_capture_origin
+                await publish_capture_origin(db, owner, request, mutation, capture_origin)
             if publication_authority_scope is not None or repository_source_scope is not None:
                 # The original publication CAS commits before its canonical
                 # configuration fence is released. Files were staged earlier.
@@ -941,6 +1017,8 @@ class GeneralTaskService:
         task = await self.repository.get_task(db, owner, task_id)
         if task.capability_id != CAPABILITY:
             raise BoardError("general_task_unavailable", "General task unavailable", status_code=404)
+        from src.work_board.channel_capture import check_current_captured_task_source
+        await check_current_captured_task_source(db, owner, task)
         envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         acceptance_events = (await db.execute(select(WorkBoardEvent).where(
             WorkBoardEvent.task_id == task_id, WorkBoardEvent.owner_principal_id == owner.principal_id,
@@ -1103,6 +1181,8 @@ class GeneralTaskService:
             reason, status = None, "unavailable"
             try:
                 original = child_binding(child)
+                from src.workflows.general_task_guard import stage_positive_parent
+                await stage_positive_parent(durable_job_repository, db, parent.run_identity)
                 current_parent, current_task, current_attempt, current_manifest, _ = await _current(
                     durable_job_repository, db, parent.run_identity)
                 _assert_joint_manifest(current_parent, current_task, current_attempt, current_manifest)
@@ -1268,6 +1348,8 @@ class GeneralTaskService:
             raise BoardError("general_task_plan_locked", "Only inert Triage plans are editable", status_code=409)
         if task.task_revision != request.expected_revision:
             raise BoardRevisionConflict(task_id, request.expected_revision, task.task_revision)
+        from src.work_board.channel_capture import check_current_captured_task_source
+        await check_current_captured_task_source(db, owner, task)
         prior = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         if (prior.repository_source is not None
                 or any(step.tool_id == "repository_work" for step in request.plan.steps)):
@@ -1310,6 +1392,7 @@ class GeneralTaskService:
             goal_revision=current.goal_revision, capability_id=CAPABILITY,
             input_artifact_id=metadata.artifact_id, idempotency_key=request.idempotency_key)
         resolved = await recheck_staged_input(db, owner, binding_request, witness=staged)
+        await check_current_captured_task_source(db, owner, current)
         # Reuse the existing input-retirement CAS. Old bytes remain private,
         # immutable historical evidence and the revoked row cannot execute.
         await _revoke_input_artifact_locked(db, owner, witness=retirement)
@@ -1369,6 +1452,8 @@ class GeneralTaskService:
             raise BoardRevisionConflict(task_id, expected_revision, task.task_revision)
         if task.status != WorkBoardStatus.triage:
             raise BoardError("general_task_acceptance_state", "Accept the exact inert Triage proposal", status_code=409)
+        from src.work_board.channel_capture import check_current_captured_task_source
+        await check_current_captured_task_source(db, owner, task)
         envelope = GeneralTaskEnvelope.model_validate(_parse_typed_input(task))
         await self.recheck_authority(db, owner, envelope, require_current_strategy=True)
         from src.work_board.document_build_native import validate_acceptance
@@ -1403,7 +1488,8 @@ class GeneralTaskService:
             if storage.build_binding(row, value) != selected.model_dump(mode="json"):
                 raise BoardError("document_build_binding_changed", "The immutable original build changed", status_code=409)
         if envelope.task_input.document_source is not None:
-            await resolve(db, owner, envelope.task_input.document_source, goal_id=envelope.task_input.goal_ref)
+            await resolve(db, owner, envelope.task_input.document_source,
+                goal_id=envelope.task_input.goal_ref, metadata_only=True)
         if require_current_strategy:
             binding = await self.strategy(owner, envelope.task_input.goal_ref)
             if binding != envelope.strategy:

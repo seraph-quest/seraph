@@ -655,6 +655,14 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         if cordis_turn is not None:
             await cordis_turn.settle("blocked", reason=reason)
 
+    async def ensure_authorized(scope) -> None:
+        # A revoked request never leaves its Cordis turn running.
+        try:
+            await _ensure_rest_authorized(http_request, scope)
+        except BaseException:
+            await asyncio.shield(cordis_blocked("native_original_root_inactive"))
+            raise
+
     try:
         _ingress_message, duplicate = await session_manager.reserve_ingress_message(
             session.id,
@@ -865,7 +873,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             _finish_request(llm_request_id)
             await _end_rest_revocation_watch(revocation_scope)
 
-        await _ensure_rest_authorized(http_request, revocation_scope)
+        await ensure_authorized(revocation_scope)
         assistant_message_id = assistant_message_id_for_ingress(ingress)
         direct_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
         if cordis_turn is not None:
@@ -975,7 +983,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
         ) from exc
     except ApprovalRequired as exc:
         await cordis_blocked("approval_required")
-        await _ensure_rest_authorized(http_request, revocation_scope)
+        await ensure_authorized(revocation_scope)
         await approval_repository.merge_details(
             exc.approval_id,
             {"resume_message": request.message},
@@ -1011,7 +1019,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             },
         )
     except ClarificationRequired as exc:
-        await _ensure_rest_authorized(http_request, revocation_scope)
+        await ensure_authorized(revocation_scope)
         rendered = await redact_secrets_in_text(exc.render_message())
         clarification_message_id = assistant_message_id_for_ingress(ingress, suffix="clarification")
         clarification_metadata = chat_assistant_metadata(
@@ -1141,7 +1149,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             _finish_request(llm_request_id)
         await _end_rest_revocation_watch(revocation_scope)
 
-    await _ensure_rest_authorized(http_request, revocation_scope)
+    await ensure_authorized(revocation_scope)
     assistant_message_id = assistant_message_id_for_ingress(ingress)
     assistant_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
     if cordis_turn is not None:

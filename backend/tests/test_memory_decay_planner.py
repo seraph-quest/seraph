@@ -23,7 +23,7 @@ _KINDS = [MemoryKind.fact, MemoryKind.preference, MemoryKind.communication_prefe
           MemoryKind.timeline, MemoryKind.commitment, MemoryKind.procedural, MemoryKind.collaborator]
 
 
-def _corpus(seed: int, count: int) -> tuple[list[MemoryEntity], list[Memory], list[str]]:
+def _corpus(seed: int, count: int, *, ties: bool = False) -> tuple[list[MemoryEntity], list[Memory], list[str]]:
     rng = random.Random(seed)
     entities = [
         MemoryEntity(id=f"entity-{seed}-{index}", canonical_key=f"entity-{seed}-{index}", canonical_name=f"Entity {index}")
@@ -34,7 +34,8 @@ def _corpus(seed: int, count: int) -> tuple[list[MemoryEntity], list[Memory], li
         topics = rng.sample(_TOPICS, rng.choice([1, 1, 2, 2, 3]))
         text = f"{' '.join(topics)} {rng.choice(_CUES)}" + (f" {rng.choice(_CUES)}" if rng.random() < 0.15 else "")
         metadata = rng.choice([None, "{}", json.dumps({"decay_step": rng.randint(0, 4)}), json.dumps({"note": "x"})])
-        created = _NOW - timedelta(days=rng.randint(0, 900), seconds=index)
+        # ``ties`` makes many rows share created_at, so tie order matters.
+        created = _NOW - timedelta(days=rng.randint(0, 30 if ties else 900), seconds=0 if ties else index)
         memories.append(Memory(
             id=f"memory-{seed}-{index:04d}",
             content=text,
@@ -84,9 +85,15 @@ async def _reset(async_db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
-async def test_planner_matches_pairwise_algorithm_on_randomized_corpus(async_db, seed):
-    entities, memories, tombstoned = _corpus(seed, 260)
+@pytest.mark.parametrize(("seed", "ties", "chunk"), [
+    (1, False, 500), (2, False, 500), (3, False, 500), (4, False, 500), (5, False, 500),
+    (6, True, 500), (7, True, 500),
+    # Small chunks put winners and losers in different apply transactions.
+    (8, False, 7), (9, True, 7),
+])
+async def test_planner_matches_pairwise_algorithm_on_randomized_corpus(async_db, monkeypatch, seed, ties, chunk):
+    monkeypatch.setattr(decay, "_DECAY_APPLY_CHUNK", chunk)
+    entities, memories, tombstoned = _corpus(seed, 260, ties=ties)
     outcomes = []
     for implementation in (legacy_apply_memory_decay_policies, apply_memory_decay_policies):
         await _reset(async_db)
@@ -95,7 +102,10 @@ async def test_planner_matches_pairwise_algorithm_on_randomized_corpus(async_db,
         outcomes.append((results, await _state(async_db)))
     (legacy_results, legacy_state), (new_results, new_state) = outcomes
     assert legacy_results[0].contradiction_count > 0, "corpus must exercise contradictions"
-    assert legacy_results[0].decayed_count > 0 and legacy_results[1].archived_count > 0
+    if ties:
+        assert legacy_results[0].decayed_count + legacy_results[1].decayed_count > 0
+    else:
+        assert legacy_results[0].decayed_count > 0 and legacy_results[1].archived_count > 0
     assert new_results == legacy_results
     assert new_state == legacy_state
 
@@ -153,3 +163,65 @@ async def test_rows_edited_between_plan_and_apply_are_not_overwritten(async_db, 
     assert tombstoned.status is MemoryStatus.active and tombstoned.metadata_json is None
     assert untouched.status is MemoryStatus.archived
     assert result.archived_count == 1
+
+
+async def _contradicting_pair(async_db):
+    recent = _NOW - timedelta(days=1)
+    async with async_db() as db:
+        db.add(Memory(id="winner", content="Atlas launch is on track", kind=MemoryKind.project,
+                      confidence=0.9, importance=0.9, created_at=recent, updated_at=recent))
+        db.add(Memory(id="loser", content="Atlas launch is delayed", kind=MemoryKind.project,
+                      confidence=0.4, importance=0.3, created_at=recent + timedelta(seconds=1),
+                      updated_at=recent + timedelta(seconds=1)))
+        return db.get_bind().url.database
+
+
+async def _loser_and_edges(async_db):
+    async with async_db() as db:
+        loser = await db.get(Memory, "loser")
+        edges = (await db.execute(select(MemoryEdge))).scalars().all()
+        return loser, edges
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("change", ["forget", "edit"])
+async def test_winner_changed_between_plan_and_apply_does_not_supersede(async_db, monkeypatch, change):
+    database = await _contradicting_pair(async_db)
+    real_plan = decay._plan_memory_decay
+
+    def plan_then_change_winner(rows, now):
+        plan = real_plan(rows, now)
+        assert plan.supersedes == [("winner", "loser")]
+        connection = sqlite3.connect(database, isolation_level=None, timeout=30)
+        try:
+            if change == "forget":
+                connection.execute("INSERT INTO memory_tombstones (id, memory_id, actor, reason, created_at) "
+                                   "VALUES ('t-winner', 'winner', 'operator', 'forget', ?)",
+                                   (now.strftime("%Y-%m-%d %H:%M:%S.%f"),))
+            else:
+                connection.execute("UPDATE memories SET content = 'Atlas launch is on track for Friday', "
+                                   "updated_at = ? WHERE id = 'winner'",
+                                   ((now + timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S.%f"),))
+        finally:
+            connection.close()
+        return plan
+
+    monkeypatch.setattr(decay, "_plan_memory_decay", plan_then_change_winner)
+    result = await apply_memory_decay_policies(now=_NOW)
+    loser, edges = await _loser_and_edges(async_db)
+    # The loser is not superseded by a winner the plan no longer describes.
+    assert result.contradiction_count == 0
+    assert loser.status is MemoryStatus.active and "superseded_by_memory_id" not in (loser.metadata_json or "")
+    assert edges == []
+
+    monkeypatch.setattr(decay, "_plan_memory_decay", real_plan)
+    rerun = await apply_memory_decay_policies(now=_NOW)
+    loser, edges = await _loser_and_edges(async_db)
+    if change == "forget":
+        # A forgotten memory never suppresses a live one.
+        assert rerun.contradiction_count == 0 and loser.status is MemoryStatus.active and edges == []
+    else:
+        # The edited winner still contradicts it and is re-evaluated.
+        assert rerun.contradiction_count == 1 and loser.status is MemoryStatus.superseded
+        assert {edge.from_memory_id for edge in edges} == {"winner"}

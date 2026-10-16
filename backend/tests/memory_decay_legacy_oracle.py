@@ -111,6 +111,9 @@ async def legacy_apply_memory_decay_policies(
                 .order_by(
                     col(Memory.kind).asc(),
                     col(Memory.created_at).asc(),
+                    # Test-only change: the same id tie-break #1085 adds, so
+                    # tie order is defined for the equivalence comparison.
+                    col(Memory.id).asc(),
                 )
             )
         ).scalars().all()

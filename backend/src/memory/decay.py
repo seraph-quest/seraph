@@ -508,6 +508,9 @@ class _DecayPlan:
     decayed: set[str] = field(default_factory=set)
     archived: set[str] = field(default_factory=set)
     edges: list[dict[str, object]] = field(default_factory=list)
+    # Plan-time witness of every winner: a loser is only superseded by a
+    # winner that is still exactly the memory the plan compared against.
+    winners: dict[str, tuple] = field(default_factory=dict)
 
 
 def _plan_memory_decay(rows: list[_DecayRow], now: datetime) -> _DecayPlan:
@@ -559,6 +562,7 @@ def _plan_memory_decay(rows: list[_DecayRow], now: datetime) -> _DecayPlan:
             loser_metadata["superseded_reason"] = "contradiction"
             loser.metadata_json = json.dumps(loser_metadata, sort_keys=True)
             plan.supersedes.append((winner.id, loser.id))
+            plan.winners.setdefault(winner.id, witness[winner.id])
 
     for memory in rows:
         if memory.status != MemoryStatus.active:
@@ -626,6 +630,16 @@ def _plan_from_records(records: list, now: datetime) -> _DecayPlan:
     return _plan_memory_decay(rows, now)
 
 
+def _naive(values: tuple) -> tuple:
+    """SQLite returns written datetimes naive; compare planned values as UTC."""
+    return tuple(
+        value.astimezone(timezone.utc).replace(tzinfo=None)
+        if isinstance(value, datetime) and value.tzinfo is not None
+        else value
+        for value in values
+    )
+
+
 # Rows applied per writer transaction: inside SQLite's bound-parameter limit
 # and short enough (~tens of ms) that other writers interleave (#1085).
 _DECAY_APPLY_CHUNK = 500
@@ -653,7 +667,9 @@ async def apply_memory_decay_policies(
                 select(*(table.c[name] for name in _DecayRow.__dataclass_fields__))
                 .where(table.c.status == MemoryStatus.active)
                 .where(_canonical_memory_without_tombstone_clause())
-                .order_by(table.c.kind.asc(), table.c.created_at.asc())
+                # ``id`` breaks created_at ties so the greedy outcome is
+                # deterministic (the pre-#1085 query left tie order to SQLite).
+                .order_by(table.c.kind.asc(), table.c.created_at.asc(), table.c.id.asc())
             )
         ).all()
     plan = await asyncio.to_thread(_plan_from_records, records, resolved_now)
@@ -661,6 +677,7 @@ async def apply_memory_decay_policies(
         return DecayMaintenanceResult()
 
     applied: set[str] = set()
+    winner_of = {loser: winner for winner, loser in plan.supersedes}
     edges_by_loser: dict[str, list[dict[str, object]]] = {}
     for edge in plan.edges:
         edges_by_loser.setdefault(str(edge["to_memory_id"]), []).append(edge)
@@ -671,14 +688,37 @@ async def apply_memory_decay_policies(
         # independent compare-and-set updates, and a superseded row commits
         # together with its edges, so other writers interleave between chunks.
         chunk = ids[start:start + _DECAY_APPLY_CHUNK]
+        winners = {winner_of[memory_id] for memory_id in chunk if memory_id in winner_of}
         async with get_session() as db:
             await _begin_canonical_write(db)
-            current = await db.execute(
-                select(*witness_columns)
-                .where(table.c.id.in_(chunk))
-                .where(_canonical_memory_without_tombstone_clause())
-            )
-            chunk_applied = [row[0] for row in current if tuple(row[1:]) == plan.before[row[0]]]
+            current = {
+                row[0]: tuple(row[1:])
+                for row in await db.execute(
+                    select(*witness_columns)
+                    .where(table.c.id.in_([*chunk, *winners]))
+                    .where(_canonical_memory_without_tombstone_clause())
+                )
+            }
+
+            def winner_current(winner_id: str) -> bool:
+                # A forgotten (tombstoned) or edited winner must not keep
+                # suppressing a live memory: the loser stays active and is
+                # re-evaluated by the next run. A winner this run already
+                # decayed in an earlier chunk carries its planned values.
+                observed = current.get(winner_id)
+                if observed is None:
+                    return False
+                if winner_id in applied:
+                    expected = (*plan.after[winner_id].values(), *plan.before[winner_id][len(_DECAY_COLUMNS):])
+                    return _naive(observed) == _naive(expected)
+                return observed == plan.winners[winner_id]
+
+            chunk_applied = [
+                memory_id
+                for memory_id in chunk
+                if current.get(memory_id) == plan.before[memory_id]
+                and (memory_id not in winner_of or winner_current(winner_of[memory_id]))
+            ]
             if not chunk_applied:
                 continue
             await db.execute(

@@ -679,6 +679,29 @@ exact fix and never falls back to legacy. Rollback is another higher epoch.
 recovery}`, the Settings Cordis panel shows it, and the WS status line names the
 loop (`cordis.agent-loop.v1` or `legacy.smolagents`).
 
+**Default cutover and operator control.** `runtime_plugins/cutover.py` holds an
+ordered manifest of domains whose default owner is Cordis
+(`register_cutover_domain(domain, prerequisites=(...))`; #1019 registers
+`seraph.agent-loop.v1`, and #1020 adds its domains with their prerequisites).
+After the host starts, the boot step moves every never-cut domain forward through
+the real fenced `transition_owner` sequence (`ready` -> `draining` -> `blocked`
+at epoch+1 with owner `cordis` -> `ready` on this boot's proof) and records a
+`runtime_composition_domain_cutover` audit event in the same writer. A domain
+whose provider is not built or not admitting stays `blocked`, and chat shows the
+host's exact fix; a later boot with a ready runtime completes it. A domain with a
+cutover marker or any operator transition is never moved by boot again, so a
+rollback is sticky. A domain whose prerequisites are not yet Cordis-owned is
+skipped. Operators use `GET /api/runtime/composition/domains` and
+`POST /api/runtime/composition/domains/{domain}/owner {target, expected_epoch,
+confirm_domain}` (authenticated HTTP only, audited as
+`runtime_composition_operator_transition`, the domain validated against the
+manifest), surfaced as one confirmed action in Settings → Cordis runtime host.
+The backend holds the exclusive workspace owner lease, so transitions run under
+its lifecycle fence. Cordis turns are bound and block a transition while live
+(`composition_not_quiescent`); legacy turns are not bound, so a process-local
+gate tracks them: a transition refuses while one runs, and no new legacy turn
+starts during a transition (`composition_transition_in_progress`).
+
 One `cordis_chat_turn_v1` job owns each ingress, keyed by the ingress message
 id. Cordis readiness, the direct-chat route preflight and the turn admission run
 before `reserve_ingress_message`, so a refused message is never a duplicate on

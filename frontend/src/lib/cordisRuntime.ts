@@ -42,15 +42,18 @@ export function normalizeCordisRuntime(value: unknown): CordisRuntimeSnapshot | 
 export interface ChatRuntimeStatus {
   loop: "cordis.agent-loop.v1" | "legacy.smolagents" | "blocked";
   route: string; owner_epoch: number | null; reason: string | null; recovery: string | null;
+  owner_kind: "legacy" | "cordis" | null;
 }
 export function normalizeChatRuntime(value: unknown): ChatRuntimeStatus | null {
   if (!record(value) || !["cordis.agent-loop.v1", "legacy.smolagents", "blocked"].includes(String(value.loop))
     || typeof value.route !== "string" || value.route.length > 64
     || !(value.owner_epoch === null || (Number.isSafeInteger(value.owner_epoch) && Number(value.owner_epoch) >= 1))
     || !nullableText(value.reason) || !(value.recovery === null || (typeof value.recovery === "string" && value.recovery.length <= 512))
-    || (value.loop === "blocked") !== (value.reason !== null)) return null;
+    || (value.loop === "blocked") !== (value.reason !== null)
+    || !(value.owner_kind === undefined || value.owner_kind === null || value.owner_kind === "legacy" || value.owner_kind === "cordis")) return null;
   return { loop: value.loop as ChatRuntimeStatus["loop"], route: value.route, owner_epoch: value.owner_epoch as number | null,
-    reason: value.reason as string | null, recovery: value.recovery as string | null };
+    reason: value.reason as string | null, recovery: value.recovery as string | null,
+    owner_kind: (value.owner_kind ?? null) as ChatRuntimeStatus["owner_kind"] };
 }
 export function chatRuntimeLabel(status: ChatRuntimeStatus): string {
   if (status.loop === "blocked") return `Chat blocked · ${status.reason}`;

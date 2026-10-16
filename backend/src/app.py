@@ -513,6 +513,14 @@ async def lifespan(app: FastAPI):
                         await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
+                    try:
+                        # Default Cordis owner cutover (#1019): once per workspace and domain,
+                        # forward-only; a missing runtime leaves the domain blocked with its fix.
+                        from src.runtime_plugins.cutover import run_boot_cutover
+                        for receipt in await run_boot_cutover(cordis_host):
+                            logging.getLogger(__name__).warning("Cordis owner cutover: %s", receipt)
+                    except Exception:
+                        logging.getLogger(__name__).exception("Cordis owner cutover deferred")
                     yield
                 finally:
                     session_manager.bind_task_continuity(None)

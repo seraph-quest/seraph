@@ -78,5 +78,30 @@ it("drops a malformed chat runtime status instead of guessing a loop", () => {
   expect(normalizeChatRuntime({ loop: "blocked", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null })).toBeNull();
   expect(normalizeChatRuntime({ loop: "smolagents", route: "chat_agent", owner_epoch: 1, reason: null, recovery: null })).toBeNull();
   expect(normalizeChatRuntime({ loop: "legacy.smolagents", route: "chat_agent", owner_epoch: null, reason: null, recovery: null, secret: "x" }))
-    .toEqual({ loop: "legacy.smolagents", route: "chat_agent", owner_epoch: null, reason: null, recovery: null });
+    .toEqual({ loop: "legacy.smolagents", route: "chat_agent", owner_epoch: null, reason: null, recovery: null, owner_kind: null });
+});
+
+it("rolls chat back to legacy only after an explicit confirmation naming the domain", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/runtime/composition/"))).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Roll chat back to legacy" }));
+  await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/runtime/composition/"))).toBe(true));
+  const [, init] = vi.mocked(apiFetch).mock.calls.find(([url]) => String(url).includes("/runtime/composition/"))!;
+  expect(JSON.parse(String((init as RequestInit).body))).toEqual({ target: "legacy", expected_epoch: 2, confirm_domain: "seraph.agent-loop.v1" });
+  expect(confirm.mock.calls[1][0]).toContain("seraph.agent-loop.v1");
+  confirm.mockRestore();
+});
+it("offers the cutover to Cordis from the legacy loop and surfaces a refused change", async () => {
+  const chat_runtime = { loop: "legacy.smolagents", route: "chat_agent", owner_epoch: 3, reason: null, recovery: null, owner_kind: "legacy" };
+  vi.mocked(apiFetch).mockImplementation(async (url: unknown) => String(url).includes("/runtime/composition/")
+    ? response({ detail: { code: "composition_not_quiescent" } }, 409) : response({ cordis_runtime: snapshot, chat_runtime }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cut chat over to Cordis" }));
+  expect(await screen.findByText("Chat loop change refused: composition_not_quiescent")).toBeInTheDocument();
+  confirm.mockRestore();
 });

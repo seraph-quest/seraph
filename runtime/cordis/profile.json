@@ -95,7 +95,9 @@
           "text/plain": "plain-text",
           "text/html": "html-text",
           "application/rss+xml": "rss-atom",
-          "application/atom+xml": "rss-atom"
+          "application/atom+xml": "rss-atom",
+          "application/xml": "rss-atom",
+          "text/xml": "rss-atom"
         }
       }
     },

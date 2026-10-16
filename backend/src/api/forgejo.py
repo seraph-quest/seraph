@@ -36,8 +36,14 @@ class ReadConsent(Revision):
     read_ack: StrictBool
 
 
+class FormProfiles(Revision):
+    expected_form_profiles_revision: int = Field(ge=0)
+    profile_ids: list[Literal["forgejo.issue-create.v1", "forgejo.issue-comment.v1"]] = Field(max_length=2)
+    profile_ack: StrictBool
+
+
 class Prepare(Revision):
-    operation: Literal["provision","preview","title"]
+    operation: Literal["provision","preview","title","form-prepare","form-submit"]
     fields: dict = Field(default_factory=dict)
     request_key: str = Field(min_length=36,max_length=36)
     goal_id: str = Field(min_length=1,max_length=128)
@@ -107,6 +113,11 @@ async def read_consent(request: Request, body: ReadConsent):
 @router.post("/jobs")
 async def prepare(request: Request, body: Prepare):
     return await response(forgejo_service.native.prepare(owner(request),**body.model_dump()))
+
+
+@router.put("/connection/form-profiles")
+async def form_profiles(request: Request, body: FormProfiles):
+    return await response(forgejo_service.activate_form_profiles(owner(request), **body.model_dump()))
 
 
 @router.get("/jobs/{job_id}")

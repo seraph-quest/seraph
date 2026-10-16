@@ -2115,7 +2115,12 @@ class BrowserTaskRunner:
                 state.heartbeat_error = type(exc).__name__
                 return
 
-    async def _launch_session(self, resources: _BrowserLaunchResources) -> _BrowserSession:
+    async def _launch_session(self, resources: _BrowserLaunchResources, *, chromium_sandbox: bool = False) -> _BrowserSession:
+        """Launch the pinned Chromium; ``chromium_sandbox`` keeps its own sandbox on.
+
+        Authenticated site profiles require the sandbox and fail closed when the
+        host cannot provide it; the public read-only lane keeps its default.
+        """
         options = {
             "java_script_enabled": False,
             "accept_downloads": False,
@@ -2143,7 +2148,7 @@ class BrowserTaskRunner:
         resources.launch_attempted = True
         playwright = await async_playwright().start()
         resources.playwright = playwright
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(headless=True, chromium_sandbox=chromium_sandbox)
         resources.browser = browser
         context = await browser.new_context(**options)
         resources.context = context

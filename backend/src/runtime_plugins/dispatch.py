@@ -35,12 +35,12 @@ TASK_JOB_KIND = "runtime_service_task_v1"
 SUPPORTED_METHODS = frozenset({
     "authority.resolve", "goals.read", "tasks.admit", "tasks.inspect", "tasks.checkpoint", "tasks.cancel",
     "capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve",
-    "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"})
+    "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append",
+    # #1018 governed executors (CapabilityExecutionHost, model fabric + shared broker).
+    "capabilities.invoke", "inference.request", "connections.invokeBoundAdapter"})
 # Operator-visible reasons for every method without a native owner here.
 BLOCKED_METHODS = MappingProxyType({
     "tasks.settle": "native_settlement_python_owner_only",
-    "capabilities.invoke": "native_capability_invoke_not_bound",
-    "inference.request": "native_inference_purpose_not_bound",
     "memory.propose": "native_memory_mutation_deferred",
     "memory.applyReviewed": "native_memory_mutation_deferred",
     "memory.forget": "native_memory_mutation_deferred",
@@ -58,7 +58,6 @@ BLOCKED_METHODS = MappingProxyType({
     "scheduler.register": "native_scheduler_not_bound",
     "scheduler.disable": "native_scheduler_not_bound",
     "scheduler.dispatchDue": "native_scheduler_not_bound",
-    "connections.invokeBoundAdapter": "native_adapter_invoke_not_bound",
     "source-extraction.extract": "native_research_execution_not_bound",
 })
 assert SUPPORTED_METHODS | set(BLOCKED_METHODS) == set(METHOD_DOMAINS)
@@ -184,6 +183,62 @@ def read_context(run) -> dict:
         return value
     except (ValueError, TypeError, KeyError) as exc:
         raise NativeServiceBlocked("native_private_context_changed") from exc
+
+
+def read_result_key() -> bytes:
+    """Per-install MAC key for read-result digests that outlive a forget.
+
+    Derived from the vault master key, which backups never archive, so a
+    retained digest cannot be used to confirm a guessed forgotten summary.
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    try:
+        from src.vault.crypto import vault_key_material
+        material = vault_key_material()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise NativeServiceBlocked("native_read_result_key_unavailable") from exc
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"seraph.cordis-read-result.v1").derive(material)
+
+
+def sealed_read_digest(result: dict, *, key: bytes | None = None) -> str:
+    import hmac
+    return hmac.new(key or read_result_key(), b"result\0" + _canonical(result).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def sealed_record_digest(text: str, *, key: bytes | None = None) -> str:
+    import hmac
+    return hmac.new(key or read_result_key(), b"record\0" + text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def retained_read_result(method: str, result: dict, *, key: bytes | None = None) -> dict:
+    """The only form of a read result that may persist in a job row or artifact.
+
+    Memory text is private and forgettable, so each record keeps only its
+    reference and a keyed digest of the served text (for the completion
+    recheck); capability and connection results are already metadata only.
+    """
+    if method != "memory.retrieve":
+        return result
+    key = key or read_result_key()
+    return {**result, "value": {"records": [
+        {"record_ref": item["record_ref"], "text_mac": sealed_record_digest(item["text"], key=key)}
+        for item in result["value"]["records"]]}}
+
+
+def sealed_read_result(context: dict) -> dict:
+    """The read journey's sealed result: its digest and retained projection only.
+
+    A legacy context carrying the full payload fails closed here. No release
+    ever admitted read jobs before #1100, so no such row needs a scrub.
+    """
+    sealed = context["result"]
+    if sealed is None:
+        raise NativeServiceBlocked("native_artifact_source_unavailable")
+    if (type(sealed) is not dict or set(sealed) != {"result_digest", "projection"}
+            or type(sealed["result_digest"]) is not str or type(sealed["projection"]) is not dict):
+        raise NativeServiceBlocked("native_private_context_changed")
+    return sealed
 
 
 def _run_candidate(run) -> dict:
@@ -378,6 +433,9 @@ class NativeServiceDispatcher:
             if method in BLOCKED_METHODS:
                 # Typed and operator-visible; no authority or private bytes used.
                 return blocked(BLOCKED_METHODS[method])
+            if scope.binding.native_branch == "governed":
+                from .governed_services import dispatch_governed
+                return await dispatch_governed(self, frame, payload, scope)
             if scope.binding.native_branch in {"programme_planning", "programme_discovery"}:
                 # Guardian research callbacks (#1008) have their own Python owner.
                 from .research_dispatch import dispatch_research
@@ -437,8 +495,12 @@ class NativeServiceDispatcher:
             if context["result"] is not None:
                 raise NativeServiceBlocked("native_read_replay_denied")
             result = succeeded(method, await native_read_projection(db, run, candidate))
-            context["result"] = {"result_digest": _digest(result), "payload": result}
-            receipt = checkpoint_receipt("cordis-read:result", {"method": method, "result_digest": _digest(result),
+            # Only a keyed digest and a non-private projection rest in the job
+            # row (#1100); the full result exists only in this call's response.
+            key = read_result_key()
+            sealed = sealed_read_digest(result, key=key)
+            context["result"] = {"result_digest": sealed, "projection": retained_read_result(method, result, key=key)}
+            receipt = checkpoint_receipt("cordis-read:result", {"method": method, "result_digest": sealed,
                                                                 "no_learning": True}, run.fencing_token)
             await cas_run(db, run, checkpoint_context_json=_canonical(context),
                           checkpoint_receipts_json=_append_receipt(run.checkpoint_receipts_json, receipt,

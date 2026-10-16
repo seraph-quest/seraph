@@ -727,9 +727,11 @@ class ToolRegistry:
             raise ValueError("tool output must be text")
         if name in {"read_file", "write_file"}:
             from src.tools.filesystem_tool import (_assert_not_secret_like_path, _safe_resolve,
-                _read_workspace_text_bounded)
+                _read_workspace_text_bounded, assert_agent_readable)
             _assert_not_secret_like_path(inputs["file_path"], "task_verify")
-            text, truncated = _read_workspace_text_bounded(_safe_resolve(inputs["file_path"]), max_bytes=60000)
+            resolved = _safe_resolve(inputs["file_path"])
+            assert_agent_readable(resolved, file_path=inputs["file_path"], operation="task_verify")
+            text, truncated = _read_workspace_text_bounded(resolved, max_bytes=60000)
             if truncated:
                 raise ValueError("task filesystem result exceeds byte limit")
             if name == "write_file":

@@ -138,6 +138,7 @@ class TestSchedulerEngine:
                     "weekly_activity_review",
                     "screen_cleanup",
                     "audio_ingress_cleanup",
+                    "cordis_mail_retention",
                     "inference_ledger_verification",
                     "work_board_dispatch",
                     "guardian_opportunity_assessment",
@@ -157,8 +158,35 @@ class TestSchedulerEngine:
                 assert screenshot_analysis_job.trigger.interval.total_seconds() == 1
                 assert screenshot_analysis_job.coalesce is True
                 assert screenshot_analysis_job.max_instances == 1
+                await self._assert_cordis_mail_retention_job(scheduler)
             finally:
                 shutdown_scheduler()
+
+    @staticmethod
+    async def _assert_cordis_mail_retention_job(scheduler):
+        """The registered job itself sweeps globally, expires stale handoffs and never raises."""
+        import time
+        from src.runtime_plugins import bound_adapters
+
+        retention = scheduler.get_job("cordis_mail_retention")
+        assert retention.trigger.interval.total_seconds() == 15 * 60
+        assert retention.coalesce is True and retention.max_instances == 1
+        stale = time.monotonic() - bound_adapters.HANDOFF_TTL_SECONDS - 1
+        bound_adapters._handoff["scheduler-stale"] = (stale, {"plain_text": "x"})
+        bound_adapters._handoff["scheduler-fresh"] = (time.monotonic(), {"plain_text": "y"})
+        purge = AsyncMock(side_effect=[1, RuntimeError("storage fault")])
+        try:
+            with patch.object(bound_adapters, "purge_cordis_mail_results", purge):
+                await retention.func()
+                assert purge.await_args_list[0].args == () and purge.await_args_list[0].kwargs == {}
+                assert "scheduler-stale" not in bound_adapters._handoff
+                assert "scheduler-fresh" in bound_adapters._handoff
+                # A failing sweep is logged and retried next interval, never raised into the scheduler.
+                await retention.func()
+            assert purge.await_count == 2
+        finally:
+            bound_adapters._handoff.pop("scheduler-stale", None)
+            bound_adapters._handoff.pop("scheduler-fresh", None)
 
     def test_startup_next_run_only_when_enabled(self):
         from src.scheduler.engine import _startup_next_run

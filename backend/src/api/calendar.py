@@ -1640,18 +1640,44 @@ async def list_events(request: Request, connection_id: str, consent_id: str = Qu
     operator = _operator(request)
     owner = _owner(operator)
     try:
-        async with get_session() as db:
-            consent, connection = await _active_consent(db, owner, consent_id)
-            if consent.connection_id != connection_id:
-                raise HTTPException(status_code=404, detail={"code": "calendar_consent_not_found", "message": "The Calendar consent is unavailable", "recovery_action": None})
-            allowed = set(json.loads(consent.allowed_fields_json or "[]"))
-            expected_consent_revision = consent.revision
-            expected_connection_revision = connection.revision
+        return await read_consented_events(owner, connection_id=connection_id, consent_id=consent_id,
+                                           max_events=max_events, publish_selection=True)
     except CalendarIntegrationError as exc:
         raise _safe_error(exc) from exc
+    except CalendarControlError as exc:
+        raise _control_http_error(exc) from exc
+
+
+async def preflight_consented_events(owner: WorkBoardOwner, *, connection_id: str, consent_id: str):
+    """The owner's pre-contact fence for one consented event-list read."""
+    async with get_session() as db:
+        consent, connection = await _active_consent(db, owner, consent_id)
+        if consent.connection_id != connection_id:
+            raise CalendarIntegrationError("calendar_consent_not_found", "The Calendar consent is unavailable", status_code=404)
+        return consent, connection
+
+
+async def read_consented_events(owner: WorkBoardOwner, *, connection_id: str, consent_id: str, max_events: int,
+                                publish_selection: bool, outer_check=None,
+                                expected_consent_revision: int | None = None) -> dict[str, Any]:
+    """One consented, field-masked event-list read shared by the route and the Cordis adapter (#1092).
+
+    ``publish_selection`` persists ``selected`` event bindings (operator authority that
+    ``/calendar/prep`` consumes); the Cordis adapter only observes and never publishes them.
+    ``outer_check`` is the caller's own fence, run before every provider contact.
+    """
+    consent, connection = await preflight_consented_events(owner, connection_id=connection_id, consent_id=consent_id)
+    if expected_consent_revision is not None and consent.revision != expected_consent_revision:
+        raise CalendarIntegrationError("calendar_revision_stale", "The Calendar consent changed", status_code=409,
+                                       recovery_action="refresh_event")
+    allowed = set(json.loads(consent.allowed_fields_json or "[]"))
+    expected_consent_revision = consent.revision
+    expected_connection_revision = connection.revision
 
     async def assert_authority() -> None:
         try:
+            if outer_check is not None:
+                await outer_check()
             async with get_session() as db:
                 current_consent, current_connection = await _active_consent(db, owner, consent_id)
                 if (
@@ -1680,55 +1706,56 @@ async def list_events(request: Request, connection_id: str, consent_id: str = Qu
         owner_principal_id=owner.principal_id,
         authority_check=assert_authority,
     )
-    try:
-        now = _now()
-        calendar_id = _consented_calendar_id(consent)
-        snapshots, revision = await adapter.list_events(calendar_id, time_min=now, time_max=now + timedelta(minutes=consent.window_minutes), allowed_fields=allowed, max_events=min(max_events, consent.max_events))
-        # Do not persist a provider snapshot after the owner/consent fence has
-        # changed since the final provider page.
-        await assert_authority()
-    except CalendarIntegrationError as exc:
-        raise _safe_error(exc)
-    except CalendarControlError as exc:
-        raise _control_http_error(exc)
+    now = _now()
+    calendar_id = _consented_calendar_id(consent)
+    snapshots, revision = await adapter.list_events(calendar_id, time_min=now, time_max=now + timedelta(minutes=consent.window_minutes), allowed_fields=allowed, max_events=min(max_events, consent.max_events))
+    # Do not persist a provider snapshot after the owner/consent fence has
+    # changed since the final provider page.
+    await assert_authority()
+    if not publish_selection:
+        events = []
+        for snapshot in snapshots[:50]:
+            fields = adapter._scrub(snapshot.fields)
+            events.append({"event_key": snapshot.event_key, "event_revision": snapshot.event_revision,
+                           **{name: fields.get(name) for name in ("summary", "start", "end", "location", "description", "attendees")
+                              if name in allowed}})
+        return {"events": events, "consent_id": consent.consent_id, "consent_revision": expected_consent_revision,
+                "connection_revision": expected_connection_revision, "calendar_list_revision": revision.digest,
+                "fetched_at": _now().isoformat().replace("+00:00", "Z"), "pages_read": revision.pages_read,
+                "truncated": revision.truncated, "selection_published": False}
     events = []
-    try:
-        async with get_session() as db:
-            await _begin_serialized(db)
-            # Keep the final authority check and selected-binding publication in
-            # one owner transaction.  A session/consent revoke committed before
-            # this transaction starts therefore cannot leave a stale selection.
-            current_consent, current_connection = await _active_consent(db, owner, consent_id)
-            if (
-                current_consent.connection_id != connection_id
-                or current_consent.revision != expected_consent_revision
-                or current_connection.revision != expected_connection_revision
-            ):
-                raise CalendarIntegrationError(
-                    "calendar_revision_stale",
-                    "Calendar authority changed during the provider read",
-                    status_code=409,
-                    recovery_action="refresh_event",
-                )
-            for snapshot in snapshots:
-                existing = await persist_calendar_event_binding(
-                    db,
-                    owner_principal_id=owner.principal_id,
-                    owner_session_id=owner.session_id,
-                    connection=current_connection,
-                    consent=current_consent,
-                    snapshot=snapshot,
-                )
-                fields = adapter._scrub(snapshot.fields)
-                # The envelope has the newly fetched list digest, while each
-                # event retains the binding's canonical selection provenance.
-                events.append({"event_binding_id": existing.event_binding_id, "event_binding_revision": existing.revision, "event_key": snapshot.event_key, "event_revision": snapshot.event_revision, "calendar_list_revision": existing.calendar_list_revision, "summary": fields.get("summary"), "start": fields.get("start"), "end": fields.get("end"), "location": fields.get("location"), "description": fields.get("description"), "attendees": fields.get("attendees")})
-            await _assert_live_operator_session(db, owner)
-            return {"events": events[:50], "consent_id": current_consent.consent_id, "consent_revision": current_consent.revision, "connection_revision": current_connection.revision, "calendar_list_revision": revision.digest, "fetched_at": _now().isoformat().replace("+00:00", "Z"), "pages_read": revision.pages_read, "truncated": revision.truncated}
-    except CalendarIntegrationError as exc:
-        raise _safe_error(exc) from exc
-    except CalendarControlError as exc:
-        raise _control_http_error(exc) from exc
+    async with get_session() as db:
+        await _begin_serialized(db)
+        # Keep the final authority check and selected-binding publication in
+        # one owner transaction.  A session/consent revoke committed before
+        # this transaction starts therefore cannot leave a stale selection.
+        current_consent, current_connection = await _active_consent(db, owner, consent_id)
+        if (
+            current_consent.connection_id != connection_id
+            or current_consent.revision != expected_consent_revision
+            or current_connection.revision != expected_connection_revision
+        ):
+            raise CalendarIntegrationError(
+                "calendar_revision_stale",
+                "Calendar authority changed during the provider read",
+                status_code=409,
+                recovery_action="refresh_event",
+            )
+        for snapshot in snapshots:
+            existing = await persist_calendar_event_binding(
+                db,
+                owner_principal_id=owner.principal_id,
+                owner_session_id=owner.session_id,
+                connection=current_connection,
+                consent=current_consent,
+                snapshot=snapshot,
+            )
+            fields = adapter._scrub(snapshot.fields)
+            # The envelope has the newly fetched list digest, while each
+            # event retains the binding's canonical selection provenance.
+            events.append({"event_binding_id": existing.event_binding_id, "event_binding_revision": existing.revision, "event_key": snapshot.event_key, "event_revision": snapshot.event_revision, "calendar_list_revision": existing.calendar_list_revision, "summary": fields.get("summary"), "start": fields.get("start"), "end": fields.get("end"), "location": fields.get("location"), "description": fields.get("description"), "attendees": fields.get("attendees")})
+        await _assert_live_operator_session(db, owner)
+        return {"events": events[:50], "consent_id": current_consent.consent_id, "consent_revision": current_consent.revision, "connection_revision": current_connection.revision, "calendar_list_revision": revision.digest, "fetched_at": _now().isoformat().replace("+00:00", "Z"), "pages_read": revision.pages_read, "truncated": revision.truncated}
 
 
 @router.post("/calendar/prep")

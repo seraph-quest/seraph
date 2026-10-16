@@ -651,13 +651,54 @@ receipt and the job's accounting rows; outputs are Vault-redacted (fail closed)
 and no service returns secrets. A changed attempt, deadline or Root never seals
 output, and unloading the host leaves the job's intent and cost liability for
 recovery while a re-admission reuses the held job.
-`connections.invokeBoundAdapter` admits a job for a canonical connection reference,
-its expected revision and an operation from a closed table
-(`calendar.read_events`, `gmail.read_messages`); the call requires the caller's
-current, ready, unchanged connection row and then fails closed as
-`native_adapter_operation_not_composed`, recorded on the blocked job, without
-touching a credential or effect. Composing those adapters is follow-up work, and
-no Gmail/Calendar operation is a native capability through `capabilities.invoke`.
+`connections.invokeBoundAdapter` (#1092) admits one governed job for an operation
+from a closed table with closed per-operation arguments, and runs it through the
+existing Python owner; the child only ever receives the job reference:
+
+- `gmail.read_message` (an `active` `gmail_readonly` connection, a bound message,
+  its source consent and revisions) runs `api/mail.read_bound_message`: the mail
+  source control job and lease, the consent and label-scope fences, the Vault
+  credential decrypted only inside the adapter after every authority callback,
+  and a body bounded to 8 KiB.
+- `calendar.read_events` (an `active` `calendar_readonly` connection and its read
+  consent) runs `api/calendar.read_consented_events` with
+  `publish_selection=False`: a Cordis read only observes and never publishes the
+  `selected` bindings `/calendar/prep` treats as authority. Only consented fields
+  are returned, cut to an equal per-event budget so the result fits 64 KiB.
+- `gmail.send_reviewed_reply` (a paused reply-send job) is admitted only by the
+  authenticated `POST /api/capabilities/mail/reply-sends/{job_id}/cordis-execute`,
+  which makes the operator's approval decision in the same request (CSRF is the
+  global Origin/cookie middleware) after checking that the Cordis host can run,
+  the arguments admit and the reply awaits its decision (`mail_reply_not_awaiting_send`
+  otherwise, with nothing decided); it runs `mail_reply_runtime.execute` under
+  `run_owned` and succeeds only when this invocation claimed the send-once intent
+  and the sent-mailbox readback carries its fence. A send already made from the
+  UI is `mail_reply_already_sent`. A send that fails to start after the decision
+  is `mail_reply_approved_not_sent`: nothing was sent and the approval stands, so
+  the operator sends from the reply review or cancels. Once the send-once intent
+  exists, or while the owner's send worker is still running (it outlives a host
+  timeout and may still claim it), any failure (an unverified readback, a host
+  timeout, a cancellation) is `mail_reply_send_in_doubt`, "verify in Sent", never
+  a plain refusal.
+
+Every owner check (session, connection state and revision, consent, binding,
+approval) runs before the intent, so a revoked or expired consent, a stale
+revision, an expired lease or a revoked session make no provider request. The
+governed job stores digests only; the labelled plaintext (`origin:
+external_untrusted`, `instruction_authority: false`, a `prompt_injection`
+receipt that never relaxes anything) reaches the Python caller once, in memory.
+Gmail's only plaintext at rest is the owner's existing encrypted control
+artifact under `artifacts/mail/private/`, which no Cordis capability can read;
+for Cordis-originated reads, whatever their outcome (the owner job id is derived
+from the governed run), it is deleted when the consent is revoked or expires, or
+after 24 hours: in the revoke route, at each adapter admission (this owner), at
+startup and every 15 minutes (`cordis_mail_retention`), each purge audited as
+`cordis_adapter_result_purged`. The sweep selects only terminal Cordis Gmail reads
+with no purge audit and pages through all of them, so newer runs never starve an
+older read. The in-memory plaintext is dropped on failure and after five minutes
+if no caller takes it; the periodic sweep expires it too. Backups taken before that keep the ciphertext until
+the backup itself is pruned. No Gmail/Calendar operation is a native capability
+through `capabilities.invoke`.
 
 ### Cordis guardian research (#1008)
 

@@ -9,11 +9,25 @@ from src.work_board.repository import BoardError
 from src.work_board.document_channel_ingest import validate_file_path
 
 
-class _PrivateRequestFilter(logging.Filter):
+class _TokenRedactingFilter(logging.Filter):
+    """Redact this operation's bot token from HTTPX/httpcore records.
+
+    Only records that contain the token are rewritten; unrelated concurrent
+    requests keep their normal log lines.
+    """
+
+    def __init__(self, token):
+        super().__init__()
+        self._token = token
+
     def filter(self, record):
-        # HTTPX/httpcore messages can contain the token-bearing request target.
-        # Suppress those records for the complete bounded private operation.
-        return False
+        try:
+            message = record.getMessage()
+        except Exception:
+            return False
+        if self._token and self._token in message:
+            record.msg, record.args = message.replace(self._token, "[redacted]"), ()
+        return True
 
 
 class TelegramDocumentHTTP:
@@ -24,7 +38,7 @@ class TelegramDocumentHTTP:
     async def acquire(self, token, file_id, *, timeout, before_bytes):
         filters = []
         for name in ("httpx", "httpcore", "httpcore.connection", "httpcore.http11", "httpcore.http2"):
-            logger = logging.getLogger(name); private_filter = _PrivateRequestFilter()
+            logger = logging.getLogger(name); private_filter = _TokenRedactingFilter(token)
             logger.addFilter(private_filter); filters.append((logger, private_filter))
         try:
             async with httpx.AsyncClient(transport=self._transport, trust_env=False,

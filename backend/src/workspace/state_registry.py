@@ -1464,6 +1464,13 @@ _RUNTIME_PATH_SPECS = (
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
+    # Audio documentation source objects (ADR-033). Re-acquirable evidence, so
+    # cache state: never archived and absent until first staged. The canonical
+    # attestation rows stay in seraph.db and fail closed with
+    # audio_documentation_source_missing until the documentation is staged
+    # again. Derived files cannot be used here: restore refuses stored derived
+    # files.
+    (".model-fabric", WorkspaceStateClass.CACHE),
     (".seraph-extension-snapshots", WorkspaceStateClass.DERIVED),
     (".seraph-workspace-maintenance.lock", WorkspaceStateClass.DERIVED),
     ("seraph.db-wal", WorkspaceStateClass.DERIVED),

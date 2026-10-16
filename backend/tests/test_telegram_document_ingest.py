@@ -566,3 +566,30 @@ async def test_final_source_release_cas_denies_unexpected_nonnull_generic_owner(
         assert contacts == ["POST", "GET"]
     finally:
         await service.stop(); await boundary.http.aclose()
+
+
+def test_token_redaction_is_scoped_to_records_containing_the_token():
+    import logging
+    from src.extensions.telegram_document_transport import _TokenRedactingFilter
+    token = "123456:synthetic-secret-token"
+    redact = _TokenRedactingFilter(token)
+    unrelated = logging.LogRecord("httpx", logging.INFO, __file__, 1, "HTTP Request: GET %s", ("https://example.com/ok",), None)
+    assert redact.filter(unrelated) is True and unrelated.getMessage() == "HTTP Request: GET https://example.com/ok"
+    private = logging.LogRecord("httpx", logging.INFO, __file__, 1, "HTTP Request: POST %s",
+        (f"https://api.telegram.org/bot{token}/getFile",), None)
+    assert redact.filter(private) is True
+    assert token not in private.getMessage() and "[redacted]" in private.getMessage()
+
+
+def test_channel_handles_never_use_a_password_hash_as_mac_key(monkeypatch):
+    from config.settings import settings
+    from src.work_board.channel_capture import _output_signing_key
+    from src.work_board.repository import BoardError
+    monkeypatch.setattr(settings, "capability_journal_secret", "")
+    monkeypatch.setattr(settings, "operator_auth_secret", "")
+    monkeypatch.setattr(settings, "operator_auth_secret_hash", "pbkdf2_sha256$stored-verification-hash")
+    with pytest.raises(BoardError) as unavailable:
+        _output_signing_key()
+    assert unavailable.value.code == "channel_output_signer_unavailable"
+    monkeypatch.setattr(settings, "capability_journal_secret", "dedicated-server-mac-material")
+    assert len(_output_signing_key()) == 32

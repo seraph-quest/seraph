@@ -338,6 +338,10 @@ def private_read(source):
         raise DocumentationError('audio_documentation_object_invalid')
     parent=object_directory()
     try: fd=os.open(source.object_id, os.O_RDONLY|os.O_NOFOLLOW, dir_fd=parent)
+    except FileNotFoundError:
+        # Objects are rebuildable (never archived): a restored attestation
+        # row whose object is absent needs the documentation staged again.
+        raise DocumentationError('audio_documentation_source_missing') from None
     finally: os.close(parent)
     try:
         facts=os.fstat(fd)

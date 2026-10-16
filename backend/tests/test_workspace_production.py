@@ -992,3 +992,48 @@ def test_isolated_backup_restore_restart_and_rollback_drill_preserves_state(tmp_
 
 def workspace_backup_dir_for(root: Path) -> Path:
     return root.parent / f"{root.name}.backups"
+
+
+def _lifecycle_cli(tmp_path, environment, *arguments):
+    completed = subprocess.run([sys.executable, str(CLI), "--base-dir", str(tmp_path), *arguments],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return json.loads(completed.stdout)
+
+
+@pytest.mark.parametrize("with_object", [False, True], ids=["empty", "with-object"])
+def test_audio_documentation_objects_never_block_backup_restore_or_inventory(tmp_path, monkeypatch, with_object):
+    import hashlib
+    from types import SimpleNamespace
+    from config.settings import settings
+    from src.model_fabric import audio_documentation as documentation
+    from src.workspace.state_registry import production_workspace_inventory
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+    os.close(documentation.object_directory())  # <workspace>/.model-fabric/audio-documentation/objects
+    raw = b"bounded official documentation bytes"
+    source = SimpleNamespace(object_id="a" * 32 + ".source", size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    if with_object:
+        documentation.private_write(source.object_id, raw)
+        assert documentation.private_read(source) == raw
+
+    inventory = production_workspace_inventory(root)
+    assert inventory["status"] != "blocked", inventory
+    entries = {entry["logical_path"]: entry for entry in canonical_workspace_registry(root).build_manifest()["entries"]}
+    assert entries[".model-fabric"]["state_class"] == "cache"
+    archive = _lifecycle_cli(tmp_path, environment, "backup", "--archive", "audio-docs.zip")
+    import zipfile
+    with zipfile.ZipFile(archive["archive_path"]) as bundle:
+        # Rebuildable objects are never archived.
+        assert not any(".model-fabric" in name and name.endswith(".source") for name in bundle.namelist())
+    _lifecycle_cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    assert production_workspace_inventory(root)["status"] != "blocked"
+    _lifecycle_cli(tmp_path, environment, "backup", "--archive", "after-restore.zip")
+    # The canonical attestation row survives in seraph.db while its object is
+    # rebuildable: a missing object fails closed with a typed reason.
+    object_path = root / ".model-fabric" / "audio-documentation" / "objects" / source.object_id
+    object_path.unlink(missing_ok=True)
+    with pytest.raises(documentation.DocumentationError) as missing:
+        documentation.private_read(source)
+    assert missing.value.code == "audio_documentation_source_missing"

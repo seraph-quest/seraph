@@ -1024,8 +1024,11 @@ is **Partial**:
   unexecuted review-only intent without replaying the original call or
   transferring audio costs. Tests exercise this with a scripted transcription at
   the owned transport.
-- Audio documentation objects under `.model-fabric/` are not part of workspace
-  backups yet; they are re-acquirable evidence and the live route is disabled.
+- Audio documentation source objects under `.model-fabric/` are declared cache
+  workspace state: backups and restores succeed with or without them, and they
+  are never archived. Their canonical attestation rows stay in `seraph.db`; after
+  a restore, a missing object fails closed with
+  `audio_documentation_source_missing` until the documentation is staged again.
 
 Live Telegram delivery, provider operation and native macOS/Safari capture remain
 unverified by these provider-free checks.

@@ -1119,9 +1119,12 @@ class ChannelOutputHandleV1(BaseModel):
 def _output_signing_key():
     import hashlib
     from config.settings import settings
-    value = str(settings.operator_auth_secret or settings.operator_auth_secret_hash or "").strip()
+    # Raw server secret material only. A stored password hash is verification
+    # data, not a MAC key, so it never signs capture origins or output handles.
+    value = str(settings.capability_journal_secret or settings.operator_auth_secret or "").strip()
     if not value:
-        raise BoardError("channel_output_signer_unavailable", "Configured server identity is required", status_code=409)
+        raise BoardError("channel_output_signer_unavailable",
+            "Set CAPABILITY_JOURNAL_SECRET (server MAC material) to issue channel handles", status_code=409)
     return hashlib.sha256(("seraph.channel-output.v1:" + value).encode()).digest()
 
 

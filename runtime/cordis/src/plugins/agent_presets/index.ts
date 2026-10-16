@@ -25,6 +25,10 @@ const specialist = (name: string, temperature: string, max_steps: number, tools:
 const guardian = (preset_id: string, runtime_path: string, temperature: string, max_tokens: string, context_purpose = 'guardian_report') =>
   preset(preset_id, 'unattended', context_purpose, runtime_path, temperature, max_tokens, 1, 'none', ['job_prompt'], 'text');
 
+// The WorkBoard drafts keep today's route and parameters (D5: strategist_agent).
+const worker = (preset_id: string) =>
+  preset(preset_id, 'worker', 'worker_draft', 'strategist_agent', '0.2', '2048', 1, 'none', ['worker_prompt'], 'json_object');
+
 /** Mirror of backend/src/agent/presets.py; the two tables must be identical. */
 export const PRESETS: Readonly<Record<string, Preset>> = Object.freeze({
   'chat.agent': preset('chat.agent', 'interactive', 'chat', 'chat_agent', 'settings', 'settings', 'settings.agent_max_steps',
@@ -53,6 +57,8 @@ export const PRESETS: Readonly<Record<string, Preset>> = Object.freeze({
   'guardian.end_of_day_goal_report': guardian('guardian.end_of_day_goal_report', 'end_of_day_goal_report', '0.4', '900'),
   'guardian.screenshot_observation_digest': guardian('guardian.screenshot_observation_digest', 'screenshot_observation_digest', '0.2', '800'),
   'guardian.memory_consolidation': guardian('guardian.memory_consolidation', 'session_consolidation', '0.3', '1024', 'memory'),
+  'worker.mail_reply_draft': worker('worker.mail_reply_draft'),
+  'worker.meeting_prep': worker('worker.meeting_prep'),
 });
 
 /** Python's ``json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False)``; kept local so the

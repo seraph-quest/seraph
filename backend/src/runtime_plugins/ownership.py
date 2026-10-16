@@ -24,12 +24,12 @@ from .contracts import METHOD_DOMAINS
 DOMAINS = tuple(f"seraph.{name}.v1" for name in (
     "authority", "goals", "tasks", "capabilities", "inference", "memory",
     "artifacts", "audit", "research", "conversation", "scheduler",
-    "connections", "agent-presets", "agent-loop", "guardian", "delegation", "source-extraction"))
+    "connections", "agent-presets", "agent-loop", "guardian", "delegation", "source-extraction", "board-workers"))
 # Domains added after an install's inventory was first seeded, with the issue
 # that introduced them. Boot inserts each missing one once as its legacy owner
 # (``introduce_domains_sync``); a missing original domain is never repaired.
 DOMAIN_INTRODUCTIONS = {"seraph.agent-presets.v1": "1020", "seraph.guardian.v1": "1020",
-                        "seraph.delegation.v1": "1020"}
+                        "seraph.delegation.v1": "1020", "seraph.board-workers.v1": "1020"}
 PRESETS_DOMAIN = "seraph.agent-presets.v1"
 STATES = frozenset({"ready", "draining", "blocked"})
 OWNER_KINDS = frozenset({"legacy", "cordis"})
@@ -82,7 +82,7 @@ class CompositionDependency:
 # Finite branch closures. A branch names the methods one original invocation
 # may forward; it never grants the authority those methods check.
 NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow", "programme_planning", "programme_discovery", "governed",
-                             "agent_loop", "guardian", "delegation"})
+                             "agent_loop", "guardian", "delegation", "board_workers"})
 READ_ORIGINS = frozenset({"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"})
 ARTIFACT_CHILDREN = ("artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append")
 WORKFLOW_CHILDREN = ("authority.resolve", "goals.read", "tasks.inspect", "tasks.checkpoint", "tasks.cancel")
@@ -121,6 +121,9 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
     if native_branch == "guardian" and origin_method == "guardian.startTurn":
         # #1020 unattended step: the same sealed-projection children as a chat step.
         return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
+    if native_branch == "board_workers" and origin_method == "board-workers.startTurn":
+        # #1020 WorkBoard draft step: the same sealed-projection children.
+        return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
     raise CompositionBindingError("composition_branch_unsupported")
 
 
@@ -129,8 +132,8 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
 # Schema 2 (#1020) adds the presets owner to every turn step; every new admission
 # writes schema 2, and an origin introduced by #1020 exists only in schema 2.
 BINDING_SCHEMA = 2
-TURN_STEP_METHODS = frozenset({"agent-loop.startTurn", "guardian.startTurn"})
-SCHEMA_2_ORIGINS = frozenset({"guardian.startTurn", "delegation.startChild"})
+TURN_STEP_METHODS = frozenset({"agent-loop.startTurn", "guardian.startTurn", "board-workers.startTurn"})
+SCHEMA_2_ORIGINS = frozenset({"guardian.startTurn", "delegation.startChild", "board-workers.startTurn"})
 
 
 def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool = True) -> tuple[str, ...]:

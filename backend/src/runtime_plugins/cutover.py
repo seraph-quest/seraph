@@ -80,6 +80,7 @@ register_cutover_domain("seraph.guardian.v1", prerequisites=(PRESETS_DOMAIN,))
 # Cordis, so its owner row never reads Cordis while specialists still run in-process on the
 # legacy orchestrator, and agent-loop's legacy gate is drained before delegation moves.
 register_cutover_domain("seraph.delegation.v1", prerequisites=(PRESETS_DOMAIN, "seraph.agent-loop.v1"))
+register_cutover_domain("seraph.board-workers.v1", prerequisites=(PRESETS_DOMAIN,))
 
 
 # ---------------------------------------------------------------- legacy turn gate

@@ -105,6 +105,12 @@
       "config": {}
     },
     {
+      "id": "seraph.board-workers.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
       "id": "seraph.source-extraction.v1",
       "required": true,
       "dependencies": [],

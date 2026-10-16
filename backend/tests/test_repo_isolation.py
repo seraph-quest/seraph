@@ -217,3 +217,23 @@ def test_wrap_rejects_changed_limits_and_unsafe_inputs(host):
         wrap(["true"], StagePaths(writable=(Path("relative"),)), RUNTIME, SMALL, host["posture"])
     with pytest.raises(ValueError):
         wrap([], host["paths"], RUNTIME, SMALL, host["posture"])
+
+
+def test_only_the_explicit_writable_binds_and_tmp_are_writable(host):
+    # Skeleton directories on the sandbox root (e.g. the parent of a bound
+    # runtime tree) and the root itself are read-only after --remount-ro.
+    # (Paths under /tmp live on the separately size-bounded /tmp tmpfs.)
+    stage = host["stage"]
+    skeleton = Path(sys.prefix) / "skeleton-write"
+    result = run(host, f"""
+import errno
+for path in ({str(skeleton)!r}, "/root-write", "/usr/root-write"):
+    try:
+        open(path, "w").write("x"); print("WROTE", path)
+    except OSError as exc:
+        print("denied", errno.errorcode.get(exc.errno))
+open("cwd-write", "w").write("ok"); open("/tmp/tmp-write", "w").write("ok"); print("writable ok")
+""")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["denied EROFS", "denied EROFS", "denied EROFS", "writable ok"]
+    assert (stage / "workspace" / "cwd-write").read_text() == "ok"

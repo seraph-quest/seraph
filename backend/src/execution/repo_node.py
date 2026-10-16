@@ -398,7 +398,7 @@ def execution_plan(root: Path, arguments: Any, allowed: Any, identity: Mapping[s
             raise RepoSandboxError("Node planner disagrees with canonical command grammar")
         commands.append(canonical)
     return {"selection":list(selection), "commands":commands, "output_directory":output_dir,
-            "package_sha256":hash_file(root/"package.json"), "lockfile_sha256":hash_file(root/"package-lock.json"),
+            "package_sha256":hash_regular(root,"package.json"), "lockfile_sha256":hash_regular(root,"package-lock.json"),
             "configs":configs, "lifecycle_hooks_executed":False}
 
 

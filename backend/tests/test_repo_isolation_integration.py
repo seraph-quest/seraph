@@ -243,11 +243,14 @@ def test_home_node_layouts_bind_only_the_executable_and_npm(tmp_path, monkeypatc
     link = home / layout
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(real_node)
+    # A Python user site next to the Node prefix must never be bound for Node.
+    (home / ".local" / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
     if layout == ".local/bin/node":
         (home / ".local" / "lib" / "node_modules" / "npm").mkdir(parents=True)
     runtime = repo_isolation.runtime_for([link])
     bound = set(runtime.read_only_paths)
-    for forbidden in (home, home / ".local", home / ".local" / "share", home / ".config", home / "bin"):
+    for forbidden in (home, home / ".local", home / ".local" / "share", home / ".config", home / "bin",
+                      home / ".local" / "lib", home / "lib"):
         assert forbidden not in bound
     assert link in bound and real_node.resolve() in bound
     ancestors, trees = repo_isolation.host_forbidden_roots(tmp_path / "workspace")

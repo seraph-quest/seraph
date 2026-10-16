@@ -60,17 +60,18 @@ def _executable_paths(item: str | os.PathLike) -> set[Path]:
     return paths
 
 
-def _prefix_library_paths(prefix: Path) -> set[Path]:
+def _prefix_library_paths(prefix: Path, *, node: bool = False) -> set[Path]:
     """Only the library trees an interpreter/runtime prefix needs.
 
     Python: ``lib``/``lib64`` (stdlib or venv site-packages) and
-    ``pyvenv.cfg``. Node: only ``lib/node_modules/npm``. Never the prefix
-    itself, so a prefix such as ``~/.local`` exposes no sibling data.
+    ``pyvenv.cfg``. Node: only ``lib/node_modules/npm`` (or nothing). Never the
+    prefix itself, so a prefix such as ``~/.local`` exposes no sibling data.
     """
     paths: set[Path] = set()
     npm = prefix / "lib" / "node_modules" / "npm"
-    if npm.is_dir():
-        paths.add(npm)
+    if node:
+        if npm.is_dir():
+            paths.add(npm)
         return paths
     if (prefix / "pyvenv.cfg").is_file():
         paths.add(prefix / "pyvenv.cfg")
@@ -257,6 +258,10 @@ def wrap(argv: Sequence[str], stage: StagePaths, runtime: IsolationRuntime, limi
         if _under_usr(path):
             raise ValueError("writable stage paths cannot be under /usr")
         command += ["--bind", str(path), str(path)]
+    # Everything not explicitly bound writable (the root tmpfs and its skeleton
+    # directories) becomes read-only, so nothing outside the stage binds and
+    # the size-bounded /tmp can grow in memory.
+    command += ["--remount-ro", "/"]
     if stage.cwd is not None:
         command += ["--chdir", str(_absolute(stage.cwd))]
     # RLIMIT_NPROC inside the new user namespace counts only sandbox processes.
@@ -408,9 +413,10 @@ def runtime_for(files: Sequence[str | os.PathLike], *, interpreter: str | os.Pat
     paths: set[Path] = set(base.read_only_paths)
     for item in files:
         paths.update(_executable_paths(item))
+        node = Path(item).resolve().name.startswith("node")
         for candidate in (Path(item).absolute(), Path(item).resolve()):
             prefix = candidate.parent.parent if candidate.parent.name == "bin" else candidate.parent
-            paths.update(_prefix_library_paths(prefix))
+            paths.update(_prefix_library_paths(prefix, node=node))
     paths = {Path(os.path.normpath(path)) for path in paths if not _under_usr(path)}
     identity = _digest({"interpreter": str(interpreter), "paths": sorted(map(str, paths))})
     return IsolationRuntime(Path(interpreter), tuple(sorted(paths)), identity)

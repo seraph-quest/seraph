@@ -57,3 +57,44 @@ export function chatRuntimeLabel(status: ChatRuntimeStatus): string {
   const loop = status.loop === "cordis.agent-loop.v1" ? "Cordis agent loop" : "legacy agent loop";
   return `Chat: ${loop} (${status.loop}) · route ${status.route}${status.owner_epoch === null ? "" : ` · owner epoch ${status.owner_epoch}`}`;
 }
+
+/** Which path scheduled guardian work takes (#1020): the server's guardian owner row, never inferred. */
+export interface GuardianRuntimeStatus {
+  loop: "cordis.guardian.v1" | "legacy.guardian" | "blocked";
+  owner_epoch: number | null; reason: string | null; recovery: string | null;
+}
+export function normalizeGuardianRuntime(value: unknown): GuardianRuntimeStatus | null {
+  if (!record(value) || !["cordis.guardian.v1", "legacy.guardian", "blocked"].includes(String(value.loop))
+    || !(value.owner_epoch === null || (Number.isSafeInteger(value.owner_epoch) && Number(value.owner_epoch) >= 1))
+    || !nullableText(value.reason) || !(value.recovery === null || (typeof value.recovery === "string" && value.recovery.length <= 512))
+    || (value.loop === "blocked") !== (value.reason !== null)) return null;
+  return { loop: value.loop as GuardianRuntimeStatus["loop"], owner_epoch: value.owner_epoch as number | null,
+    reason: value.reason as string | null, recovery: value.recovery as string | null };
+}
+export function guardianRuntimeLabel(status: GuardianRuntimeStatus): string {
+  if (status.loop === "blocked") return `Scheduled guardian work blocked · ${status.reason}`;
+  const loop = status.loop === "cordis.guardian.v1" ? "Cordis guardian loop" : "legacy guardian path";
+  return `Scheduled guardian work: ${loop} (${status.loop})${status.owner_epoch === null ? "" : ` · owner epoch ${status.owner_epoch}`}`;
+}
+
+/** One runtime domain owner row; a non-ready row carries the reason and its fix. */
+export interface RuntimeDomainStatus {
+  domain: string; owner_kind: "legacy" | "cordis" | null; epoch: number | null;
+  state: "ready" | "draining" | "blocked" | "missing" | "unseeded"; reason: string | null; recovery: string | null;
+}
+export function normalizeRuntimeDomains(value: unknown): RuntimeDomainStatus[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 64).flatMap((item): RuntimeDomainStatus[] => {
+    if (!record(item) || typeof item.domain !== "string" || item.domain.length > 64
+      || !["ready", "draining", "blocked", "missing", "unseeded"].includes(String(item.state))
+      || !(item.owner_kind === null || item.owner_kind === "legacy" || item.owner_kind === "cordis")
+      || !(item.epoch === null || (Number.isSafeInteger(item.epoch) && Number(item.epoch) >= 1))
+      || !nullableText(item.reason) || !(item.recovery === null || (typeof item.recovery === "string" && item.recovery.length <= 512))) return [];
+    return [{ domain: item.domain, owner_kind: item.owner_kind as RuntimeDomainStatus["owner_kind"], epoch: item.epoch as number | null,
+      state: item.state as RuntimeDomainStatus["state"], reason: item.reason as string | null, recovery: item.recovery as string | null }];
+  });
+}
+/** Domains an operator must act on: anything not ready, except a never-seeded inventory. */
+export function blockedRuntimeDomains(domains: RuntimeDomainStatus[]): RuntimeDomainStatus[] {
+  return domains.filter(item => item.state !== "ready" && item.state !== "unseeded");
+}

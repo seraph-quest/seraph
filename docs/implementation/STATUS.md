@@ -64,6 +64,20 @@ server-captured base and the tested tree. It must also reproduce the tested byte
 when applied to a fresh base copy outside the workspace, so a test that commits or
 configures Git textconv cannot misreport its change.
 
+**Cordis presets and unattended guardian turns: Partial (#1020, part 1).**
+- **Presets:** chat turns name a reviewed preset that both Python and the Cordis
+  sequencer check.
+- **Guardian turns:** when the guardian owner is cut over, the strategist
+  decision, the six scheduled reports and memory consolidation run as
+  unattended guardian turns. Each makes today's exact call and settles once
+  through the Cordis sequencer, with no tools and no approvals. Its output is
+  used only while the turn, its scheduler parent and the epoch are current.
+- **Blocked guardian loop:** work stops visibly in Settings, Activity and the
+  cockpit, with no fallback.
+- **Not yet migrated:** orchestrator, specialists, delegation and Board worker
+  drafts.
+- **Verification:** offline, with scripted completions and denied sockets.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

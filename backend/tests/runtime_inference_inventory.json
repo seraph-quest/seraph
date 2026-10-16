@@ -1,0 +1,367 @@
+{
+ "categories": {
+  "agent_turn": "Interactive chat, direct chat and onboarding: the #1019 Cordis turn (presets chat.*).",
+  "agent_turn_pr2": "Orchestrator and specialists: move to the Cordis loop in #1020 PR2.",
+  "board_worker_pr3": "WorkBoard dispatcher drafts: move to worker turns in #1020 PR3.",
+  "capability_owned": "A capability's own governed Python executor on the same broker (#1020 Dependencies clause).",
+  "context_helper": "Context-assembly helpers of the enclosing turn, under its principal (decision D2).",
+  "eval_facade": "Eval-only fixtures and compatibility facades; never a production turn.",
+  "guardian_turn": "Unattended guardian calls: run inside one cordis_guardian_turn_v1 (presets guardian.*).",
+  "model_owner": "The single model owner (llm_runtime) behind the one remote-inference broker.",
+  "shared_route": "A route shared by callers of several categories; its provenance follow-up is #1111."
+ },
+ "routes": {
+  "activity_digest": "guardian_turn",
+  "chat_agent": "agent_turn",
+  "context_window_summary": "context_helper",
+  "cordis_background_inference": "capability_owned",
+  "cordis_interactive_inference": "capability_owned",
+  "daily_briefing": "guardian_turn",
+  "end_of_day_goal_report": "guardian_turn",
+  "evening_review": "guardian_turn",
+  "file_worker": "agent_turn_pr2",
+  "general_task_planner": "capability_owned",
+  "goal_planner": "agent_turn_pr2",
+  "memory_embedding": "capability_owned",
+  "memory_keeper": "agent_turn_pr2",
+  "onboarding_agent": "agent_turn",
+  "orchestrator_agent": "agent_turn_pr2",
+  "readonly_research_child": "capability_owned",
+  "screenshot_image_analysis": "capability_owned",
+  "screenshot_observation_digest": "guardian_turn",
+  "session_consolidation": "guardian_turn",
+  "session_title_generation": "context_helper",
+  "strategist_agent": "shared_route",
+  "vault_keeper": "agent_turn_pr2",
+  "web_researcher": "agent_turn_pr2",
+  "weekly_activity_review": "guardian_turn",
+  "workflow_runner": "agent_turn_pr2"
+ },
+ "schema_version": 1,
+ "sites": {
+  "agent/context_window.py::_summarize_middle::build_canonical_inference_context:context_window_summary": {
+   "category": "context_helper",
+   "count": 1
+  },
+  "agent/context_window.py::_summarize_middle::completion_with_fallback_sync": {
+   "category": "context_helper",
+   "count": 3
+  },
+  "agent/direct_chat.py::run_direct_local_chat::build_canonical_inference_context": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/direct_chat.py::run_direct_local_chat::completion_with_fallback_sync": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/direct_chat.py::stream_direct_local_chat::build_canonical_inference_context": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/direct_chat.py::stream_direct_local_chat::stream_completion_with_fallback": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/factory.py::create_agent::ToolCallingAgent": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/factory.py::create_orchestrator::ToolCallingAgent": {
+   "category": "agent_turn_pr2",
+   "count": 1
+  },
+  "agent/factory.py::get_model::FallbackLiteLLMModel": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/factory.py::get_model::build_model_kwargs": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/onboarding.py::create_onboarding_agent::FallbackLiteLLMModel": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/onboarding.py::create_onboarding_agent::ToolCallingAgent": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/onboarding.py::create_onboarding_agent::build_model_kwargs": {
+   "category": "agent_turn",
+   "count": 1
+  },
+  "agent/session.py::SessionManager.generate_title::build_canonical_inference_context:session_title_generation": {
+   "category": "context_helper",
+   "count": 1
+  },
+  "agent/session.py::SessionManager.generate_title::completion_with_fallback": {
+   "category": "context_helper",
+   "count": 1
+  },
+  "agent/specialists.py::_create_model::FallbackLiteLLMModel": {
+   "category": "agent_turn_pr2",
+   "count": 1
+  },
+  "agent/specialists.py::_create_model::build_model_kwargs": {
+   "category": "agent_turn_pr2",
+   "count": 1
+  },
+  "agent/specialists.py::create_specialist::ToolCallingAgent": {
+   "category": "agent_turn_pr2",
+   "count": 1
+  },
+  "agent/strategist.py::create_strategist_agent::FallbackLiteLLMModel": {
+   "category": "eval_facade",
+   "count": 1
+  },
+  "agent/strategist.py::create_strategist_agent::ToolCallingAgent": {
+   "category": "eval_facade",
+   "count": 1
+  },
+  "agent/strategist.py::create_strategist_agent::build_model_kwargs:strategist_agent": {
+   "category": "eval_facade",
+   "count": 1
+  },
+  "agent/strategist.py::run_strategist_decision_completion.decision_call::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 2
+  },
+  "agent/strategist.py::run_strategist_decision_completion::build_canonical_inference_context:strategist_agent": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "api/model_fabric_settings.py::_run_model_fabric_canary_locked::run_capability_probe": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "api/workflows.py::_repo_repair_route_metadata::build_model_kwargs:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "api/workflows.py::grant_repo_repair_code_egress_consent::build_model_kwargs:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "evals/harness.py::_eval_provider_fallback_chain::completion_with_fallback_sync": {
+   "category": "eval_facade",
+   "count": 1
+  },
+  "evals/harness.py::_eval_provider_health_reroute::completion_with_fallback_sync": {
+   "category": "eval_facade",
+   "count": 1
+  },
+  "evals/harness.py::_run_governed_completion_fixture._run_completion::completion_with_fallback_sync": {
+   "category": "eval_facade",
+   "count": 1
+  },
+  "guardian/audio_worker.py::AudioIngressWorker._process_impl::GpuAdmissionRequest": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "guardian/opportunity_plans.py::_invoke_plan_completion.adapter::_governed_research_chat_completion": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "guardian/opportunity_plans.py::_run_plan_generation::build_canonical_inference_context": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "guardian/opportunity_runtime.py::_completion.adapter::_governed_research_chat_completion": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "guardian/opportunity_runtime.py::assessment_context::build_canonical_inference_context:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "llm_runtime.py::FallbackLiteLLMModel.generate.invoke_fallback_transport::_governed_openai_chat_completion": {
+   "category": "model_owner",
+   "count": 1
+  },
+  "llm_runtime.py::FallbackLiteLLMModel.generate.invoke_primary_transport::_governed_openai_chat_completion": {
+   "category": "model_owner",
+   "count": 1
+  },
+  "llm_runtime.py::FallbackLiteLLMModel.generate::build_canonical_inference_context": {
+   "category": "model_owner",
+   "count": 1
+  },
+  "llm_runtime.py::completion_with_fallback::completion_with_fallback_sync": {
+   "category": "model_owner",
+   "count": 1
+  },
+  "llm_runtime.py::completion_with_fallback_sync.invoke_fallback_transport::_governed_openai_chat_completion": {
+   "category": "model_owner",
+   "count": 1
+  },
+  "llm_runtime.py::completion_with_fallback_sync.invoke_primary_transport::_governed_openai_chat_completion": {
+   "category": "model_owner",
+   "count": 1
+  },
+  "llm_runtime.py::completion_with_fallback_sync::build_canonical_inference_context": {
+   "category": "model_owner",
+   "count": 1
+  },
+  "memory/consolidator.py::consolidate_session::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "memory/embedder.py::_embed_texts::build_canonical_inference_context": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "memory/pipeline/extract.py::extract_session_memories::build_canonical_inference_context:session_consolidation": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "observer/screenshot_semantic_analysis.py::_analyze_with_openrouter::build_canonical_inference_context:screenshot_image_analysis": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "runtime_plugins/governed_services.py::_request_inference::build_canonical_inference_context": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "runtime_plugins/governed_services.py::_request_inference::stream_completion_with_fallback": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "scheduler/jobs/activity_digest.py::run_activity_digest::build_canonical_inference_context:activity_digest": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/activity_digest.py::run_activity_digest::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/daily_briefing.py::run_daily_briefing::build_canonical_inference_context:daily_briefing": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/daily_briefing.py::run_daily_briefing::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/end_of_day_goal_report.py::_report_completion::build_canonical_inference_context:end_of_day_goal_report": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/end_of_day_goal_report.py::_report_completion::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/evening_review.py::run_evening_review::build_canonical_inference_context:evening_review": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/evening_review.py::run_evening_review::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/screenshot_observation_digest.py::_llm_digest_content::build_canonical_inference_context:screenshot_observation_digest": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/screenshot_observation_digest.py::_llm_digest_content::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/weekly_activity_review.py::run_weekly_activity_review::build_canonical_inference_context:weekly_activity_review": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "scheduler/jobs/weekly_activity_review.py::run_weekly_activity_review::completion_with_fallback": {
+   "category": "guardian_turn",
+   "count": 1
+  },
+  "work_board/dispatcher.py::WorkBoardDispatcher._capability_preflight::build_canonical_inference_context:readonly_research_child": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "work_board/dispatcher.py::WorkBoardDispatcher._execute_direct_adapter.model_call::FallbackLiteLLMModel": {
+   "category": "board_worker_pr3",
+   "count": 2
+  },
+  "work_board/dispatcher.py::WorkBoardDispatcher._execute_direct_adapter.model_call::build_canonical_inference_context:strategist_agent": {
+   "category": "board_worker_pr3",
+   "count": 2
+  },
+  "work_board/dispatcher.py::WorkBoardDispatcher._execute_direct_adapter.model_call::build_model_kwargs:strategist_agent": {
+   "category": "board_worker_pr3",
+   "count": 2
+  },
+  "work_board/general_task_planner.py::GeneralTaskPlanner.propose.invoke::_governed_research_chat_completion": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "work_board/general_task_planner.py::GeneralTaskPlanner.propose::build_canonical_inference_context:general_task_planner": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "work_board/near_text_native.py::execute::invoke_near_text": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "work_board/triage.py::_invoke_governed_proposal::completion_with_fallback": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "work_board/triage.py::_prepare_governed_proposal::build_canonical_inference_context": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair.py::RepoRepairService.__init__::FallbackLiteLLMModel": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair.py::RepoRepairService.generate_proposal::build_canonical_inference_context": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair.py::RepoRepairService.generate_proposal::build_model_kwargs": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair.py::RepoRepairService.resolve_proposal::build_model_kwargs": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair_source.py::_prepare_repository_iteration::build_model_kwargs:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair_source.py::grant_repository_iteration_consent::build_model_kwargs:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair_source.py::repository_source_preview::build_model_kwargs:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair_source.py::run_repository_iteration::build_canonical_inference_context:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair_source.py::run_repository_iteration::build_model_kwargs:strategist_agent": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/research_provider.py::_context::build_canonical_inference_context:readonly_research_child": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/research_provider.py::execute_discovery_request.invoke::_governed_research_chat_completion": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/research_provider.py::execute_discovery_request::build_canonical_inference_context:readonly_research_child": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/research_provider.py::execute_funded_child.invoke::_governed_research_chat_completion": {
+   "category": "capability_owned",
+   "count": 1
+  }
+ }
+}

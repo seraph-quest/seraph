@@ -340,7 +340,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "memory/embedder.py",
-        501,
+        508,
         "_request_embeddings",
         "client.post",
         "canonical_adapter",

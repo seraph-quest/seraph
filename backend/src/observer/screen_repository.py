@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlmodel import select, func, col
 
-from src.audit.runtime import log_integration_event
+from src.audit.runtime import READ_PATH_AUDIT_WAIT_MS, log_integration_event
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
 
@@ -82,6 +82,7 @@ class ScreenObservationRepository:
                 observations = list(result.scalars().all())
         except Exception as e:
             await log_integration_event(
+                lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
                 integration_type="screen_repository",
                 name="daily_summary",
                 outcome="failed",
@@ -94,6 +95,7 @@ class ScreenObservationRepository:
 
         if not observations:
             await log_integration_event(
+                lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
                 integration_type="screen_repository",
                 name="daily_summary",
                 outcome="empty_result",
@@ -135,6 +137,7 @@ class ScreenObservationRepository:
             "longest_streaks": streaks[:3],
         }
         await log_integration_event(
+            lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
             integration_type="screen_repository",
             name="daily_summary",
             outcome="succeeded",
@@ -170,6 +173,7 @@ class ScreenObservationRepository:
                     combined_project[proj] = combined_project.get(proj, 0) + secs
         except Exception as e:
             await log_integration_event(
+                lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
                 integration_type="screen_repository",
                 name="weekly_summary",
                 outcome="failed",
@@ -182,6 +186,7 @@ class ScreenObservationRepository:
 
         if total_observations == 0:
             await log_integration_event(
+                lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
                 integration_type="screen_repository",
                 name="weekly_summary",
                 outcome="empty_result",
@@ -192,6 +197,7 @@ class ScreenObservationRepository:
             )
         else:
             await log_integration_event(
+                lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
                 integration_type="screen_repository",
                 name="weekly_summary",
                 outcome="succeeded",

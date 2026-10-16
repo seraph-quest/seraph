@@ -2,7 +2,7 @@ import logging
 import os
 
 from config.settings import settings
-from src.audit.runtime import log_integration_event_sync
+from src.audit.runtime import READ_PATH_AUDIT_WAIT_MS, log_integration_event_sync
 
 logger = logging.getLogger(__name__)
 
@@ -110,12 +110,13 @@ def get_soul_file_mtime() -> float | None:
         return None
 
 
-def _log_soul_event(outcome: str, details: dict | None = None) -> None:
+def _log_soul_event(outcome: str, details: dict | None = None, *, lock_wait_ms: int | None = None) -> None:
     log_integration_event_sync(
         integration_type="soul_file",
         name=os.path.basename(_soul_path),
         outcome=outcome,
         details=details,
+        lock_wait_ms=lock_wait_ms,
     )
 
 
@@ -126,12 +127,14 @@ def read_soul() -> str:
         _log_soul_event(
             "succeeded",
             details={"operation": "read", "used_default": False, "length": len(text)},
+            lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
         )
         return text
 
     _log_soul_event(
         "empty_result",
         details={"operation": "read", "reason": "missing_file", "used_default": True},
+        lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
     )
     return _DEFAULT_SOUL
 
@@ -182,9 +185,11 @@ def ensure_soul_exists() -> None:
         _log_soul_event(
             "succeeded",
             details={"operation": "ensure", "created": True},
+            lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
         )
     else:
         _log_soul_event(
             "skipped",
             details={"operation": "ensure", "created": False},
+            lock_wait_ms=READ_PATH_AUDIT_WAIT_MS,
         )

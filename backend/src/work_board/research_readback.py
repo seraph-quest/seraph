@@ -202,11 +202,18 @@ async def _verified_group_costs(jobs, db, child_ids, call_ids):
 
     The fixed slot ids plus any row naming a child job, each verified against
     its stored digest. Verified as the status read is: in its own short session
-    on a deferred snapshot under the shared flock, so a concurrent accounting
-    writer can never make the proof spuriously unavailable. Writers persist the
-    witness before commit, so only a serialized re-check may conclude
-    continuity is broken; it is skipped when the caller already holds the
-    writer lock, since then no accounting writer can be between those steps.
+    on a deferred snapshot, with ``_continuity_lock(exclusive=False)``, which
+    takes no flock and relies on the atomic receipt replacement, so a
+    concurrent accounting writer cannot make the proof busy. Writers persist
+    the witness before commit, so a read-only failure may be spurious and only
+    a serialized re-check may conclude continuity is broken. That re-check is
+    skipped (failing closed) whenever the caller's connection already has a
+    transaction open: inside a write transaction no accounting writer can be
+    between those steps, while a bare deferred read may see a spurious
+    unavailable, which is safe.
+
+    No accounting owner fails closed (``accounting_continuity_unavailable``),
+    as the full-ledger verification did.
     """
     from src.workflows.inference_accounting import InferenceAccountingError
     try:

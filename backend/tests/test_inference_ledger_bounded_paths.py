@@ -200,3 +200,19 @@ async def test_research_readback_is_not_made_busy_by_a_concurrent_accounting_wri
     # A writer holds the exclusive accounting flock (non-blocking for others).
     with _continuity_lock(Path(settings.workspace_dir).resolve()):
         assert [row.operation_id for row in await _group_costs(repository)] == ["remote:child-a"]
+
+
+@pytest.mark.asyncio
+async def test_research_readback_without_an_accounting_owner_fails_closed(accounting_db, monkeypatch):
+    from tests.test_inference_accounting import setup_configuration
+    root, _engine, _factory = accounting_db
+    setup_configuration(ceiling=1000, bound=100)  # deployment binding, but no accounting owner yet
+    repository = __import__("src.workflows.job_runtime", fromlist=["DurableJobRepository"]).DurableJobRepository()
+    assert _sql(root, "SELECT count(*) FROM inference_accounting_owners") == [(0,)]
+    from pathlib import Path
+    from config.settings import settings
+    from src.workflows.inference_accounting import _continuity_lock
+    with _continuity_lock(Path(settings.workspace_dir).resolve(), exclusive=False):
+        pass  # the lock itself is available: the refusal below is the missing owner
+    with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
+        await _group_costs(repository)

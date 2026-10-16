@@ -314,6 +314,11 @@ def reset_process_singletons(monkeypatch):
     from src.auth import service as auth_service
     monkeypatch.setattr(auth_service, "_auth_touch_retry_after", 0.0)
     monkeypatch.setattr(observer_api, "_empty_poll_audited_at", {})
+    # The Vault cipher is cached from the first key it loads; each test has its
+    # own workspace and key, so a key cached by a prior test must not decrypt
+    # (and fail closed on) this test's Vault.
+    from src.vault import crypto as vault_crypto
+    monkeypatch.setattr(vault_crypto, "_fernet", None)
     yield
 
 

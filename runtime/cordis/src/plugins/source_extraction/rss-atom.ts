@@ -63,7 +63,9 @@ export function parseXml(source: string): Element {
       current.text += text;
       current.parts.push(text);
       if (Buffer.byteLength(current.text, 'utf8') > FEED_LIMITS.maxInputBytes) throw new FeedRejected('source_output_oversize');
-    } else if (text.trim()) throw new FeedRejected('source_feed_malformed');
+    // Outside the root only XML whitespace may appear: JS trim() would also
+    // drop U+FEFF and NBSP, letting a second BOM or a leading NBSP through.
+    } else if (/[^ \t\r\n]/.test(text)) throw new FeedRejected('source_feed_malformed');
   };
   while (offset < source.length) {
     const next = source.indexOf('<', offset);
@@ -141,13 +143,24 @@ function truncateField(text: string): string {
 const field = (value: string | undefined, html = false): string =>
   // A long field is cut rather than rejecting the whole feed.
   truncateField((html ? normalizeSourceText(value ?? '', true) : normalizeLines(value ?? '')).replace(/\n/g, ' '));
-// Block elements whose boundaries separate words in Atom xhtml content.
+/** A link is either exact or absent: a cut URL could read as a different resource. */
+function linkField(value: string | undefined): string {
+  const text = normalizeLines(value ?? '').replace(/\n/g, ' ');
+  return Buffer.byteLength(text, 'utf8') <= FEED_LIMITS.maxFieldBytes ? text : '';
+}
+// Block elements whose boundaries separate words in Atom xhtml content; script
+// and style bodies are never content.
+const XHTML_SKIPPED = new Set(['script', 'style']);
 const XHTML_BLOCKS = new Set(['p', 'div', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'br', 'tr', 'td', 'th', 'section',
   'article', 'blockquote', 'pre', 'ul', 'ol', 'table', 'dt', 'dd']);
 /** Document-order text of an element, with line breaks at xhtml block boundaries. */
 function deepText(element: Element): string {
-  return element.parts.map(part => typeof part === 'string' ? part
-    : XHTML_BLOCKS.has(local(part.name).toLowerCase()) ? `\n${deepText(part)}\n` : deepText(part)).join('');
+  return element.parts.map(part => {
+    if (typeof part === 'string') return part;
+    const name = local(part.name).toLowerCase();
+    if (XHTML_SKIPPED.has(name)) return '\n';
+    return XHTML_BLOCKS.has(name) ? `\n${deepText(part)}\n` : deepText(part);
+  }).join('');
 }
 /** Atom text constructs: ``xhtml`` is inline markup, ``text`` is literal, ``html`` and RSS are escaped HTML. */
 function summary(element: Element | undefined, atom: boolean): string {
@@ -180,7 +193,7 @@ export function feedText(source: string): string {
       : child(entry, 'link')?.text;
     const values: [string, string][] = [
       ['Item', field(child(entry, 'title')?.text)],
-      ['Link', field(link)],
+      ['Link', linkField(link)],
       ['Published', field(child(entry, atom ? 'updated' : 'pubDate')?.text)],
       ['Summary', summary(atom ? (child(entry, 'summary') ?? child(entry, 'content')) : child(entry, 'description'), atom)],
     ];

@@ -75,9 +75,22 @@ test('a field over 4 KiB is cut on a code point boundary instead of rejecting th
   // Every field is bounded independently; whole-input and element caps still reject.
   const huge = lines('<feed><title>' + 'a'.repeat(9000) + '</title><entry><title>' + 'b'.repeat(9000) + '</title><link href="https://x/'
     + 'c'.repeat(9000) + '"/><updated>' + 'd'.repeat(9000) + '</updated><summary>' + 'e'.repeat(9000) + '</summary></entry></feed>');
-  assert.equal(huge.length, 5);
+  // Text fields are cut; the over-long link is dropped rather than cut.
+  assert.deepEqual(huge.map(line => line.split(':')[0]), ['Feed', 'Item', 'Published', 'Summary']);
   for (const line of huge) assert.ok(byteLength(line) <= FEED_LIMITS.maxFieldBytes + 16);
   rejects('<rss><channel><title>' + 'x'.repeat(FEED_LIMITS.maxInputBytes) + '</title></channel></rss>', 'source_output_oversize');
+});
+
+test('an over-long link is dropped, never emitted as a cut URL', () => {
+  const href = 'https://example.com/' + 'p'.repeat(FEED_LIMITS.maxFieldBytes);
+  const atom = feedText(`<feed><title>F</title><entry><title>E</title><link href="${href}"/></entry></feed>`).split('\n');
+  const rss = feedText(`<rss><channel><title>F</title><item><title>E</title><link>${href}</link></item></channel></rss>`).split('\n');
+  for (const lines of [atom, rss]) {
+    assert.deepEqual(lines, ['Feed: F', 'Item: E']);
+    assert.ok(!lines.some(line => line.startsWith('Link:') || line.includes('\u2026')));
+  }
+  const exact = 'https://example.com/' + 'p'.repeat(FEED_LIMITS.maxFieldBytes - 'https://example.com/'.length);
+  assert.ok(feedText(`<feed><title>F</title><entry><title>E</title><link href="${exact}"/></entry></feed>`).includes('Link: ' + exact));
 });
 
 test('one UTF-8 byte order mark may precede the XML declaration', () => {
@@ -86,6 +99,11 @@ test('one UTF-8 byte order mark may precede the XML declaration', () => {
   assert.equal(feedText('\uFEFF<rss><channel><title>No declaration</title></channel></rss>'), 'Feed: No declaration');
   // A second mark, a mark after whitespace or a mark inside the declaration stays malformed.
   rejects('\uFEFF\uFEFF' + RSS, 'source_feed_malformed');
+  rejects('\uFEFF\uFEFF<rss><channel><title>T</title></channel></rss>', 'source_feed_malformed');
+  rejects('\u00a0<rss><channel><title>T</title></channel></rss>', 'source_feed_malformed');
+  rejects('<rss><channel><title>T</title></channel></rss>\u00a0', 'source_feed_malformed');
+  rejects('<rss><channel><title>T</title></channel></rss>\uFEFF', 'source_feed_malformed');
+  assert.equal(feedText(' \t\r\n<rss><channel><title>Spaced</title></channel></rss>\n'), 'Feed: Spaced');
   rejects(' \uFEFF' + RSS, 'source_feed_malformed');
   rejects('<?xml\uFEFF version="1.0"?><rss><channel/></rss>', 'source_feed_malformed');
   rejects('\uFEFF<?xml version="1.0" encoding="UTF-16"?><rss><channel/></rss>', 'source_feed_malformed');
@@ -98,6 +116,11 @@ test('Atom xhtml content keeps its text in document order with block breaks', ()
   assert.equal(entry('<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>One <em>two</em> three.</p><p>Four &amp; five</p></div></content>'),
     'Summary: One two three. Four & five');
   assert.equal(entry('<summary type="xhtml"><xhtml:div xmlns:xhtml="http://www.w3.org/1999/xhtml">A<xhtml:br/>B</xhtml:div></summary>'), 'Summary: A B');
+  // Script and style bodies inside xhtml are never emitted as content.
+  assert.equal(entry('<content type="xhtml"><div><p>click</p><script>alert(2)</script><style>p{x}</style><SCRIPT>x()</SCRIPT>after</div></content>'),
+    'Summary: click after');
+  assert.equal(entry('<content type="xhtml"><xhtml:div xmlns:xhtml="http://www.w3.org/1999/xhtml">a<xhtml:script>bad()</xhtml:script>b</xhtml:div></content>'),
+    'Summary: a b');
   // Decoded markup inside xhtml text stays literal text, never re-parsed as HTML.
   assert.equal(entry('<content type="xhtml"><div>&lt;script&gt;x&lt;/script&gt; kept</div></content>'), 'Summary: <script>x</script> kept');
   assert.equal(entry('<summary type="text">&lt;b&gt;literal&lt;/b&gt;</summary>'), 'Summary: <b>literal</b>');

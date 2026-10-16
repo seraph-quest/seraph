@@ -599,8 +599,10 @@ selects a format provider per media type from its closed profile config:
 WHATWG entity table, with a parity test) and `rss-atom`, a hand-written bounded
 reader (256 KiB input, depth 32, 4,096 elements, 64 items) that rejects
 DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
-declarations; feed links stay inert text. A field longer than 4 KiB is cut on a
-code point boundary and ends with `…` instead of rejecting the feed. One UTF-8
+declarations; feed links stay inert text. A text field longer than 4 KiB is cut
+on a code point boundary and ends with `…` instead of rejecting the feed; an
+over-long link is dropped rather than cut, so no altered URL is emitted. Script
+and style bodies inside Atom xhtml are not content. One UTF-8
 byte order mark may precede the declaration. Atom `type="xhtml"` content keeps
 its text in document order with breaks at block elements; `type="text"` stays
 literal and `type="html"` and RSS descriptions are normalized as HTML. Feeds
@@ -616,7 +618,11 @@ brief reference/digest, route epoch, strategy binding, issue time, original
 deadline and the limit/output ceilings) and admits one goal-less
 `goal_discovery_planning_v1` service job per occurrence. The discovery history
 lists only the current UTC day's planning jobs for that Goal's programmes, found
-by their derived occurrence IDs rather than by scanning every planning row. Its single
+by their derived occurrence IDs rather than by scanning every planning row. A plan
+from an earlier day that did not succeed is not shown: planning only stages an
+inert plan (no contact, inference, cost or external effect), it is never re-run,
+and it admitted no discovery job, so it has no `runs` row either. Its recovery is
+the current research runtime state and a new occurrence on the next eligible day. Its single
 `research.buildPlan` invocation may only read that request and stage one plan;
 Python checks every binding field against the request, every limit and output
 cap against the ceiling, then `validate_goal_research_plan`, and writes its own

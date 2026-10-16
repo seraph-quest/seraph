@@ -798,7 +798,13 @@ class GoalDiscoveryService:
             # Planning jobs are goal-less on the ledger, but each occurrence's
             # job id is derived from its owner, programme and day: read exactly
             # this Goal's programmes for today instead of every planning row.
-            # Past-day plans are not carried forward (current_day_only).
+            # Past-day plans are not carried forward (current_day_only), held
+            # ones included: a planning job only reads its request and stages
+            # an inert plan (no contact, inference, cost or external effect),
+            # is never re-run for its occurrence, and its recovery is the
+            # current runtime state plus a new occurrence the next day. A plan
+            # that never succeeded admitted no discovery job, so it has no row
+            # in ``runs`` either.
             goal = await db.get(Goal, goal_id)
             owners = {raw["id"]: raw["owner_identity_id"] for raw in _load(goal)["generations"]} if goal is not None else {}
             day = self._today()

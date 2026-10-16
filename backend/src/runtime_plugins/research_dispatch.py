@@ -27,7 +27,7 @@ REJECTION = re.compile(r"source-rejected:([0-3]):([a-z_]{1,64})\Z")
 # Source-content rejections the consumer may record per slot (mirror of guardian.ts).
 SOURCE_REJECTIONS = frozenset({"source_feed_malformed", "source_feed_dtd_forbidden", "source_feed_entity_forbidden",
                                "source_output_oversize", "source_normalized_empty", "source_envelope_invalid",
-                               "source_output_invalid"})
+                               "source_output_invalid", "source_output_mismatch"})
 MAX_SNAPSHOT_BYTES = 65536
 # The only reason codes a research block may record or show. A child's
 # reason_code is untrusted text: anything else becomes research_provider_blocked.
@@ -191,6 +191,31 @@ def extraction_inputs(witness) -> tuple[dict, dict, dict]:
     return {**request, "reference": requests[0]["reference"]}, raw, snapshots
 
 
+def _python_recheck(witness, payload):
+    """(slot, raw digest, text, matches) for a plain/html snapshot proposal, else None.
+
+    Computed from Python-owned staged bytes and pins only; the writer then
+    requires the proposal to be the exact one rechecked here.
+    """
+    from src.guardian.source_watch import SourceWatchError, normalize_source_text
+    try:
+        match = SNAPSHOT_REQUEST.fullmatch(payload["request_ref"])
+        request, raw, _ = extraction_inputs(witness)
+        value = _strict_json(_content(payload))
+        slot, text = int(match[1]), value["text"]
+        envelope = _strict_json(raw[slot]["content"])
+        provider = (request["pins"].get("formats") or {}).get(envelope["media_type"])
+        if provider not in {"plain-text", "html-text"} or type(text) is not str:
+            return None
+        try:
+            expected = normalize_source_text(envelope["body"], html_content=provider == "html-text")
+        except (SourceWatchError, ValueError):
+            expected = None
+        return slot, raw[slot]["reference"].digest, text, expected == text
+    except (TypeError, KeyError, ValueError, NativeServiceBlocked):
+        return None  # The writer's own validation reports malformed proposals.
+
+
 def rejected_slots(context) -> dict[int, str]:
     return {op["slot"]: op["reason"] for op in context["operations"] if op.get("op") == "source_rejected"}
 
@@ -204,6 +229,8 @@ async def _discovery(dispatcher, method, payload, scope):
     from src.work_board.research_artifacts import DISCOVERY_ARTIFACT_LIMITS, json_bytes
     jobs, job_id = dispatcher.jobs, scope.witness["invocation_ref"]
     witness = await physical_discovery_inputs(jobs, job_id)
+    # The reference normalizer runs before the writer lock is taken.
+    recheck = _python_recheck(witness, payload) if method == "artifacts.stage" else None
     async with discovery_writer_scope(witness=witness):
         async with jobs._session() as db:
             await _writer(db)
@@ -264,19 +291,14 @@ async def _discovery(dispatcher, method, payload, scope):
                 raise NativeServiceBlocked("stale_output")
             text = value["text"]
             envelope = _strict_json(raw[slot]["content"])
+            # Python owns the reference normalizer for plain/html providers; a
+            # differing output rejects only this slot. rss-atom output is
+            # provider-attested: Python bounds it but has no reference parser.
             provider = (pins.get("formats") or {}).get(envelope["media_type"])
-            if provider in {"plain-text", "html-text"}:
-                # Python owns the reference normalizer for these providers: the
-                # output must be exactly what it produces from the staged bytes.
-                from src.guardian.source_watch import SourceWatchError, normalize_source_text
-                try:
-                    expected = normalize_source_text(envelope["body"], html_content=provider == "html-text")
-                except (SourceWatchError, ValueError):
-                    expected = None
-                if expected != text:
-                    raise NativeServiceBlocked("stale_output")
-            # rss-atom output is provider-attested: Python bounds it but has no reference parser.
-            rejection = ("source_normalized_empty" if not text else "source_output_invalid" if "\r" in text
+            mismatch = (provider in {"plain-text", "html-text"}
+                        and recheck != (slot, raw[slot]["reference"].digest, text, True))
+            rejection = ("source_output_mismatch" if mismatch else "source_normalized_empty" if not text
+                         else "source_output_invalid" if "\r" in text
                          else "source_output_oversize" if len(text.encode("utf-8")) > MAX_SNAPSHOT_BYTES else None)
             snapshot = None
             if rejection is None:

@@ -515,16 +515,18 @@ async def test_unreviewed_child_reason_is_recorded_as_a_fixed_code(accounting_db
         assert "research.Plan" not in json.dumps(history)
 
 
-async def test_html_output_differing_from_the_python_normalizer_is_rejected(accounting_db, real_auth, monkeypatch):  # noqa: F811
-    from src.guardian.goal_discovery import ResearchRuntimeBlocked
+async def test_html_output_differing_from_the_python_normalizer_rejects_only_its_slot(accounting_db, real_auth, monkeypatch):  # noqa: F811
     fixture = Fixture(FORMATS["html"])
     async with discovery(accounting_db, monkeypatch, fixture) as env:
         job = await _admit(env)
-        # Python's reference now disagrees with the provider's text: a forged/stale output.
+        # Python's reference now disagrees with the provider's text: never adopted, and only this slot degrades.
         monkeypatch.setattr("src.guardian.source_watch.normalize_source_text", lambda *_a, **_k: "Different text")
-        with pytest.raises(ResearchRuntimeBlocked, match="stale_output"):
-            await env["service"].run(job["job_id"])
-        assert not any(a["kind"] == "snapshot" for a in (await _artifacts(env, job["job_id"])).artifacts.values())
+        done = await env["service"].run(job["job_id"])
+        assert done["status"] == "degraded", done
+        witness = await _artifacts(env, job["job_id"])
+        assert not any(a["kind"] == "snapshot" for a in witness.artifacts.values())
+        brief = next(a for a in witness.artifacts.values() if a["kind"] == "brief")["parsed"]
+        assert [item["reason"] for item in brief["coverage"]["unavailable"]] == ["source_output_mismatch"]
 
 
 async def test_snapshot_too_large_to_store_rejects_only_its_slot(accounting_db, real_auth, monkeypatch):  # noqa: F811

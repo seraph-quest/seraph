@@ -628,8 +628,10 @@ request and raw sources, extract them, stage each normalized snapshot and read
 it back. A snapshot is adopted through the existing discovery artifact owner
 only when it binds the raw digest and the job's pinned source provider and
 config digests. For the `plain-text` and `html-text` providers Python also
-recomputes `normalize_source_text` over the staged bytes and rejects any
-difference as `stale_output`; `rss-atom` output is provider-attested (Python
+recomputes `normalize_source_text` over the staged bytes (before taking the
+job writer) and rejects a differing output for that slot only
+(`source_output_mismatch`); the HTML provider matches Python's `re.I` tag-name
+case folding (`ı`/`İ`/`ſ`) with explicit character classes; `rss-atom` output is provider-attested (Python
 bounds it but has no reference feed parser). Both normalizers strip comments,
 script/style blocks and tags with linear scans, so unclosed constructs cannot
 stall the shared child. Feed, size and line-ending rejections are recorded per

@@ -7,9 +7,13 @@ import { HTML5_ENTITIES } from './html-entities.js';
 
 // Python str.isspace() / re ``\s`` for str patterns.
 const WS = '\\t\\n\\x0b\\x0c\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+// Python re.I folding for these tag letters (computed from CPython's re), as
+// explicit classes: JS /i folds differently (e.g. it does not fold ı/İ to i).
+const FOLD: Readonly<Record<string, string>> = Object.freeze({ i: '[iI\u0130\u0131]', s: '[sS\u017f]' });
+const folded = (word: string) => Array.from(word, c => /[a-z]/.test(c) ? (FOLD[c] ?? `[${c}${c.toUpperCase()}]`) : c).join('');
 // Python ``\b`` after a word character: the next character is not alnum/_.
-const SCRIPT_OPEN = /<(script|style|noscript)(?![\p{L}\p{N}_])/giu;
-const BLOCK_CLOSE = /<\/(p|div|li|h[1-6]|br|tr|section|article)>/giu;
+const SCRIPT_OPEN = new RegExp(`<(${['script', 'style', 'noscript'].map(folded).join('|')})(?![\\p{L}\\p{N}_])`, 'gu');
+const BLOCK_CLOSE = new RegExp(`</(${['p', 'div', 'li', 'h[1-6]', 'br', 'tr', 'section', 'article'].map(folded).join('|')})>`, 'gu');
 const CHARREF = /&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)/gu;
 const RUNS = new RegExp(`[${WS}]+`, 'u');
 

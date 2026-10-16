@@ -46,9 +46,25 @@ def test_linear_python_normalizer_equals_the_original_regex_form():
     small = ["<a<b>c", "<>x<>", "<!--<!-- a -->b-->", "<!-->x-->y", "<script>a<script>b</script>c</script>",
              "<SCRIPT >x</ScRiPt\t>y", "<style>x</script>y</style>z", "<scriptx>a</scriptx>", "<noscript>n</noscript >",
              "<script>unclosed", "<script x='>'>y</script>z", "<ſcript>s</script>t"]
-    for text in [*_corpus(), *small, *(value[:2000] for value in ADVERSARIAL.values())]:
+    for text in [*_corpus(), *_case_fold_corpus(1000), *small, *(value[:2000] for value in ADVERSARIAL.values())]:
         for flag in (True, False):
             assert normalize_source_text(text, html_content=flag) == _reference_normalize(text, html_content=flag), text
+
+
+def _case_fold_corpus(count=3000):
+    """Tag names with letters Unicode case folding treats specially (ı İ ſ K Å) and mixed case."""
+    rng = random.Random(10082)
+    variants = {"i": "iIıİ", "s": "sSſ", "k": "kK\u212a", "a": "aA\u212b"}
+    names = ["script", "style", "noscript", "p", "div", "li", "h1", "h6", "br", "tr", "section", "article", "kbd", "a"]
+
+    def spell(name):
+        return "".join(rng.choice(variants.get(c, c + c.upper())) if rng.random() < 0.6 else c for c in name)
+    cases = []
+    for _ in range(count):
+        open_name, close_name = spell(rng.choice(names)), spell(rng.choice(names))
+        cases.append(rng.choice([f"<{open_name}>x</{close_name}>y", f"a</{close_name}>b", f"<{open_name} q>z</{open_name}\t>w",
+                                 f"<{open_name}>m</{close_name} >n<p>o</{spell('p')}>"]))
+    return cases
 
 
 def _corpus():
@@ -68,7 +84,9 @@ def test_html_provider_matches_python_normalize_source_text():
               "for await (const chunk of process.stdin) input += chunk;"
               "const cases = JSON.parse(input);"
               "process.stdout.write(JSON.stringify(cases.map(([text, html]) => normalizeSourceText(text, html))));")
-    cases += ["<a<b>c", "<>x<>", "<!--<!-- a -->b-->", "<script>a<script>b</script>c</script>", "<SCRIPT >x</ScRiPt\t>y",
+    cases += _case_fold_corpus()
+    cases += ["<scrıpt>x</scrıpt>y", "<noscrıpt>x</noscrıpt>y", "a</dıv>b", "a</DİV>b",
+              "<a<b>c", "<>x<>", "<!--<!-- a -->b-->", "<script>a<script>b</script>c</script>", "<SCRIPT >x</ScRiPt\t>y",
               "<style>x</script>y</style>z", "<script>unclosed", "<ſcript>s</script>t", *(v[:4000] for v in ADVERSARIAL.values())]
     pairs = [[text, html] for text in cases for html in (True, False)]
     completed = subprocess.run([NODE, "--input-type=module", "-e", script], input=json.dumps(pairs), capture_output=True,

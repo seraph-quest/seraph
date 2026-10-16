@@ -16,7 +16,7 @@ import type { Json } from '../../protocol.js';
 const blocked = (reason_code: string) => ({ status: 'blocked', reason_code, memory_status: 'no_learning' }) as const;
 // Source-content rejections are recorded per slot; anything else blocks the step.
 export const SOURCE_REJECTIONS = Object.freeze(['source_feed_malformed', 'source_feed_dtd_forbidden', 'source_feed_entity_forbidden',
-  'source_output_oversize', 'source_normalized_empty', 'source_envelope_invalid', 'source_output_invalid']);
+  'source_output_oversize', 'source_normalized_empty', 'source_envelope_invalid', 'source_output_invalid', 'source_output_mismatch']);
 
 interface Source { source_slot: number; artifact_ref: string; acquisition_receipt_ref: string; }
 function request(content: string): { job_ref: string; sources: Source[] } | undefined {

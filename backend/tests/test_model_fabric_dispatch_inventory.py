@@ -371,7 +371,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "extensions/telegram_document_transport.py",
-        34,
+        48,
         "TelegramDocumentHTTP.acquire",
         "client.stream",
         "non_model_transport",
@@ -380,7 +380,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "extensions/telegram_document_transport.py",
-        48,
+        62,
         "TelegramDocumentHTTP.acquire",
         "client.stream",
         "non_model_transport",

@@ -352,15 +352,23 @@ def _augment_inference_readiness(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    workspace_owner = None
-    if settings.deployment_environment.strip().lower() in {"prod", "production"}:
-        # The container preflight proves the /app/data bind.  Hold the same
-        # lock inode for the whole backend lifetime so host backup/restore
-        # cannot observe or replace a live workspace generation.
-        from src.workspace.production import runtime_workspace_owner
+    if settings.deployment_environment.strip().lower() not in {"prod", "production"}:
+        async with _lifespan_services(app):
+            yield
+        return
+    # The container preflight proves the /app/data bind.  Hold the same
+    # lock inode for the whole backend lifetime so host backup/restore
+    # cannot observe or replace a live workspace generation.  The lease is
+    # released on every exit, including a failed startup.
+    from src.workspace.production import runtime_workspace_owner
 
-        workspace_owner = runtime_workspace_owner(settings.workspace_dir)
-        workspace_owner.__enter__()
+    with runtime_workspace_owner(settings.workspace_dir):
+        async with _lifespan_services(app):
+            yield
+
+
+@asynccontextmanager
+async def _lifespan_services(app: FastAPI):
     await init_db()
     from src.conversation.task_context import TaskContinuityService
     from src.work_board.repository import WorkBoardRepository
@@ -592,8 +600,6 @@ async def lifespan(app: FastAPI):
         shutdown_error = exc
     finally:
         await close_db()
-    if workspace_owner is not None:
-        workspace_owner.__exit__(None, None, None)
     if shutdown_error is not None:
         raise shutdown_error
 

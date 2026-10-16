@@ -956,6 +956,14 @@ def _grep_directories_recurse(args: list[str]) -> bool:
     return False
 
 
+def _is_recursive_long_option(arg: str) -> bool:
+    """--recursive / --dereference-recursive, including GNU unique-prefix abbreviations."""
+    if not arg.startswith("--"):
+        return False
+    name = arg[2:].partition("=")[0]
+    return len(name) >= 3 and ("recursive".startswith(name) or "dereference-recursive".startswith(name))
+
+
 def _grep_takes_separate_directories_value(arg: str) -> bool:
     if arg.startswith("--"):
         name = arg[2:]
@@ -1058,15 +1066,15 @@ def _validate_command_specific_args(executable: str, args: list[str], cwd: Path)
             "sed in-place editing is blocked in the process runtime; use apply_workspace_patch for workspace edits."
         )
 
-    if command_name == "rg" and any(arg.startswith("--pre") for arg in args):
-        # --pre runs an arbitrary program over every searched file.
-        raise ValueError("rg --pre is blocked in the process runtime.")
+    if command_name == "rg" and any(arg.startswith(("--pre", "--hostname-bin")) for arg in args):
+        # --pre and --hostname-bin run an arbitrary program.
+        raise ValueError("rg --pre and --hostname-bin are blocked in the process runtime.")
 
     if command_name in {"grep", "rg", "sed"}:
         pattern_consumed = False
         path_argument_checked = False
         recursive_search = command_name == "rg" or any(
-            arg in {"-r", "-R", "--recursive", "--dereference-recursive"}
+            _is_recursive_long_option(arg)
             or (arg.startswith("-") and not arg.startswith("--") and any(flag in arg[1:] for flag in ("r", "R")))
             for arg in args
         ) or (command_name == "grep" and _grep_directories_recurse(args))

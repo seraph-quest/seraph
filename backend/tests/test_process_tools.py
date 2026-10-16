@@ -1002,11 +1002,11 @@ def test_grep_directory_read_without_recursion_still_searches_ordinary_files(iso
     assert "needle" in run_command(command="grep", args_json='["needle","notes/a.md"]')
 
 
-@pytest.mark.parametrize("args_json", ['["--pre","cat","x","notes"]', '["--pre=cat","x","notes"]', '["--pre-glob","*","x","notes"]'])
+@pytest.mark.parametrize("args_json", ['["--pre","cat","x","notes"]', '["--pre=cat","x","notes"]', '["--pre-glob","*","x","notes"]', '["--hostname-bin=./prog","--hyperlink-format=default","x","notes"]', '["--hostname-bin","./prog","x","notes"]'])
 def test_rg_pre_preprocessor_is_blocked(isolated_workspace, args_json):
     _write_workspace_file("notes/a.md", "x\n")
 
-    assert run_command(command="rg", args_json=args_json) == "Error: rg --pre is blocked in the process runtime."
+    assert run_command(command="rg", args_json=args_json) == "Error: rg --pre and --hostname-bin are blocked in the process runtime."
 
 
 def test_run_command_still_reads_ordinary_and_read_only_runtime_files(isolated_workspace):
@@ -1031,6 +1031,11 @@ def test_run_command_still_reads_ordinary_and_read_only_runtime_files(isolated_w
         ("grep", '["--dir=rec","SERAPH_TEST_SECRET","."]', "path argument"),
         ("grep", '["-nd","recurse","SERAPH_TEST_SECRET","."]', "path argument"),
         ("grep", '["-d","recurse","-e","SERAPH_TEST_SECRET"]', "path argument"),
+        # GNU unique-prefix abbreviations of the recursion flags, no operand.
+        ("grep", '["--rec","SERAPH_TEST_SECRET"]', "path argument"),
+        ("grep", '["--recursiv","SERAPH_TEST_SECRET"]', "path argument"),
+        ("grep", '["--deref","SERAPH_TEST_SECRET"]', "path argument"),
+        ("grep", '["--dereference-rec","SERAPH_TEST_SECRET"]', "path argument"),
         # A directory operand is scanned even without a recursion flag.
         ("grep", '["SERAPH_TEST_SECRET","."]', "path argument"),
         ("find", '[".","-name",".env","-print"]', "search path"),

@@ -104,8 +104,9 @@ Limits:
 - a pre-existing hard-link alias of a READ_ONLY file stays writable through
   that alias;
 - top-level files are bound by inode for the length of a command;
-- a macOS Seatbelt adapter and a `start_process` network policy are
-  follow-up work.
+- a macOS Seatbelt adapter ([#1129](https://github.com/seraph-quest/seraph/issues/1129))
+  and a `start_process` network policy
+  ([#1130](https://github.com/seraph-quest/seraph/issues/1130)) are follow-up work.
 
 **Project issues and pull requests to goal tasks: Partial (#1017).** An explicit
 sync reads only the connected repository's issues and pull requests: at most 50

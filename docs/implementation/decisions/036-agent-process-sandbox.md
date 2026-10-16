@@ -196,8 +196,9 @@ before each launch.
     that run;
   - correctness depends on `agent_protected_paths()` declaring every
     protected name.
-- **Follow-ups:** a macOS Seatbelt adapter, and a network policy for
-  `start_process`.
+- **Follow-ups:** a macOS Seatbelt adapter
+  ([#1129](https://github.com/seraph-quest/seraph/issues/1129)), and a network policy for
+  `start_process` ([#1130](https://github.com/seraph-quest/seraph/issues/1130)).
 
 ## Verification
 

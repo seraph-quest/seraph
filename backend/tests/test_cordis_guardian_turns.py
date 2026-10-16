@@ -881,3 +881,40 @@ async def test_strategist_inference_lands_in_the_one_broker_and_ledger_on_both_o
     assert len(decisions) == 2 and decisions[0] == decisions[1]  # the same provider request on both loops
     (turn,) = await _jobs_of_kind("cordis_guardian_turn_v1")
     assert turn["status"] == "succeeded"
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_measured_unattended_turn_overhead_p95_over_100_samples(accounting_db, monkeypatch):  # noqa: F811
+    """The added Cordis cost of one guardian call on the real path, against #1019's 250 ms per-step budget:
+    the turn admission, the one guardian.startTurn step (job, invocation, decision, verification) and the
+    fenced settlement. The model call itself is a local no-op."""
+    import os
+    import statistics
+    import time
+    from src.runtime_plugins.guardian_turns import GuardianTurn
+    deny_sockets(monkeypatch)
+    samples = 110
+
+    def p95(values):
+        return statistics.quantiles(values, n=100)[94]
+    admissions, steps, settlements = [], [], []
+    async with guardian_host() as host:
+        async with service_principal("daily_briefing"):
+            for _ in range(samples):
+                began = time.perf_counter()
+                turn = await GuardianTurn.admit(preset_id="guardian.daily_briefing", timeout_seconds=60, host=host,
+                                                jobs=durable_job_repository)
+                admissions.append(time.perf_counter() - began)
+                began = time.perf_counter()
+                await turn.decide_final("a" * 64)
+                steps.append(time.perf_counter() - began)
+                began = time.perf_counter()
+                assert await turn.settle("succeeded")
+                settlements.append(time.perf_counter() - began)
+    print("MEASURED guardian n=%d p50/p95 ms: admission %.1f/%.1f, step %.1f/%.1f, settlement %.1f/%.1f" % (
+        samples, statistics.median(admissions) * 1000, p95(admissions) * 1000, statistics.median(steps) * 1000,
+        p95(steps) * 1000, statistics.median(settlements) * 1000, p95(settlements) * 1000))
+    # Non-gating by default, as #1019: asserted only on a quiet host with SERAPH_CORDIS_LATENCY_BUDGET=1.
+    if os.environ.get("SERAPH_CORDIS_LATENCY_BUDGET") == "1":
+        assert p95(admissions) <= 0.250 and p95(steps) <= 0.250 and p95(settlements) <= 0.250

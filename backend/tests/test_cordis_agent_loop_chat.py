@@ -525,3 +525,43 @@ def test_rest_client_disconnect_cancels_the_turn(tmp_path, monkeypatch, real_aut
                 break
             time.sleep(0.05)
         assert env.turns() == [("blocked", "agent_turn_cancelled")]
+
+
+def test_rest_failure_or_disconnect_between_admission_and_attach_settles_the_turn(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    import time
+    import httpx
+    with chat_env(tmp_path, monkeypatch, [final("never")], loop="cordis") as env:
+        # The agent build fails after admission: REST errors and the turn is closed, not left running.
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("agent build failed")
+        monkeypatch.setattr("src.api.chat.build_agent", broken)
+        with pytest.raises(RuntimeError):
+            env.client.post("/api/chat", json={"message": "summarize my notes", "message_id": "build-1"}, headers=ORIGIN)
+        assert env.turns() == [("blocked", "agent_turn_failed")]
+        # A client disconnect while guardian state is being built cancels the turn.
+        entered = asyncio.Event()
+
+        async def hanging(**_kwargs):
+            entered.set()
+            await asyncio.sleep(60)
+        monkeypatch.setattr("src.api.chat.build_guardian_state", hanging)
+        cookies = dict(env.client.cookies)
+
+        async def disconnect():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=env.client.app), base_url="http://testserver",
+                                         cookies=cookies, headers=ORIGIN) as client:
+                request = asyncio.create_task(client.post("/api/chat", json={"message": "summarize my notes",
+                                                                             "message_id": "build-2"}))
+                await asyncio.wait_for(entered.wait(), 10)
+                request.cancel()
+                try:
+                    await request
+                except asyncio.CancelledError:
+                    pass
+        env.client.portal.call(disconnect)
+        for _ in range(100):
+            if len(env.turns()) == 2 and env.turns()[1][0] != "running":
+                break
+            time.sleep(0.05)
+        assert env.turns() == [("blocked", "agent_turn_failed"), ("blocked", "agent_turn_cancelled")]
+        assert env.model.calls == []

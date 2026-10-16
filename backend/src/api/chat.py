@@ -663,129 +663,319 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             await asyncio.shield(cordis_blocked("native_original_root_inactive"))
             raise
 
+    # Any failure between admission and settlement (agent build, guardian state, a client
+    # disconnect, ingress logging) closes the Cordis turn visibly instead of leaving it running.
     try:
-        _ingress_message, duplicate = await session_manager.reserve_ingress_message(
-            session.id,
+        try:
+            _ingress_message, duplicate = await session_manager.reserve_ingress_message(
+                session.id,
+                request.message,
+                message_id=ingress.message_id,
+                metadata_json=chat_ingress_metadata(ingress),
+                attachment_refs=request.attachments,
+            )
+        except MessageIngressConflictError as exc:
+            await cordis_blocked("chat_message_identity_conflict")
+            await log_chat_ingress_event(
+                session_id=session.id,
+                envelope=ingress,
+                status="identity_conflict",
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=chat_ingress_rejection_detail(
+                    ingress,
+                    code="chat_message_identity_conflict",
+                    message="This message identity is already bound to another request.",
+                ),
+            ) from exc
+        if duplicate:
+            await cordis_blocked("chat_message_duplicate")
+            await log_chat_ingress_event(
+                session_id=session.id,
+                envelope=ingress,
+                status="duplicate_rejected",
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=chat_ingress_rejection_detail(
+                    ingress,
+                    code="chat_message_duplicate",
+                    message="This message was already accepted for this session.",
+                ),
+            )
+        await log_chat_ingress_event(
+            session_id=session.id,
+            envelope=ingress,
+            status="accepted",
+        )
+        if chat_loop == "cordis" and cordis_turn is None:
+            # The turn exists but its user row did not (an interrupted earlier attempt).
+            raise HTTPException(status_code=409, detail={"code": "agent_turn_replayed",
+                                                         "message": turn_blocked_message("agent_turn_replayed")})
+
+        async def settle_cordis(content: str, message_id: str, metadata_json: str | None, *, outcome="succeeded",
+                                reason=None, direct=False) -> None:
+            if direct:
+                try:
+                    await cordis_turn.decide_direct(content)
+                except TurnBlocked as exc:
+                    await cordis_turn.settle("blocked", reason=exc.reason_code)
+                    raise HTTPException(status_code=503, detail={"code": exc.reason_code,
+                                                                 "message": turn_blocked_message(exc.reason_code)}) from exc
+            if not await cordis_turn.settle(outcome, reason=reason, message={
+                    "session_id": session.id, "role": "assistant", "content": content, "message_id": message_id,
+                    "metadata_json": metadata_json}):
+                code = cordis_turn.blocked_reason or "agent_turn_settlement_refused"
+                raise HTTPException(status_code=503, detail={"code": code, "message": turn_blocked_message(code)})
+
+        # Check onboarding status
+        profile = await get_or_create_profile()
+        is_onboarding = not profile.onboarding_completed
+        direct_runtime_path = "onboarding_agent" if is_onboarding else "chat_agent"
+        try:
+            from src.llm_runtime import reject_removed_external_agent_route
+
+            reject_removed_external_agent_route(runtime_path=direct_runtime_path)
+        except ExternalAgentRuntimeRemovedError as exc:
+            await cordis_blocked("external_agent_runtime_removed")
+            raise HTTPException(status_code=410, detail=exc.payload()) from exc
+        if should_use_direct_local_chat(
             request.message,
-            message_id=ingress.message_id,
-            metadata_json=chat_ingress_metadata(ingress),
-            attachment_refs=request.attachments,
-        )
-    except MessageIngressConflictError as exc:
-        await cordis_blocked("chat_message_identity_conflict")
-        await log_chat_ingress_event(
-            session_id=session.id,
-            envelope=ingress,
-            status="identity_conflict",
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=chat_ingress_rejection_detail(
-                ingress,
-                code="chat_message_identity_conflict",
-                message="This message identity is already bound to another request.",
-            ),
-        ) from exc
-    if duplicate:
-        await cordis_blocked("chat_message_duplicate")
-        await log_chat_ingress_event(
-            session_id=session.id,
-            envelope=ingress,
-            status="duplicate_rejected",
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=chat_ingress_rejection_detail(
-                ingress,
-                code="chat_message_duplicate",
-                message="This message was already accepted for this session.",
-            ),
-        )
-    await log_chat_ingress_event(
-        session_id=session.id,
-        envelope=ingress,
-        status="accepted",
-    )
-    if chat_loop == "cordis" and cordis_turn is None:
-        # The turn exists but its user row did not (an interrupted earlier attempt).
-        raise HTTPException(status_code=409, detail={"code": "agent_turn_replayed",
-                                                     "message": turn_blocked_message("agent_turn_replayed")})
-
-    async def settle_cordis(content: str, message_id: str, metadata_json: str | None, *, outcome="succeeded",
-                            reason=None, direct=False) -> None:
-        if direct:
+            runtime_path=direct_runtime_path,
+            is_onboarding=is_onboarding,
+        ):
+            started_at = perf_counter()
+            if cordis_turn is not None and cordis_turn.profile != "direct":
+                await cordis_blocked("agent_turn_profile_changed")
+                raise HTTPException(status_code=503, detail={"code": "agent_turn_profile_changed",
+                                                             "message": turn_blocked_message("agent_turn_profile_changed")})
+            # The Cordis route ran this preflight before admission.
+            route_error = (None if cordis_turn is not None
+                           else await direct_local_chat_route_error(runtime_path=direct_runtime_path))
+            if route_error:
+                safe_detail = await redact_secrets_in_text(route_error)
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="rest",
+                    is_onboarding=is_onboarding,
+                    outcome="failed",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(request.message),
+                        "error": safe_detail,
+                        "runtime": "direct-openrouter-chat",
+                        "failure_stage": "route_preflight",
+                    },
+                )
+                raise HTTPException(status_code=503, detail=safe_detail)
+            llm_request_id = f"direct-rest:{session.id}:{started_at}"
+            _register_request(llm_request_id)
+            auth_tokens = set_runtime_context(
+                session.id,
+                get_current_approval_mode(),
+                trust_principal=chat_principal,
+            )
+            revocation_scope = _begin_rest_revocation_watch(http_request)
             try:
-                await cordis_turn.decide_direct(content)
-            except TurnBlocked as exc:
-                await cordis_turn.settle("blocked", reason=exc.reason_code)
-                raise HTTPException(status_code=503, detail={"code": exc.reason_code,
-                                                             "message": turn_blocked_message(exc.reason_code)}) from exc
-        if not await cordis_turn.settle(outcome, reason=reason, message={
-                "session_id": session.id, "role": "assistant", "content": content, "message_id": message_id,
-                "metadata_json": metadata_json}):
-            code = cordis_turn.blocked_reason or "agent_turn_settlement_refused"
-            raise HTTPException(status_code=503, detail={"code": code, "message": turn_blocked_message(code)})
+                response_text = await asyncio.wait_for(
+                    run_direct_local_chat(
+                        request.message,
+                        runtime_path=direct_runtime_path,
+                        is_onboarding=is_onboarding,
+                        session_id=session.id,
+                        request_id=llm_request_id,
+                    ),
+                    timeout=min(settings.agent_chat_timeout, 60),
+                )
+                response_text = await redact_secrets_in_text(response_text)
+                assert_runtime_not_revoked()
+            except RuntimeRevokedError as exc:
+                await cordis_blocked("native_original_root_inactive")
+                raise HTTPException(
+                    status_code=401,
+                    detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
+                ) from exc
+            except asyncio.TimeoutError:
+                await cordis_blocked("agent_turn_timed_out")
+                _mark_request_timed_out(llm_request_id)
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="rest",
+                    is_onboarding=is_onboarding,
+                    outcome="timed_out",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(request.message),
+                        "timeout_seconds": min(settings.agent_chat_timeout, 60),
+                        "request_id": llm_request_id,
+                        "runtime": "direct-openrouter-chat",
+                    },
+                )
+                raise HTTPException(status_code=504, detail="OpenRouter chat timed out — try again")
+            except NoCompliantModelRouteError as exc:
+                await cordis_blocked(NoCompliantModelRouteError.code)
+                safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+                logger.info(
+                    "Direct OpenRouter REST chat blocked before provider contact",
+                    extra={"reason": safe_reason},
+                )
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="rest",
+                    is_onboarding=is_onboarding,
+                    outcome="blocked",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(request.message),
+                        "error": safe_reason,
+                        "request_id": llm_request_id,
+                        "runtime": "direct-openrouter-chat",
+                        "failure_stage": "route_preflight",
+                        "remote_outcome": "not_contacted",
+                        "retry_required": False,
+                    },
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": NoCompliantModelRouteError.code,
+                        **(await _route_block_detail(exc)),
+                    },
+                ) from exc
+            except asyncio.CancelledError:
+                # A REST client disconnect cancels the handler; the Cordis turn settles visibly.
+                if cordis_turn is not None:
+                    cordis_turn.cancel()
+                    await asyncio.shield(cordis_blocked("agent_turn_cancelled"))
+                raise
+            except Exception as e:
+                await cordis_blocked("agent_turn_failed")
+                logger.exception("Direct OpenRouter chat failed")
+                safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="rest",
+                    is_onboarding=is_onboarding,
+                    outcome="failed",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "message_length": len(request.message),
+                        "error": safe_detail,
+                        "request_id": llm_request_id,
+                        "runtime": "direct-openrouter-chat",
+                    },
+                )
+                raise HTTPException(status_code=500, detail=safe_detail)
+            finally:
+                reset_runtime_context(auth_tokens)
+                _finish_request(llm_request_id)
+                await _end_rest_revocation_watch(revocation_scope)
 
-    # Check onboarding status
-    profile = await get_or_create_profile()
-    is_onboarding = not profile.onboarding_completed
-    direct_runtime_path = "onboarding_agent" if is_onboarding else "chat_agent"
-    try:
-        from src.llm_runtime import reject_removed_external_agent_route
-
-        reject_removed_external_agent_route(runtime_path=direct_runtime_path)
-    except ExternalAgentRuntimeRemovedError as exc:
-        await cordis_blocked("external_agent_runtime_removed")
-        raise HTTPException(status_code=410, detail=exc.payload()) from exc
-    if should_use_direct_local_chat(
-        request.message,
-        runtime_path=direct_runtime_path,
-        is_onboarding=is_onboarding,
-    ):
-        started_at = perf_counter()
-        if cordis_turn is not None and cordis_turn.profile != "direct":
-            await cordis_blocked("agent_turn_profile_changed")
-            raise HTTPException(status_code=503, detail={"code": "agent_turn_profile_changed",
-                                                         "message": turn_blocked_message("agent_turn_profile_changed")})
-        # The Cordis route ran this preflight before admission.
-        route_error = (None if cordis_turn is not None
-                       else await direct_local_chat_route_error(runtime_path=direct_runtime_path))
-        if route_error:
-            safe_detail = await redact_secrets_in_text(route_error)
+            await ensure_authorized(revocation_scope)
+            assistant_message_id = assistant_message_id_for_ingress(ingress)
+            direct_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
+            if cordis_turn is not None:
+                await settle_cordis(response_text, assistant_message_id, direct_metadata, direct=True)
+            else:
+                await session_manager.add_message(
+                    session.id,
+                    "assistant",
+                    response_text,
+                    metadata_json=direct_metadata,
+                    message_id=assistant_message_id,
+                )
             await log_agent_run_event(
                 session_id=session.id,
                 transport="rest",
                 is_onboarding=is_onboarding,
-                outcome="failed",
+                outcome="succeeded",
                 policy_mode=get_current_tool_policy_mode(),
                 details={
                     "duration_ms": int((perf_counter() - started_at) * 1000),
                     "message_length": len(request.message),
-                    "error": safe_detail,
+                    "response_length": len(response_text),
+                    "request_id": llm_request_id,
                     "runtime": "direct-openrouter-chat",
-                    "failure_stage": "route_preflight",
                 },
             )
-            raise HTTPException(status_code=503, detail=safe_detail)
-        llm_request_id = f"direct-rest:{session.id}:{started_at}"
-        _register_request(llm_request_id)
-        auth_tokens = set_runtime_context(
-            session.id,
-            get_current_approval_mode(),
-            trust_principal=chat_principal,
-        )
-        revocation_scope = _begin_rest_revocation_watch(http_request)
-        try:
-            response_text = await asyncio.wait_for(
-                run_direct_local_chat(
-                    request.message,
-                    runtime_path=direct_runtime_path,
-                    is_onboarding=is_onboarding,
-                    session_id=session.id,
-                    request_id=llm_request_id,
-                ),
-                timeout=min(settings.agent_chat_timeout, 60),
+            return ChatResponse(
+                response=response_text,
+                session_id=session.id,
+                conversation_id=ingress.conversation_id,
+                thread_id=ingress.thread_id,
+                message_id=assistant_message_id,
+                owner_principal_id=ingress.principal_id,
+                operator_session_id=ingress.operator_session_id,
+                device_id=ingress.device_id,
+                channel=ingress.channel,
+                transport=ingress.transport,
+                correlation_id=ingress.correlation_id,
+                causation_id=ingress.message_id,
+                attachment_refs=ingress.attachment_refs,
             )
+
+        if is_onboarding:
+            agent = create_onboarding_agent(request.message)
+        else:
+            try:
+                guardian_state = await asyncio.wait_for(
+                    build_guardian_state(
+                        session_id=session.id,
+                        user_message=request.message,
+                        owner_principal_id=operator.principal.principal_id,
+                        owner_session_id=operator.session_id,
+                        trust_principal=chat_principal,
+                    ),
+                    timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
+                )
+                agent = build_agent(guardian_state=guardian_state)
+            except Exception:
+                logger.warning(
+                    "Guardian state unavailable for REST chat; continuing with minimal agent context",
+                    exc_info=True,
+                )
+                agent = build_agent()
+        if cordis_turn is not None:
+            if cordis_turn.profile != ("onboarding" if is_onboarding else "agent"):
+                await cordis_blocked("agent_turn_profile_changed")
+                raise HTTPException(status_code=503, detail={"code": "agent_turn_profile_changed",
+                                                             "message": turn_blocked_message("agent_turn_profile_changed")})
+            cordis_turn.attach(agent)
+
+        revocation_scope = None
+        try:
+            from src.observer.manager import context_manager as obs_manager
+            started_at = perf_counter()
+            llm_request_id = f"agent-rest:{session.id}:{started_at}"
+            _register_request(llm_request_id)
+            revocation_scope = _begin_rest_revocation_watch(http_request)
+            tokens = set_runtime_context(
+                session.id,
+                obs_manager.get_context(
+                    owner_principal_id=operator.principal.principal_id,
+                    owner_session_id=operator.session_id,
+                ).approval_mode,
+                trust_principal=chat_principal,
+            )
+            llm_request_token = set_current_llm_request_id(llm_request_id)
+            run_ctx = contextvars.copy_context()
+            reset_runtime_context(tokens)
+            reset_current_llm_request_id(llm_request_token)
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(run_ctx.run, agent.run, request.message),
+                    timeout=settings.agent_chat_timeout,
+                )
+            except Exception as exc:
+                if (route_error := route_error_from(exc)) is not None and route_error is not exc:
+                    raise route_error from exc
+                raise
+            response_text = str(result.output) if hasattr(result, "output") else str(result)
             response_text = await redact_secrets_in_text(response_text)
             assert_runtime_not_revoked()
         except RuntimeRevokedError as exc:
@@ -794,35 +984,106 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 status_code=401,
                 detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
             ) from exc
-        except asyncio.TimeoutError:
-            await cordis_blocked("agent_turn_timed_out")
-            _mark_request_timed_out(llm_request_id)
-            await log_agent_run_event(
-                session_id=session.id,
-                transport="rest",
-                is_onboarding=is_onboarding,
-                outcome="timed_out",
+        except ApprovalRequired as exc:
+            await cordis_blocked("approval_required")
+            await ensure_authorized(revocation_scope)
+            await approval_repository.merge_details(
+                exc.approval_id,
+                {"resume_message": request.message},
+            )
+            try:
+                approval_row = await approval_repository.get(exc.approval_id)
+            except Exception:
+                # A transport receipt must not turn a valid approval pause into a
+                # server error when the optional metadata read is unavailable.
+                approval_row = None
+            approval_metadata = _approval_transport_metadata(exc, approval_row)
+            await audit_repository.log_event(
+                session_id=exc.session_id,
+                actor="agent",
+                event_type="approval_requested",
+                tool_name=exc.tool_name,
+                risk_level=exc.risk_level,
                 policy_mode=get_current_tool_policy_mode(),
-                details={
-                    "duration_ms": int((perf_counter() - started_at) * 1000),
-                    "message_length": len(request.message),
-                    "timeout_seconds": min(settings.agent_chat_timeout, 60),
-                    "request_id": llm_request_id,
-                    "runtime": "direct-openrouter-chat",
+                summary=exc.summary,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "type": "approval_required",
+                    "approval_id": exc.approval_id,
+                    "tool_name": exc.tool_name,
+                    "risk_level": exc.risk_level,
+                    "message": (
+                        f"{exc.summary}\n\n"
+                        "This is a high-risk action. Approve it first, then resend your request."
+                    ),
+                    **approval_metadata,
                 },
             )
-            raise HTTPException(status_code=504, detail="OpenRouter chat timed out — try again")
+        except ClarificationRequired as exc:
+            await ensure_authorized(revocation_scope)
+            rendered = await redact_secrets_in_text(exc.render_message())
+            clarification_message_id = assistant_message_id_for_ingress(ingress, suffix="clarification")
+            clarification_metadata = chat_assistant_metadata(
+                ingress,
+                message_id=clarification_message_id,
+                display_role="clarification",
+                extra={
+                    "question": exc.question,
+                    "reason": exc.reason,
+                    "options": exc.options,
+                },
+            )
+            if cordis_turn is not None:
+                await settle_cordis(rendered, clarification_message_id, clarification_metadata, outcome="blocked",
+                                    reason="clarification_required")
+            else:
+                await session_manager.add_message(
+                    session.id,
+                    "assistant",
+                    rendered,
+                    metadata_json=clarification_metadata,
+                    message_id=clarification_message_id,
+                )
+            await audit_repository.log_event(
+                session_id=session.id,
+                actor="agent",
+                event_type="clarification_requested",
+                tool_name="clarify",
+                risk_level="low",
+                policy_mode=get_current_tool_policy_mode(),
+                summary=exc.question,
+                details={
+                    "reason": exc.reason,
+                    "options": exc.options,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "type": "clarification_required",
+                    "session_id": session.id,
+                    "question": exc.question,
+                    "reason": exc.reason,
+                    "options": exc.options,
+                    "message": rendered,
+                },
+            )
         except NoCompliantModelRouteError as exc:
             await cordis_blocked(NoCompliantModelRouteError.code)
             safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
+            contacted = request_provider_contacted(llm_request_id)
             logger.info(
-                "Direct OpenRouter REST chat blocked before provider contact",
+                "REST OpenRouter agent chat blocked mid-turn after provider contact"
+                if contacted else "REST OpenRouter agent chat blocked before provider contact",
                 extra={"reason": safe_reason},
             )
+            detail = await _route_block_detail(exc, provider_contacted=contacted)
             await log_agent_run_event(
                 session_id=session.id,
                 transport="rest",
-                is_onboarding=is_onboarding,
+                is_onboarding=not profile.onboarding_completed,
                 outcome="blocked",
                 policy_mode=get_current_tool_policy_mode(),
                 details={
@@ -830,33 +1091,52 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                     "message_length": len(request.message),
                     "error": safe_reason,
                     "request_id": llm_request_id,
-                    "runtime": "direct-openrouter-chat",
-                    "failure_stage": "route_preflight",
-                    "remote_outcome": "not_contacted",
+                    "runtime": "openrouter-agent",
+                    "failure_stage": "mid_turn_route" if contacted else "route_preflight",
+                    "remote_outcome": detail["remote_outcome"],
                     "retry_required": False,
                 },
             )
             raise HTTPException(
                 status_code=503,
-                detail={
-                    "code": NoCompliantModelRouteError.code,
-                    **(await _route_block_detail(exc)),
-                },
+                detail={"code": NoCompliantModelRouteError.code, **detail},
             ) from exc
+        except asyncio.TimeoutError:
+            if cordis_turn is not None:
+                # Stop the worker at its next boundary.
+                cordis_turn.cancel()
+            await cordis_blocked("agent_turn_timed_out")
+            _mark_request_timed_out(llm_request_id)
+            logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)
+            await log_agent_run_event(
+                session_id=session.id,
+                transport="rest",
+                is_onboarding=not profile.onboarding_completed,
+                outcome="timed_out",
+                policy_mode=get_current_tool_policy_mode(),
+                details={
+                    "duration_ms": int((perf_counter() - started_at) * 1000),
+                    "message_length": len(request.message),
+                    "timeout_seconds": settings.agent_chat_timeout,
+                    "request_id": llm_request_id,
+                },
+            )
+            raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
         except asyncio.CancelledError:
-            # A REST client disconnect cancels the handler; the Cordis turn settles visibly.
             if cordis_turn is not None:
                 cordis_turn.cancel()
                 await asyncio.shield(cordis_blocked("agent_turn_cancelled"))
             raise
         except Exception as e:
-            await cordis_blocked("agent_turn_failed")
-            logger.exception("Direct OpenRouter chat failed")
-            safe_detail = await redact_secrets_in_text(f"Agent error: {e}")
+            turn_reason = turn_failure_reason(e) if cordis_turn is not None else None
+            await cordis_blocked(turn_reason or "agent_turn_failed")
+            logger.exception("Agent execution failed")
+            safe_detail = await redact_secrets_in_text(
+                turn_blocked_message(turn_reason) if turn_reason else f"Agent error: {e}")
             await log_agent_run_event(
                 session_id=session.id,
                 transport="rest",
-                is_onboarding=is_onboarding,
+                is_onboarding=not profile.onboarding_completed,
                 outcome="failed",
                 policy_mode=get_current_tool_policy_mode(),
                 details={
@@ -864,32 +1144,31 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                     "message_length": len(request.message),
                     "error": safe_detail,
                     "request_id": llm_request_id,
-                    "runtime": "direct-openrouter-chat",
                 },
             )
             raise HTTPException(status_code=500, detail=safe_detail)
         finally:
-            reset_runtime_context(auth_tokens)
-            _finish_request(llm_request_id)
+            if "llm_request_id" in locals():
+                _finish_request(llm_request_id)
             await _end_rest_revocation_watch(revocation_scope)
 
         await ensure_authorized(revocation_scope)
         assistant_message_id = assistant_message_id_for_ingress(ingress)
-        direct_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
+        assistant_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
         if cordis_turn is not None:
-            await settle_cordis(response_text, assistant_message_id, direct_metadata, direct=True)
+            await settle_cordis(response_text, assistant_message_id, assistant_metadata)
         else:
             await session_manager.add_message(
                 session.id,
                 "assistant",
                 response_text,
-                metadata_json=direct_metadata,
+                metadata_json=assistant_metadata,
                 message_id=assistant_message_id,
             )
         await log_agent_run_event(
             session_id=session.id,
             transport="rest",
-            is_onboarding=is_onboarding,
+            is_onboarding=not profile.onboarding_completed,
             outcome="succeeded",
             policy_mode=get_current_tool_policy_mode(),
             details={
@@ -897,9 +1176,28 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 "message_length": len(request.message),
                 "response_length": len(response_text),
                 "request_id": llm_request_id,
-                "runtime": "direct-openrouter-chat",
             },
         )
+
+        # Check if onboarding should be marked complete
+        if not profile.onboarding_completed:
+            msg_count = await session_manager.count_messages(session.id)
+            if msg_count >= 6:
+                await mark_onboarding_complete()
+                logger.info("Onboarding completed via REST")
+
+        # Trigger memory consolidation in background
+        if response_text:
+            try:
+                from src.memory.flush import flush_session_memory
+                from src.utils.background import track_task
+                track_task(
+                    flush_session_memory(session.id, trigger="post_response"),
+                    name=f"consolidate-{session.id[:8]}",
+                )
+            except ImportError:
+                pass
+
         return ChatResponse(
             response=response_text,
             session_id=session.id,
@@ -915,298 +1213,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             causation_id=ingress.message_id,
             attachment_refs=ingress.attachment_refs,
         )
-
-    if is_onboarding:
-        agent = create_onboarding_agent(request.message)
-    else:
-        try:
-            guardian_state = await asyncio.wait_for(
-                build_guardian_state(
-                    session_id=session.id,
-                    user_message=request.message,
-                    owner_principal_id=operator.principal.principal_id,
-                    owner_session_id=operator.session_id,
-                    trust_principal=chat_principal,
-                ),
-                timeout=max(float(settings.guardian_state_timeout_seconds), 0.5),
-            )
-            agent = build_agent(guardian_state=guardian_state)
-        except Exception:
-            logger.warning(
-                "Guardian state unavailable for REST chat; continuing with minimal agent context",
-                exc_info=True,
-            )
-            agent = build_agent()
-    if cordis_turn is not None:
-        if cordis_turn.profile != ("onboarding" if is_onboarding else "agent"):
-            await cordis_blocked("agent_turn_profile_changed")
-            raise HTTPException(status_code=503, detail={"code": "agent_turn_profile_changed",
-                                                         "message": turn_blocked_message("agent_turn_profile_changed")})
-        cordis_turn.attach(agent)
-
-    revocation_scope = None
-    try:
-        from src.observer.manager import context_manager as obs_manager
-        started_at = perf_counter()
-        llm_request_id = f"agent-rest:{session.id}:{started_at}"
-        _register_request(llm_request_id)
-        revocation_scope = _begin_rest_revocation_watch(http_request)
-        tokens = set_runtime_context(
-            session.id,
-            obs_manager.get_context(
-                owner_principal_id=operator.principal.principal_id,
-                owner_session_id=operator.session_id,
-            ).approval_mode,
-            trust_principal=chat_principal,
-        )
-        llm_request_token = set_current_llm_request_id(llm_request_id)
-        run_ctx = contextvars.copy_context()
-        reset_runtime_context(tokens)
-        reset_current_llm_request_id(llm_request_token)
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(run_ctx.run, agent.run, request.message),
-                timeout=settings.agent_chat_timeout,
-            )
-        except Exception as exc:
-            if (route_error := route_error_from(exc)) is not None and route_error is not exc:
-                raise route_error from exc
-            raise
-        response_text = str(result.output) if hasattr(result, "output") else str(result)
-        response_text = await redact_secrets_in_text(response_text)
-        assert_runtime_not_revoked()
-    except RuntimeRevokedError as exc:
-        await cordis_blocked("native_original_root_inactive")
-        raise HTTPException(
-            status_code=401,
-            detail={"code": "session_revoked", "message": "Operator session was revoked during inference."},
-        ) from exc
-    except ApprovalRequired as exc:
-        await cordis_blocked("approval_required")
-        await ensure_authorized(revocation_scope)
-        await approval_repository.merge_details(
-            exc.approval_id,
-            {"resume_message": request.message},
-        )
-        try:
-            approval_row = await approval_repository.get(exc.approval_id)
-        except Exception:
-            # A transport receipt must not turn a valid approval pause into a
-            # server error when the optional metadata read is unavailable.
-            approval_row = None
-        approval_metadata = _approval_transport_metadata(exc, approval_row)
-        await audit_repository.log_event(
-            session_id=exc.session_id,
-            actor="agent",
-            event_type="approval_requested",
-            tool_name=exc.tool_name,
-            risk_level=exc.risk_level,
-            policy_mode=get_current_tool_policy_mode(),
-            summary=exc.summary,
-        )
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "type": "approval_required",
-                "approval_id": exc.approval_id,
-                "tool_name": exc.tool_name,
-                "risk_level": exc.risk_level,
-                "message": (
-                    f"{exc.summary}\n\n"
-                    "This is a high-risk action. Approve it first, then resend your request."
-                ),
-                **approval_metadata,
-            },
-        )
-    except ClarificationRequired as exc:
-        await ensure_authorized(revocation_scope)
-        rendered = await redact_secrets_in_text(exc.render_message())
-        clarification_message_id = assistant_message_id_for_ingress(ingress, suffix="clarification")
-        clarification_metadata = chat_assistant_metadata(
-            ingress,
-            message_id=clarification_message_id,
-            display_role="clarification",
-            extra={
-                "question": exc.question,
-                "reason": exc.reason,
-                "options": exc.options,
-            },
-        )
+    except BaseException as exc:
         if cordis_turn is not None:
-            await settle_cordis(rendered, clarification_message_id, clarification_metadata, outcome="blocked",
-                                reason="clarification_required")
-        else:
-            await session_manager.add_message(
-                session.id,
-                "assistant",
-                rendered,
-                metadata_json=clarification_metadata,
-                message_id=clarification_message_id,
-            )
-        await audit_repository.log_event(
-            session_id=session.id,
-            actor="agent",
-            event_type="clarification_requested",
-            tool_name="clarify",
-            risk_level="low",
-            policy_mode=get_current_tool_policy_mode(),
-            summary=exc.question,
-            details={
-                "reason": exc.reason,
-                "options": exc.options,
-            },
-        )
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "type": "clarification_required",
-                "session_id": session.id,
-                "question": exc.question,
-                "reason": exc.reason,
-                "options": exc.options,
-                "message": rendered,
-            },
-        )
-    except NoCompliantModelRouteError as exc:
-        await cordis_blocked(NoCompliantModelRouteError.code)
-        safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
-        contacted = request_provider_contacted(llm_request_id)
-        logger.info(
-            "REST OpenRouter agent chat blocked mid-turn after provider contact"
-            if contacted else "REST OpenRouter agent chat blocked before provider contact",
-            extra={"reason": safe_reason},
-        )
-        detail = await _route_block_detail(exc, provider_contacted=contacted)
-        await log_agent_run_event(
-            session_id=session.id,
-            transport="rest",
-            is_onboarding=not profile.onboarding_completed,
-            outcome="blocked",
-            policy_mode=get_current_tool_policy_mode(),
-            details={
-                "duration_ms": int((perf_counter() - started_at) * 1000),
-                "message_length": len(request.message),
-                "error": safe_reason,
-                "request_id": llm_request_id,
-                "runtime": "openrouter-agent",
-                "failure_stage": "mid_turn_route" if contacted else "route_preflight",
-                "remote_outcome": detail["remote_outcome"],
-                "retry_required": False,
-            },
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={"code": NoCompliantModelRouteError.code, **detail},
-        ) from exc
-    except asyncio.TimeoutError:
-        if cordis_turn is not None:
-            # Stop the worker at its next boundary.
-            cordis_turn.cancel()
-        await cordis_blocked("agent_turn_timed_out")
-        _mark_request_timed_out(llm_request_id)
-        logger.warning("REST chat agent timed out after %ds", settings.agent_chat_timeout)
-        await log_agent_run_event(
-            session_id=session.id,
-            transport="rest",
-            is_onboarding=not profile.onboarding_completed,
-            outcome="timed_out",
-            policy_mode=get_current_tool_policy_mode(),
-            details={
-                "duration_ms": int((perf_counter() - started_at) * 1000),
-                "message_length": len(request.message),
-                "timeout_seconds": settings.agent_chat_timeout,
-                "request_id": llm_request_id,
-            },
-        )
-        raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
-    except asyncio.CancelledError:
-        if cordis_turn is not None:
-            cordis_turn.cancel()
-            await asyncio.shield(cordis_blocked("agent_turn_cancelled"))
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            if cancelled:
+                cordis_turn.cancel()
+            await asyncio.shield(cordis_blocked("agent_turn_cancelled" if cancelled else "agent_turn_failed"))
         raise
-    except Exception as e:
-        turn_reason = turn_failure_reason(e) if cordis_turn is not None else None
-        await cordis_blocked(turn_reason or "agent_turn_failed")
-        logger.exception("Agent execution failed")
-        safe_detail = await redact_secrets_in_text(
-            turn_blocked_message(turn_reason) if turn_reason else f"Agent error: {e}")
-        await log_agent_run_event(
-            session_id=session.id,
-            transport="rest",
-            is_onboarding=not profile.onboarding_completed,
-            outcome="failed",
-            policy_mode=get_current_tool_policy_mode(),
-            details={
-                "duration_ms": int((perf_counter() - started_at) * 1000),
-                "message_length": len(request.message),
-                "error": safe_detail,
-                "request_id": llm_request_id,
-            },
-        )
-        raise HTTPException(status_code=500, detail=safe_detail)
-    finally:
-        if "llm_request_id" in locals():
-            _finish_request(llm_request_id)
-        await _end_rest_revocation_watch(revocation_scope)
 
-    await ensure_authorized(revocation_scope)
-    assistant_message_id = assistant_message_id_for_ingress(ingress)
-    assistant_metadata = chat_assistant_metadata(ingress, message_id=assistant_message_id)
-    if cordis_turn is not None:
-        await settle_cordis(response_text, assistant_message_id, assistant_metadata)
-    else:
-        await session_manager.add_message(
-            session.id,
-            "assistant",
-            response_text,
-            metadata_json=assistant_metadata,
-            message_id=assistant_message_id,
-        )
-    await log_agent_run_event(
-        session_id=session.id,
-        transport="rest",
-        is_onboarding=not profile.onboarding_completed,
-        outcome="succeeded",
-        policy_mode=get_current_tool_policy_mode(),
-        details={
-            "duration_ms": int((perf_counter() - started_at) * 1000),
-            "message_length": len(request.message),
-            "response_length": len(response_text),
-            "request_id": llm_request_id,
-        },
-    )
-
-    # Check if onboarding should be marked complete
-    if not profile.onboarding_completed:
-        msg_count = await session_manager.count_messages(session.id)
-        if msg_count >= 6:
-            await mark_onboarding_complete()
-            logger.info("Onboarding completed via REST")
-
-    # Trigger memory consolidation in background
-    if response_text:
-        try:
-            from src.memory.flush import flush_session_memory
-            from src.utils.background import track_task
-            track_task(
-                flush_session_memory(session.id, trigger="post_response"),
-                name=f"consolidate-{session.id[:8]}",
-            )
-        except ImportError:
-            pass
-
-    return ChatResponse(
-        response=response_text,
-        session_id=session.id,
-        conversation_id=ingress.conversation_id,
-        thread_id=ingress.thread_id,
-        message_id=assistant_message_id,
-        owner_principal_id=ingress.principal_id,
-        operator_session_id=ingress.operator_session_id,
-        device_id=ingress.device_id,
-        channel=ingress.channel,
-        transport=ingress.transport,
-        correlation_id=ingress.correlation_id,
-        causation_id=ingress.message_id,
-        attachment_refs=ingress.attachment_refs,
-    )

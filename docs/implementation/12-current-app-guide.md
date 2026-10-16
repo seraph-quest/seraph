@@ -796,8 +796,12 @@ whenever the `seraph.guardian.v1` owner is Cordis:
 How a guardian turn runs:
 1. Python makes exactly today's call: the same messages, model owner, runtime
    path, principal, broker and ledger binding.
-2. One `cordis_guardian_turn_v1` job, owned by `service:guardian`, records the
-   lineage.
+2. One `cordis_guardian_turn_v1` job records the lineage. A scheduled run's
+   turn is owned by `service:guardian`. A memory flush that runs inside an
+   operator's turn is owned by that operator instead and bound to its Root.
+   This covers the post-response, compaction, session-end and
+   workflow-completion triggers. A revoked Root, or changed grants, then
+   refuses the step and the adoption.
 3. One `guardian.startTurn` step may stage only `settlement`.
 4. The output is used only after the turn settled while the turn, its
    scheduler parent and the composition epoch were all still current. For the
@@ -831,10 +835,16 @@ new domains.
   that is still missing blocks chat as `composition_dependency_missing` with
   "Restart Seraph to seed the runtime inventory."
 
+**Default cutover order.** #1019's boot cutover manifest moves the presets
+first. Agent-loop and guardian follow, each with presets as a prerequisite.
+- A row that is still missing at boot is introduced inside the same
+  composition writer, then cut over.
+- An operator rollback of either new domain is sticky, as for agent-loop.
+
 **Not part of this slice:** orchestrator, specialists and delegation (#1020
 part 2), and the Board worker drafts (part 3). A source inventory test maps
-every model and turn site to its owner category. The default production
-cutover of the new domains follows #1019's cutover step.
+every model and turn site to its owner category. It runs beside the
+transport-level dispatch inventory and does not replace it.
 
 ### Cordis guardian research (#1008)
 

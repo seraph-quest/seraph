@@ -76,7 +76,13 @@ configures Git textconv cannot misreport its change.
   cockpit, with no fallback.
 - **Not yet migrated:** orchestrator, specialists, delegation and Board worker
   drafts.
-- **Verification:** offline, with scripted completions and denied sockets.
+- **Memory flushes:** a flush inside an operator's turn is admitted under that
+  operator's Root.
+- **Default cutover:** the boot cutover moves the presets owner first, then
+  agent-loop and guardian.
+- **Verification:** offline, with scripted completions and denied sockets. The
+  strategist call also runs through the real broker and ledger behind an
+  intercepted provider boundary.
 
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate

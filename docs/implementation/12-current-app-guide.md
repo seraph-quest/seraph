@@ -2315,7 +2315,8 @@ network, and its approval says it can reach localhost services, including
 Seraph's own API. Every launch drops all capabilities and hides host files
 outside the workspace and runtime; hard-coded `/tmp` writes go to a private
 tmpfs. A stop, timeout, cancel or exit tears down the command's pid
-namespace, so double-forked children cannot outlive it. A signal death is
+namespace, so double-forked children cannot outlive it. Background
+processes also end when the backend process exits. A signal death is
 reported as exit code 128 + signal.
 
 A top-level file is bound by inode at launch. If Seraph replaces it by rename

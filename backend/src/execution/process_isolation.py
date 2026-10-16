@@ -93,6 +93,10 @@ _REMEDIES = {
     "container_apparmor_denies_mount": ("load deploy/apparmor/seraph-backend and start the container with "
                                         "security_opt apparmor=seraph-backend"),
     "container_proc_masked": "start the backend container with security_opt systempaths=unconfined",
+    "sandbox_startup_failed": "bubblewrap exited before the command started; the host is re-probed on the next command",
+    "sandbox_startup_timeout": "the sandbox did not start in time; nothing ran",
+    "workspace_view_mismatch": "the in-sandbox guard found the workspace view weaker than built; nothing ran",
+    "workspace_view_unsafe": "the workspace cannot be represented safely in the sandbox view; fix the named entry",
 }
 NOT_VISIBLE_NOTE = "Host files outside the workspace are not visible."
 

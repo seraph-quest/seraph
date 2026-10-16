@@ -89,6 +89,8 @@ async def snapshot(db, owner, task_id):
 
 
 async def recover(dispatcher, owner, task_id, request):
+    from src.runtime_plugins.lifecycle_dispatch import assert_dispatch_admission
+    assert_dispatch_admission()  # #1025: no API-launched worker while dispatch is inactive
     jobs = dispatcher.jobs
     async with jobs._session() as initial:
         original_task, original_attempt, original_run = await bound(initial, owner, task_id)
@@ -152,6 +154,8 @@ async def recover(dispatcher, owner, task_id, request):
 
 
 async def retry(dispatcher,owner,task_id,request):
+    from src.runtime_plugins.lifecycle_dispatch import assert_dispatch_admission
+    assert_dispatch_admission()  # #1025: no API-launched worker while dispatch is inactive
     """One explicit second parser generation after exact terminated-child proof."""
     from datetime import timedelta
     from src.work_board.document_compare_native import execute

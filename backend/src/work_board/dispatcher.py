@@ -5827,7 +5827,10 @@ class WorkBoardDispatcher:
             artifact_refs=projection["artifacts"])
 
     async def recover_research(self, owner, task_id, request):
+        from src.runtime_plugins.lifecycle_dispatch import assert_dispatch_admission
         from src.work_board.research_control import bound, reserve_recovery
+        # An API-launched worker starts only while the dispatch domain is active (#1025).
+        assert_dispatch_admission()
         from src.workflows.research_coordinator import continue_parent, freeze_quiescent
         async with self.session_provider() as db:
             task, attempt, parent = await bound(db, owner, task_id)

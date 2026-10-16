@@ -548,8 +548,13 @@ async def _services_lifespan(app: FastAPI):
         with current_task_service():
             from src.guardian.goal_discovery import current_goal_discovery
             async with current_goal_discovery():
+                # The scheduler and dispatcher lifecycle follows its owner rows (#1025):
+                # only the exempt retention jobs start here; the gated jobs start after
+                # the Cordis host and the boot cutover, under their domains' epochs.
+                from src.runtime_plugins.lifecycle import (activate_runtime_lifecycle, deactivate_runtime_lifecycle,
+                                                           runtime_lifecycle)
+                runtime_lifecycle.attach()
                 init_scheduler()
-                await sync_scheduled_jobs()
                 try:
                     from src.observer.manager import context_manager
                     await context_manager.refresh()
@@ -575,10 +580,16 @@ async def _services_lifespan(app: FastAPI):
                             logging.getLogger(__name__).warning("Cordis owner cutover: %s", receipt)
                     except Exception:
                         logging.getLogger(__name__).exception("Cordis owner cutover deferred")
+                    await activate_runtime_lifecycle(cordis_host, sync_user_jobs=sync_scheduled_jobs)
                     yield
                 finally:
                     session_manager.bind_task_continuity(None)
                     cordis_host.provider_reports_source = None
+                    try:
+                        # Close admission and drain before the host the activation depended on stops.
+                        await deactivate_runtime_lifecycle()
+                    except Exception:
+                        logging.getLogger(__name__).exception("Runtime lifecycle deactivation failed")
                     try:
                         await cordis_host.stop()
                     finally:
@@ -607,7 +618,11 @@ async def _services_lifespan(app: FastAPI):
                         if connection_sync_runtime is not None and _dispatcher.connection_sync_runtime is connection_sync_runtime:
                             _dispatcher.connection_sync_runtime = None
                     finally:
-                        shutdown_scheduler()
+                        try:
+                            shutdown_scheduler()
+                        finally:
+                            from src.runtime_plugins.lifecycle import runtime_lifecycle
+                            runtime_lifecycle.detach()
 
 
 def create_app() -> FastAPI:

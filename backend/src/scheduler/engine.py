@@ -31,8 +31,20 @@ def _async_job_wrapper(
     coroutine lifetime without blocking the app loop.
     """
     async def _run_with_authority():
+        from src.runtime_plugins.lifecycle import current_activation, job_domain, runtime_lifecycle
+        # The owner row decides whether this gated job may run now (#1025);
+        # retention and cleanup jobs are exempt.
+        activation, blocked_reason = runtime_lifecycle.admit(job_id)
+        if blocked_reason is not None:
+            await _record_lifecycle_block(job_id, blocked_reason)
+            return
         if allow_model_inference and await _skip_disabled_inference_job(job_id):
             return
+        activation_token = current_activation.set(activation)
+        domain = job_domain(job_id)
+        current = asyncio.current_task()
+        if domain is not None and current is not None:
+            runtime_lifecycle.track(domain, current)
         execution_job_id = f"scheduler:{job_id}:{uuid4().hex}"
         principal = TrustPrincipal(
             principal_id=f"service:scheduler:{job_id}",
@@ -45,6 +57,7 @@ def _async_job_wrapper(
             await coro_func()
         finally:
             reset_runtime_context(tokens)
+            current_activation.reset(activation_token)
 
     async def wrapper():
         try:
@@ -80,6 +93,13 @@ async def _skip_disabled_inference_job(job_id: str) -> bool:
     await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})
     logger.info("Scheduled job %s skipped: %s", job_id, reason)
     return True
+
+
+async def _record_lifecycle_block(job_id: str, reason: str) -> None:
+    """A gated tick whose domain is not active runs nothing; the block is visible."""
+    from src.audit.runtime import log_scheduler_job_event
+    await log_scheduler_job_event(job_name=job_id, outcome="blocked", details={"reason": reason})
+    logger.info("Scheduled job %s blocked: %s", job_id, reason)
 
 
 def _validate_timezone(tz_name: str) -> str:
@@ -118,7 +138,7 @@ def _startup_next_run(enabled: bool, *, delay_seconds: int = 0) -> datetime | No
 
 
 def init_scheduler() -> AsyncIOScheduler | None:
-    """Create and start the background scheduler with all configured jobs.
+    """Create and start the one background scheduler.
 
     Returns None if scheduler is disabled via settings.
     """
@@ -129,10 +149,66 @@ def init_scheduler() -> AsyncIOScheduler | None:
         return None
 
     _scheduler = AsyncIOScheduler()
-    validated_tz = _validate_timezone(settings.user_timezone)
+    _scheduler_loop = asyncio.get_running_loop()
+    from src.runtime_plugins.lifecycle import runtime_lifecycle
+    # Under the backend lifecycle only the exempt retention jobs start here; every gated
+    # job is registered when its domain activates (``start_domain_jobs``), under that
+    # epoch (#1025). A process without the lifecycle registers every job, as before.
+    enforced = runtime_lifecycle.enforced()
+    _add_jobs(job for job in _system_job_specs(_scheduler_loop)
+              if not enforced or _job_domain(job["id"]) is None)
+    _scheduler.start()
+    logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
+    return _scheduler
 
-    loop = asyncio.get_running_loop()
-    _scheduler_loop = loop
+
+def _job_domain(job_id: str) -> str | None:
+    from src.runtime_plugins.lifecycle import job_domain
+    return job_domain(job_id)
+
+
+def _add_jobs(jobs) -> None:
+    for job in jobs:
+        try:
+            _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
+        except Exception:
+            logger.exception("Failed to register job: %s", job["id"])
+
+
+def start_domain_jobs(domain: str) -> None:
+    """Register (first activation) or resume (same instance) one domain's gated jobs."""
+    if _scheduler is None or _scheduler_loop is None:
+        return
+    existing = {job.id: job for job in _scheduler.get_jobs()}
+    fresh = []
+    for job in _system_job_specs(_scheduler_loop):
+        if _job_domain(job["id"]) != domain:
+            continue
+        if job["id"] in existing:
+            _scheduler.resume_job(job["id"])
+        else:
+            fresh.append(job)
+    _add_jobs(fresh)
+    for job_id, job in existing.items():
+        if job_id.startswith("user_cron:") and _job_domain(job_id) == domain:
+            _scheduler.resume_job(job_id)
+
+
+def pause_domain_jobs(domain: str) -> None:
+    """Close admission: no gated job of this domain fires again until reactivation."""
+    if _scheduler is None:
+        return
+    for job in _scheduler.get_jobs():
+        if _job_domain(job.id) == domain:
+            try:
+                _scheduler.pause_job(job.id)
+            except Exception:
+                logger.exception("Failed to pause job %s", job.id)
+
+
+def _system_job_specs(loop: asyncio.AbstractEventLoop) -> list[dict[str, Any]]:
+    """Every built-in job, exactly as today; the lifecycle decides when each is registered."""
+    validated_tz = _validate_timezone(settings.user_timezone)
 
     from src.scheduler.jobs.memory_consolidation import run_memory_consolidation
     from src.scheduler.jobs.goal_check import run_goal_check
@@ -311,15 +387,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
         },
     ]
 
-    for job in jobs:
-        try:
-            _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
-        except Exception:
-            logger.exception("Failed to register job: %s", job["id"])
-
-    _scheduler.start()
-    logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
-    return _scheduler
+    return jobs
 
 
 def shutdown_scheduler() -> None:
@@ -338,6 +406,10 @@ def get_scheduler() -> AsyncIOScheduler | None:
 
 async def sync_scheduled_jobs() -> None:
     if _scheduler is None:
+        return
+    from src.runtime_plugins.lifecycle import SCHEDULER_DOMAIN, runtime_lifecycle
+    if runtime_lifecycle.enforced() and runtime_lifecycle.active(SCHEDULER_DOMAIN) is None:
+        # User cron jobs (governed schedules, source watches) register on activation.
         return
 
     from src.scheduler.scheduled_jobs import build_cron_trigger, execute_scheduled_job, scheduled_job_repository

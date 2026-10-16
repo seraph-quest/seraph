@@ -18,8 +18,8 @@ from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 
 from .contracts import succeeded
 from .dispatch import (READ_JOB_KIND, NativeServiceBlocked, _append_receipt, _canonical, _digest, _writer,
-                       cas_run, checkpoint_receipt, operation_ref, read_context, sealed_read_result,
-                       transient_storage_error)
+                       cas_run, checkpoint_receipt, operation_ref, read_context, sealed_read_digest,
+                       sealed_read_result, transient_storage_error)
 from .ownership import ARTIFACT_CHILDREN
 
 ARTIFACT_TYPE = "cordis_service_read"
@@ -267,5 +267,5 @@ def assert_child_echo(run, method: str, observed: dict) -> None:
         if (sealed is None or sealed["method"] != method or sealed["state"] != "settled"
                 or sealed.get("result_digest") != _digest(observed)):
             raise NativeServiceBlocked("native_child_result_mismatch")
-    elif context["result"] is None or _digest(observed) != sealed_read_result(context)["result_digest"]:
+    elif context["result"] is None or sealed_read_digest(observed) != sealed_read_result(context)["result_digest"]:
         raise NativeServiceBlocked("native_child_result_mismatch")

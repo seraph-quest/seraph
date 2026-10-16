@@ -201,15 +201,19 @@ journey (and, for guardian research, the bounded callbacks described in
 [Cordis guardian research (#1008)](#cordis-guardian-research-1008)). That journey admits one `runtime_service_read_v1` job, performs the
 read, stages the sealed result as a private 0600 workspace file (intent before
 effect), adopts and reads it back, appends one `runtime_service_observed` audit
-event and settles the job with explicit `no_learning`. Only the result digest
-and a non-private projection are ever persisted, in the job row and in that
-file: a `memory.retrieve` result keeps its record references but never the
-memory text, so a forget, revoke or backup leaves no read-result copy to scrub
-(#1100). The completion transaction rechecks each record against the owner's
-list predicate, which reads the tombstone ledger directly. A record that was
-forgotten, redacted or tombstoned mid-journey (including a restored row whose
-reapply is still pending) blocks the job with `native_memory_record_withdrawn`,
-and the read is not served. The child's answer to
+event and settles the job with explicit `no_learning`. Only a keyed result
+digest and a non-private projection are ever persisted, in the job row and in
+that file: a `memory.retrieve` result keeps each record reference and a keyed
+digest of its served text, never the text itself, so a forget, revoke or backup
+leaves no read-result copy to scrub (#1100). The digests are HMACs under a
+per-install key derived from the vault key, which backups never archive, so a
+retained digest cannot confirm a guessed forgotten summary. The completion
+transaction rechecks each record through the owner's list-safe summary path,
+which reads the tombstone ledger directly. A record forgotten, redacted or
+tombstoned mid-journey (including a restored row whose reapply is still
+pending) blocks the job with `native_memory_record_withdrawn`; an edited record
+blocks it with `native_memory_record_changed`, and unavailable redaction with
+`native_memory_redaction_unavailable`. The read is then not served. The child's answer to
 each call must equal the result Python sealed for it (the read's answer must
 match its sealed digest; task answers must equal
 the value Python builds from the durable job row, including the checkpoint

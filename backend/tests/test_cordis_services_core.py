@@ -111,9 +111,9 @@ async def _row(domain):
         return CompositionDependency(row.runtime_domain, row.owner_kind, row.epoch, row.composition_digest), row.state
 
 
-def _sha(value) -> str:
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     ensure_ascii=False).encode("utf-8")).hexdigest()
+def _record_mac(text: str) -> str:
+    from src.runtime_plugins.dispatch import sealed_record_digest
+    return sealed_record_digest(text)
 
 
 def _persisted_copies(text: str, *, root: Path | None = None) -> list[str]:
@@ -615,7 +615,11 @@ async def test_read_job_artifact_readback_journey_records_explicit_no_learning(l
                 WorkflowRunState.run_identity == job["job_id"]))).scalar_one())
         # The returned read equals Python's sealed digest; only the retained
         # projection rests in the job row and the artifact (#1100).
-        assert _sha(value["result"]) == sealed["result"]["result_digest"]
+        from src.runtime_plugins.dispatch import sealed_read_digest
+        assert sealed_read_digest(value["result"]) == sealed["result"]["result_digest"]
+        # The retained digest is keyed per install, never a bare content hash.
+        assert hashlib.sha256(json.dumps(value["result"], sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False).encode()).hexdigest() != sealed["result"]["result_digest"]
         assert set(sealed["result"]) == {"result_digest", "projection"}
         assert value["completion"]["result_digest"] == sealed["result"]["result_digest"]
         assert value["completion"]["retained_result"] == sealed["result"]["projection"]
@@ -632,7 +636,8 @@ async def test_read_job_artifact_readback_journey_records_explicit_no_learning(l
             assert value["result"]["value"]["records"] == [{
                 "record_ref": "owner-memory", "text": "cafe summary 1007",
                 "text_digest": hashlib.sha256(b"cafe summary 1007").hexdigest()}]
-            assert sealed["result"]["projection"]["value"] == {"records": [{"record_ref": "owner-memory"}]}
+            assert sealed["result"]["projection"]["value"] == {"records": [
+                {"record_ref": "owner-memory", "text_mac": _record_mac("cafe summary 1007")}]}
             assert _persisted_copies("cafe summary 1007") == []
             # The private query never crossed to the plugin; only a job reference did.
             assert calls[start]["payload"] == {"query_ref": job["job_id"], "limit": 5}
@@ -664,6 +669,9 @@ async def _withdraw(case, operator, memory_id):
         async with get_session() as db:
             await db.execute(update(OperatorSession).where(OperatorSession.id == operator.session_id)
                              .values(revoked_at=datetime.now(timezone.utc)))
+    elif case == "edit":
+        async with get_session() as db:
+            await db.execute(update(Memory).where(Memory.id == memory_id).values(summary="cafe edited 1100"))
     elif case == "tombstone-reapply-pending":
         # A restored pre-forget row: still active with its text, while the
         # durable tombstone ledger has not yet re-applied the redaction.
@@ -708,7 +716,8 @@ async def test_memory_read_results_never_retain_text_a_forget_or_revoke_must_scr
                                       host=host, jobs=jobs)
     # Served once, live, to the Python caller.
     assert [item["text"] for item in value["result"]["value"]["records"]] == [_PRIVATE_TEXT]
-    assert value["completion"]["retained_result"]["value"] == {"records": [{"record_ref": memory_id}]}
+    assert value["completion"]["retained_result"]["value"] == {"records": [
+        {"record_ref": memory_id, "text_mac": _record_mac(_PRIVATE_TEXT)}]}
     assert _persisted_copies(_PRIVATE_TEXT) == []
     root = Path(settings.workspace_dir)
     archive = _backup_archive(root, "before-" + case + ".zip")
@@ -729,10 +738,16 @@ async def test_memory_read_results_never_retain_text_a_forget_or_revoke_must_scr
 
 @needs_host
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["forget-archive", "tombstone-reapply-pending"])
-async def test_memory_withdrawn_mid_journey_is_never_served_or_retained(live_host, case):
-    """The completion transaction rechecks the owner's list predicate, which
-    reads the tombstone ledger directly, before the read is served."""
+@pytest.mark.parametrize("case,reason,methods", [
+    ("forget-archive", "native_memory_record_withdrawn", 5),
+    ("tombstone-reapply-pending", "native_memory_record_withdrawn", 5),
+    ("edit", "native_memory_record_changed", 5),
+    ("revoke", "native_original_root_inactive", 2),
+])
+async def test_memory_withdrawn_mid_journey_is_never_served_or_retained(live_host, case, reason, methods):
+    """The completion transaction rechecks each record through the owner's
+    list-safe summary path (tombstone ledger read directly) and the served
+    text's keyed digest; every artifact callback rechecks the original Root."""
     host, jobs, calls = live_host
     operator = await _operator()
     memory_id = await _private_memory(operator)
@@ -747,23 +762,24 @@ async def test_memory_withdrawn_mid_journey_is_never_served_or_retained(live_hos
     with pytest.raises(NativeServiceBlocked) as denied:
         await execute_native_read(operator=operator, candidate=_MEMORY_READ, idempotency_key="late-" + case,
                                   host=host, jobs=jobs)
-    assert denied.value.reason_code == "native_memory_record_withdrawn"
-    assert [call["method"] for call in calls][-5:] == ["memory.retrieve", "artifacts.stage", "artifacts.adopt",
-                                                       "artifacts.read", "audit.append"]
+    assert denied.value.reason_code == reason
+    journey = ["memory.retrieve", "artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append"]
+    assert [call["method"] for call in calls][-methods:] == journey[:methods]
     async with get_session() as db:
         run = (await db.execute(select(WorkflowRunState).where(
             WorkflowRunState.idempotency_key == "late-" + case))).scalar_one()
-    assert run.status == "blocked" and run.failure_reason == "native_memory_record_withdrawn"
+    assert run.status == "blocked" and run.failure_reason == reason
     assert run.result_digest is None
-    assert _persisted_copies(_PRIVATE_TEXT) == []
+    assert _persisted_copies(_PRIVATE_TEXT) == [] and _persisted_copies("cafe edited 1100") == []
 
 
 def test_legacy_read_context_with_a_full_payload_fails_closed():
     from src.runtime_plugins.dispatch import retained_read_result, sealed_read_result
     result = {"status": "succeeded", "memory_status": "no_learning",
               "value": {"records": [{"record_ref": "m1", "text": "secret", "text_digest": "0" * 64}]}}
-    assert retained_read_result("memory.retrieve", result)["value"] == {"records": [{"record_ref": "m1"}]}
-    assert retained_read_result("capabilities.list", result) is result
+    retained = retained_read_result("memory.retrieve", result, key=b"k" * 32)["value"]
+    assert set(retained["records"][0]) == {"record_ref", "text_mac"} and "secret" not in json.dumps(retained)
+    assert retained_read_result("capabilities.list", result, key=b"k" * 32) is result
     with pytest.raises(NativeServiceBlocked) as denied:
         sealed_read_result({"result": {"result_digest": "0" * 64, "payload": result}})
     assert denied.value.reason_code == "native_private_context_changed"

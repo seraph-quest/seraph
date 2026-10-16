@@ -136,26 +136,32 @@ async def _memory_projection(run, candidate: dict, *, repository=None) -> dict:
 
 
 async def assert_memory_records_current(db, run, value: dict) -> None:
-    """Serve retrieved records only while each is still visible to its owner.
+    """Serve retrieved records only while each still reads exactly as served.
 
-    Runs in the completion transaction with the owner's own list predicate,
-    which reads the tombstone ledger directly: a forgotten, archived or
-    redacted record, and a restored row whose redaction reapply is still
-    pending, all deny the read (#1100).
+    Runs in the completion transaction through the owner's own list-safe
+    summary path, which reads the tombstone ledger directly. A forgotten,
+    archived, redacted or tombstoned record (including a restored row whose
+    redaction reapply is pending) is withdrawn; an edited record, or one whose
+    redaction is now unavailable, has changed. Either denies the read (#1100).
     """
-    from sqlalchemy.orm import defer
-    from src.db.models import Memory
-    from src.memory.repository import _canonical_memory_deletion_marker, _memory_record_scope_statement
-    from .dispatch import NativeServiceBlocked
-    refs = {item["record_ref"] for item in value["records"]}
-    if not refs:
+    import hmac
+    from src.memory.repository import current_memory_record_summaries
+    from .dispatch import NativeServiceBlocked, read_result_key, sealed_record_digest
+    records = value["records"]
+    if not records:
         return
-    rows = (await db.execute(_memory_record_scope_statement(
-        owner_session_id=run.operator_session_id, status="active",
-    ).where(Memory.id.in_(refs)).options(defer(Memory.content), defer(Memory.summary))
-        .execution_options(populate_existing=True))).scalars().all()
-    if {row.id for row in rows if _canonical_memory_deletion_marker(row, check_text=False) is None} != refs:
-        raise NativeServiceBlocked("native_memory_record_withdrawn")
+    current = await current_memory_record_summaries(
+        db, owner_session_id=run.operator_session_id, memory_ids=[item["record_ref"] for item in records])
+    key = read_result_key()
+    for item in records:
+        if item["record_ref"] not in current:
+            raise NativeServiceBlocked("native_memory_record_withdrawn")
+        summary, truncated = current[item["record_ref"]]
+        if summary == REDACTION_UNAVAILABLE:
+            raise NativeServiceBlocked("native_memory_redaction_unavailable")
+        if truncated or not hmac.compare_digest(
+                sealed_record_digest("" if summary is None else summary, key=key), item["text_mac"]):
+            raise NativeServiceBlocked("native_memory_record_changed")
 
 
 async def native_read_projection(db, run, candidate: dict) -> dict:

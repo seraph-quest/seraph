@@ -305,7 +305,7 @@ async def test_repository_cas_repeats_composition_fence(service_db):
 
 @pytest.mark.asyncio
 async def test_blocked_methods_are_typed_and_visible_never_silent(service_db):
-    assert SUPPORTED_METHODS | set(BLOCKED_METHODS) == set(METHOD_DOMAINS) and len(METHOD_DOMAINS) == 34
+    assert SUPPORTED_METHODS | set(BLOCKED_METHODS) == set(METHOD_DOMAINS) and len(METHOD_DOMAINS) == 35
     assert BLOCKED_METHODS["research.buildPlan"] == "native_research_plan_not_bound"
     dispatcher = NativeServiceDispatcher()
     for method, reason in BLOCKED_METHODS.items():

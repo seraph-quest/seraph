@@ -78,6 +78,7 @@ async def guardian_runtime_status(host=None) -> dict:
     from src.db.engine import get_session
     from .bridge import cordis_host, cordis_recovery
     from .ownership import CompositionBindingError, inventory
+    from sqlalchemy.exc import OperationalError
     host = host or cordis_host
     try:
         async with get_session() as db:
@@ -85,6 +86,12 @@ async def guardian_runtime_status(host=None) -> dict:
     except CompositionBindingError:
         return {"loop": LOOP_NAMES["blocked"], "owner_epoch": None, "reason": "guardian_inventory_invalid",
                 "recovery": "Repair the runtime composition inventory (a malformed owner row fails closed)."}
+    except OperationalError as exc:
+        # A database that predates the inventory table has never been cut over;
+        # any other storage fault propagates.
+        if "no such table: runtime_composition_states" not in str(exc):
+            raise
+        rows = {}
     if not rows:
         # An entirely unseeded inventory has never been cut over.
         return {"loop": LOOP_NAMES["legacy"], "owner_epoch": None, "reason": None, "recovery": None}

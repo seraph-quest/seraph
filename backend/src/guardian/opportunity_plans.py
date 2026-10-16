@@ -21,6 +21,9 @@ from src.work_board.contracts import WorkBoardOwner
 from src.workspace import canonical_workspace_root_identity
 
 BLUEPRINTS = ("public-browser-check", "public-evidence-report")
+# #1111: plans are built from staged public evidence, so they run on their
+# own external-content route rather than the strategist's.
+PLAN_RUNTIME_PATH = "guardian_opportunity_plan"
 _contact_source = ContextVar("opportunity_plan_contact_source", default=None)
 _plan_operator = ContextVar("opportunity_plan_operator", default=None)
 
@@ -477,7 +480,7 @@ async def _resume_plan(operator, owner, opportunity_id, proposal_id, *, server_w
             raise OpportunityError("proposal_binding_conflict")
         goal, _, _, _, _ = await assert_opportunity_current(db, opportunity)
         card = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == proposal.parent_task_id))
-        route, version = triage._route_binding()
+        route, version = triage._route_binding_for(PLAN_RUNTIME_PATH)
         if (proposal.route_id != route or proposal.capability_version != version
                 or proposal.authority_digest != triage._authority_digest(owner, card, route, version)):
             raise OpportunityError("proposal_binding_conflict")
@@ -513,7 +516,7 @@ async def _generation_response(db, opportunity, proposal):
 
 
 async def _generate_plan_once(*, operator, opportunity_id, request, server_witness=None):
-    """One bounded strategist invocation; never queue or execute native leaves."""
+    """One bounded plan invocation; never queue or execute native leaves."""
     from src.work_board import triage
     from src.work_board.repository import WorkBoardRepository, stage_safe_task_text, BoardError
     from src.work_board.contracts import WorkBoardTaskCreate
@@ -549,7 +552,7 @@ async def _generate_plan_once(*, operator, opportunity_id, request, server_witne
             goal_id=goal.id, goal_revision=goal.revision, capability_id="browser.public-task.v1", status=WorkBoardStatus.triage,
             priority=50, idempotency_scope="opportunity-plan", idempotency_key=str(request.idempotency_key))
         safe = await stage_safe_task_text(db, owner, card_request)
-        route, version = triage._route_binding()
+        route, version = triage._route_binding_for(PLAN_RUNTIME_PATH)
     async with db_engine.get_session() as db:
         await db.execute(text("BEGIN IMMEDIATE"))
         await _recheck_plan_operator(db, owner, operator, opportunity_id, server_witness=server_witness)
@@ -675,12 +678,12 @@ async def _invoke_plan_completion(owner, proposal_id, messages, context, binding
     from src.model_fabric.gpu_admission import GpuPriority
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
-    profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
+    profile_id = llm_runtime.resolve_runtime_profile(runtime_path=PLAN_RUNTIME_PATH, profile=None)
     profile = llm_runtime._provider_profile(profile_id)
     if profile is None:
         raise OpportunityError("profile_unavailable")
     api_key = "" if profile.keyless else profile.api_key
-    target = {"profile": profile_id, "model_id": llm_runtime._resolved_primary_model_id(runtime_path="strategist_agent", profile=profile_id),
+    target = {"profile": profile_id, "model_id": llm_runtime._resolved_primary_model_id(runtime_path=PLAN_RUNTIME_PATH, profile=profile_id),
         "api_base": llm_runtime._profile_api_base(profile_id), "api_key": api_key,
         "source": "primary", "options": llm_runtime._profile_options(profile_id)}
     body = finalized_openai_compatible_body(model_id=target["model_id"], messages=messages, options=target["options"],

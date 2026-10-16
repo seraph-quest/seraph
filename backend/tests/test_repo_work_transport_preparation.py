@@ -20,7 +20,7 @@ def configured_model(monkeypatch):
     monkeypatch.setattr(llm_runtime, "provider_profiles", lambda: {profile.id: profile})
     model = FallbackLiteLLMModel(model_id="openrouter/fixture/model", api_key="",
         api_base=profile.api_base, runtime_profile=profile.id,
-        runtime_path="strategist_agent", max_tokens=4096,
+        runtime_path="repository_repair", max_tokens=4096,
         provider={"only": ["fixture-upstream"], "allow_fallbacks": False})
     return model
 
@@ -50,11 +50,11 @@ def test_nonfixed_or_missing_profile_cannot_prepare_iteration_body(configured_mo
 def test_each_route_field_is_part_of_exact_primary_identity():
     target = {"source": "primary", "api_base": "https://openrouter.ai/api/v1",
         "profile": "profile", "model_id": "openrouter/fixture/model", "options": {"provider": "one"}}
-    original = repository_transport_route_digest(target, "strategist_agent")
+    original = repository_transport_route_digest(target, "repository_repair")
     for key, value in [("source", "fallback"), ("api_base", "https://other.invalid/v1"),
                        ("profile", "different"), ("model_id", "other/model"),
                        ("options", {"provider": "two"})]:
-        assert repository_transport_route_digest({**target, key: value}, "strategist_agent") != original
+        assert repository_transport_route_digest({**target, key: value}, "repository_repair") != original
 
 
 def test_final_body_cap_includes_model_options_and_schema(configured_model):

@@ -18,6 +18,7 @@ from config.settings import settings
 from src.auth.middleware import OperatorAuthMiddleware
 from src.db.models import GuardianOpportunity, WorkBoardAttempt, WorkBoardProposal, WorkBoardStatus, WorkBoardTask
 from src.guardian.opportunity_runtime import admit_assessment, execute_assessment
+from tests.test_external_content_routes_1111 import assert_split_route_receipt
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import durable_job_repository
 from tests.test_guardian_opportunity_vertical import OpportunityHttpBoundary
@@ -94,6 +95,13 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
             kwargs['transport'] = PlanHttpBoundary(calls, {'blueprint': blueprint})
         return original_client(**kwargs)
     monkeypatch.setattr(httpx, 'AsyncClient', clients)
+    from src import llm_runtime
+    sent_contexts = []
+    governed_completion = llm_runtime._governed_research_chat_completion
+    async def record_context(**kwargs):
+        sent_contexts.append(kwargs['context'])
+        return await governed_completion(**kwargs)
+    monkeypatch.setattr(llm_runtime, '_governed_research_chat_completion', record_context)
     versions = iter(('Stable public line\nPrevious public release\n',
         'Stable public line\nA relevant new public release\n'))
     async def source_http(request):
@@ -219,6 +227,12 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
             generation_id = proposal.admission_job_id
         generation = await durable_job_repository.get_job(generation_id)
         assert generation['status'] == 'succeeded'
+        # #1111: the plan call ran on its own external-content route, not the
+        # strategist's; the assessment before it ran on the assessment route.
+        routed = {item.runtime_path for item in sent_contexts} - {'capability_probe'}
+        assert routed == {'guardian_opportunity_assessment', 'guardian_opportunity_plan'}, routed
+        await assert_split_route_receipt('guardian_opportunity_plan',
+            [item for item in sent_contexts if item.runtime_path == 'guardian_opportunity_plan'])
         if finalizer_cut:
             assert cut_jobs == [generation_id]
         dispatcher = WorkBoardDispatcher(jobs=durable_job_repository,session_provider=factory.accounting_sessions)

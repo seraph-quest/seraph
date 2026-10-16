@@ -52,6 +52,7 @@ from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import durable_job_repository
 from tests.conftest import _PATCH_TARGETS
 from tests.test_inference_accounting import accounting_db
+from tests.test_external_content_routes_1111 import assert_split_route_receipt
 
 
 CAPABILITY = "engineering.repo-repair.v1"
@@ -364,7 +365,7 @@ def _init_repository(
     return repository, before_source, before_git
 
 
-def _model_transport(transport_calls: list[dict[str, Any]]):
+def _model_transport(transport_calls: list[dict[str, Any]], contexts: list[Any] | None = None):
     """Return one deterministic response at the governed transport seam."""
 
     def proposal(base_digest: str) -> dict[str, Any]:
@@ -401,6 +402,8 @@ def _model_transport(transport_calls: list[dict[str, Any]]):
                         break
         if not isinstance(base_digest, str) or len(base_digest) != 64:
             raise AssertionError("governed repair transport did not receive the canonical source packet")
+        if contexts is not None:
+            contexts.append(kwargs.get("context"))
         transport_calls.append(
             {
                 "endpoint": str(getattr(getattr(kwargs.get("decision"), "selected", None), "endpoint", "")),
@@ -967,7 +970,8 @@ async def _prepare_native_flow(
         scheduled_at=None if low_due else now + timedelta(hours=1),
     )
     transport_calls: list[dict[str, Any]] = []
-    monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", _model_transport(transport_calls))
+    model_contexts: list[Any] = []
+    monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", _model_transport(transport_calls, model_contexts))
 
     dispatcher = WorkBoardDispatcher(repository=repository, session_provider=async_db)
     first = await dispatcher.run_pass()
@@ -1021,6 +1025,7 @@ async def _prepare_native_flow(
         "repository_api": repository,
         "dispatcher": dispatcher,
         "transport_calls": transport_calls,
+        "model_contexts": model_contexts,
         "job_id": job_id,
         "attempt": attempt,
         "packet": packet,
@@ -1063,8 +1068,11 @@ async def test_local_native_repo_repair_api_vertical(client, async_db, tmp_path:
     resumed = await flow["dispatcher"].run_pass()
     assert resumed["claimed"] == 0
     assert len(transport_calls) == 1
-    assert transport_calls[0]["runtime_path"] == "strategist_agent"
+    assert transport_calls[0]["runtime_path"] == "repository_repair"
     assert transport_calls[0]["endpoint"] == "https://openrouter.ai/api/v1/chat/completions"
+    # #1111: the persisted receipt and the sent context name the repository
+    # route, and the source packet carries no instruction authority.
+    await assert_split_route_receipt("repository_repair", flow["model_contexts"])
 
     pending = await client.get(f"/api/workflows/repo-repair/{job_id}")
     assert pending.status_code == 200, pending.text

@@ -1115,7 +1115,7 @@ async def test_started_duplicate_proposal_reconciles_without_second_job_or_provi
             status=WorkBoardStatus.triage,
             requires_review=False,
         )
-        route_id = "strategist_agent"
+        route_id = triage_service._PROPOSAL_ROUTE
         capability_version = "1"
         proposal = WorkBoardProposal(
             proposal_id="proposal-unknown-provider",
@@ -1153,7 +1153,7 @@ async def test_started_duplicate_proposal_reconciles_without_second_job_or_provi
         db.add(proposal)
         await db.flush()
 
-    monkeypatch.setattr(triage_service, "_route_binding", lambda: ("strategist_agent", "1"))
+    monkeypatch.setattr(triage_service, "_route_binding", lambda: (triage_service._PROPOSAL_ROUTE, "1"))
     get_job = AsyncMock(return_value={"status": "failed"})
     admit_call = AsyncMock()
     provider_call = AsyncMock()

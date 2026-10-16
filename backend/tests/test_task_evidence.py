@@ -336,7 +336,7 @@ async def test_governed_prompt_contains_exact_packet_and_stale_adoption_fails(as
             expected_task_revision=1, expected_packet_revision=packet["revision"],
             expected_packet_digest=packet["digest"], allow_model_context=True))
     prepared = await triage._prepare_governed_proposal(task, kind="specify", operator=operator,
-        job_id="exact-context-job", route_id="strategist_agent")
+        job_id="exact-context-job", route_id="work_board_proposal")
     data = json.loads(prepared[0][1]["content"])
     assert data["evidence_data"]["digest"] == packet["digest"]
     assert "October 20" in prepared[0][1]["content"]

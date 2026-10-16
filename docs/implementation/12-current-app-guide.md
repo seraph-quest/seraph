@@ -1414,8 +1414,16 @@ receipts and Settings record the real origin instead of the strategist's
 | `calendar_meeting_prep` | Work `calendar.meeting-prep.v1` | report / `report_synthesis` | `EXTERNAL_UNTRUSTED` |
 | `guardian_opportunity_assessment` | guardian opportunity assessment | background / `agent_reasoning` | `EXTERNAL_UNTRUSTED` (goal fields stay `CANONICAL_MEMORY`) |
 | `repository_repair` | repository repair proposals and iterations | interactive / `agent_reasoning` | `EXTERNAL_UNTRUSTED` (no instruction authority) |
+| `work_board_proposal` | Work Board triage Specify/Decompose | interactive / `agent_reasoning` | `EXTERNAL_UNTRUSTED` (task card and staged evidence) |
+| `guardian_opportunity_plan` | guardian opportunity plans | background / `agent_reasoning` | `EXTERNAL_UNTRUSTED` (staged public evidence) |
 
-All four use the OpenRouter text slot, so model selection and the spend ceiling
+The class follows the initiator. Specify/Decompose starts only from the
+authenticated owner's request, which waits on the call, so it is interactive.
+An opportunity plan can also start without the operator, when a policy
+auto-stages plans after an assessment, and it is always admitted at the
+reports tier, so it is background.
+
+All of them use the OpenRouter text slot, so model selection and the spend ceiling
 are unchanged. Spend stays on the one deployment ledger under the same owner
 ids. A general-task group member must reserve under its role's route
 (communication preparation by capability, repository iteration under
@@ -1425,8 +1433,15 @@ reservation resumes on its original ledger row under the split route. In-flight
 work whose prepared request digest bound the old route fails closed through the
 existing route-drift checks, and its liability is retained; nothing is replayed.
 Settings lists these routes under *external content* in the model topology.
-Work Board proposals (triage specify/decompose and guardian opportunity plans)
-still use `strategist_agent`.
+The two proposal routes have no legacy alias. A proposal binds its route in
+`route_id` and its authority digest for at most 15 minutes (`PROPOSAL_TTL`;
+opportunity plans 5 minutes). A proposal made before the split therefore
+expires, or fails closed through the existing route drift checks
+(`proposal_binding_conflict` or `proposal_output_stale`) when generated,
+completed or accepted. The proposal's `capability_id` keeps the legacy
+`strategist_agent` value. It is a capability identity bound into proposal
+authority, not a model route. A guard test fails if any model call site outside
+the strategist resolves to `strategist_agent`.
 
 `POST /api/work-board/general-tasks` captures the server's current typed tool
 descriptor snapshot and creates one ordinary `WorkBoardTask`. Its bounded plan
@@ -2724,7 +2739,7 @@ Work offers a meeting-preparation form using verified calendars and redacted
 events. Selecting an event creates an immutable typed input and a Todo task;
 the existing task controls govern admission and execution. Preparation rereads
 the selected event, synthesizes one bounded brief through the governed
-strategist route, and rereads the event again. Changed or revoked authority
+`calendar_meeting_prep` route (#1111), and rereads the event again. Changed or revoked authority
 blocks publication. Completion requires artifact readback and an explicit
 `no_learning` receipt. Work shows the actual route and outcome.
 

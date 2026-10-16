@@ -33,7 +33,8 @@ permits only the separate optional M5 NEAR HTTPS capability. This roadmap does
 not broaden those locked contracts.
 
 Recommended delivery order is **M1, M2, M3, M4**. M2 technically uses the existing
-strategist route and does not depend on M1; M3 depends on M2, M4 on M3. M5 is an
+governed text route (its own `guardian_opportunity_assessment` route since #1111)
+and does not depend on M1; M3 depends on M2, M4 on M3. M5 is an
 optional separate branch of work and blocks none of M1–M4. Each milestone is one
 parent issue/project item, with internal checklist slices and one ready aggregate
 PR. No child issue is necessary while ownership/acceptance remain one milestone.

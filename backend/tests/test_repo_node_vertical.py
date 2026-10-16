@@ -68,8 +68,9 @@ async def _prepare_node_flow(client,async_db,tmp_path,monkeypatch,*,typescript=F
         return repository,native._tree_receipt(repository),native._tree_receipt(repository/".git")
     def selected_settings(**kwargs):
         return RepoSandboxSettings(**kwargs,profile=PROFILE,node_runtime_path=NODE,max_wall_seconds=wall_seconds)
-    def transport_factory(calls):
+    def transport_factory(calls,contexts=None):
         def transport(**kwargs):
+            if contexts is not None:contexts.append(kwargs["context"])
             body=kwargs["body"];base=None
             for message in body["messages"]:
                 with suppress(ValueError,TypeError):
@@ -312,8 +313,8 @@ async def test_authenticated_node_missing_recorded_preflight_blocks_display(clie
 async def test_integrated_original_python_native_vertical(client,async_db,tmp_path,monkeypatch):
     _prepare_accounting_fixture(tmp_path,monkeypatch)
     original_factory=native._model_transport
-    def factory(calls):
-        original_transport=original_factory(calls)
+    def factory(calls,*contexts):
+        original_transport=original_factory(calls,*contexts)
         def transport(**kwargs):
             response,raw=original_transport(**kwargs)
             return response,{**raw,"id":"gen-python-fixture","usage":{**raw.get("usage",{}),"cost":"0.000001"}}
@@ -509,8 +510,8 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
 async def test_default_python_authenticated_journey_without_node_dependency(client,async_db,tmp_path,monkeypatch):
     _prepare_accounting_fixture(tmp_path,monkeypatch)
     original_transport=native._model_transport
-    def costed_transport(calls):
-        original=original_transport(calls)
+    def costed_transport(calls,*contexts):
+        original=original_transport(calls,*contexts)
         def transport(**kwargs):
             response,metadata=original(**kwargs)
             return response,{**metadata,"id":"gen-python-fixture","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":"0.000001"}}

@@ -57,6 +57,13 @@ EXPECTED_CANONICAL_ROUTES = {
     "readonly_research_child",
     "cordis_interactive_inference",
     "cordis_background_inference",
+    # #1111: external-content callers split off strategist_agent.
+    "mail_reply_draft",
+    "calendar_meeting_prep",
+    "guardian_opportunity_assessment",
+    "repository_repair",
+    "work_board_proposal",
+    "guardian_opportunity_plan",
 }
 
 

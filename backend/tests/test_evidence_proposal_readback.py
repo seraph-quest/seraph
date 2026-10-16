@@ -45,7 +45,7 @@ async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp
             admission_job_id='original-proposal-job',expires_at=now+timedelta(minutes=5),
             provider_contact_started=True,provider_contact_state='started',status='pending_inference',
             capability_id='strategist_agent',capability_version='fixture-version',grant_revision=task.goal_revision,
-            route_id='strategist_agent',authority_digest='a'*64,request_digest='b'*64,
+            route_id='work_board_proposal',authority_digest='a'*64,request_digest='b'*64,
             evidence_use_snapshot_json=json.dumps(snapshot),proposal_json=json.dumps(output),proposal_digest=digest)
         authority=triage._proposal_job_authority(proposal)
         run=WorkflowRunState(id=proposal.admission_job_id,run_identity=proposal.admission_job_id,root_run_identity=proposal.admission_job_id,
@@ -84,7 +84,7 @@ async def test_generated_output_readback_is_current_fenced_and_pure(async_db,tmp
             yield
         finally:os.close(rival);os.close(fd)
     monkeypatch.setattr('src.workspace.accounting_witness.maintenance_accounting_lock',policy_lock)
-    monkeypatch.setattr(triage,'_route_binding',lambda:('strategist_agent','fixture-version'))
+    monkeypatch.setattr(triage,'_route_binding',lambda:('work_board_proposal','fixture-version'))
     monkeypatch.setattr(triage,'_authority_digest',lambda *args:'a'*64)
     original=durable_job_repository.record_readback
     async def barrier(*args,**kwargs):

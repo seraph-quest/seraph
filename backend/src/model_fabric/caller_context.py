@@ -170,8 +170,8 @@ CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
         "normal",
     ),
     # #1111: callers over external content, split off ``strategist_agent``
-    # so their receipts state the real origin and workload. All four stay on
-    # the text slot, so model selection and spend bounds are unchanged.
+    # so their receipts state the real origin and workload. All of them stay
+    # on the text slot, so model selection and spend bounds are unchanged.
     "mail_reply_draft": CanonicalRouteSpec(
         InferenceWorkload.REPORT,
         (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
@@ -200,12 +200,34 @@ CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
         ContentOrigin.EXTERNAL_UNTRUSTED,
         "interactive",
     ),
+    # Work Board specify/decompose: started only by the authenticated owner,
+    # whose request waits on the call, so interactive. The task card and the
+    # staged evidence working set are untrusted data, never instructions.
+    "work_board_proposal": CanonicalRouteSpec(
+        InferenceWorkload.INTERACTIVE,
+        (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
+        "agent_reasoning",
+        ContentOrigin.EXTERNAL_UNTRUSTED,
+        "interactive",
+    ),
+    # Guardian opportunity plans: also started without the operator when a
+    # policy auto-stages plans after an assessment, and always admitted at the
+    # reports tier, so background. Input is staged public evidence.
+    "guardian_opportunity_plan": CanonicalRouteSpec(
+        InferenceWorkload.BACKGROUND,
+        (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
+        "agent_reasoning",
+        ContentOrigin.EXTERNAL_UNTRUSTED,
+        "normal",
+    ),
 }
 
 # Rows persisted before #1111 name ``strategist_agent`` for these callers.
 # Readback and recovery validators accept that legacy id for existing rows;
 # new admissions always use the split route. Spend stays on the one
-# deployment ledger under the same owner ids.
+# deployment ledger under the same owner ids. The two Work Board proposal
+# routes have no alias: a proposal binds its route for at most 15 minutes, so
+# one made before the split expires or fails its route drift check.
 LEGACY_ROUTE_ALIASES: dict[str, str] = {
     "mail_reply_draft": "strategist_agent",
     "calendar_meeting_prep": "strategist_agent",

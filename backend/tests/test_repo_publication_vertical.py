@@ -46,8 +46,8 @@ async def _actual_repair(client, async_db, tmp_path, monkeypatch):
         return finish_configuration
     monkeypatch.setattr(native, "_configure_openrouter", managed_configuration)
     original_transport = native._model_transport
-    def costed_fixture_transport(calls):
-        transport = original_transport(calls)
+    def costed_fixture_transport(calls, *contexts):
+        transport = original_transport(calls, *contexts)
         def complete(**values):
             response, body = transport(**values)
             return response, {**body, "id": "fixture-publication-proposal", "usage": {"cost": "0.000001"}}

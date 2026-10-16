@@ -2,7 +2,7 @@
 
 Inference is advisory and produces a reviewable ``WorkBoardProposal`` row.
 Only the explicit acceptance path creates tasks and dependency links.  The
-module uses the existing strategist OpenRouter route and never falls back to a
+module uses the governed ``work_board_proposal`` OpenRouter route and never falls back to a
 local model or executes a proposed capability while staging.
 """
 
@@ -64,8 +64,11 @@ PROPOSAL_TTL = timedelta(minutes=15)
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
 _SAFE_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _PROPOSAL_KINDS = frozenset({"specify", "decompose"})
-_PROPOSAL_ROUTE = "strategist_agent"
+# #1111: the task card and staged evidence are external content, so the
+# proposal call has its own route instead of the strategist's.
+_PROPOSAL_ROUTE = "work_board_proposal"
 _PROPOSAL_JOB_KIND = "work_board_proposal"
+# Capability identity bound into proposal authority; not a model route.
 _PROPOSAL_CAPABILITY = "strategist_agent"
 _PROPOSAL_RUNNER = "work-board-proposal"
 _PROPOSAL_ATTEMPT_BUDGET_REASON = "proposal_admission_attempt_budget_exhausted"
@@ -228,8 +231,13 @@ def _proposal_digest(payload: Mapping[str, Any]) -> str:
 
 def _route_binding() -> tuple[str, str]:
     """Return the explicitly selected OpenRouter route and contract version."""
+    return _route_binding_for(_PROPOSAL_ROUTE)
+
+
+def _route_binding_for(route: str) -> tuple[str, str]:
+    """Bind one registered proposal route (Work Board or opportunity plan)."""
     try:
-        policy = effective_workload_policy(_PROPOSAL_ROUTE)
+        policy = effective_workload_policy(route)
     except Exception as exc:
         raise BoardError(
             "openrouter_policy_unavailable",
@@ -249,7 +257,7 @@ def _route_binding() -> tuple[str, str]:
             "The proposal route is not governed by the OpenRouter provider policy",
             status_code=409,
         )
-    profile_id = resolve_runtime_profile(runtime_path=_PROPOSAL_ROUTE, profile="openrouter")
+    profile_id = resolve_runtime_profile(runtime_path=route, profile="openrouter")
     profile = provider_profiles().get(profile_id)
     if profile is None or profile.provider_kind != "openrouter":
         raise BoardError(
@@ -265,16 +273,16 @@ def _route_binding() -> tuple[str, str]:
         )
     # The proposal route has no provider fallback.  Reject configuration that
     # would make the shared legacy wrapper try a second paid target.
-    if profile.fallback_models or fallback_model_ids(runtime_path=_PROPOSAL_ROUTE):
+    if profile.fallback_models or fallback_model_ids(runtime_path=route):
         raise BoardError(
             "openrouter_fallback_forbidden",
             "The proposal route has a configured fallback and is blocked",
             status_code=409,
         )
-    # ``strategist_agent`` is the canonical Seraph route identity used by the
+    # ``route`` is the canonical Seraph route identity used by the
     # model-fabric context.  ``profile_id`` is only the selected provider
     # profile and must not replace that route identity in durable bindings.
-    return _PROPOSAL_ROUTE, profile.contract_hash
+    return route, profile.contract_hash
 
 
 def _proposal_request_digest(

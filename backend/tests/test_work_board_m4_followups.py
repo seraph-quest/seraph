@@ -59,7 +59,8 @@ def _now() -> datetime:
 
 def test_proposal_route_binding_uses_canonical_seraph_route():
     route_id, contract_hash = triage_service._route_binding()
-    assert route_id == "strategist_agent"
+    # #1111: task cards and staged evidence are external content.
+    assert route_id == "work_board_proposal"
     assert len(contract_hash) == 64
 
 
@@ -822,12 +823,12 @@ async def test_proposal_prompt_redacts_before_provider_contact_and_binds_transfo
         kind="specify",
         operator=operator,
         job_id="work-board-proposal:redacted-prompt",
-        route_id="strategist_agent",
+        route_id="work_board_proposal",
     )
     serialized = json.dumps(messages)
     assert "sk-live-triage-secret" not in serialized
     assert "[redacted secret]" in serialized
-    assert captured["route_id"] == "strategist_agent"
+    assert captured["route_id"] == "work_board_proposal"
     assert captured["redaction_applied"] is True
     assert captured["transformation_digest"] == transformation_digest
 
@@ -866,7 +867,7 @@ async def test_redaction_unavailable_is_known_no_contact(monkeypatch):
             kind="specify",
             operator=operator,
             job_id="work-board-proposal:redaction-unavailable",
-            route_id="strategist_agent",
+            route_id="work_board_proposal",
         )
     assert failure.value.code == "proposal_redaction_unavailable"
 
@@ -1127,7 +1128,7 @@ async def test_fresh_key_cannot_bypass_unknown_contact_proposal(async_db, monkey
         db.add(proposal)
         await db.flush()
 
-    monkeypatch.setattr(triage_service, "_route_binding", lambda: ("strategist_agent", "route-contract"))
+    monkeypatch.setattr(triage_service, "_route_binding", lambda: (triage_service._PROPOSAL_ROUTE, "route-contract"))
     monkeypatch.setattr(
         triage_service.durable_job_repository,
         "get_job",
@@ -1349,7 +1350,7 @@ async def test_pre_contact_failed_job_uses_one_no_effect_retry_cas(monkeypatch):
         authority_digest="authority-digest",
         grant_revision=1,
         input_digest="input-digest",
-        route_id="strategist_agent",
+        route_id="work_board_proposal",
         admission_job_id="work-board-proposal:proposal-pre-contact-recover",
         effect_id_digest=hashlib.sha256(
             b"remote_inference:remote:work-board-proposal:proposal-pre-contact-recover"
@@ -1449,7 +1450,7 @@ async def test_admit_proposal_job_retries_exact_failed_pre_contact_binding_once(
         capability_version="route-v1",
         authority_digest="authority-injected",
         grant_revision=task.goal_revision,
-        route_id="strategist_agent",
+        route_id="work_board_proposal",
         admission_job_id="work-board-proposal:proposal-injected-retry",
         provider_contact_started=False,
         provider_contact_state="not_started",
@@ -2119,7 +2120,7 @@ async def test_pre_contact_proposal_binding_cannot_change_under_same_key(async_d
         current = next(calls)
         if current == "missing":
             raise BoardError("openrouter_route_unavailable", "route unavailable", status_code=409)
-        return "strategist_agent", "new-route-contract"
+        return triage_service._PROPOSAL_ROUTE, "new-route-contract"
 
     monkeypatch.setattr(triage_service, "_route_binding", route_binding)
     monkeypatch.setattr(

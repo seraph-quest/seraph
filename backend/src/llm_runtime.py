@@ -3743,7 +3743,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         if (self._runtime_path != "repository_repair"
                 or str(self.api_base or "").rstrip("/") != "https://openrouter.ai/api/v1"
                 or type(max_tokens) is not int or not 1 <= max_tokens <= 4096):
-            raise PermissionError("fixed governed repository strategist route required")
+            raise PermissionError("fixed governed repository repair route required")
         controls = _openrouter_runtime_controls(self._runtime_profile)
         if not controls:
             raise PermissionError("current configured repository strategist profile required")

@@ -12,6 +12,7 @@ from sqlalchemy import select, func
 
 from tests.test_inference_accounting import accounting_db, setup_configuration
 from tests.test_research_native_vertical import real_auth, ResponseBytes
+from tests.test_external_content_routes_1111 import assert_split_route_receipt
 from src.auth.middleware import OperatorAuthMiddleware
 from src.db.models import GuardianOpportunity, GuardianIntervention, InferenceCostReservation, NativeNotificationOutbox
 from src.guardian.opportunity_runtime import execute_assessment, admit_assessment, assessment_context, read_snapshot
@@ -98,6 +99,13 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             kwargs["transport"] = OpportunityHttpBoundary(calls, controls)
         return original_client(**kwargs)
     monkeypatch.setattr(httpx, "AsyncClient", clients)
+    from src import llm_runtime
+    sent_contexts = []
+    governed_completion = llm_runtime._governed_research_chat_completion
+    async def record_context(**kwargs):
+        sent_contexts.append(kwargs["context"])
+        return await governed_completion(**kwargs)
+    monkeypatch.setattr(llm_runtime, "_governed_research_chat_completion", record_context)
     versions = iter(("Stable public line\nPrevious public release\n",
         "Stable public line\nA relevant new public release\n",
         "Stable public line\nA newer relevant public release with material detail\n"))
@@ -360,6 +368,11 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox))).scalar() == 0
         native = await durable_job_repository.get_job(final.job_id)
         assert native["status"] == "succeeded"
+        # #1111: every non-canary call ran on the assessment route; its receipt
+        # and sent context say so, and the public evidence has no authority.
+        await assert_split_route_receipt("guardian_opportunity_assessment",
+            [item for item in sent_contexts if item.runtime_path != "capability_probe"],
+            extra_origins={ContentOrigin.CANONICAL_MEMORY})
         assert "no learning" in native["result"]["summary"]
         if home_observer is not None:
             await home_observer(client, owner, "proposed")

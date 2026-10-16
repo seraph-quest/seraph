@@ -571,7 +571,9 @@ prepared with scripts disabled, exact-approved once, submitted by one native POS
 and read back through the numeric API; site, account, profile or value drift
 invalidates the approval, and a lost response stays Unknown with no replay.
 Local acceptance uses a disposable signed Forgejo 15.0.9 and Chromium with its
-own sandbox; production Codeberg stays blocked, and requiring a genuine
+own sandbox; production Codeberg stays blocked. The paused native POST carries no
+`Sec-Fetch-Site`, so Forgejo's cross-origin check is not an independent control;
+backend-only cookies and the exact validated single POST are. Requiring a genuine
 `Sec-Fetch-Site` at handoff is a follow-up. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 permits ordinary top-frame Chromium text with local preview and deletion-only
 redaction, exact Task/Goal approval and encrypted D1 attachment. It excludes

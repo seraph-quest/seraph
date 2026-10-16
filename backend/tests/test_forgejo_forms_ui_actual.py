@@ -3,6 +3,7 @@
 Only execute under the independently reviewed disposable local fixture group.
 No substituted UI DOM, route JSON, provider HTML or native submitter.
 """
+from collections import Counter
 import hashlib
 import json
 import mimetypes
@@ -197,13 +198,16 @@ async def test_actual_built_ui_form_journey(accounting_db, monkeypatch, profile)
                 await expect(form.get_by_label("Exact Forgejo form job")).to_contain_text("unknown_external_effect")
                 assert len(provider.requests) == before_reload
                 await expect(form.get_by_role("button",name="Run exact form job once",exact=True)).to_be_disabled()
-                # Every non-local request was aborted. The built index.html
-                # names a Google Fonts stylesheet and the storage panel retries
-                # the API on 127.0.0.1; both stay aborted. Nothing else may be
-                # attempted.
-                unexpected = [url for url in rejected if urlsplit(url).hostname not in
-                    {"fonts.googleapis.com", "fonts.gstatic.com", "127.0.0.1"}]
-                assert not unexpected, unexpected
+                # Every non-local request was aborted. The exact multiset is
+                # pinned: the built index.html names one Google Fonts
+                # stylesheet (loaded on sign-in and both reloads) and the
+                # settings panels retry four API reads on 127.0.0.1 once per
+                # open. Any other or additional request fails the journey.
+                api_retry = "http://127.0.0.1:8004/api/"
+                expected_aborted = Counter({"https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap": 3,
+                    api_retry+"runtime/status": 2, api_retry+"settings/artifact-storage": 2,
+                    api_retry+"settings/model-fabric": 2, api_retry+"settings/screen-analysis": 2})
+                assert Counter(rejected) == expected_aborted, sorted(rejected)
                 outcome = {"profile":profile,"actual_build_hashes":bundle_hashes,"actual_local_api_calls":local_calls,
                     "success_ui":success_text,"unknown_ui":await form.inner_text(),"provider_requests":provider.requests,
                     "reload_restart_provider_contacts":0,"native_success_posts":1,"no_learning":True}

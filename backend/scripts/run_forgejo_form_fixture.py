@@ -2,13 +2,17 @@
 
 Usage (from backend/):
     FORGEJO_TEST_BINARY=/path/to/forgejo-15.0.9-linux-amd64 \\
-        .venv/bin/python scripts/run_forgejo_form_fixture.py [pytest args...]
+        .venv/bin/python scripts/run_forgejo_form_fixture.py [--keep] [pytest args...]
 
 The pinned, signature-verified Forgejo binary serves the logical site
 ``https://codeberg.org`` on 127.0.0.1 only (offline mode, no mail, webhooks,
 federation or registration). A fresh private root holds its database,
 repositories, the disposable fixture credentials and the Seraph workspace; the
-whole provider process group is killed and reaped on exit. Tests reach it only
+whole provider process group is killed and reaped on exit. The root (which
+holds the disposable credentials, database and log) is deleted after a passing
+run unless --keep is given; a failing run keeps it for inspection. The binary
+is hashed once and the verified bytes are copied into the private root and
+executed from there, so nothing can swap it between the check and the exec. Tests reach it only
 through their loopback transport and launch Playwright's Chromium with its own
 sandbox enabled. No network beyond localhost and no inference is used.
 """
@@ -19,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -113,14 +118,36 @@ def _close_group(process: subprocess.Popen) -> None:
 
 
 def main(pytest_args: list[str]) -> int:
-    binary = Path(os.environ.get("FORGEJO_TEST_BINARY", "")).expanduser()
-    if not binary.is_file() or hashlib.sha256(binary.read_bytes()).hexdigest() != BINARY_SHA256:
+    keep = "--keep" in pytest_args
+    pytest_args = [arg for arg in pytest_args if arg != "--keep"]
+    source = Path(os.environ.get("FORGEJO_TEST_BINARY", "")).expanduser()
+    verified = source.read_bytes() if source.is_file() else b""
+    if hashlib.sha256(verified).hexdigest() != BINARY_SHA256:
         print("FORGEJO_TEST_BINARY must be the pinned Forgejo 15.0.9 binary", file=sys.stderr)
         return 2
     root = Path(tempfile.mkdtemp(prefix="forgejo-form-fixture-"))
     os.chmod(root, 0o700)
-    for name in ("home", "tmp", "seraph-workspace"):
+    for name in ("home", "tmp", "seraph-workspace", "bin"):
         (root / name).mkdir(mode=0o700)
+    binary = root / "bin" / "forgejo"
+    descriptor = os.open(binary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o700)
+    try:
+        os.write(descriptor, verified)
+    finally:
+        os.close(descriptor)
+    passed = False
+    try:
+        result = _run(root, binary, pytest_args)
+        passed = result == 0
+        return result
+    finally:
+        if passed and not keep:
+            shutil.rmtree(root, ignore_errors=True)
+        else:
+            print("fixture root kept (disposable credentials inside): " + str(root), file=sys.stderr)
+
+
+def _run(root: Path, binary: Path, pytest_args: list[str]) -> int:
     env = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"), "LANG": "C.UTF-8",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(root / "home/.gitconfig")}
     version = subprocess.run([str(binary), "--version"], env=env, capture_output=True, timeout=30, check=True).stdout
@@ -181,7 +208,6 @@ def main(pytest_args: list[str]) -> int:
     finally:
         _close_group(provider)
         log.close()
-        print("fixture root (disposable, private): " + str(root), file=sys.stderr)
 
 
 if __name__ == "__main__":

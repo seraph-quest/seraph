@@ -128,3 +128,39 @@ def test_destination_and_comment_readback_require_exact_id_actor_parent_and_empt
     for key, altered in (("id", True), ("user", {"id": 8}), ("body", "Different"), ("pull_request_url", None), ("issue_url", "https://evil.example/"),
             ("issue_url", "https://codeberg.org/a/r/issues/3"), ("issue_url", "https://codeberg.org/a/r/pulls/2")):
         with pytest.raises(ForgejoError): exact_readback({**value, key: altered}, target, 12)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sandbox", [True, False])
+async def test_launch_session_passes_the_chromium_sandbox_choice_to_playwright(monkeypatch, tmp_path, sandbox):
+    from src.browser import task_runner
+    calls = []
+
+    class Chromium:
+        async def launch(self, **kwargs):
+            calls.append(kwargs)
+            class Browser:
+                async def new_context(self, **_options): return object()
+            return Browser()
+
+    class Driver:
+        chromium = Chromium()
+
+    class Starter:
+        async def start(self): return Driver()
+
+    monkeypatch.setattr(task_runner, "_playwright_browser_executable_present", lambda: True)
+    monkeypatch.setattr("playwright.async_api.async_playwright", lambda: Starter())
+    runner = task_runner.BrowserTaskRunner(workspace_root=str(tmp_path))
+    await runner._launch_session(task_runner._BrowserLaunchResources(), chromium_sandbox=sandbox)
+    assert calls == [{"headless": True, "chromium_sandbox": sandbox}]
+
+
+def test_both_forgejo_profiles_request_the_chromium_sandbox():
+    # Every authenticated Forgejo launch asks for Chromium's own sandbox and
+    # maps a failed sandboxed launch to a typed pre-contact block.
+    from pathlib import Path
+    for module in ("forgejo_form_browser.py", "forgejo_profile.py"):
+        source = (Path(__file__).resolve().parents[1] / "src" / "browser" / module).read_text()
+        assert source.count("_launch_session(") == source.count("_launch_session(resources, chromium_sandbox=True)") == 1
+        assert 'raise ForgejoError("forgejo_sandboxed_browser_unavailable") from exc' in source

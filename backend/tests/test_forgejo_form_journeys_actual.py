@@ -13,9 +13,20 @@ from tests.test_forgejo_native_actual import ActualLoopback
 
 class FormLoopback(ActualLoopback):
     lose_form_response = False
+    # (old, new) bytes replaced once in the actual signed GET /issues/new page.
+    inject_form = None
 
     async def handle_async_request(self, request):
         response = await super().handle_async_request(request)
+        if self.inject_form and request.method == "GET" and request.url.path.endswith("/issues/new"):
+            # Negative external-response boundary only: the actual provider
+            # page is read and closed before one native form control drifts.
+            body = await response.aread(); headers = dict(response.headers)
+            await response.aclose()
+            old, new = self.inject_form; self.inject_form = None
+            assert old in body, "pinned page no longer contains the drift anchor"
+            headers.pop("content-length", None)
+            return httpx.Response(response.status_code, headers=headers, content=body.replace(old, new, 1), request=request)
         if self.lose_form_response and request.method == "POST" and (
             request.url.path.endswith("/issues/new") or request.url.path.endswith("/comments")
         ):
@@ -159,9 +170,10 @@ async def test_actual_signed_form_complete_journey(accounting_db, monkeypatch, p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drift", ["account", "profile", "revoke", "value"])
+@pytest.mark.parametrize("drift", ["account", "profile", "revoke", "value", "staged_target", "page_digest",
+    "sandbox_unavailable", "native_extra_control", "native_file_input"])
 async def test_actual_approval_is_invalidated_by_site_account_profile_or_value_drift(accounting_db, monkeypatch, drift):
-    """An exact approval binds the original site/account/profile/value; any drift blocks with no POST."""
+    """An exact approval binds the original site/account/profile/value/form; any drift blocks with no POST."""
     credential_file = os.environ.get("FORGEJO_TEST_CREDENTIAL_FILE")
     if not credential_file:
         pytest.skip("requires the local signed Forgejo 15.0.9 fixture")
@@ -224,13 +236,23 @@ async def test_actual_approval_is_invalidated_by_site_account_profile_or_value_d
         body = "Drift-bound literal body " + uuid.uuid4().hex
         fields = {"profile": profile, "owner": credentials["user_name"], "repository": "fixture1013",
                   "content": body, "title": "Drift title " + uuid.uuid4().hex[:8]}
-        preview = (await execute((await prepare("form-prepare", fields=fields)).json())).json()
-        assert preview["status"] == "succeeded", preview
-        output = (await client.get(base+"/jobs/"+preview["job_id"]+"/output")).json()
 
         def posts():
             return sum(method == "POST" and (path.endswith("/issues/new") or path.endswith("/comments"))
                        for method, path in transport.requests)
+
+        if drift in ("native_extra_control", "native_file_input"):
+            # The actual page served to sandboxed Chromium gains one unreviewed
+            # native control; preparation blocks and nothing can be approved.
+            transport.inject_form = (b'name="search"', b'name="search" type="file"') if drift == "native_file_input" \
+                else (b'<input name="title"', b'<input name="unreviewed_extra" value=""><input name="title"')
+            blocked = await execute((await prepare("form-prepare", fields=fields)).json())
+            assert blocked.status_code != 200 or blocked.json()["status"] != "succeeded", blocked.text
+            assert transport.inject_form is None and posts() == 0
+            return
+        preview = (await execute((await prepare("form-prepare", fields=fields)).json())).json()
+        assert preview["status"] == "succeeded", preview
+        output = (await client.get(base+"/jobs/"+preview["job_id"]+"/output")).json()
 
         if drift == "value":
             # A changed value is a different preview: its digest cannot bind
@@ -247,7 +269,32 @@ async def test_actual_approval_is_invalidated_by_site_account_profile_or_value_d
         assert approved.status_code == 200, approved.text
         approved = approved.json()
         current = (await client.get(base+"/connection")).json()
-        if drift == "account":
+        changed = None
+        if drift in ("staged_target", "page_digest"):
+            # Tamper the retained private artifact the approved execution reads:
+            # the submit job's staged target, or the preview's retained page.
+            from src.browser.forgejo_native import reference
+            from src.vault.crypto import decrypt, encrypt
+            from src.workspace import canonical_workspace_root
+            owner_job = submit["job_id"] if drift == "staged_target" else preview["job_id"]
+            path = canonical_workspace_root(settings.workspace_dir) / reference(owner_job,
+                "input" if drift == "staged_target" else "form-source")
+            plain = decrypt(path.read_text())
+            if drift == "staged_target":
+                staged = json.loads(plain); staged["target"]["content"] = body + " tampered"
+                plain = json.dumps(staged, sort_keys=True, separators=(",", ":"))
+            else:
+                plain = plain.replace("</body>", "<p>changed retained page</p></body>", 1)
+            path.write_bytes(encrypt(plain).encode())
+        elif drift == "sandbox_unavailable":
+            from playwright.async_api import BrowserType, Error as PlaywrightError
+            original_launch = BrowserType.launch
+            async def no_sandbox(self, *args, **kwargs):
+                if kwargs.get("chromium_sandbox"):
+                    raise PlaywrightError("No usable sandbox!")
+                return await original_launch(self, *args, **kwargs)
+            monkeypatch.setattr(BrowserType, "launch", no_sandbox)
+        elif drift == "account":
             changed = await client.put(base+"/connection", json={"vault_key": "form-drift-other-input",
                                                                  "expected_revision": current["revision"]})
         elif drift == "profile":
@@ -255,7 +302,7 @@ async def test_actual_approval_is_invalidated_by_site_account_profile_or_value_d
                 "expected_form_profiles_revision": current["form_profiles_revision"], "profile_ids": [], "profile_ack": True})
         else:
             changed = await client.post(base+"/connection/revoke", json={"expected_revision": current["revision"]})
-        assert changed.status_code == 200, changed.text
+        assert changed is None or changed.status_code == 200, changed.text
         if drift == "profile":
             # Restoring the same profile is a new activation revision; the
             # original approval stays bound to the revoked one.

@@ -189,9 +189,14 @@ credentials reach numeric API GETs only. Native Chromium Origin, Referer and
 frame are required at transport handoff. Chromium's request-stage interception
 runs before its network service adds Fetch Metadata, so the paused native POST
 carries no `Sec-Fetch-Site`. A present value must be `same-origin`; a missing one
-is forwarded as missing and never synthesized, and Forgejo's unmodified Go
-`http.CrossOriginProtection` then checks the genuine Origin against the request
-Host. Requiring a genuine `Sec-Fetch-Site` at handoff needs a separately
+is forwarded as missing and never synthesized. Forgejo's unmodified Go
+`http.CrossOriginProtection` then accepts the request because the backend
+transport sends the browser's Origin to the matching Host, so it is not an
+independent control here. The control is confinement: only the trusted backend
+transport holds the session cookie, and it forwards nothing but the one approved
+native POST, validated against the exact path, body and reviewed digests, from
+the scripts-disabled page Seraph itself served. This matches the #925 title
+profile. Requiring a genuine `Sec-Fetch-Site` at handoff needs a separately
 reviewed transport stage and remains a follow-up. No synthetic CSRF token is
 created. Cross-origin and challenge responses fail closed.
 

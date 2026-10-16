@@ -154,7 +154,73 @@ CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
         ContentOrigin.CANONICAL_MEMORY,
         "normal",
     ),
+    # #1111: callers over external content, split off ``strategist_agent``
+    # so their receipts state the real origin and workload. All four stay on
+    # the text slot, so model selection and spend bounds are unchanged.
+    "mail_reply_draft": CanonicalRouteSpec(
+        InferenceWorkload.REPORT,
+        (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
+        "report_synthesis",
+        ContentOrigin.EXTERNAL_UNTRUSTED,
+        "normal",
+    ),
+    "calendar_meeting_prep": CanonicalRouteSpec(
+        InferenceWorkload.REPORT,
+        (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
+        "report_synthesis",
+        ContentOrigin.EXTERNAL_UNTRUSTED,
+        "normal",
+    ),
+    "guardian_opportunity_assessment": CanonicalRouteSpec(
+        InferenceWorkload.BACKGROUND,
+        (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
+        "agent_reasoning",
+        ContentOrigin.EXTERNAL_UNTRUSTED,
+        "high",
+    ),
+    "repository_repair": CanonicalRouteSpec(
+        InferenceWorkload.INTERACTIVE,
+        (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
+        "agent_reasoning",
+        ContentOrigin.EXTERNAL_UNTRUSTED,
+        "interactive",
+    ),
 }
+
+# Rows persisted before #1111 name ``strategist_agent`` for these callers.
+# Readback and recovery validators accept that legacy id for existing rows;
+# new admissions always use the split route. Spend stays on the one
+# deployment ledger under the same owner ids.
+LEGACY_ROUTE_ALIASES: dict[str, str] = {
+    "mail_reply_draft": "strategist_agent",
+    "calendar_meeting_prep": "strategist_agent",
+    "guardian_opportunity_assessment": "strategist_agent",
+    "repository_repair": "strategist_agent",
+}
+
+
+COMMUNICATION_ROUTE_BY_CAPABILITY: dict[str, str] = {
+    "work.mail-reply-draft.v1": "mail_reply_draft",
+    "calendar.meeting-prep.v1": "calendar_meeting_prep",
+}
+
+
+def general_task_group_route(role: str, preparation_binding: object = None) -> str:
+    """Return the one route a general-task group member may reserve under."""
+    if role == "repository_iteration":
+        return "repository_repair"
+    if role == "communication_preparation":
+        route = COMMUNICATION_ROUTE_BY_CAPABILITY.get(str(getattr(preparation_binding, "capability_id", "")))
+        if route is None:
+            raise ValueError("communication_preparation_route_unknown")
+        return route
+    return "general_task_planner"
+
+
+def route_lineage(runtime_path: str) -> frozenset[str]:
+    """Return the route id plus the legacy id that persisted rows may carry."""
+    legacy = LEGACY_ROUTE_ALIASES.get(runtime_path)
+    return frozenset({runtime_path, legacy} if legacy else {runtime_path})
 
 CANONICAL_SPECIALIST_ROUTES = (
     "memory_keeper",

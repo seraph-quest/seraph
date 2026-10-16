@@ -6,6 +6,7 @@ from pydantic import Field, ValidationError, model_validator, field_validator
 from src.work_board.contracts import (TaskProposalGroupV1, ClosedTaskModel,
     TaskDigest, TaskIdentity, NativeInvocationIdentity, GeneralTaskNativeChildBindingV1)
 from src.workflows.inference_accounting import InferenceAccountingError, _utc
+from src.model_fabric.caller_context import general_task_group_route
 
 KIND = "general_task_group_reservation.v1"
 
@@ -237,7 +238,10 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
         raise InferenceAccountingError("general_task_group_cost_limit")
     role = binding.get("role")
     repository = preparation = None
-    expected_route = "strategist_agent" if role in {"repository_iteration", "communication_preparation"} else "general_task_planner"
+    try:
+        expected_route = general_task_group_route(role, binding.get("preparation_binding"))
+    except ValueError:
+        raise InferenceAccountingError("general_task_group_runtime_invalid") from None
     if runtime_path != expected_route or role not in {"initial_proposal", "continuation", "repository_iteration", "specialist", "communication_preparation"}:
         raise InferenceAccountingError("general_task_group_runtime_invalid")
     initial = next((row for row in members if entry_for(row).get("role") == "initial_proposal"), None)
@@ -332,7 +336,10 @@ async def validate_recovered_entry(db, run, row, rows, binding, *, runtime_path)
         or not isinstance(binding.get("group"), TaskProposalGroupV1)
         or binding["group"].model_dump(mode="json") != entry["group"]):
         raise InferenceAccountingError("general_task_group_binding_invalid")
-    expected_route = "strategist_agent" if entry["role"] in {"repository_iteration", "communication_preparation"} else "general_task_planner"
+    try:
+        expected_route = general_task_group_route(entry["role"], binding.get("preparation_binding"))
+    except ValueError:
+        raise InferenceAccountingError("general_task_group_runtime_invalid") from None
     if runtime_path != expected_route:
         raise InferenceAccountingError("general_task_group_runtime_invalid")
     if entry["role"] in {"continuation", "specialist"}:
@@ -400,7 +407,7 @@ async def validate_contact(db, run, row, rows, *, binding=None):
     if liability > group.max_cost_microusd:
         raise InferenceAccountingError("general_task_group_cost_limit")
     if entry.get("role") == "repository_iteration":
-        if row.runtime_path != "strategist_agent":
+        if row.runtime_path != general_task_group_route("repository_iteration"):
             raise InferenceAccountingError("general_task_group_runtime_invalid")
         repository = await validate_repository_iteration(db, run, rows, binding,
             operation_id=row.operation_id, payload_digest=row.payload_digest,
@@ -408,7 +415,11 @@ async def validate_contact(db, run, row, rows, *, binding=None):
         if repository != entry["repository_binding"]:
             raise InferenceAccountingError("repository_iteration_witness_invalid")
     elif entry.get("role") == "communication_preparation":
-        if row.runtime_path != "strategist_agent":
+        try:
+            expected_route = general_task_group_route("communication_preparation", binding["preparation_binding"])
+        except (KeyError, TypeError, ValueError):
+            raise InferenceAccountingError("general_task_group_binding_invalid") from None
+        if row.runtime_path != expected_route:
             raise InferenceAccountingError("general_task_group_runtime_invalid")
         preparation = await validate_preparation(db, run, group, binding, bound=row.bound_microusd)
         if preparation != entry["preparation"] or _utc(row.deadline_at) > binding["preparation_binding"].source_deadline_at:

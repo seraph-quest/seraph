@@ -269,7 +269,7 @@ def priority_for_inference_context(context: Any) -> GpuPriority:
         "session_title_generation",
     }:
         return GpuPriority.REPORTS_RESEARCH_MEMORY
-    if runtime_path == "strategist_agent":
+    if runtime_path in {"strategist_agent", "guardian_opportunity_assessment"}:
         return GpuPriority.ACCEPTED_SCHEDULED_GOAL
     return GpuPriority.REPORTS_RESEARCH_MEMORY
 

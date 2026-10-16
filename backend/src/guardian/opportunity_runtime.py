@@ -12,6 +12,8 @@ from src.guardian.opportunity_contracts import EvidenceSource, OpportunityEviden
 from src.workspace import canonical_workspace_root
 
 CAPABILITY = "guardian.opportunity-assess.v1"
+# #1111: public evidence is external content, not canonical memory.
+ASSESSMENT_RUNTIME_PATH = "guardian_opportunity_assessment"
 JOB_KIND = "guardian_opportunity_assess"
 PREFIX = "artifacts/work-board/opportunities/"
 EVIDENCE_LIMIT = 16384
@@ -171,7 +173,7 @@ async def admit_assessment(opportunity_id):
         "opportunity_id": row.id, "policy_revision": row.policy_revision,
         "source_digest": row.source_digest, "permissions": ["model_inference", "workspace_write"],
         "budget_grant_id": policy.grant_id}
-    cost_bound = effective_workload_policy("strategist_agent").max_cost_microusd
+    cost_bound = effective_workload_policy(ASSESSMENT_RUNTIME_PATH).max_cost_microusd
     if cost_bound is not None:
         authority["budget_microusd"] = cost_bound
 
@@ -506,7 +508,7 @@ def assessment_context(row, goal, evidence):
     principal = TrustPrincipal(principal_id=SERVICE_PRINCIPAL, principal_type=PrincipalType.SERVICE,
         grants=(AuthorityGrant.MODEL_INFERENCE,), session_id=row.original_root_id,
         operator_session_id=row.original_root_id, job_id=row.job_id)
-    context = build_canonical_inference_context("strategist_agent", payload=messages, output_tokens=1024,
+    context = build_canonical_inference_context(ASSESSMENT_RUNTIME_PATH, payload=messages, output_tokens=1024,
         timeout_seconds=remaining, principal=principal, session_id=row.original_root_id,
         job_id=row.job_id, request_id=f"opportunity:{row.id}", redaction_applied=True)
     context = replace(context, provenance=(
@@ -529,13 +531,13 @@ async def _completion(row, goal, evidence, *, fence):
     from src.workflows.job_runtime import durable_job_repository
     messages, context = assessment_context(row, goal, evidence)
     await assert_known_vault_values_absent(json.loads(messages[1]["content"]))
-    profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
+    profile_id = llm_runtime.resolve_runtime_profile(runtime_path=ASSESSMENT_RUNTIME_PATH, profile=None)
     profile = llm_runtime._provider_profile(profile_id)
     if profile is None:
         raise OpportunityError("profile_unavailable")
     api_key = "" if profile.keyless else profile.api_key
     target = {"profile": profile_id, "model_id": llm_runtime._resolved_primary_model_id(
-        runtime_path="strategist_agent", profile=profile_id), "api_base": llm_runtime._profile_api_base(profile_id),
+        runtime_path=ASSESSMENT_RUNTIME_PATH, profile=profile_id), "api_base": llm_runtime._profile_api_base(profile_id),
         "api_key": api_key, "source": "primary", "options": llm_runtime._profile_options(profile_id)}
     body = finalized_openai_compatible_body(model_id=target["model_id"], messages=messages,
         options=target["options"], temperature=0, max_tokens=1024, stream=False,

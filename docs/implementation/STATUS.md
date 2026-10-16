@@ -808,7 +808,7 @@ they do not establish real-account or production usefulness. See the
   App Guide](./12-current-app-guide.md#reviewed-procedures-v2-m6-889-branch-local-target).
 - [ ] Epic #883 M4 #887 is a bounded repository-repair capability:
   selected-source inspection, explicit code-egress consent, one governed
-  `strategist_agent` proposal, exact patch approval, and staged test/readback
+  `repository_repair` proposal (formerly `strategist_agent`, #1111), exact patch approval, and staged test/readback
   evidence with `no_learning`. The server-owned selector offers a disabled
   local host-user runner by default plus optional strict Docker rootless and
   existing-daemon rootful profiles; every local job requires the exact

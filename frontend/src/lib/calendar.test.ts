@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createCalendarPrep, listCalendarEvents, validateCalendarEventsResponse, validateCalendarPrepResponse, validateCalendarResultPreview } from "./calendar";
+import { createCalendarPrep, listCalendarEvents, validateCalendarEventsResponse, validateCalendarExecution, validateCalendarPrepResponse, validateCalendarResultPreview } from "./calendar";
 
 const digest = "a".repeat(64);
 const timestamp = "2026-09-30T10:00:00Z";
@@ -189,5 +189,21 @@ describe("calendar wire validators", () => {
       pages_read: 1,
       truncated: false,
     })).toThrow();
+  });
+
+  it("accepts the split calendar_meeting_prep route and the legacy strategist_agent id on effective routes", () => {
+    const execution = (runtime_path: string) => validateCalendarExecution({
+      capability_id: "calendar.meeting-prep.v1", job_id: "job-1", durable_status: "succeeded",
+      connection_id: null, connection_revision: null, consent_id: null, consent_revision: null,
+      event_binding_id: null, event_key: null, event_revision: null, calendar_list_revision: null,
+      read_1: null, read_2: null, artifact_id: null, file_path: null, content_sha256: null,
+      readback_id: null, verified_at: null, memory_status: "no_learning", failure_code: null, recovery_action: null,
+      effective_route: { runtime_path, provider: "openrouter", model: "fixture/text", upstream_provider: "unknown",
+        profile_id: "openrouter.text", admission_digest: digest, status: "succeeded", cost_microusd: 12 },
+    });
+    expect(execution("calendar_meeting_prep")?.effective_route?.runtime_path).toBe("calendar_meeting_prep");
+    // Results persisted before #1111 keep reading back with their original route id.
+    expect(execution("strategist_agent")?.effective_route?.runtime_path).toBe("strategist_agent");
+    expect(execution("chat_agent")?.effective_route).toBeNull();
   });
 });

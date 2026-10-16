@@ -308,6 +308,11 @@ function isSafeNonNegativeInteger(value: unknown, maximum: number): value is num
     && value <= maximum;
 }
 
+// #1111: records written before the route split carry the legacy strategist_agent id.
+function isRepositoryRepairRoute(value: unknown): boolean {
+  return value === "repository_repair" || value === "strategist_agent";
+}
+
 function isNullableBoundedString(value: unknown, maxBytes: number): value is string | null {
   return value === null || isBoundedString(value, maxBytes);
 }
@@ -912,7 +917,7 @@ export function RepoRepairInspector({
 
     const egress = next.egress as Record<string, unknown>;
     if (
-      egress.runtime_path !== "strategist_agent"
+      !isRepositoryRepairRoute(egress.runtime_path)
       || !isNullableBoundedString(egress.effective_profile_id, SOURCE_PREVIEW_MAX_PACKET_BYTES)
       || !isNullableBoundedString(egress.effective_upstream, SOURCE_PREVIEW_MAX_PACKET_BYTES)
       || !isSafeNonNegativeInteger(egress.maximum_input_bytes, SOURCE_PREVIEW_MAX_PACKET_BYTES)
@@ -1007,7 +1012,7 @@ export function RepoRepairInspector({
           || new TextEncoder().encode(file.text).length !== file.size_bytes) return reject();
       }
       for (const key of ["request_body_digest", "request_route_digest", "egress_envelope_digest", "diagnostics_digest"]) if (!isSha256Digest(egress[key])) return reject();
-      if (egress.runtime_path !== "strategist_agent" || !isBoundedString(egress.effective_profile_id, 128) || !isBoundedString(egress.effective_upstream, 128)
+      if (!isRepositoryRepairRoute(egress.runtime_path) || !isBoundedString(egress.effective_profile_id, 128) || !isBoundedString(egress.effective_upstream, 128)
         || !isSafeNonNegativeInteger(egress.maximum_input_bytes, SOURCE_PREVIEW_MAX_PACKET_BYTES) || Number(egress.maximum_input_bytes) < 1
         || !isSafeNonNegativeInteger(egress.maximum_output_tokens, SOURCE_PREVIEW_MAX_OUTPUT_TOKENS) || Number(egress.maximum_output_tokens) < 1
         || !isSafeNonNegativeInteger(egress.combined_input_bytes, Number(egress.maximum_input_bytes))

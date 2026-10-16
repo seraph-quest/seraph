@@ -1314,6 +1314,31 @@ inference accounting owner. Evidence content, credential references and tool
 permission declarations are excluded from its model messages; unavailable secret
 redaction blocks planning.
 
+Callers whose model input is external content have their own registered routes
+([#1111](https://github.com/seraph-quest/seraph/issues/1111)), so route policy,
+receipts and Settings record the real origin instead of the strategist's
+`CANONICAL_MEMORY` label:
+
+| Route | Caller | Workload / task class | Origin |
+|---|---|---|---|
+| `mail_reply_draft` | Work `work.mail-reply-draft.v1` | report / `report_synthesis` | `EXTERNAL_UNTRUSTED` |
+| `calendar_meeting_prep` | Work `calendar.meeting-prep.v1` | report / `report_synthesis` | `EXTERNAL_UNTRUSTED` |
+| `guardian_opportunity_assessment` | guardian opportunity assessment | background / `agent_reasoning` | `EXTERNAL_UNTRUSTED` (goal fields stay `CANONICAL_MEMORY`) |
+| `repository_repair` | repository repair proposals and iterations | interactive / `agent_reasoning` | `EXTERNAL_UNTRUSTED` (no instruction authority) |
+
+All four use the OpenRouter text slot, so model selection and the spend ceiling
+are unchanged. Spend stays on the one deployment ledger under the same owner
+ids. A general-task group member must reserve under its role's route
+(communication preparation by capability, repository iteration under
+`repository_repair`). Rows written before the split name `strategist_agent`.
+Readback and approval of those rows accept the legacy id. A never-contacted
+reservation resumes on its original ledger row under the split route. In-flight
+work whose prepared request digest bound the old route fails closed through the
+existing route-drift checks, and its liability is retained; nothing is replayed.
+Settings lists these routes under *external content* in the model topology.
+Work Board proposals (triage specify/decompose and guardian opportunity plans)
+still use `strategist_agent`.
+
 `POST /api/work-board/general-tasks` captures the server's current typed tool
 descriptor snapshot and creates one ordinary `WorkBoardTask`. Its bounded plan
 and input share an immutable private artifact. Repeating the same owner-scoped
@@ -2136,8 +2161,9 @@ unknown artifact or task response retains the exact original keys and payload;
 the operator must reconcile or retry that exact request before another
 mutation is allowed. Artifact reads expose only safe identity, digest, expiry,
 and lifecycle metadata. The server then inspects a private snapshot, pauses
-for explicit code-egress consent, and asks the governed `strategist_agent`
-route for one strict patch proposal. The operator reviews the exact proposal
+for explicit code-egress consent, and asks the governed `repository_repair`
+route for one strict patch proposal (#1111; records written before the split
+name `strategist_agent`). The operator reviews the exact proposal
 and approval target before the selected executor's staged test/readback path
 can run.
 

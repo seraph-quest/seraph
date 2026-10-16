@@ -7685,7 +7685,7 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
-            policy = effective_workload_policy("strategist_agent")
+            policy = effective_workload_policy("mail_reply_draft")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)
             if (
@@ -7900,7 +7900,7 @@ class WorkBoardDispatcher:
                     allowed_body_fields=json.loads(consent.allowed_body_fields_json or "[]"),
                 )
                 context = build_canonical_inference_context(
-                    "strategist_agent",
+                    "mail_reply_draft",
                     payload=payload,
                     output_tokens=2048,
                     timeout_seconds=MAIL_RUNTIME_SECONDS,
@@ -7926,9 +7926,9 @@ class WorkBoardDispatcher:
                     group_context = (bind_general_task_accounting(communication_binding.group, role="communication_preparation", preparation_binding=communication_binding)
                         if communication_binding is not None else nullcontext())
                     with bind_remote_inference_receipt(repository=self.jobs, job_id=job_id, owner=lease_owner, fencing_token=fence), group_context:
-                        model_kwargs = build_model_kwargs(temperature=0.2, max_tokens=2048, runtime_path="strategist_agent")
+                        model_kwargs = build_model_kwargs(temperature=0.2, max_tokens=2048, runtime_path="mail_reply_draft")
                         route_metadata = {
-                            "runtime_path": "strategist_agent",
+                            "runtime_path": "mail_reply_draft",
                             "provider": "openrouter",
                             "model": str(model_kwargs.get("model_id") or "")[:256],
                             "upstream_provider": "unknown",
@@ -8076,7 +8076,7 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
-            policy = effective_workload_policy("strategist_agent")
+            policy = effective_workload_policy("calendar_meeting_prep")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)
             if (
@@ -8614,7 +8614,7 @@ class WorkBoardDispatcher:
                 lease_owner = _text(lease.get("owner")) or self.runner_id
                 principal = TrustPrincipal(principal_id=task.owner_principal_id, principal_type=PrincipalType.OPERATOR, authenticated=True, revoked=False, grants=(AuthorityGrant.MODEL_INFERENCE,), session_id=task.owner_session_id, operator_session_id=task.owner_session_id, job_id=job_id)
                 payload = {"event": event_payload, "capability_id": capability_id, "event_key": event_payload.get("event_key"), "event_revision": event_payload.get("event_revision")}
-                context = build_canonical_inference_context("strategist_agent", payload=payload, output_tokens=2048, timeout_seconds=120, principal=principal, session_id=task.owner_session_id, job_id=job_id, request_id=f"calendar:{job_id}", redaction_applied=True)
+                context = build_canonical_inference_context("calendar_meeting_prep", payload=payload, output_tokens=2048, timeout_seconds=120, principal=principal, session_id=task.owner_session_id, job_id=job_id, request_id=f"calendar:{job_id}", redaction_applied=True)
                 if communication_binding is not None:
                     context = replace(context, deadline_at=min(context.deadline_at,
                         communication_binding.source_deadline_at.timestamp()))
@@ -8625,9 +8625,9 @@ class WorkBoardDispatcher:
                     group_context = (bind_general_task_accounting(communication_binding.group, role="communication_preparation", preparation_binding=communication_binding)
                         if communication_binding is not None else nullcontext())
                     with bind_remote_inference_receipt(repository=self.jobs, job_id=job_id, owner=lease_owner, fencing_token=fence), group_context:
-                        model_kwargs = build_model_kwargs(temperature=0.2, max_tokens=2048, runtime_path="strategist_agent")
+                        model_kwargs = build_model_kwargs(temperature=0.2, max_tokens=2048, runtime_path="calendar_meeting_prep")
                         route_metadata = {
-                            "runtime_path": "strategist_agent",
+                            "runtime_path": "calendar_meeting_prep",
                             "provider": "openrouter",
                             "model": str(model_kwargs.get("model_id") or "")[:256],
                             # The governed profile proves the provider class;
@@ -8774,7 +8774,7 @@ class WorkBoardDispatcher:
                         # they are deliberately not copied into the Calendar
                         # operator projection.
                         effective_route = {
-                            "runtime_path": "strategist_agent",
+                            "runtime_path": "calendar_meeting_prep",
                             "provider": "openrouter",
                             "model": actual_model,
                             "upstream_provider": upstream_provider,

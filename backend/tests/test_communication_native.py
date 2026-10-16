@@ -233,7 +233,7 @@ async def test_actual_original_task_prepares_mail_owner(accounting_db, monkeypat
             from src.work_board.repository import BoardError
             async with sessions() as db:
                 reservations = list((await db.execute(select(InferenceCostReservation))).scalars())
-                paid = [row for row in reservations if row.runtime_path == "strategist_agent"]
+                paid = [row for row in reservations if row.runtime_path == "mail_reply_draft"]
                 assert len(paid) == 1 and paid[0].state == "unknown"
                 assert paid[0].bound_microusd == 25_000
                 child = (await db.execute(select(WorkflowRunState).where(

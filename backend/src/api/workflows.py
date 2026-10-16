@@ -8111,11 +8111,12 @@ def _repo_repair_route_metadata() -> tuple[str | None, str | None]:
 
     try:
         from src.llm_runtime import build_model_kwargs
+        from src.workflows.repo_repair import REPO_REPAIR_RUNTIME_PATH
 
         kwargs = build_model_kwargs(
             temperature=0.2,
             max_tokens=4096,
-            runtime_path="strategist_agent",
+            runtime_path=REPO_REPAIR_RUNTIME_PATH,
         )
         profile = str(kwargs.get("runtime_profile") or "").strip() or None
         base = str(kwargs.get("api_base") or "").strip().rstrip("/")
@@ -8478,7 +8479,7 @@ async def get_repo_repair_source_preview(job_id: str, request: Request):
             status_code=409,
             detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet", "operator_visible": True},
         )
-    from src.workflows.repo_repair import RepoRepairService
+    from src.workflows.repo_repair import REPO_REPAIR_RUNTIME_PATH, RepoRepairService
 
     service = RepoRepairService()
     packet_projection = service._packet_result(packet)
@@ -8522,7 +8523,7 @@ async def get_repo_repair_source_preview(job_id: str, request: Request):
             "revision": int(packet.revision),
         },
         "egress": {
-            "runtime_path": "strategist_agent",
+            "runtime_path": consent.runtime_path if consent is not None else REPO_REPAIR_RUNTIME_PATH,
             "effective_profile_id": consent.effective_profile_id if consent is not None else profile,
             "effective_upstream": consent.effective_upstream if consent is not None else upstream,
             "maximum_input_bytes": 64 * 1024,
@@ -8619,13 +8620,14 @@ async def grant_repo_repair_code_egress_consent(
         from src.llm_runtime import build_model_kwargs
         from src.workflows.repo_repair import (
             REPO_REPAIR_MAX_CONSENT_TTL,
+            REPO_REPAIR_RUNTIME_PATH,
             RepoRepairService,
         )
 
         route = build_model_kwargs(
             temperature=0.2,
             max_tokens=4096,
-            runtime_path="strategist_agent",
+            runtime_path=REPO_REPAIR_RUNTIME_PATH,
             profile=req.expected_profile_id,
         )
         observed_profile = str(route.get("runtime_profile") or "").strip()

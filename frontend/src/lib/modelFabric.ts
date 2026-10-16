@@ -65,7 +65,7 @@ export interface ModelFabricRuntimeStatus {
   profiles: ModelFabricProfileStatus[];
   excluded_profiles: ModelFabricProfileStatus[];
   proofs: ModelFabricProofStatus[];
-  topology: { text: string[]; vlm: string[] };
+  topology: { text: string[]; vlm: string[]; external_content: string[] };
   runtime_paths: Record<string, ModelFabricWorkloadStatus>;
   workloads: Record<string, ModelFabricWorkloadStatus>;
   openrouter_setup?: OpenRouterSetupStatus | null;
@@ -566,6 +566,7 @@ export function normalizeModelFabricRuntime(value: unknown): ModelFabricRuntimeS
     topology: {
       text: stringArray(topology?.text),
       vlm: stringArray(topology?.vlm),
+      external_content: stringArray(topology?.external_content),
     },
     runtime_paths,
     workloads,

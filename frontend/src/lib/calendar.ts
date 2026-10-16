@@ -460,9 +460,10 @@ export function validateCalendarExecution(value: unknown): CalendarExecutionProj
     if (input === null) return null;
     if (!isRecord(input)) return null;
     if (Object.keys(input).sort().join("|") !== ["runtime_path", "provider", "model", "upstream_provider", "profile_id", "admission_digest", "status", "cost_microusd"].sort().join("|")) return null;
-    if (input.runtime_path !== "strategist_agent" || input.provider !== "openrouter") return null;
+    // #1111: results written before the route split carry the legacy strategist_agent id.
+    if ((input.runtime_path !== "calendar_meeting_prep" && input.runtime_path !== "strategist_agent") || input.provider !== "openrouter") return null;
     return {
-      runtime_path: "strategist_agent",
+      runtime_path: input.runtime_path,
       provider: "openrouter",
       model: requiredString(input.model, "effective model", 256),
       upstream_provider: requiredString(input.upstream_provider, "upstream provider", 256),

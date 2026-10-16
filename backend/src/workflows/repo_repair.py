@@ -58,7 +58,7 @@ from src.execution.repo_sandbox import (
 )
 from src.llm_runtime import FallbackLiteLLMModel, build_model_kwargs
 from src.model_fabric import bind_remote_inference_receipt
-from src.model_fabric.caller_context import build_canonical_inference_context
+from src.model_fabric.caller_context import build_canonical_inference_context, route_lineage
 from src.security.trust_contract import TrustPrincipal, canonical_digest
 from src.vault.redaction import redact_secrets_in_text
 from src.work_board.contracts import WorkBoardOwner
@@ -73,7 +73,9 @@ RepoRepairProposal = RepoRepairProposalRow
 
 
 REPO_REPAIR_CAPABILITY = "engineering.repo-repair.v1"
-REPO_REPAIR_RUNTIME_PATH = "strategist_agent"
+# #1111: repository source is external content; rows written before the
+# split carry the legacy ``strategist_agent`` id (see route_lineage).
+REPO_REPAIR_RUNTIME_PATH = "repository_repair"
 REPO_REPAIR_APPROVAL_TOOL = REPO_REPAIR_CAPABILITY
 REPO_REPAIR_APPROVAL_ACTION = "repo_repair.resolve"
 REPO_REPAIR_SCHEMA_VERSION = 1
@@ -1638,7 +1640,7 @@ class RepoRepairService:
                 or consent_row.input_digest != input_row.payload_sha256
                 or consent_row.goal_id != goal_key
                 or int(consent_row.goal_revision) != int(goal_revision)
-                or consent_row.runtime_path != REPO_REPAIR_RUNTIME_PATH
+                or consent_row.runtime_path not in route_lineage(REPO_REPAIR_RUNTIME_PATH)
             ):
                 raise RepoRepairError("egress_consent_authority_invalid", "The source-code egress consent is unavailable or stale", status_code=409)
 
@@ -2356,7 +2358,7 @@ class RepoRepairService:
             intent_route = intent_payload.get("effective_route")
             if (
                 not isinstance(intent_route, Mapping)
-                or str(intent_route.get("runtime_path")) != REPO_REPAIR_RUNTIME_PATH
+                or str(intent_route.get("runtime_path")) not in route_lineage(REPO_REPAIR_RUNTIME_PATH)
                 or str(intent_route.get("profile")) != str(consent.effective_profile_id)
             ):
                 raise RepoRepairError(
@@ -2495,7 +2497,7 @@ class RepoRepairService:
         ):
             raise RepoRepairError("repair_response_checkpoint_conflict", "The repair response checkpoint is bound to different authority", status_code=409)
         route = payload.get("effective_route")
-        if not isinstance(route, Mapping) or str(route.get("runtime_path")) != REPO_REPAIR_RUNTIME_PATH:
+        if not isinstance(route, Mapping) or str(route.get("runtime_path")) not in route_lineage(REPO_REPAIR_RUNTIME_PATH):
             raise RepoRepairError("repair_response_checkpoint_conflict", "The repair response route checkpoint is invalid", status_code=409)
         if str(route.get("profile")) != str(consent.effective_profile_id):
             raise RepoRepairError("model_route_consent_mismatch", "The recovered response route is not consented", status_code=409)
@@ -3801,8 +3803,8 @@ class RepoRepairService:
                 raise RepoRepairError("proposal_not_replayable", "The repair proposal is no longer executable", status_code=409)
             if _utc(row.expires_at) <= now:
                 raise RepoRepairError("proposal_expired", "The repair proposal has expired", status_code=409)
-            if row.model_runtime_path != REPO_REPAIR_RUNTIME_PATH:
-                raise RepoRepairError("proposal_route_invalid", "The repair proposal route is not the registered strategist route", status_code=409)
+            if row.model_runtime_path not in route_lineage(REPO_REPAIR_RUNTIME_PATH):
+                raise RepoRepairError("proposal_route_invalid", "The repair proposal route is not the registered repository repair route", status_code=409)
             authority = await self._resolve_canonical_authority(
                 session,
                 owner=owner,
@@ -3861,7 +3863,7 @@ class RepoRepairService:
                         RepoRepairEgressConsentRow.input_digest == authority.input_digest,
                         RepoRepairEgressConsentRow.goal_id == row.goal_id,
                         RepoRepairEgressConsentRow.goal_revision == int(row.goal_revision),
-                        RepoRepairEgressConsentRow.runtime_path == REPO_REPAIR_RUNTIME_PATH,
+                        RepoRepairEgressConsentRow.runtime_path.in_(sorted(route_lineage(REPO_REPAIR_RUNTIME_PATH))),
                         RepoRepairEgressConsentRow.state == "active",
                     )
                 )

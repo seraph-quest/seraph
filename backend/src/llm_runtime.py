@@ -3658,13 +3658,13 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         self._fallback_model = self._fallback_models[0] if self._fallback_models else None
 
     def prepare_repository_iteration_transport(self, messages, *, response_format, max_tokens):
-        """Prepare the fixed primary strategist body without contacting a provider.
+        """Prepare the fixed primary repository-repair body without contacting a provider.
 
         Preparation grants no dispatch authority. The capability's source
         owner stages and consents these bytes; generate verifies its sealed
         binding against the actual final body before broker admission.
         """
-        if (self._runtime_path != "strategist_agent"
+        if (self._runtime_path != "repository_repair"
                 or str(self.api_base or "").rstrip("/") != "https://openrouter.ai/api/v1"
                 or type(max_tokens) is not int or not 1 <= max_tokens <= 4096):
             raise PermissionError("fixed governed repository strategist route required")
@@ -3678,7 +3678,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             "options": dict(self._seraph_transport_options)}
         reject_legacy_external_agent_model(target["model_id"])
         target_messages = _messages_for_local_target(messages, target=target,
-            runtime_path="strategist_agent", reserved_output_tokens=output_limit)
+            runtime_path="repository_repair", reserved_output_tokens=output_limit)
         body = finalized_openai_compatible_body(
             model_id=_target_transport_model(target),
             messages=[_openai_message_payload(message) for message in target_messages],
@@ -3687,7 +3687,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             additional_fields={"response_format": _transport_json_value(response_format)},
         )
         from src.workflows.repo_repair_source import repository_transport_route_digest
-        return {"body": body, "route_digest": repository_transport_route_digest(target, "strategist_agent")}
+        return {"body": body, "route_digest": repository_transport_route_digest(target, "repository_repair")}
 
     def generate(
         self,

@@ -135,7 +135,7 @@ RUNTIME_FALLBACK_OVERRIDES="mcp_*=openai/gpt-4.1-mini|openai/gpt-4.1-nano;mcp_gi
 PROVIDER_CAPABILITY_OVERRIDES=openai/gpt-4.1-mini=reasoning|tool_use;openai/gpt-4o-mini=fast|cheap
 ```
 
-Current built-in runtime paths include `chat_agent`, `onboarding_agent`, `strategist_agent`, `context_window_summary`, `session_title_generation`, `session_consolidation`, `daily_briefing`, `evening_review`, `activity_digest`, and `weekly_activity_review`.
+Current built-in runtime paths include `chat_agent`, `onboarding_agent`, `strategist_agent`, `context_window_summary`, `session_title_generation`, `session_consolidation`, `daily_briefing`, `evening_review`, `activity_digest`, and `weekly_activity_review`. Callers whose input is external content have their own routes: `mail_reply_draft`, `calendar_meeting_prep`, `guardian_opportunity_assessment` and `repository_repair`. Settings lists them under *external content* in the model topology. They use the OpenRouter text route and the same spend ceiling as the strategist.
 
 ### Optional scheduling settings
 

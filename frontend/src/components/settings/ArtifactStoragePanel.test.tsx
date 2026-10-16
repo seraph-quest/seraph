@@ -388,13 +388,15 @@ describe("ArtifactStoragePanel", () => {
         }));
       }
       if (url.includes("/api/settings/model-fabric")) return Promise.resolve(mockResponse(settingsPayload));
-      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({ provider: "openrouter", model: "fixture/text", model_fabric: { status: "ready", configuration_status: "ready", configuration_error: null, configured_chat_profile: "openrouter.text", profiles: [profile], topology: { text: ["interactive"], vlm: [] }, workloads: {} } }));
+      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({ provider: "openrouter", model: "fixture/text", model_fabric: { status: "ready", configuration_status: "ready", configuration_error: null, configured_chat_profile: "openrouter.text", profiles: [profile], topology: { text: ["chat_agent", "mail_reply_draft", "repository_repair"], vlm: [], external_content: ["mail_reply_draft", "repository_repair"] }, workloads: {} } }));
       return Promise.reject(new Error(`unexpected ${url}`));
     });
 
     render(<ArtifactStoragePanel />);
     const prove = await screen.findByRole("button", { name: "Prove route" });
     expect(screen.getByText(/Each canary is one real, billed OpenRouter call/)).toBeInTheDocument();
+    // #1111: Settings names the routes whose input is external content.
+    expect(await screen.findByText("text: chat_agent, mail_reply_draft, repository_repair · VLM: none · external content: mail_reply_draft, repository_repair")).toBeInTheDocument();
     await waitFor(() => expect(prove).toBeEnabled());
     expect(screen.getByRole("option", { name: "24 hours" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Proof lifetime"), { target: { value: "86400" } });

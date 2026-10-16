@@ -66,7 +66,7 @@ function sourcePreviewPayload(text = "VALUE = 1", overrides: Record<string, unkn
     status: "paused",
     recovery_action: "review_code_egress",
     source_packet: { ...packet, selected_files: [{ path: "src/app.py", size_bytes: text.length, sha256: "1".repeat(64), text }], omissions: [] },
-    egress: { runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
+    egress: { runtime_path: "repository_repair", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
     provider_contacted: false,
     operator_visible: true,
     ...overrides,
@@ -568,6 +568,24 @@ describe("RepoRepairInspector", () => {
     await waitFor(() => expect(screen.getByText(/did not match the current owner-bound packet/i)).toBeInTheDocument());
     expect(screen.queryByText("VALUE = 1")).not.toBeInTheDocument();
   });
+
+  it.each([["repository_repair", true], ["strategist_agent", true], ["chat_agent", false]] as const)(
+    "validates the private source preview route %s (legacy strategist_agent stays readable)", async (route, accepted) => {
+      const fetchMock = vi.mocked(fetch);
+      const base = sourcePreviewPayload();
+      fetchMock
+        .mockResolvedValueOnce(response(projection()))
+        .mockResolvedValueOnce(response(sourcePreviewPayload("VALUE = 1", { egress: { ...base.egress, runtime_path: route } })));
+      render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
+      await screen.findByText(/Private source stays local/);
+      fireEvent.click(screen.getByRole("button", { name: "Inspect selected source" }));
+      if (accepted) {
+        expect(await screen.findByText("VALUE = 1")).toBeInTheDocument();
+      } else {
+        await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/did not match the current owner-bound packet/i));
+        expect(screen.queryByText("VALUE = 1")).not.toBeInTheDocument();
+      }
+    });
 
   it("rejects a private source preview with a missing egress object", async () => {
     const fetchMock = vi.mocked(fetch);

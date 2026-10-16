@@ -23,6 +23,8 @@ from src.work_board.contracts import (TaskProposalGroupV1,
 
 _SEAL = object()
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+# #1111: the registered repository route, shared with repo_repair.REPO_REPAIR_RUNTIME_PATH.
+_RUNTIME_PATH = "repository_repair"
 _task_publication = ContextVar("repository_task_publication", default=None)
 _startup_fence = ContextVar("repository_startup_fence", default=None)
 _UNCERTAINTY_COLUMNS = frozenset({"status", "failure_reason", "finished_at", "lease_owner",
@@ -570,11 +572,11 @@ def _repository_policy_limits():
     from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
     from src.model_fabric.caller_context import canonical_route_spec
     from src.workflows.job_runtime import DurableJobLeaseError
-    configured, digest = _policy_for_runtime("strategist_agent")
+    configured, digest = _policy_for_runtime(_RUNTIME_PATH)
     setup = configured.openrouter_setup
     bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
     if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
-        slot = route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class)
+        slot = route_slot_for_task_class(canonical_route_spec(_RUNTIME_PATH).task_class)
         route = (setup.routes or {}).get(slot)
         if slot != "text" or route is None or not route.enabled:
             raise DurableJobLeaseError("original repository text route unavailable")
@@ -1429,7 +1431,7 @@ async def _prepare_repository_iteration(service, jobs, *, job_id, owner, iterati
             stdout, stderr = prior_diagnostics["stdout"], prior_diagnostics["stderr"]
         candidate = await service.prepare_iteration_egress(iteration_id=iteration,
             source_payload=packet_payload, stdout=stdout, stderr=stderr)
-        kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path="strategist_agent")
+        kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path=_RUNTIME_PATH)
         model = service.model_factory(**kwargs)
         response_format = {"type": "json_schema", "json_schema": {
             "name": "seraph_repo_repair_proposal", "strict": True,
@@ -1729,7 +1731,7 @@ async def repository_source_preview(service, jobs, *, job_id, owner):
         async with jobs._session() as db:
             remaining = await _repository_remaining(db, context)
         from src.llm_runtime import build_model_kwargs
-        kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path="strategist_agent")
+        kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path=_RUNTIME_PATH)
         return {"job_id": job_id, "status": context["run"].status, "revision": context["run"].revision,
             "recovery_action": "review_code_egress" if projection["contact_state"] == "not_started" else "refresh_repair_status",
             "repository_review": {key: value for key, value in projection.items() if key not in
@@ -1739,7 +1741,7 @@ async def repository_source_preview(service, jobs, *, job_id, owner):
                 "source_manifest_sha256": prepared["source_manifest_digest"],
                 "artifact_sha256": prepared["source_packet_artifact_digest"],
                 "selected_files": envelope["source_packet"]["files"], "omissions": []},
-            "egress": {"runtime_path": "strategist_agent", "effective_profile_id": kwargs.get("runtime_profile"),
+            "egress": {"runtime_path": _RUNTIME_PATH, "effective_profile_id": kwargs.get("runtime_profile"),
                 "effective_upstream": "openrouter", "maximum_input_bytes": 65536, "maximum_output_tokens": 4096,
                 "request_body": body, "request_body_digest": prepared["request_body_digest"],
                 "request_route_digest": prepared["request_route_digest"],
@@ -2014,7 +2016,7 @@ async def grant_repository_iteration_consent(service, jobs, *, job_id, owner, re
             expected_digest=prepared["egress_envelope_digest"]))
         candidate = await source.prepare_iteration_egress(iteration_id=prepared["iteration_id"],
             source_payload=envelope["source_packet"], stdout=envelope["diagnostics"]["stdout"], stderr=envelope["diagnostics"]["stderr"])
-        kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path="strategist_agent")
+        kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path=_RUNTIME_PATH)
         model = source.model_factory(**kwargs)
         finalized = source.finalize_iteration_egress(candidate, model=model, response_format=body["response_format"])
         import asyncio
@@ -2052,7 +2054,7 @@ async def grant_repository_iteration_consent(service, jobs, *, job_id, owner, re
                 workflow_run_id=job_id, source_packet_id=prepared["source_packet_id"],
                 source_digest=prepared["source_manifest_digest"], source_manifest_digest=prepared["source_manifest_digest"],
                 goal_id=run.goal_id, goal_revision=run.goal_revision, input_digest=run.input_digest,
-                effective_profile_id=request.expected_profile_id, effective_upstream="openrouter", runtime_path="strategist_agent",
+                effective_profile_id=request.expected_profile_id, effective_upstream="openrouter", runtime_path=_RUNTIME_PATH,
                 iteration_id=prepared["iteration_id"], egress_envelope_schema="seraph.repo_iteration_egress.v1",
                 egress_envelope_artifact_ref=prepared["egress_envelope_artifact_ref"], egress_envelope_sha256=prepared["egress_envelope_digest"],
                 diagnostics_sha256=prepared["diagnostics_digest"], redaction_version=prepared["redaction_version"],
@@ -2168,9 +2170,9 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
             _request_body_digest=prepared["request_body_digest"], _request_route_digest=prepared["request_route_digest"],
             _canonical_source=canonical, _seal=_SEAL)
     model = service.model_factory(**build_model_kwargs(temperature=0.2, max_tokens=4096,
-        runtime_path="strategist_agent"))
+        runtime_path=_RUNTIME_PATH))
     scoped_principal = replace(principal, job_id=ticket.job_id)
-    inference_context = build_canonical_inference_context("strategist_agent", payload=body["messages"],
+    inference_context = build_canonical_inference_context(_RUNTIME_PATH, payload=body["messages"],
         output_tokens=4096, timeout_seconds=min(120.0, phase_timeout), principal=scoped_principal,
         session_id=scoped_principal.session_id, job_id=ticket.job_id,
         transformation_digest=_source_digest({"preparation": prepared["preparation_digest"], "consent": ticket.consent_id}),
@@ -2248,7 +2250,7 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
             goal_id=run.goal_id, goal_revision=run.goal_revision,
             repository_ref=context["work"].repository_ref,
             base_snapshot_digest=output.base_snapshot_sha256, source_packet_id=prepared["source_packet_id"],
-            source_digest=prepared["source_manifest_digest"], model_runtime_path="strategist_agent",
+            source_digest=prepared["source_manifest_digest"], model_runtime_path=_RUNTIME_PATH,
             model_profile_id=cost.profile_id, model_request_digest=prepared["request_body_digest"],
             model_output_digest=response_digest, model_response_artifact_id=response_ref.removeprefix("workspace-json:"),
             model_response_artifact_sha256=response_digest, patch_artifact_id=patch_ref.removeprefix("workspace-json:"),
@@ -4521,7 +4523,7 @@ def verify_repository_iteration_transport_body(body, *, target, runtime_path) ->
     if witness is None:
         return
     assert_repository_iteration_witness(witness)
-    if (runtime_path != "strategist_agent" or target.get("source") != "primary"
+    if (runtime_path != _RUNTIME_PATH or target.get("source") != "primary"
             or str(target.get("api_base") or "").rstrip("/") != "https://openrouter.ai/api/v1"
             or witness._request_body_digest is None or witness._request_route_digest is None
             or canonical_digest(body) != witness._request_body_digest

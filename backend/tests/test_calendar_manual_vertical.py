@@ -47,6 +47,7 @@ from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
+from tests.test_external_content_routes_1111 import assert_split_route_receipt
 
 
 def _provider_event() -> dict[str, object]:
@@ -353,8 +354,11 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
     }
     model_calls: list[dict[str, object]] = []
 
+    model_contexts: list[object] = []
+
     def governed_transport(**kwargs):
         model_calls.append(dict(kwargs["body"]))
+        model_contexts.append(kwargs["context"])
         message = SimpleNamespace(role="assistant", content=json.dumps(model_output))
         response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
         return response, {"usage": {"cost": "0.0000101"}, "choices": [{"message": {"role": "assistant", "content": json.dumps(model_output)}}]}
@@ -469,7 +473,8 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
         "status",
         "cost_microusd",
     }
-    assert effective_route["runtime_path"] == "strategist_agent"
+    assert effective_route["runtime_path"] == "calendar_meeting_prep"
+    await assert_split_route_receipt("calendar_meeting_prep", model_contexts)
     assert effective_route["provider"] == "openrouter"
     assert effective_route["status"] == "succeeded"
     assert effective_route["profile_id"]

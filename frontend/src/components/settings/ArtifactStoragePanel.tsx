@@ -1294,7 +1294,7 @@ export function ArtifactStoragePanel() {
                 label="Topology"
                 value={
                   modelFabricRuntime
-                    ? `text: ${modelFabricRuntime.topology.text.join(", ") || "none"} · VLM: ${modelFabricRuntime.topology.vlm.join(", ") || "none"}`
+                    ? `text: ${modelFabricRuntime.topology.text.join(", ") || "none"} · VLM: ${modelFabricRuntime.topology.vlm.join(", ") || "none"}${modelFabricRuntime.topology.external_content.length ? ` · external content: ${modelFabricRuntime.topology.external_content.join(", ")}` : ""}`
                     : "text and screenshot VLM route receipts unavailable"
                 }
                 tone={modelFabricRuntime ? "good" : "normal"}

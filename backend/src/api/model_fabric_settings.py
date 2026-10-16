@@ -1444,6 +1444,11 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
                 path for path, spec in CANONICAL_ROUTE_SPECS.items()
                 if spec.workload is InferenceWorkload.VISION
             ],
+            # #1111: routes whose input is external, untrusted content.
+            "external_content": [
+                path for path, spec in CANONICAL_ROUTE_SPECS.items()
+                if spec.origin is ContentOrigin.EXTERNAL_UNTRUSTED
+            ],
         },
         "runtime_paths": runtime_paths,
         "workloads": workloads,

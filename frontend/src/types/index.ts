@@ -1674,7 +1674,8 @@ export interface CalendarReadReceipt {
 }
 
 export interface CalendarEffectiveRoute {
-  runtime_path: "strategist_agent";
+  /** strategist_agent only on results written before the #1111 route split. */
+  runtime_path: "calendar_meeting_prep" | "strategist_agent";
   provider: "openrouter";
   model: string;
   upstream_provider: string;

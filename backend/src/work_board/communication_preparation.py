@@ -575,7 +575,7 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
     from src.work_board.repository import stage_safe_task_text
     from src.model_fabric.configuration import (openrouter_policy_for_setup,
         OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class)
-    from src.model_fabric.caller_context import canonical_route_spec
+    from src.model_fabric.caller_context import COMMUNICATION_ROUTE_BY_CAPABILITY, canonical_route_spec
     from src.model_fabric.effective_policy import current_inference_policy
     from src.workflows.mail_reply_draft import reply_job_id
     from src.integrations.google_calendar import calendar_job_id
@@ -593,8 +593,9 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
         setup = configured.openrouter_setup
         if setup is None or configured.status != "ready" or configured.egress_revoked:
             raise BoardError("communication_source_budget_unavailable", "Review source inference policy", status_code=409)
-        policy = openrouter_policy_for_setup(setup, "strategist_agent")
-        route = ((setup.routes or {}).get(route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class))
+        runtime_path = COMMUNICATION_ROUTE_BY_CAPABILITY[capability]
+        policy = openrouter_policy_for_setup(setup, runtime_path)
+        route = ((setup.routes or {}).get(route_slot_for_task_class(canonical_route_spec(runtime_path).task_class))
             if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup)
         if route is None or getattr(route, "enabled", True) is not True:
             raise BoardError("communication_source_budget_unavailable", "Current source route required", status_code=409)

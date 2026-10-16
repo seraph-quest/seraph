@@ -525,14 +525,19 @@ class InferenceAccountingRepositoryMixin:
                             and row.state in {"reserved", "contact_started", "unknown"} for row in rows):
                             raise InferenceAccountingError("near_owner_outstanding_limit")
                     if prior is not None:
+                        from src.model_fabric.caller_context import route_lineage
                         if (prior.state == "reserved" and prior.recovery_reason == "typed_owner_precontact_resume"
                             and prior.job_id == job_id and prior.owner_id == owner_id and prior.payload_digest == payload_digest
-                            and prior.policy_digest == policy_digest and prior.runtime_path == runtime_path and prior.profile_id == profile_id
+                            and prior.policy_digest == policy_digest and prior.runtime_path in route_lineage(runtime_path) and prior.profile_id == profile_id
                             and prior.bound_microusd == bound and _utc(prior.deadline_at) > observed):
                             from src.workflows.general_task_accounting import entry_for, validate_recovered_entry
                             if entry_for(prior) is not None or general_task_binding is not None:
                                 await validate_recovered_entry(db, run, prior, rows, general_task_binding,
                                     runtime_path=runtime_path)
+                            # #1111: a never-contacted row reserved under the legacy
+                            # route id resumes on the same ledger row and owner under
+                            # its split route, so its receipt states the real origin.
+                            prior.runtime_path = runtime_path
                             prior.job_fencing_token = fencing_token
                             prior.recovery_reason = None
                             prior.revision += 1

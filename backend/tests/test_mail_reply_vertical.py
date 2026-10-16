@@ -47,6 +47,7 @@ from src.work_board.dispatcher import WorkBoardDispatcher
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
+from tests.test_external_content_routes_1111 import assert_split_route_receipt
 
 
 OWNER = "operator:single"
@@ -381,8 +382,11 @@ async def test_mail_reply_dispatches_two_reads_one_model_private_readback(accoun
         "caveats": ["Review before sending."],
     }
 
+    model_contexts: list[object] = []
+
     def governed_transport(**kwargs):
         model_calls.append(dict(kwargs["body"]))
+        model_contexts.append(kwargs["context"])
         content = json.dumps(output, separators=(",", ":"))
         message = SimpleNamespace(role="assistant", content=content)
         return SimpleNamespace(choices=[SimpleNamespace(message=message)]), {"choices": [{"message": {"role": "assistant", "content": content}}], "usage": {"cost": "0.000002"}}
@@ -395,6 +399,7 @@ async def test_mail_reply_dispatches_two_reads_one_model_private_readback(accoun
     assert result["completed"] is True, result
     assert FakeAdapter.reads == 2
     assert len(model_calls) == 1
+    await assert_split_route_receipt("mail_reply_draft", model_contexts)
 
     async with async_db() as db:
         task = await repository.get_task(db, owner, created["task_id"])

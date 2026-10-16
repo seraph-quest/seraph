@@ -407,11 +407,16 @@ class DurableInferenceBrokerMixin:
             request = replace(request, estimated_cost_microusd=bound)
             task_binding = _task_group.get()
             repository_witness = current_repository_iteration_accounting_witness()
-            expected_task_route = ("strategist_agent" if repository_witness is not None
-                or (task_binding is not None and task_binding.get("role") == "communication_preparation")
-                else "general_task_planner")
-            if task_binding is not None and request.runtime_path != expected_task_route:
-                raise InferenceAccountingError("general_task_group_runtime_invalid")
+            if task_binding is not None:
+                from .caller_context import general_task_group_route
+                try:
+                    expected_task_route = general_task_group_route(
+                        "repository_iteration" if repository_witness is not None else str(task_binding.get("role")),
+                        task_binding.get("preparation_binding"))
+                except ValueError:
+                    raise InferenceAccountingError("general_task_group_runtime_invalid") from None
+                if request.runtime_path != expected_task_route:
+                    raise InferenceAccountingError("general_task_group_runtime_invalid")
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
             if repository_witness is not None and (ephemeral

@@ -89,3 +89,59 @@ async def test_settings_save_refuses_a_tampered_touched_account(accounting_db, m
     _sql(root, "UPDATE inference_accounting_owners SET ceiling_microusd = 999999")
     with pytest.raises(InferenceAccountingError, match="accounting_continuity_unavailable"):
         await repository.configure_inference_accounting(2000)
+
+
+# --- #1098 review P3: the programme budget reads sealed row evidence --------
+
+def _programme(job_id, programme_id="programme-1"):
+    from types import SimpleNamespace
+    from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE, discovery_authority
+    binding = {"goal_id": "goal-1", "goal_revision": 1, "programme_id": programme_id, "grant_revision": 1,
+        "owner_identity_id": "identity-1", "issuer_root_id": "root-1", "issuer_principal_id": "user:issuer",
+        "brief_digest": "b" * 64, "capability_id": "guardian.goal-discovery.v1", "route_epoch": 1,
+        "route_digest": "r" * 64, "expires_at": "2026-12-01T00:00:00Z", "cost_ceiling_microusd": 100}
+    authority = {"authority_type": "goal_programme_discovery_v1", "principal": DISCOVERY_SERVICE,
+        "owner_kind": "service", "service_id": DISCOVERY_SERVICE, "capability_id": "guardian.goal-discovery.v1",
+        "capability_version": "1", "goal_owner_principal_id": "user:issuer", "goal_owner_session_id": "root-1",
+        "programme_binding": binding, "plan_ref": {"artifact_id": "plan-1", "digest": "c" * 64, "schema_version": 1},
+        "occurrence_day": "2026-10-16", "original_job_id": job_id, "budget_microusd": 100, "no_learning": True}
+    run = SimpleNamespace(run_identity=job_id, job_kind=DISCOVERY_KIND, declared_authority_json=json.dumps(authority))
+    sealed = discovery_authority(run.declared_authority_json).programme_binding.model_dump(mode="json")
+    row = SimpleNamespace(operation_id=f"remote:{job_id}:0", job_id=job_id, owner_id=DISCOVERY_SERVICE,
+        goal_id="goal-1", goal_revision=1, state="reserved", bound_microusd=60, actual_cost_microusd=None,
+        evidence_json=json.dumps([{"kind": "reservation"}, {"kind": "goal_programme_binding",
+            "binding": sealed, "native_job_id": job_id}]))
+    return run, row
+
+
+class _Runs:
+    def __init__(self, runs):
+        self.runs = runs
+
+    async def execute(self, _query):
+        from types import SimpleNamespace
+        return SimpleNamespace(scalars=lambda: list(self.runs))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", [None, "job_kind", "programme_id"])
+async def test_programme_budget_counts_a_prior_row_whatever_its_run_row_says(monkeypatch, tamper):
+    """An edit to the prior run (unsealed) must not drop its cost from the budget."""
+    from src.workflows import research_accounting, research_guard
+
+    async def no_authority_check(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(research_guard, "assert_discovery_authority", no_authority_check)
+    prior_run, prior_row = _programme("goal-discovery:" + "1" * 32)
+    current, _row = _programme("goal-discovery:" + "2" * 32)
+    if tamper == "job_kind":
+        prior_run.job_kind = "goal_discovery_planning_v1"
+    elif tamper == "programme_id":
+        prior_run.declared_authority_json = _programme(prior_run.run_identity, "programme-elsewhere")[0].declared_authority_json
+    db = _Runs([prior_run, current])
+    if tamper is None:
+        with pytest.raises(InferenceAccountingError, match="programme_generation_cost_budget_exhausted"):
+            await research_accounting.discovery_generation_budget(None, db, current, [prior_row], new_bound=60)
+        return
+    with pytest.raises(InferenceAccountingError, match="programme_cost_original_lineage_changed"):
+        await research_accounting.discovery_generation_budget(None, db, current, [prior_row], new_bound=60)

@@ -24,8 +24,17 @@ the totals for its scope (per group key, discovery-service rows), the open set
 read by recovery and research cancel must sum to the sealed open liabilities
 per state, and the near-text outstanding check reads its sealed per-owner count
 instead of a query, so a row hidden by editing an untouched row's columns is
-refused rather than under-counted. A content edit to a row no operation reads is caught at
-the next full verification and cannot change any admission decision.
+refused rather than under-counted. The programme budget takes each row's
+programme from its digest-covered evidence, not the unsealed run row. A content
+edit to a row no operation reads is caught at the next full verification and
+cannot change any admission decision.
+
+Accepted residual: consumer reads outside the accounting writer path
+(guardian opportunity runtime, research snapshot and coordinator close-out,
+repository source recovery) read reservations without digest checks. They
+classify job or display state only and never admit spend or free capacity; a
+row hidden from them stays held in the sealed totals and is caught at the next
+full verification.
 """
 
 from __future__ import annotations

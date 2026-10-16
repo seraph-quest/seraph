@@ -206,6 +206,23 @@ async def discovery_accounting_scope(jobs, *, job_id=None, operation_id=None):
         yield policy
 
 
+def _sealed_programme_binding(row):
+    """The programme binding a reservation recorded at admission, if any.
+
+    Evidence is in the row digest, so this survives edits to the run row.
+    """
+    try:
+        entries = [entry for entry in json.loads(row.evidence_json or "[]")
+            if isinstance(entry, dict) and entry.get("kind") == "goal_programme_binding"]
+    except (TypeError, ValueError) as exc:
+        raise InferenceAccountingError("programme_cost_original_lineage_changed") from exc
+    if not entries:
+        return None
+    if len(entries) != 1:
+        raise InferenceAccountingError("programme_cost_original_lineage_changed")
+    return {"binding": entries[0].get("binding"), "native_job_id": entries[0].get("native_job_id")}
+
+
 async def discovery_generation_budget(jobs, db, run, rows, *, new_bound=0, operation_id=None, payload_digest=None):
     """All-period generation spend and liabilities in the sole cost writer."""
     from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_SERVICE, discovery_authority
@@ -236,13 +253,22 @@ async def discovery_generation_budget(jobs, db, run, rows, *, new_bound=0, opera
     used = 0
     for row in rows:
         parent = parents.get(row.job_id)
+        # Membership comes from the row's digest-covered programme evidence,
+        # not only the run row's unsealed job kind and authority (#1095): a
+        # run edit can make the two disagree (refused), never hide a row.
+        sealed = _sealed_programme_binding(row)
         if parent is None:
-            if row.owner_id == DISCOVERY_SERVICE:
+            if row.owner_id == DISCOVERY_SERVICE or sealed is not None:
                 raise InferenceAccountingError("programme_cost_original_job_missing")
             continue
-        if parent.job_kind != DISCOVERY_KIND:
+        joined = discovery_authority(parent.declared_authority_json).programme_binding \
+            if parent.job_kind == DISCOVERY_KIND else None
+        if sealed is not None and (joined is None or sealed != {"binding": joined.model_dump(mode="json"),
+                                                                 "native_job_id": parent.run_identity}):
+            raise InferenceAccountingError("programme_cost_original_lineage_changed")
+        if joined is None:
             continue
-        original = discovery_authority(parent.declared_authority_json).programme_binding
+        original = joined
         if original.programme_id != binding.programme_id or original.owner_identity_id != binding.owner_identity_id:
             continue
         if original != binding:

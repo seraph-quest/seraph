@@ -198,8 +198,12 @@ _NEAR_TEXT_RUNTIME = "near_text_native"
 def evidence_group_key(evidence_json):
     """The private lookup key a valid row's group evidence classifies to.
 
-    Dependency-free and deliberately lenient: full verification separately
-    rejects malformed evidence and any stored key that disagrees with it.
+    Dependency-free and deliberately lenient (None unless there is exactly one
+    well-formed group entry). It is sound only because full verification
+    enforces ``assert_group_lookup`` (src/workflows/inference_group_lookup.py)
+    on every row: malformed or duplicate group evidence and any stored key that
+    disagrees with its evidence are refused there, so a row this classifies as
+    ungrouped really has no group.
     """
     try:
         entries = json.loads(evidence_json or "[]")

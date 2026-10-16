@@ -1536,7 +1536,13 @@ saves, denial quiescence, research funding/rebind/cancel, research readback)
 use the same bounded verification as the hot writers: they read rows by id or
 read exactly the open reservations, whose per-state bound sums must equal the
 sealed open liabilities, so an open row hidden by a state edit is refused, not
-skipped. The scoped reads cannot be emptied either: a general-task group read
+skipped. The discovery programme budget takes each row's programme from its
+digest-covered admission evidence, so an edit to the unsealed run row is refused
+rather than dropping that row's cost. Consumer reads outside the accounting
+writer path (opportunity runtime, research snapshot and close-out, repository
+source recovery) only classify job or display state; they are not
+digest-checked, never admit spend, and a row hidden from them stays held in the
+sealed totals until full verification. The scoped reads cannot be emptied either: a general-task group read
 must return exactly the sealed member count for that group, a discovery
 programme read the sealed count of discovery-service rows, and the near-text
 outstanding check reads a sealed per-owner count, so hiding a row by editing its

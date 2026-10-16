@@ -29,7 +29,7 @@ def _callback_budget(native_binding: Any) -> int:
 
 NODE_REASONS = frozenset({"node_missing", "node_unavailable", "node_unsupported"})
 BUILD_REASONS = frozenset({"runtime_package_missing", "runtime_build_stale", "build_receipt_invalid",
-                           "runtime_package_invalid_or_missing", "build_dependencies_missing", "package_pin_mismatch"})
+                           "runtime_package_invalid_or_missing", "package_pin_mismatch"})
 
 
 def cordis_recovery(state: str, reason: str | None) -> str | None:
@@ -39,9 +39,11 @@ def cordis_recovery(state: str, reason: str | None) -> str | None:
     if reason in NODE_REASONS:
         return ("Install Node 22.12+ or 24.x and set CORDIS_NODE_PATH to it (or put it first on PATH), "
                 "then run ./manage.sh -e dev cordis build and restart with ./manage.sh -e dev local up.")
+    if reason == "build_dependencies_missing":
+        return ("Run npm ci --prefix runtime/cordis --ignore-scripts (Node 24.13.1, npm 11.8.0), then restart with "
+                "./manage.sh -e dev local up, which builds the package.")
     if reason in BUILD_REASONS:
-        return ("Run ./manage.sh -e dev cordis build (installs the locked runtime/cordis dependencies with npm ci "
-                "when missing), then restart with ./manage.sh -e dev local up.")
+        return "Run ./manage.sh -e dev cordis build, then restart with ./manage.sh -e dev local up."
     if state == "cleanup_unknown":
         return "Reconcile the unknown Cordis cleanup, then restart with ./manage.sh -e dev local up."
     return "Restart with ./manage.sh -e dev local up; if it stays blocked run ./manage.sh -e dev cordis probe."

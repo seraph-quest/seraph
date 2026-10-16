@@ -9,6 +9,9 @@ services:
     build:
       context: ./backend
       dockerfile: ./Dockerfile
+      # Resolved relative to this Compose file (verified with `docker compose config`).
+      additional_contexts:
+        cordis: ./runtime/cordis
     volumes:
       - ./backend/src:/app/src
       - ./backend/config:/app/config

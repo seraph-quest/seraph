@@ -637,14 +637,18 @@ result records `no_learning`. **Inspect discovery runs** adds `research_runtime`
 Discovery therefore requires the Cordis host. The backend lifespan starts it
 with `CORDIS_NODE_PATH` when set, otherwise the `node` on PATH (Node 22.12+ or
 24.x). `./manage.sh -e dev local up|run` first runs a keyless preflight with the
-same Node: when the package is missing or stale it runs `cordis build`, which
-installs locked dependencies with `npm ci --ignore-scripts` (npm 11.8.0) only
-when they are absent; otherwise it prints the blocked reason and the exact fix
-while core startup continues. Runtime status (Settings → Cordis runtime host)
+same Node: when the package is missing or stale it runs `cordis build`; like the
+frontend it never installs dependencies, so a fresh checkout first runs
+`npm ci --prefix runtime/cordis --ignore-scripts`. Otherwise it prints the
+blocked reason (`build_dependencies_missing`, `node_unsupported`, ...) and the
+exact fix while core startup continues. Runtime status (Settings → Cordis runtime host)
 and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
-and set `CORDIS_NODE_PATH`, or run `./manage.sh -e dev cordis build`, then
-restart. The backend container image does not yet contain Node or
-`runtime/cordis`, so containerized deployments show discovery as blocked.
+and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
+`./manage.sh -e dev cordis build`, then restart. The backend container image
+builds `runtime/cordis` in a pinned `node:24.13.1-bookworm-slim` stage (Compose
+`additional_contexts`, npm 11.8.0, `npm ci --ignore-scripts`, `npm run build`)
+and copies that Node binary and the built package to `/runtime/cordis`, the
+path the backend resolves.
 
 Raw public sources up to the plan's `max_source_bytes` (256 KiB) cross to Cordis
 as one staged envelope read in bounded 64 KiB `artifacts.read` chunks at UTF-8

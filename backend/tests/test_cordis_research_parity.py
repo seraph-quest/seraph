@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import random
 import re
 import subprocess
@@ -105,3 +106,18 @@ async def test_unavailable_host_names_the_exact_fix_in_runtime_status_and_discov
     from src.runtime_plugins.bridge import cordis_recovery
     assert "./manage.sh -e dev cordis build" in cordis_recovery("blocked", "runtime_build_stale")
     assert cordis_recovery("ready", None) is None
+
+
+@needs_cordis
+def test_uninstalled_dependencies_are_named_with_their_install_fix(tmp_path):
+    import shutil
+    from src.runtime_plugins.bridge import cordis_recovery
+    from src.runtime_plugins.composition import PACKAGE_FILES, CompositionBlocked, reviewed_composition
+    root = (tmp_path / "cordis").resolve()
+    for name in PACKAGE_FILES:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PACKAGE / name, root / name)
+    with pytest.raises(CompositionBlocked) as missing:
+        reviewed_composition(root=root, node_path=Path(NODE))
+    assert missing.value.reason == "build_dependencies_missing"
+    assert "npm ci --prefix runtime/cordis --ignore-scripts" in cordis_recovery("blocked", missing.value.reason)

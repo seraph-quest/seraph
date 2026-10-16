@@ -262,6 +262,9 @@ def reviewed_composition(*, node_path: Path | None = None, root: Path = PACKAGE_
             if path.resolve(strict=True) != path:
                 raise CompositionBlocked("unreviewed_runtime_path")
             _trusted_file(path)
+        if not (root / "node_modules/cordis/package.json").is_file():
+            # Locked dependencies were never installed (npm ci from the lockfile).
+            raise CompositionBlocked("build_dependencies_missing")
         profile = validate_profile(decode_json((root / "profile.json").read_bytes()))
         manifest = decode_json((root / "package.json").read_bytes())
         lock = decode_json((root / "package-lock.json").read_bytes())

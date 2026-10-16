@@ -75,7 +75,7 @@ function display_help() {
     echo "  logs    Follow log output (e.g., 'logs -f backend')."
     echo "  build   Build or rebuild services."
     echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
-    echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. build runs npm ci from the lockfile only when dependencies are missing."
+    echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. No dependency installation."
     echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
@@ -761,8 +761,8 @@ function cordis_cli() {
 # Goal discovery plans and extracts only through the reviewed Cordis host (#1008).
 # Node is CORDIS_NODE_PATH from the env file when set, else `node` on PATH; the
 # backend starts the host with the same Node. This preflight runs the reviewed
-# build when the package is missing or stale (installing locked dependencies with
-# `npm ci` only when absent). Core startup continues either way: an unavailable
+# build when the package is missing or stale; like the frontend, it never
+# installs dependencies. Core startup continues either way: an unavailable
 # runtime stays an operator-visible block with its fix, never a Python fallback.
 function prepare_local_cordis() {
     local status reason node_args=()
@@ -775,7 +775,7 @@ function prepare_local_cordis() {
     fi
     reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
     case "$reason" in
-        node_missing|node_unavailable|node_unsupported) ;;
+        node_missing|node_unavailable|node_unsupported|build_dependencies_missing) ;;
         *)
             echo "Building the reviewed Cordis research runtime ($reason) ..."
             if cordis_cli build "${node_args[@]}" >>"$LOCAL_BACKEND_LOG_FILE" 2>&1 \
@@ -791,6 +791,8 @@ function prepare_local_cordis() {
     case "$reason" in
         node_missing|node_unavailable|node_unsupported)
             echo "  Fix: install Node 22.12+ or 24.x and set CORDIS_NODE_PATH in $ENV_FILE (or put it first on PATH), then rerun." >&2 ;;
+        build_dependencies_missing)
+            echo "  Fix: npm ci --prefix runtime/cordis --ignore-scripts (Node 24.13.1, npm 11.8.0), then rerun; this run builds it." >&2 ;;
         *)
             echo "  Fix: run ./manage.sh -e $ENV cordis build (see $LOCAL_BACKEND_LOG_FILE), then rerun." >&2 ;;
     esac

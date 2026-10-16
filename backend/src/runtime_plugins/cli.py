@@ -70,15 +70,9 @@ def build(node_path: Path | None) -> int:
     try:
         node, _ = reviewed_node(node_path)
         npm = reviewed_npm(node)
-        # Missing dependencies are installed only from the pinned lockfile
-        # (`npm ci`, no lifecycle scripts); operator npm configuration is never read.
+        # Build never installs dependencies or reads operator npm configuration.
         if not (PACKAGE_ROOT / "node_modules/typescript/bin/tsc").is_file():
-            _check_npm_configuration()
-            installed = subprocess.run([str(node), str(npm), "--prefix", str(PACKAGE_ROOT), "ci", "--ignore-scripts",
-                                        "--no-audit", "--no-fund"], cwd=PACKAGE_ROOT, env=_npm_env(node),
-                                       close_fds=True, timeout=300)
-            if installed.returncode or not (PACKAGE_ROOT / "node_modules/typescript/bin/tsc").is_file():
-                raise CompositionBlocked("build_dependencies_missing")
+            raise CompositionBlocked("build_dependencies_missing")
         _check_npm_configuration()
         result = subprocess.run([str(node), str(npm), "--prefix", str(PACKAGE_ROOT), "run", "build"], cwd=PACKAGE_ROOT,
                                 env=_npm_env(node), close_fds=True, timeout=60)

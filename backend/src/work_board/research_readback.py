@@ -169,13 +169,11 @@ async def original_group_binds(db, run, *, typed_inputs):
             or row.deadline_at is None or row.deadline_at.replace(tzinfo=timezone.utc) > run.deadline_at.replace(tzinfo=timezone.utc)):
             raise ValueError("research original child identity changed")
     jobs = DurableJobRepository()
-    account, costs = await jobs._accounting_rows(db)
+    call_ids = ["remote:"+child for child in creation["child_ids"]]
     try:
-        with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-            jobs._assert_accounting_continuity(workspace, account, costs)
+        group = await _verified_group_costs(jobs, db, creation["child_ids"], call_ids)
     except InferenceAccountingError as exc:
         raise ValueError("research original accounting proof unavailable") from exc
-    group = [cost for cost in costs if cost.job_id in creation["child_ids"]]
     if group:
         call_ids = ["remote:"+child for child in creation["child_ids"]]
         if len(group) != len(call_ids):
@@ -197,6 +195,27 @@ async def original_group_binds(db, run, *, typed_inputs):
                     for item in evidence)):
                 raise ValueError("research original accounting provenance changed")
     return True
+
+
+async def _verified_group_costs(jobs, db, child_ids, call_ids):
+    """The research group's cost rows, bounded (#1095).
+
+    The fixed slot ids plus any row naming a child job, each verified against
+    its stored digest under the continuity lock, instead of the whole ledger.
+    """
+    from src.db.models import InferenceAccountingOwner, InferenceCostReservation
+    from src.workflows.inference_accounting import _continuity_lock
+    account = await db.get(InferenceAccountingOwner, "deployment")
+    with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+        ledger = await jobs._open_ledger(db, workspace, account)
+        by_job = await jobs._ledger_rows(db, ledger, InferenceCostReservation.job_id.in_(list(child_ids)))
+        found = {row.operation_id: row for row in by_job}
+        for call_id in call_ids:
+            if call_id not in found:
+                row = await jobs._ledger_row(db, ledger, call_id)
+                if row is not None:
+                    found[call_id] = row
+    return sorted(found.values(), key=lambda row: row.operation_id)
 
 
 async def verified_dossier(db, task, attempt, run):
@@ -226,9 +245,8 @@ async def _materialized_dossier(db, task, attempt, run):
     if not creation_binds(run, creation, authority.get("research_authority_schema_version")):
         raise ValueError("research original creation identity changed")
     jobs = DurableJobRepository()
-    account, costs = await jobs._accounting_rows(db)
-    with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-        jobs._assert_accounting_continuity(workspace, account, costs)
+    costs = await _verified_group_costs(jobs, db, creation["child_ids"],
+        ["remote:"+child_id for child_id in creation["child_ids"]])
     children = []
     refs = []
     for slot, child_id in enumerate(creation["child_ids"]):

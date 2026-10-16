@@ -5,7 +5,7 @@ under ``BEGIN IMMEDIATE``, so each writer-lock hold grew with ledger size.
 Ledger digest v2 (``src.workspace.accounting_witness``) makes the check
 incremental without weakening what admission trusts:
 
-* **Fast verification** (hot writers and status reads). The external witness
+* **Fast verification** (every accounting writer and reader, #1095). The external witness
   must equal the account witness. The ordered root of the stored row digests
   plus the account record (including its running totals) must reproduce the
   account digest. Every row the operation reads to decide, or modifies, must
@@ -14,16 +14,17 @@ incremental without weakening what admission trusts:
   latch.
 * **Full verification** (first writer per process and deployment, any writer
   once the last full pass is older than ``2 * FULL_VERIFICATION_INTERVAL``,
-  the rare writers, startup recovery, the background verifier, and the
-  maintenance tools). It re-validates every row's evidence and group key,
+  the background verifier, which startup recovery runs first off the writer
+  lock, and the maintenance tools). It re-validates every row's evidence and group key,
   recomputes every row digest from content and the totals from every row.
 
 Scoped reads select rows by unhashed or content columns (the private
 ``group_lookup_key``, owner, job). Each must return exactly the count sealed in
-the totals for its scope (per group key, discovery-service rows), and the
-near-text outstanding check reads its sealed per-owner count instead of a
-query, so a row hidden by editing an untouched row's columns is refused rather
-than under-counted. A content edit to a row no operation reads is caught at
+the totals for its scope (per group key, discovery-service rows), the open set
+read by recovery and research cancel must sum to the sealed open liabilities
+per state, and the near-text outstanding check reads its sealed per-owner count
+instead of a query, so a row hidden by editing an untouched row's columns is
+refused rather than under-counted. A content edit to a row no operation reads is caught at
 the next full verification and cannot change any admission decision.
 """
 

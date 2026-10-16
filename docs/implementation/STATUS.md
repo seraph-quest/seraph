@@ -314,9 +314,11 @@ require canonical startup migration before accounting readiness. Since #1086
 the hot accounting writers and status reads no longer load the deployment
 ledger: they verify the witness, the root of stored row digests and the rows
 they touch, and admit against digest-sealed running totals; full verification
-(every row) runs per process on first write, when over 20 minutes stale, on
-rare writers, at startup and every 10 minutes in the background. The rare
-writers still load the whole ledger.
+(every row) runs per process on first write, when over 20 minutes stale, at
+startup and every 10 minutes in the background. Since #1095 the rare writers
+and readers (recovery, settings saves, denial quiescence, research funding,
+cancel and readback) use the same bounded verification, and startup's full pass
+runs on a worker thread without the writer lock.
 
 Private handoff publication derives at most twelve specialist callback identities
 from validated original-group reservations and uses exact unique run-identity

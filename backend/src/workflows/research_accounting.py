@@ -24,14 +24,20 @@ def payload_checkpoint(run, identifier):
 
 
 async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
-    """Both exact prompt-ready slot rows or neither; no independent counter."""
+    """Both exact prompt-ready slot rows or neither; no independent counter.
+
+    Bounded verification (#1095): the slot rows are read by their fixed ids and
+    digest-verified, and admission reads only the sealed running totals.
+    """
+    from src.db.models import InferenceAccountingOwner
     from src.workflows.job_runtime import _assert_canonical_goal_fence
+    from src.workspace.accounting_witness import held_microusd, totals_overrun_rows, totals_period_rows
     now = datetime.now(timezone.utc)
     async with jobs._session() as db:
         await jobs._accounting_begin(db)
-        account, rows = await jobs._accounting_rows(db)
+        account = await db.get(InferenceAccountingOwner, "deployment")
         with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-            jobs._assert_accounting_continuity(workspace, account, rows)
+            ledger = await jobs._open_ledger(db, workspace, account)
             parent = await jobs._fetch(db, parent_id)
             jobs._assert_lease(parent, owner=owner, fencing_token=fencing_token)
             if parent.status != "running" or parent.job_kind != PARENT_KIND or _utc(parent.deadline_at) <= now:
@@ -55,9 +61,11 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
                 or account.ceiling_microusd != setup.spend_ceiling_microusd):
                 raise InferenceAccountingError("research_reviewed_allowance_changed")
             period = period_id(now)
-            operations = [_operation_payload(row) for row in rows]
-            period_status = period_state(account.model_dump(mode="json"), operations, period)
-            if period_status["reason_code"] or unreviewed_overruns(account.model_dump(mode="json"), operations):
+            from src.workflows.inference_ledger import shadow_compare_decisions
+            await shadow_compare_decisions(db, account, ledger.totals, period, parent.owner_principal_id)
+            owner_data = account.model_dump(mode="json")
+            period_status = period_state(owner_data, totals_period_rows(ledger.totals), period)
+            if period_status["reason_code"] or unreviewed_overruns(owner_data, totals_overrun_rows(ledger.totals)):
                 raise InferenceAccountingError(period_status["reason_code"] or "provider_charge_exceeded_reservation")
             candidates = []
             for slot, child_id in enumerate(creation["child_ids"]):
@@ -81,7 +89,7 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
                 group_binding = {"kind": "research_group_reservation", "parent_job_id": parent_id,
                     "creation_digest": creation["creation_digest"], "slot": slot,
                     "prompt_ready_fence": child.fencing_token, "group_call_ids": ["remote:"+item for item in creation["child_ids"]]}
-                existing = next((row for row in rows if row.operation_id == operation_id), None)
+                existing = await jobs._ledger_row(db, ledger, operation_id)
                 expected = {"job_id": child_id, "owner_id": child.owner_principal_id,
                     "goal_id": child.goal_id, "goal_revision": child.goal_revision,
                     "payload_digest": ready["payload_digest"], "policy_digest": policy_digest,
@@ -98,13 +106,10 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
                 if existing_count != len(candidates):
                     raise InferenceAccountingError("research_group_partial_reservation")
                 return [_operation_payload(item[3]) for item in candidates]
-            def held(row):
-                return row.bound_microusd if row.state in {"reserved", "contact_started", "unknown"} else (
-                    (row.actual_cost_microusd or 0) if row.state == "settled" and row.period_id >= period else 0)
             total = bound * len(candidates)
-            if sum(held(row) for row in rows) + total > account.ceiling_microusd:
+            if held_microusd(ledger.totals, period) + total > account.ceiling_microusd:
                 raise InferenceAccountingError("deployment_cost_budget_exhausted")
-            if sum(held(row) for row in rows if row.owner_id == parent.owner_principal_id) + total > owner_ceiling:
+            if held_microusd(ledger.totals, period, parent.owner_principal_id) + total > owner_ceiling:
                 raise InferenceAccountingError("owner_cost_budget_exhausted")
             created = []
             for child, expected, group_binding, _existing in candidates:
@@ -115,9 +120,8 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
                     created_at=now.replace(tzinfo=None), updated_at=now.replace(tzinfo=None),
                     evidence_json=_json([{"kind": "reservation", "bound_microusd": bound, "memory_status": "no_learning"}, group_binding]), **expected)
                 db.add(row)
-                rows.append(row)
                 created.append(row)
-            await jobs._persist_accounting_witness(db, workspace, account, rows)
+            await jobs._persist_accounting_witness(db, workspace, account, created)
             return [_operation_payload(row) for row in created]
 
 

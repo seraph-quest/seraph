@@ -4,12 +4,12 @@ The external lifecycle witness is written before transaction commit. Any crash
 between those two writes deliberately blocks egress until reconciliation. This
 is a continuity fence, not host-administrator tamper resistance.
 
-Ledger verification is bounded (#1086, ``src.workflows.inference_ledger``):
-hot writers check the witness, the root of stored row digests and every row
-they read or change, and admit against running totals sealed in the account
-record; the whole ledger is re-verified on the first writer of each process,
-whenever the last full pass is over 20 minutes old, on rare writers, at
-startup recovery and every 10 minutes in the background.
+Ledger verification is bounded (#1086, #1095, ``src.workflows.inference_ledger``):
+every writer and reader checks the witness, the root of stored row digests and
+every row it reads or changes, and admits against running totals sealed in the
+account record; the whole ledger is re-verified on the first writer of each
+process, whenever the last full pass is over 20 minutes old, and off the writer
+lock at startup recovery and every 10 minutes in the background.
 """
 
 from __future__ import annotations
@@ -241,10 +241,10 @@ class InferenceAccountingRepositoryMixin:
         binding = proof.denial._binding
         async with self._session() as db:
             await self._accounting_begin(db)
-            account, rows = await self._accounting_rows(db)
+            account = await db.get(InferenceAccountingOwner, "deployment")
             with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
-                row = next((item for item in rows if item.operation_id == binding[0]), None)
+                ledger = await self._open_ledger(db, workspace, account)
+                row = await self._ledger_row(db, ledger, binding[0])
                 if row is None or not _provider_contact_denied(row) or (
                     row.operation_id, row.job_id, row.owner_id, row.payload_digest,
                     row.policy_digest, binding[5], row.job_fencing_token) != binding:
@@ -265,7 +265,7 @@ class InferenceAccountingRepositoryMixin:
                     row.revision += 1
                     row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     db.add(row)
-                    await self._persist_accounting_witness(db, workspace, account, rows)
+                    await self._persist_accounting_witness(db, workspace, account, [row])
                 return _operation_payload(row)
 
     async def recover_inference_accounting(self, *, now: datetime | None = None, job_id: str | None = None) -> list[dict[str, object]]:
@@ -277,17 +277,28 @@ class InferenceAccountingRepositoryMixin:
         """Classify stale provider work without replaying ephemeral callbacks."""
         observed = _utc(now or datetime.now(timezone.utc))
         recovered = []
+        if job_id is None:
+            # Startup: the full verification this process's first writer owes
+            # (#1086 R7) runs first on a worker thread without the writer lock
+            # (#1095); a failure is re-checked under the lock and latches.
+            # Advisory otherwise: if it cannot run, _open_ledger below still
+            # verifies in full under the lock, as before.
+            try:
+                await self.verify_inference_ledger_in_background()
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("Startup ledger pre-verification unavailable", exc_info=True)
         async with self._session() as db:
             await self._accounting_begin(db)
             from src.workflows.repo_repair_source import _repository_startup_protected_lineage
             protected = await _repository_startup_protected_lineage(db)
-            account, rows = await self._accounting_rows(db)
+            account = await db.get(InferenceAccountingOwner, "deployment")
             if account is None:
                 return []
             with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-                self._assert_accounting_continuity(workspace, account, rows)
+                ledger = await self._open_ledger(db, workspace, account)
                 changed = False
-                for row in rows:
+                for row in await self._open_rows(db, ledger):
                     if row.job_id in protected:
                         continue
                     if job_id is not None and row.job_id != job_id:
@@ -385,11 +396,10 @@ class InferenceAccountingRepositoryMixin:
                     changed = True
                     recovered.append({"job_id": row.job_id, "operation_id": row.operation_id,
                         "status": run.status, "reason": row.recovery_reason})
-                from src.workflows import inference_ledger
                 # Startup recovery also seals a v1 ledger (or restored rows
                 # without stored digests) forward to v2 after its full check.
-                if changed or db.info[inference_ledger._SESSION_KEY].backfill:
-                    await self._persist_accounting_witness(db, workspace, account, rows)
+                if changed or ledger.backfill:
+                    await self._persist_accounting_witness(db, workspace, account)
         return recovered
 
     async def _accounting_resume_claim_allowed(self, db, run) -> bool:
@@ -406,7 +416,7 @@ class InferenceAccountingRepositoryMixin:
             return run.status == "queued" and await self._accounting_resume_claim_allowed(db, run)
 
     async def _accounting_rows(self, db: Any):
-        """The whole ledger, for the rare writers and readers that verify in full."""
+        """The whole ledger, for a due full verification (and its in-lock re-check)."""
         from src.workflows import inference_ledger
         account = await db.get(InferenceAccountingOwner, "deployment")
         rows = list((await db.execute(select(InferenceCostReservation))).scalars())
@@ -470,6 +480,31 @@ class InferenceAccountingRepositoryMixin:
             inference_ledger.verify_loaded_rows(state, rows)
         except inference_ledger.LedgerVerificationError as exc:
             raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+        return rows
+
+    async def _open_rows(self, db: Any, state):
+        """Exactly the open reservations, in ledger (rowid) order.
+
+        ``state`` is a content column, so an edit to an untouched row could hide
+        it from the query. Every returned row is digest-verified (so it really
+        is open) and bounds are positive, so per-state bound sums equal to the
+        sealed open liabilities prove nothing open was left out (#1095).
+        """
+        from sqlalchemy import literal_column
+        from src.workflows import inference_ledger
+        rows = list((await db.execute(select(InferenceCostReservation)
+            .where(InferenceCostReservation.state.in_(("reserved", "contact_started", "unknown")))
+            .order_by(literal_column("inference_cost_reservations.rowid")))).scalars())
+        try:
+            inference_ledger.verify_loaded_rows(state, rows)
+        except inference_ledger.LedgerVerificationError as exc:
+            raise InferenceAccountingError("accounting_continuity_unavailable") from exc
+        for open_state, sealed in state.totals["open_bound_by_state"].items():
+            self._require_sealed_count(sum(row.bound_microusd for row in rows if row.state == open_state), sealed)
+
+        async def open_ids(candidates):
+            return [row.operation_id for row in candidates if row.state in {"reserved", "contact_started", "unknown"}]
+        await self._shadow_helper(db, open_ids, rows)
         return rows
 
     async def _group_rows(self, db: Any, state, group_id: str):
@@ -577,7 +612,12 @@ class InferenceAccountingRepositoryMixin:
         root = Path(settings.workspace_dir).resolve()
         async with self._session() as db:
             await self._accounting_begin(db)
-            account, rows = await self._accounting_rows(db)
+            account = await db.get(InferenceAccountingOwner, "deployment")
+            if account is None:
+                # Bootstrap requires an empty ledger; one row disproves it.
+                from src.workflows import inference_ledger
+                rows = list((await db.execute(select(InferenceCostReservation).limit(1))).scalars())
+                db.info[inference_ledger._SESSION_KEY] = inference_ledger.full_state(None, rows)
             with _continuity_lock(root, initialize=account is None, held_workspace=continuity_workspace) as workspace:
                 if account is None:
                     prior = read_lifecycle_receipt(workspace)
@@ -598,7 +638,7 @@ class InferenceAccountingRepositoryMixin:
                     db.add(account)
                     await db.flush()
                 else:
-                    self._assert_accounting_continuity(workspace, account, rows)
+                    await self._open_ledger(db, workspace, account)
                     if account.ceiling_microusd == ceiling and reserve_review_microusd is None:
                         return _witness(account)
                     account.settings_revision += 1
@@ -606,16 +646,29 @@ class InferenceAccountingRepositoryMixin:
                 history = json.loads(account.settings_history_json)
                 history.append({"revision": account.settings_revision, "ceiling_microusd": ceiling, "recorded_at": datetime.now(timezone.utc).isoformat()})
                 if reserve_review_microusd is not None:
-                    from src.workspace.accounting_witness import unreviewed_overruns
-                    overruns = unreviewed_overruns(account.model_dump(mode="json"), [_operation_payload(row) for row in rows])
+                    from src.workflows import inference_ledger
+                    from src.workspace.accounting_witness import totals_overrun_rows, unreviewed_overruns
+                    # The sealed overrun set, in creation order (#1095); empty
+                    # on bootstrap.
+                    totals = db.info[inference_ledger._SESSION_KEY].totals
+                    overruns = unreviewed_overruns(account.model_dump(mode="json"), sorted(
+                        totals_overrun_rows(totals), key=lambda row: (row["sequence"], row["operation_id"])))
+                    await self._shadow_helper(db, lambda candidates: self._overrun_ids(account, candidates),
+                        overruns, compare=lambda value: value == sorted(row["operation_id"] for row in overruns))
                     covered = [row for row in overruns if row["actual_cost_microusd"] <= reserve_review_microusd][:128]
                     history.append({"kind": "request_reserve_review", "revision": account.settings_revision,
                         "accounting_revision": account.revision, "bound_microusd": reserve_review_microusd,
                         "operations": [{key: row[key] for key in ("operation_id", "sequence", "revision")} for row in covered],
                         "recorded_at": datetime.now(timezone.utc).isoformat()})
                 account.settings_history_json = _json(history)
-                await self._persist_accounting_witness(db, workspace, account, rows)
+                await self._persist_accounting_witness(db, workspace, account)
                 return _witness(account)
+
+    @staticmethod
+    async def _overrun_ids(account, rows):
+        from src.workspace.accounting_witness import unreviewed_overruns
+        return sorted(row["operation_id"] for row in unreviewed_overruns(account.model_dump(mode="json"),
+            [_operation_payload(row) for row in rows]))
 
     async def reserve_inference_cost(self, *, operation_id: str, job_id: str, owner_id: str,
                                      payload_digest: str, policy_digest: str, runtime_path: str,

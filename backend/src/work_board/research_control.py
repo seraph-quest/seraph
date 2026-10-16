@@ -30,14 +30,18 @@ async def precontact_intent_reusable(jobs, db, run, effects):
         return False
     await verify_current_prompt_in_db(jobs, db, _serialize(run))
     ready = checkpoint(_serialize(run), "research:prompt-ready")
-    account, rows = await jobs._accounting_rows(db)
-    with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-        jobs._assert_accounting_continuity(workspace, account, rows)
-    row = next((item for item in rows if item.operation_id == operation), None)
-    details = intents[0].get("details", {})
+    from src.db.models import InferenceAccountingOwner
+    account = await db.get(InferenceAccountingOwner, "deployment")
     parent = await jobs._fetch(db, run.parent_job_id)
     creation = checkpoint(_serialize(parent), "research:creation")
     call_ids = ["remote:"+child_id for child_id in creation["child_ids"]]
+    # Bounded (#1095): the request row and each funded slot row by its fixed id,
+    # each digest-verified, instead of the whole ledger.
+    with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
+        ledger = await jobs._open_ledger(db, workspace, account)
+        row = await jobs._ledger_row(db, ledger, operation)
+        rows = [cost for cost in [await jobs._ledger_row(db, ledger, call_id) for call_id in call_ids] if cost is not None]
+    details = intents[0].get("details", {})
     return bool(row and row.job_id == run.run_identity and row.owner_id == run.owner_principal_id
         and row.state == "reserved" and row.contact_started_at is None and not row.recovery_reason
         and row.payload_digest == ready["payload_digest"] and row.policy_digest == ready["policy_digest"]
@@ -334,11 +338,14 @@ async def finish_cancel(jobs, owner, task_id, request):
                 for other in records) for item in records):
                 uncertain = True
                 uncertain_ids.add(row.run_identity)
-        account, costs = await jobs._accounting_rows(db)
+        from src.db.models import InferenceAccountingOwner
+        account = await db.get(InferenceAccountingOwner, "deployment")
         with _continuity_lock(Path(settings.workspace_dir).resolve()) as workspace:
-            jobs._assert_accounting_continuity(workspace, account, costs)
+            ledger = await jobs._open_ledger(db, workspace, account)
             changed = False
-            for cost in costs:
+            # Only open rows are acted on: exactly the open set, sealed-checked
+            # (#1095), so a child liability cannot be hidden from the cancel.
+            for cost in await jobs._open_rows(db, ledger):
                 if cost.job_id not in creation["child_ids"]:
                     continue
                 if cost.state in {"contact_started", "unknown"}:
@@ -390,5 +397,5 @@ async def finish_cancel(jobs, owner, task_id, request):
             attempt.lease_owner = attempt.lease_expires_at = None
             db.add_all([task, attempt])
             if changed:
-                await jobs._persist_accounting_witness(db, workspace, account, costs)
+                await jobs._persist_accounting_witness(db, workspace, account)
         return {"completed": True, "cancelled": not uncertain, "unknown_liability_preserved": uncertain}

@@ -1527,12 +1527,16 @@ witness rollback and an older database are refused on the next operation.
 A content-only edit to a row no operation touches is found by full
 verification. That re-validates every row's evidence, key, content digest and
 the totals, and runs on the first accounting writer of each process, on any
-writer once the last full pass is over 20 minutes old, on the rare writers
-(recovery, settings saves, denial quiescence, research funding/rebind/cancel,
-research readback), at startup recovery, every 10 minutes from the
+writer once the last full pass is over 20 minutes old, every 10 minutes from the
 `inference_ledger_verification` scheduler job (a deferred read that latches
 accounting for the process after an in-lock re-check), and in every workspace
-CLI tool. The scoped reads cannot be emptied either: a general-task group read
+CLI tool. Startup recovery runs that same lock-free verifier first, so its
+sweep is bounded too (#1095). The rare writers and readers (recovery, settings
+saves, denial quiescence, research funding/rebind/cancel, research readback)
+use the same bounded verification as the hot writers: they read rows by id or
+read exactly the open reservations, whose per-state bound sums must equal the
+sealed open liabilities, so an open row hidden by a state edit is refused, not
+skipped. The scoped reads cannot be emptied either: a general-task group read
 must return exactly the sealed member count for that group, a discovery
 programme read the sealed count of discovery-service rows, and the near-text
 outstanding check reads a sealed per-owner count, so hiding a row by editing its

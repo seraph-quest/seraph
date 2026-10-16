@@ -30,6 +30,7 @@ deployment and owner totals.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import bisect
 import json
 import logging
 import time
@@ -60,11 +61,70 @@ class LedgerVerificationError(Exception):
     """A continuity failure detected by ledger verification."""
 
 
+class DigestIndex:
+    """Stored row digests in ``operation_id`` order, plus their concatenation.
+
+    The root is the hash of that concatenation, so a persist only splices the
+    changed digests in instead of re-sorting and re-joining the ledger.
+    """
+
+    def __init__(self, order: list[str], digests: list[str], joined: str):
+        self._order, self._digests, self._joined = order, digests, joined
+
+    @classmethod
+    def build(cls, pairs) -> "DigestIndex | None":
+        pairs = list(pairs)
+        order = [operation_id for operation_id, _ in pairs]
+        digests = [digest for _, digest in pairs]
+        joined = witness_codec._joined_row_digests(digests)
+        # operation_id is the primary key, so sorted order is also unique.
+        if joined is None or order != sorted(order):
+            return None
+        return cls(order, digests, joined)
+
+    def _position(self, operation_id: str) -> int:
+        return bisect.bisect_left(self._order, operation_id)
+
+    def get(self, operation_id: str) -> str | None:
+        position = self._position(operation_id)
+        if position < len(self._order) and self._order[position] == operation_id:
+            return self._digests[position]
+        return None
+
+    def __contains__(self, operation_id: str) -> bool:
+        return self.get(operation_id) is not None
+
+    def __getitem__(self, operation_id: str) -> str:
+        digest = self.get(operation_id)
+        if digest is None:
+            raise KeyError(operation_id)
+        return digest
+
+    def __setitem__(self, operation_id: str, digest: str) -> None:
+        if not witness_codec.valid_row_digest(digest):
+            raise LedgerVerificationError("ledger_row_digest_invalid")
+        position = self._position(operation_id)
+        start = position * 64
+        if position < len(self._order) and self._order[position] == operation_id:
+            self._digests[position] = digest
+            self._joined = self._joined[:start] + digest + self._joined[start + 64:]
+        else:
+            self._order.insert(position, operation_id)
+            self._digests.insert(position, digest)
+            self._joined = self._joined[:start] + digest + self._joined[start:]
+
+    def __len__(self) -> int:
+        return len(self._order)
+
+    def root(self) -> str:
+        return witness_codec.rows_root_from_joined(self._joined, len(self._order))
+
+
 @dataclass
 class LedgerState:
     """What one transaction verified, reused by its persist."""
 
-    digests: dict[str, str]
+    digests: DigestIndex
     totals: dict[str, Any]
     full: bool
     rows: list[InferenceCostReservation] | None = None
@@ -128,23 +188,29 @@ def _content_changed(row: InferenceCostReservation) -> bool:
         for attribute in state.mapper.column_attrs if attribute.key not in _DERIVED_COLUMNS)
 
 
-async def scan_row_digests(db) -> tuple[dict[str, str], bool]:
+async def scan_row_digests(db) -> tuple[DigestIndex | None, bool]:
     """Stored row digests in ``operation_id`` order; False if any is unusable."""
-    # Index-only scan of (operation_id, ledger_row_digest); no row decoding.
-    result = await db.execute(text(
-        "SELECT operation_id, ledger_row_digest FROM inference_cost_reservations ORDER BY operation_id"))
-    digests: dict[str, str] = {}
-    usable = True
-    for operation_id, digest in result.fetchall():
-        if not witness_codec.valid_row_digest(digest):
-            usable = False
-        digests[operation_id] = digest
-    return digests, usable
+    # Index-only scan of (operation_id, ledger_row_digest). Plain driver
+    # tuples: building 10k SQLAlchemy rows would dominate the writer hold.
+    query = "SELECT operation_id, ledger_row_digest FROM inference_cost_reservations ORDER BY operation_id"
+    fetched = None
+    connection_factory = getattr(db, "connection", None)
+    if connection_factory is not None:
+        connection = await connection_factory()
+        raw = await connection.get_raw_connection()
+        driver = getattr(raw, "driver_connection", None)
+        if driver is not None and hasattr(driver, "execute"):
+            cursor = await driver.execute(query)
+            fetched = await cursor.fetchall()
+            await cursor.close()
+    if fetched is None:
+        fetched = (await db.execute(text(query))).fetchall()
+    index = DigestIndex.build(fetched)
+    return index, index is not None
 
 
-def _root(digests: dict[str, str]) -> str:
-    # dict keeps scan (operation_id) order; new rows are re-sorted on persist.
-    return witness_codec.rows_root(digests[key] for key in sorted(digests))
+def _root(digests: DigestIndex) -> str:
+    return digests.root()
 
 
 def parse_totals(account) -> dict[str, Any]:
@@ -157,7 +223,7 @@ def parse_totals(account) -> dict[str, Any]:
     return totals
 
 
-def verify_fast(account, receipt_witness, digests: dict[str, str]) -> dict[str, Any]:
+def verify_fast(account, receipt_witness, digests: DigestIndex) -> dict[str, Any]:
     """Witness + root + account record; returns the trusted running totals."""
     from src.workflows.inference_accounting import _witness
     if receipt_witness != _witness(account):
@@ -275,9 +341,10 @@ def full_state(account, rows) -> LedgerState:
     """State for a transaction that loaded the whole ledger (verified separately)."""
     ordered = sorted(rows, key=lambda item: item.operation_id)
     values = {row.operation_id: row_values(row) for row in ordered}
-    digests = {operation_id: witness_codec.row_digest(value) for operation_id, value in values.items()}
+    computed = {operation_id: witness_codec.row_digest(value) for operation_id, value in values.items()}
+    digests = DigestIndex.build(computed.items())
     backfill = account is None or not witness_codec.is_v2_digest(account.ledger_digest) or any(
-        row.ledger_row_digest != digests[row.operation_id] for row in ordered)
+        row.ledger_row_digest != computed[row.operation_id] for row in ordered)
     return LedgerState(digests=digests, totals=witness_codec.ledger_totals(list(values.values())),
         full=True, rows=list(ordered), pre_images=values, backfill=backfill)
 

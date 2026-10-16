@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 
 from src.workspace.production import ProductionWorkspace, ProductionWorkspaceReconciliationError, read_lifecycle_receipt, LIFECYCLE_PATH_ENV, CANONICAL_CONTAINER_WORKSPACE, BIND_IDENTITY_ENV
 
@@ -111,8 +112,24 @@ def is_v2_digest(digest):
     return isinstance(digest, str) and digest.startswith(LEDGER_V2_PREFIX)
 
 
+_ROW_DIGEST = re.compile(r"[0-9a-f]{64}")
+_HEX = re.compile(r"[0-9a-f]*")
+
+
 def valid_row_digest(value):
-    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+    return isinstance(value, str) and _ROW_DIGEST.fullmatch(value) is not None
+
+
+def _joined_row_digests(digests):
+    """Concatenate validated digests; one C-level hex check for the whole ledger."""
+    if not all(type(digest) is str and len(digest) == 64 for digest in digests):
+        return None
+    joined = "".join(digests)
+    return joined if _HEX.fullmatch(joined) is not None else None
+
+
+def valid_row_digests(digests):
+    return _joined_row_digests(list(digests)) is not None
 
 
 def row_digest(values):
@@ -120,29 +137,19 @@ def row_digest(values):
     return hashlib.sha256(_canonical(_v2_record(values)).encode()).hexdigest()
 
 
-class RowsRoot:
-    """Incremental root over row digests fed in ``operation_id`` order."""
-
-    def __init__(self):
-        self._hash = hashlib.sha256()
-        self.count = 0
-
-    def add(self, digest):
-        if not valid_row_digest(digest):
-            raise ProductionWorkspaceReconciliationError("accounting row digest invalid")
-        self._hash.update(digest.encode())
-        self.count += 1
-
-    def hexdigest(self):
-        final = self._hash.copy()
-        final.update(f":{self.count}".encode())
-        return final.hexdigest()
-
-
 def rows_root(digests_in_order):
-    root = RowsRoot()
-    for digest in digests_in_order:
-        root.add(digest)
+    """Root over row digests in ``operation_id`` order (BINARY collation)."""
+    digests = list(digests_in_order)
+    joined = _joined_row_digests(digests)
+    if joined is None:
+        raise ProductionWorkspaceReconciliationError("accounting row digest invalid")
+    return rows_root_from_joined(joined, len(digests))
+
+
+def rows_root_from_joined(joined, count):
+    """``rows_root`` for an already validated concatenation of ``count`` digests."""
+    root = hashlib.sha256(joined.encode())
+    root.update(f":{count}".encode())
     return root.hexdigest()
 
 

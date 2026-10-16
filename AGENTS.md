@@ -287,6 +287,11 @@ beyond a single narrow check.
   Review before issue creation, PR creation, merge, roadmap finalization or
   public superiority claims. Self-approval is not a substitute; if agents are
   unavailable, run separately named passes and state the limitation.
+- Agent model tiers (operator decision, 2026-10-16): spawn implementation
+  workers, planners, researchers and other non-review agents on Sonnet at high
+  effort; spawn every Critic/Contrarian, security, design and re-review agent on
+  Haiku at extra-high (`xhigh`) effort. Start a fresh reviewer for each review
+  round with the context it needs instead of resuming an earlier reviewer.
 - The critic checks unsupported claims, current official sources and dates for
   unstable technical/competitive claims, acceptance/proof gaps, trust/privacy/
   memory boundaries, scope and duplicate issues, docs/code/Project contradictions

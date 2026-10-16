@@ -123,6 +123,12 @@ describe("RepoRepairInspector", () => {
     render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
     expect(await screen.findByText("Preflight: verified")).toBeInTheDocument();
     expect(screen.queryByText(/Preflight: blocked or unknown/)).not.toBeInTheDocument();
+    // The declared local-host limitations are shown before any approval.
+    const warning = screen.getByText(/Trusted host execution: no isolation guarantee/);
+    expect(warning).toHaveTextContent("unrestricted network access");
+    expect(warning).toHaveTextContent("~/.ssh and Seraph's database and vault");
+    expect(warning).toHaveTextContent("can outlive it");
+    expect(warning).toHaveTextContent("redaction is pattern-based");
   });
 
   it("does not treat the ready status alone as verified preflight", async () => {
@@ -720,5 +726,335 @@ describe("RepoRepairInspector", () => {
       const secondBody = JSON.parse(String(consentCalls[1][1]?.body));
       expect(secondBody).toEqual(firstBody);
     });
+  });
+});
+
+// Closed Source-specific metadata; these negative fixtures grant no runtime authority.
+function repositorySourceStatus() {
+  return {
+    job_id: 'repository:source-test', status: 'running', revision: 6,
+    repository_review: {native_child_id:'general-tool:source-test',repository_job_id:'repository:source-test',iteration_index:1,
+      iteration_id:'a'.repeat(64),preparation_digest:'b'.repeat(64),contact_state:'not_started',source_preview_path:'/api/workflows/repo-repair/repository:source-test/source-preview'},
+    source_recovery:null,patch_proposal:null,approval:null,iterations:[],iteration_states:[],recovery_action:'review_code_egress',provider_contacted:false,no_learning:true,operator_visible:true,
+  };
+}
+
+describe('RepoRepairInspector original Source recovery readback', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); window.sessionStorage.clear(); });
+  const recovery = { state: 'held_unknown', reason: 'original_completion_unproven', physical_hold: true,
+    original_result: null, public_actions: 'unavailable' };
+  it.each(['pending_original_producer', 'held_unknown', 'held_partial', 'continuation_ready',
+    'original_cleanup_committed', 'original_stop_committed', 'physical_cleanup_only'])('renders owner state %s without enabling recovery', async (state) => {
+    const fetch = vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: {
+      ...recovery, state, physical_hold: state === 'physical_cleanup_only' ? false : true,
+      original_result: state === 'held_partial' ? 'held_partial' : null,
+    } }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText(`Original recovery: ${state.replace(/_/g, ' ')}`)).toBeInTheDocument();
+    expect(screen.getByText(`Original physical hold: ${state === 'physical_cleanup_only' ? 'released' : 'held'}`)).toBeInTheDocument();
+    expect(screen.getByText(`Original result: ${state === 'held_partial' ? 'held partial' : 'unavailable'}`)).toBeInTheDocument();
+    expect(screen.getByText(/Public Source recovery actions are unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/no learning/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /recover|reconcile|settle|Try original cleanup/i })).not.toBeInTheDocument();
+    if (state !== 'continuation_ready') expectNoRepositoryEffects();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch.mock.calls.every(call => !call[1]?.method || call[1].method === 'GET')).toBe(true);
+  });
+
+  it.each([
+    [false, false], [false, true], [true, false], [true, true], [null, false], [null, true],
+  ])('keeps Unknown liabilities distinct from physical hold %s with pending Stop %s', async (physical_hold, pendingStop) => {
+    const fetch = vi.fn().mockResolvedValue(response({
+      ...repositorySourceStatus(), status: 'unknown_external_effect', provider_contacted: true,
+      recovery_action: pendingStop ? 'repository_stop_pending' : 'original_unknown',
+      source_recovery: { ...recovery, state: physical_hold === false ? 'physical_cleanup_only' : 'held_unknown', physical_hold },
+      ...(pendingStop ? { repository_stop: { reason: 'operator_cancelled', pending: true,
+        limit_evidence: null, limit_evidence_digest: null } } : {}),
+    }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    const holdLabel = physical_hold === null ? 'unknown' : physical_hold ? 'held' : 'released';
+    expect(await screen.findByText(`Original physical hold: ${holdLabel}`)).toBeInTheDocument();
+    expect(screen.getByText('Original result: unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/Task and result remain Unknown\. Original reservation and contacted cost debt remain held\./)).toBeInTheDocument();
+    if (physical_hold === false) {
+      expect(screen.getAllByText(/Original physical cleanup is verified; physical hold released\./)).toHaveLength(pendingStop ? 2 : 1);
+      expect(screen.queryByText(/Physical cleanup is pending verification\./)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Original physical cleanup status is unknown\./)).not.toBeInTheDocument();
+    } else if (physical_hold === true) {
+      expect(screen.getAllByText(/Physical cleanup is pending verification\./)).toHaveLength(pendingStop ? 2 : 1);
+      expect(screen.queryByText(/physical hold released\./)).not.toBeInTheDocument();
+    } else {
+      expect(screen.getAllByText(/Original physical cleanup status is unknown\./)).toHaveLength(pendingStop ? 2 : 1);
+      expect(screen.queryByText(/physical hold released\.|Physical cleanup is pending verification\./)).not.toBeInTheDocument();
+    }
+    if (pendingStop) expect(screen.getByText(/^Original reservation remains held\./)).toBeInTheDocument();
+    expect(screen.getByText(/Public Source recovery actions are unavailable/)).toBeInTheDocument();
+    expectNoRepositoryEffects();
+    expect(screen.queryByRole('button', { name: /recover|reconcile|settle|Try original cleanup/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch.mock.calls.every(call => !call[1]?.method || call[1].method === 'GET')).toBe(true);
+  });
+
+  it('keeps unknown physical hold distinct from released capacity', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: { ...recovery, physical_hold: null } })));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText('Original physical hold: unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Original physical hold: released')).not.toBeInTheDocument();
+  });
+
+  it.each(['succeeded', 'failed'])('renders original %s without inferring it from cleanup', async (original_result) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery: {
+      ...recovery, state: 'original_cleanup_committed', physical_hold: false, original_result,
+    } })));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText(`Original result: ${original_result}`)).toBeInTheDocument();
+    expectNoRepositoryEffects();
+  });
+
+  it('clears held recovery readback after a foreign-job refresh', async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(response({ ...repositorySourceStatus(), source_recovery: recovery }))
+      .mockResolvedValueOnce(response({ ...repositorySourceStatus(), job_id: 'repository:foreign', source_recovery: recovery }));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByText('Original physical hold: held')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+    expectNoRepositoryEffects();
+  });
+
+  it.each([
+    ['unknown state', { ...recovery, state: 'recovered' }],
+    ['extra private data', { ...recovery, private_path: '/private/key' }],
+    ['unsafe reason', { ...recovery, reason: '/private/key' }],
+    ['unbounded reason', { ...recovery, reason: 'a'.repeat(129) }],
+    ['missing result', { state: recovery.state, reason: recovery.reason, physical_hold: true, public_actions: 'unavailable' }],
+    ['untyped hold', { ...recovery, physical_hold: 'false' }],
+    ['invented result', { ...recovery, original_result: 'verified' }],
+    ['array result', { ...recovery, original_result: ['succeeded'] }],
+    ['caller enablement', { ...recovery, public_actions: 'available' }],
+    ['premature cleanup action', { ...recovery, public_actions: 'reconcile_original_cleanup' }],
+  ])('rejects %s without retaining controls', async (_label, source_recovery) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...repositorySourceStatus(), source_recovery })));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expectNoRepositoryEffects();
+    expect(screen.queryByLabelText('Original Source recovery readback')).not.toBeInTheDocument();
+  });
+
+  it('rejects a stale backend missing the required current projection field', async () => {
+    const payload: Record<string, unknown> = repositorySourceStatus();
+    delete payload.source_recovery;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(payload)));
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test' />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expectNoRepositoryEffects();
+  });
+});
+
+describe('RepoRepairInspector current Source metadata boundary',()=>{
+  beforeEach(()=>{vi.stubGlobal('fetch',vi.fn());window.sessionStorage.clear();});
+  afterEach(()=>{vi.unstubAllGlobals();vi.restoreAllMocks();window.sessionStorage.clear();});
+  it.each([
+    ['foreign job',{job_id:'repository:foreign'}],
+    ['private body',{private_source:'source must not reach metadata'}],
+    ['provider contact string',{provider_contacted:'false'}],
+    ['invisible source',{operator_visible:false}],
+    ['missing no learning',{no_learning:false}],
+    ['unpaired iteration metadata',{iterations:[{index:1,input_tree_digest:'a'.repeat(64),patch_digest:'b'.repeat(64),command_refs:['repository:execution:a'],result_artifacts:['repository:readback:a']}]}],
+    ['foreign preview route',{repository_review:{...repositorySourceStatus().repository_review,source_preview_path:'https://foreign.invalid/private'}}],
+    ['renewed iteration',{repository_review:{...repositorySourceStatus().repository_review,iteration_index:4}}],
+    ['null stop',{repository_stop:null}],
+    ['empty stop',{repository_stop:{}}],
+    ['stop alias',{stop:{reason:'cost_exhausted',pending:true,limit_evidence:null,limit_evidence_digest:null}}],
+    ['automatic stop without evidence',{repository_stop:{reason:'cost_exhausted',pending:true,limit_evidence:null,limit_evidence_digest:null}}],
+    ['unprepared without stop',{repository_review:{...repositorySourceStatus().repository_review,contact_state:'not_prepared',iteration_index:null,iteration_id:null,preparation_digest:null,source_preview_path:null}}],
+    ['mixed unprepared review',{repository_review:{...repositorySourceStatus().repository_review,contact_state:'not_prepared'}}],
+  ])('rejects %s before any private read',async(_label,change)=>{
+    const fetch=vi.fn().mockResolvedValue(response({...repositorySourceStatus(),...change}));vi.stubGlobal('fetch',fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test'/>);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText('Inspect exact source and diagnostics')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it('clears current Source metadata during operator rotation before late replies',async()=>{
+    const fetch=vi.fn().mockResolvedValueOnce(response(repositorySourceStatus())).mockImplementationOnce(()=>new Promise(()=>undefined));vi.stubGlobal('fetch',fetch);
+    const view=render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test'/>);
+    expect(await screen.findByText('Inspect exact source and diagnostics')).toBeInTheDocument();
+    view.rerender(<RepoRepairInspector {...inspectorProps} ownerSessionId='new-session' taskOwnerSessionId='new-session' jobId='repository:source-test'/>);
+    expect(screen.queryByText('Inspect exact source and diagnostics')).not.toBeInTheDocument();
+  });
+  it.each([
+    ['malformed stop',{...repositorySourceStatus(),repository_stop:null}],
+    ['copied native binding',{...repositorySourceStatus(),repository_review:{...repositorySourceStatus().repository_review,native_child_id:'general-tool:foreign'}}],
+    ['older revision',{...repositorySourceStatus(),revision:5}],
+  ])('clears retained Source controls after %s refresh',async(_label,payload)=>{
+    const fetch=vi.fn().mockResolvedValueOnce(response(repositorySourceStatus())).mockResolvedValueOnce(response(payload));vi.stubGlobal('fetch',fetch);
+    render(<RepoRepairInspector {...inspectorProps} jobId='repository:source-test'/>);
+    expect(await screen.findByText('Inspect exact source and diagnostics')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button',{name:'Refresh repair status'}));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText('Inspect exact source and diagnostics')).not.toBeInTheDocument();
+    expect(screen.queryByText('Allow this iteration\'s source and diagnostics')).not.toBeInTheDocument();
+    expect(screen.queryByText('Execute this approved patch')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Unmodified actual R199 and R209 authenticated Source/Task GET capture bytes.
+// Provenance: 1009-STOP-METADATA-HANDOFF-R202.md; raw archive inventory84d977.
+// Full owner/Task/401/403 receipts are retained; no normalized or invented successes.
+// R209 Unknown Pending: actual-auth-stop-unknown_pending.json, SHA 6bc22abf011c28a27d61018d7282ad13333d9d351a5d1055b10e43f3020b9086.
+const repositorySourceCaptureBytes = [
+  { state: "pending", sha256: "797e347376229b3feec8e5bef2aa0c86363e9d3a02ee22eb0aa6dd2dfab20f0f", raw: "{\"captures\": [{\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:a1be74699f85a3f3e7ea42029c2d98a74815b47eff5024c64431ec905d4f7d27\", \"response\": {\"detail\": {\"code\": \"authentication_required\"}}, \"status\": 401}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:a1be74699f85a3f3e7ea42029c2d98a74815b47eff5024c64431ec905d4f7d27\", \"response\": {\"approval\": null, \"iteration_states\": [], \"iterations\": [], \"job_id\": \"repository:a1be74699f85a3f3e7ea42029c2d98a74815b47eff5024c64431ec905d4f7d27\", \"no_learning\": true, \"operator_visible\": true, \"patch_proposal\": null, \"provider_contacted\": false, \"recovery_action\": \"repository_stop_pending\", \"repository_review\": {\"contact_state\": \"not_prepared\", \"iteration_id\": null, \"iteration_index\": null, \"native_child_id\": \"general-tool:38bc39173a336a25b0a798770c983fa810ecbf05da5c53d7\", \"preparation_digest\": null, \"repository_job_id\": \"repository:a1be74699f85a3f3e7ea42029c2d98a74815b47eff5024c64431ec905d4f7d27\", \"source_preview_path\": null}, \"repository_stop\": {\"limit_evidence\": {\"cause\": \"cost_exhausted\", \"goal_cutoff_at\": \"2026-10-09T11:53:52.015635Z\", \"group_calls\": 0, \"group_liability_microusd\": 0, \"original_deadline_at\": \"2026-10-09T11:43:52.156623Z\", \"original_group_max_calls\": 5, \"original_group_max_cost_microusd\": 500, \"original_limits_digest\": \"0fdfe67e2fd2c329acc94d843ee6bf997abb4d710a0d7936af44b013fc19dcd2\", \"original_root_max_cost_microusd\": 0, \"original_server_bound_microusd\": 100, \"root_liability_microusd\": 0, \"schema_version\": \"repository.native_limit_evidence.v1\"}, \"limit_evidence_digest\": \"4c8a66c5f83088bc2d81fde46633ef033b2559af028d222e7b4ad9c7414a01f5\", \"pending\": true, \"reason\": \"cost_exhausted\"}, \"revision\": 4, \"status\": \"running\"}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/work-board/tasks/57b2a3e196384e58936c4e8679386b6c\", \"response\": {\"attempts\": [{\"attempt_id\": \"ab83b504254a42d39d759a835adacd81\", \"cancel_requested_at\": null, \"created_at\": \"2026-10-09T11:38:53.347470Z\", \"ended_at\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 1, \"heartbeat_at\": \"2026-10-09T11:38:53.823032Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": null, \"readback_status\": \"pending\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T11:38:52.156623Z\", \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T11:38:53.823032Z\", \"verification_status\": \"pending\", \"workflow_run_id\": \"work-board:57b2a3e196384e58936c4e8679386b6c:ab83b504254a42d39d759a835adacd81\"}], \"children\": [], \"comments\": [], \"events\": [{\"created_at\": \"2026-10-09T11:38:52.129741Z\", \"event_id\": 1, \"kind\": \"task.created\", \"metadata\": {\"status\": \"todo\", \"task_revision\": 1}, \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\"}, {\"created_at\": \"2026-10-09T11:38:52.155074Z\", \"event_id\": 2, \"kind\": \"task.ready\", \"metadata\": {\"status\": \"ready\", \"task_revision\": 2}, \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\"}, {\"created_at\": \"2026-10-09T11:38:53.353360Z\", \"event_id\": 3, \"kind\": \"task.claimed\", \"metadata\": {\"attempt_id\": \"ab83b504254a42d39d759a835adacd81\", \"status\": \"running\", \"task_revision\": 3}, \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\"}, {\"created_at\": \"2026-10-09T11:38:53.383356Z\", \"event_id\": 4, \"kind\": \"attempt.linked\", \"metadata\": {\"attempt_id\": \"ab83b504254a42d39d759a835adacd81\", \"task_revision\": 4, \"workflow_run_id\": \"work-board:57b2a3e196384e58936c4e8679386b6c:ab83b504254a42d39d759a835adacd81\"}, \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\"}, {\"created_at\": \"2026-10-09T11:38:54.342642Z\", \"event_id\": 9, \"kind\": \"attempt.repository_stop_requested\", \"metadata\": {\"attempt_id\": \"ab83b504254a42d39d759a835adacd81\"}, \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\"}], \"parent_handoffs\": [], \"parents\": [], \"revision\": 5, \"task\": {\"archived_at\": null, \"artifact_refs\": [], \"assignee_id\": null, \"block_kind\": \"needs_input\", \"block_reason\": \"general_task_native_wait\", \"block_source_status\": \"running\", \"body\": \"General registered-tool task\", \"cancel_requested_at\": null, \"capability_id\": \"agent.task.v1\", \"completed_at\": null, \"completed_dependency_count\": 0, \"created_at\": \"2026-10-09T11:38:52.125250Z\", \"creation_sequence\": 1, \"dependency_count\": 0, \"dispatch_rank\": null, \"dispatch_wait_reason\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"goal_id\": \"goal:fixture\", \"goal_revision\": 1, \"idempotency_key\": \"source-original\", \"idempotency_scope\": \"general-task\", \"input_artifact_id\": \"c79ea9e0-a78e-5607-85dc-41ae9382c59c\", \"latest_attempt\": {\"attempt_id\": \"ab83b504254a42d39d759a835adacd81\", \"cancel_requested_at\": null, \"created_at\": \"2026-10-09T11:38:53.347470Z\", \"ended_at\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 1, \"heartbeat_at\": \"2026-10-09T11:38:53.823032Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": null, \"readback_status\": \"pending\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T11:38:52.156623Z\", \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T11:38:53.823032Z\", \"verification_status\": \"pending\", \"workflow_run_id\": \"work-board:57b2a3e196384e58936c4e8679386b6c:ab83b504254a42d39d759a835adacd81\"}, \"origin_session_id\": \"d9ee68d0a1c74fb39da483e0e7bfacab\", \"origin_thread_id\": null, \"owner_principal_id\": \"operator:root:c688d29179ce4d62b979bbbb5c8a8a3b\", \"owner_session_id\": \"d9ee68d0a1c74fb39da483e0e7bfacab\", \"pipeline_operation_id\": null, \"pipeline_slot\": null, \"priority\": 50, \"readback_status\": \"pending\", \"recovery_action\": \"approve_existing_run\", \"repository_review\": {\"contact_state\": \"not_prepared\", \"iteration_id\": null, \"iteration_index\": null, \"native_child_id\": \"general-tool:38bc39173a336a25b0a798770c983fa810ecbf05da5c53d7\", \"preparation_digest\": null, \"repository_job_id\": \"repository:a1be74699f85a3f3e7ea42029c2d98a74815b47eff5024c64431ec905d4f7d27\", \"source_preview_path\": null}, \"requires_review\": true, \"result_refs\": [], \"review_expires_at\": null, \"reviewer_id\": \"operator:root:c688d29179ce4d62b979bbbb5c8a8a3b\", \"scheduled_at\": null, \"status\": \"blocked\", \"task_id\": \"57b2a3e196384e58936c4e8679386b6c\", \"task_revision\": 5, \"title\": \"Repair the selected repository\", \"typed_input_digest\": \"6dcbbd706840cea16d070f90ef60ab2f4d676e8b6265bef09fe0c1e36097f7f9\", \"typed_input_ref\": \"workspace-json:artifacts/work-board/inputs/c79ea9e0-a78e-5607-85dc-41ae9382c59c-6dcbbd706840cea16d070f90ef60ab2f4d676e8b6265bef09fe0c1e36097f7f9.json\", \"updated_at\": \"2026-10-09T11:38:53.823032Z\", \"verification_status\": \"pending\"}}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:a1be74699f85a3f3e7ea42029c2d98a74815b47eff5024c64431ec905d4f7d27\", \"response\": {\"detail\": {\"code\": \"repo_repair_owner_mismatch\"}}, \"status\": 403}], \"owner\": {\"principal_id\": \"operator:root:c688d29179ce4d62b979bbbb5c8a8a3b\", \"session_id\": \"d9ee68d0a1c74fb39da483e0e7bfacab\"}}" },
+  { state: "terminal", sha256: "12f059be07c6dd1b2d242d2653d008ab42598fb726512f9b919b115925583fb1", raw: "{\"captures\": [{\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:7f193adfd34899ddb55c9e2c0ce9d7dde2d9ade3ba763cd5d135dafd4a11bbf6\", \"response\": {\"detail\": {\"code\": \"authentication_required\"}}, \"status\": 401}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:7f193adfd34899ddb55c9e2c0ce9d7dde2d9ade3ba763cd5d135dafd4a11bbf6\", \"response\": {\"approval\": null, \"iteration_states\": [], \"iterations\": [], \"job_id\": \"repository:7f193adfd34899ddb55c9e2c0ce9d7dde2d9ade3ba763cd5d135dafd4a11bbf6\", \"no_learning\": true, \"operator_visible\": true, \"patch_proposal\": null, \"provider_contacted\": false, \"recovery_action\": \"original_cost_exhausted\", \"repository_review\": {\"contact_state\": \"not_prepared\", \"iteration_id\": null, \"iteration_index\": null, \"native_child_id\": \"general-tool:eb8f2d65e37c6821e693e7d9574d86d996fc37c5a57365e7\", \"preparation_digest\": null, \"repository_job_id\": \"repository:7f193adfd34899ddb55c9e2c0ce9d7dde2d9ade3ba763cd5d135dafd4a11bbf6\", \"source_preview_path\": null}, \"repository_stop\": {\"limit_evidence\": {\"cause\": \"cost_exhausted\", \"goal_cutoff_at\": \"2026-10-09T11:53:57.079427Z\", \"group_calls\": 0, \"group_liability_microusd\": 0, \"original_deadline_at\": \"2026-10-09T11:43:57.193959Z\", \"original_group_max_calls\": 5, \"original_group_max_cost_microusd\": 500, \"original_limits_digest\": \"612a0a068c8950ebb95de7170555c9d08580cea9e219cc82f8e11ae4fc4ba54a\", \"original_root_max_cost_microusd\": 0, \"original_server_bound_microusd\": 100, \"root_liability_microusd\": 0, \"schema_version\": \"repository.native_limit_evidence.v1\"}, \"limit_evidence_digest\": \"5ee9666106a2ed1faa8f7771000c8b9af8bbf11aba2e2bea0cda8654d4e06976\", \"pending\": false, \"reason\": \"cost_exhausted\"}, \"revision\": 5, \"status\": \"failed\"}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/work-board/tasks/2061228f2c604aa7b74fa1d433104b31\", \"response\": {\"attempts\": [{\"attempt_id\": \"af247160c2a2435691d9a309728e7183\", \"cancel_requested_at\": \"2026-10-09T11:38:57.824609Z\", \"created_at\": \"2026-10-09T11:38:57.207926Z\", \"ended_at\": \"2026-10-09T11:38:57.824609Z\", \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 2, \"heartbeat_at\": \"2026-10-09T11:38:57.343685Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": \"cancelled\", \"readback_status\": \"not_applicable\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T11:38:57.193959Z\", \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T11:38:57.824609Z\", \"verification_status\": \"cancelled\", \"workflow_run_id\": \"work-board:2061228f2c604aa7b74fa1d433104b31:af247160c2a2435691d9a309728e7183\"}], \"children\": [], \"comments\": [], \"events\": [{\"created_at\": \"2026-10-09T11:38:57.172025Z\", \"event_id\": 1, \"kind\": \"task.created\", \"metadata\": {\"status\": \"todo\", \"task_revision\": 1}, \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\"}, {\"created_at\": \"2026-10-09T11:38:57.192653Z\", \"event_id\": 2, \"kind\": \"task.ready\", \"metadata\": {\"status\": \"ready\", \"task_revision\": 2}, \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\"}, {\"created_at\": \"2026-10-09T11:38:57.212197Z\", \"event_id\": 3, \"kind\": \"task.claimed\", \"metadata\": {\"attempt_id\": \"af247160c2a2435691d9a309728e7183\", \"status\": \"running\", \"task_revision\": 3}, \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\"}, {\"created_at\": \"2026-10-09T11:38:57.235646Z\", \"event_id\": 4, \"kind\": \"attempt.linked\", \"metadata\": {\"attempt_id\": \"af247160c2a2435691d9a309728e7183\", \"task_revision\": 4, \"workflow_run_id\": \"work-board:2061228f2c604aa7b74fa1d433104b31:af247160c2a2435691d9a309728e7183\"}, \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\"}, {\"created_at\": \"2026-10-09T11:38:57.744661Z\", \"event_id\": 9, \"kind\": \"attempt.repository_stop_requested\", \"metadata\": {\"attempt_id\": \"af247160c2a2435691d9a309728e7183\"}, \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\"}, {\"created_at\": \"2026-10-09T11:38:57.858646Z\", \"event_id\": 12, \"kind\": \"attempt.cancel_requested\", \"metadata\": {\"attempt_id\": \"af247160c2a2435691d9a309728e7183\", \"workflow_run_id\": \"work-board:2061228f2c604aa7b74fa1d433104b31:af247160c2a2435691d9a309728e7183\"}, \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\"}], \"parent_handoffs\": [], \"parents\": [], \"revision\": 6, \"task\": {\"archived_at\": null, \"artifact_refs\": [], \"assignee_id\": null, \"block_kind\": \"needs_input\", \"block_reason\": \"general_task_native_cancel_fully_cancelled\", \"block_source_status\": \"running\", \"body\": \"General registered-tool task\", \"cancel_requested_at\": \"2026-10-09T11:38:57.824609Z\", \"capability_id\": \"agent.task.v1\", \"completed_at\": null, \"completed_dependency_count\": 0, \"created_at\": \"2026-10-09T11:38:57.167657Z\", \"creation_sequence\": 1, \"dependency_count\": 0, \"dispatch_rank\": null, \"dispatch_wait_reason\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"goal_id\": \"goal:fixture\", \"goal_revision\": 1, \"idempotency_key\": \"source-original\", \"idempotency_scope\": \"general-task\", \"input_artifact_id\": \"f9d2f87c-4caa-5c7f-9174-5c069029a326\", \"latest_attempt\": {\"attempt_id\": \"af247160c2a2435691d9a309728e7183\", \"cancel_requested_at\": \"2026-10-09T11:38:57.824609Z\", \"created_at\": \"2026-10-09T11:38:57.207926Z\", \"ended_at\": \"2026-10-09T11:38:57.824609Z\", \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 2, \"heartbeat_at\": \"2026-10-09T11:38:57.343685Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": \"cancelled\", \"readback_status\": \"not_applicable\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T11:38:57.193959Z\", \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T11:38:57.824609Z\", \"verification_status\": \"cancelled\", \"workflow_run_id\": \"work-board:2061228f2c604aa7b74fa1d433104b31:af247160c2a2435691d9a309728e7183\"}, \"origin_session_id\": \"50e56812c5ee4ef3b59f4fd5663e418b\", \"origin_thread_id\": null, \"owner_principal_id\": \"operator:root:5c673f23c1524c5cb92b0bb595f6f35e\", \"owner_session_id\": \"50e56812c5ee4ef3b59f4fd5663e418b\", \"pipeline_operation_id\": null, \"pipeline_slot\": null, \"priority\": 50, \"readback_status\": \"not_applicable\", \"recovery_action\": \"approve_existing_run\", \"repository_review\": {\"contact_state\": \"not_prepared\", \"iteration_id\": null, \"iteration_index\": null, \"native_child_id\": \"general-tool:eb8f2d65e37c6821e693e7d9574d86d996fc37c5a57365e7\", \"preparation_digest\": null, \"repository_job_id\": \"repository:7f193adfd34899ddb55c9e2c0ce9d7dde2d9ade3ba763cd5d135dafd4a11bbf6\", \"source_preview_path\": null}, \"requires_review\": true, \"result_refs\": [], \"review_expires_at\": null, \"reviewer_id\": \"operator:root:5c673f23c1524c5cb92b0bb595f6f35e\", \"scheduled_at\": null, \"status\": \"blocked\", \"task_id\": \"2061228f2c604aa7b74fa1d433104b31\", \"task_revision\": 6, \"title\": \"Repair the selected repository\", \"typed_input_digest\": \"47d13fcb8cf96fb730769e44c553afe1f9e2c595d3714571df83c08f15cdca7d\", \"typed_input_ref\": \"workspace-json:artifacts/work-board/inputs/f9d2f87c-4caa-5c7f-9174-5c069029a326-47d13fcb8cf96fb730769e44c553afe1f9e2c595d3714571df83c08f15cdca7d.json\", \"updated_at\": \"2026-10-09T11:38:57.824609Z\", \"verification_status\": \"cancelled\"}}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:7f193adfd34899ddb55c9e2c0ce9d7dde2d9ade3ba763cd5d135dafd4a11bbf6\", \"response\": {\"detail\": {\"code\": \"repo_repair_owner_mismatch\"}}, \"status\": 403}], \"owner\": {\"principal_id\": \"operator:root:5c673f23c1524c5cb92b0bb595f6f35e\", \"session_id\": \"50e56812c5ee4ef3b59f4fd5663e418b\"}}" },
+  { state: "prepared", sha256: "e03f6ef5c0a24a075eb45b1e6bf804212492ef031352d33e0e37f9e4f64a43a6", raw: "{\"captures\": [{\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8\", \"response\": {\"detail\": {\"code\": \"authentication_required\"}}, \"status\": 401}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8\", \"response\": {\"approval\": null, \"iteration_states\": [], \"iterations\": [], \"job_id\": \"repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8\", \"no_learning\": true, \"operator_visible\": true, \"patch_proposal\": null, \"provider_contacted\": false, \"recovery_action\": \"review_code_egress\", \"repository_review\": {\"contact_state\": \"not_started\", \"iteration_id\": \"a94f6d1186c6b0d3382227b447023313871beff69a63ba6e9958b94226938be1\", \"iteration_index\": 1, \"native_child_id\": \"general-tool:83cf72e6da4c6ff1cca8bb38f4d28b18514233d78d4e5442\", \"preparation_digest\": \"7b991f921d6adf967414ba6ffc0f2365b9d95a71768ed203817d6fd08486e55f\", \"repository_job_id\": \"repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8\", \"source_preview_path\": \"/api/workflows/repo-repair/repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8/source-preview\"}, \"revision\": 6, \"status\": \"running\"}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/work-board/tasks/75b776e5570349cb98435eacfe6320b7\", \"response\": {\"attempts\": [{\"attempt_id\": \"acc70d52be80472abe1229456df30552\", \"cancel_requested_at\": null, \"created_at\": \"2026-10-09T11:39:00.011566Z\", \"ended_at\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 1, \"heartbeat_at\": \"2026-10-09T11:39:00.204272Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": null, \"readback_status\": \"pending\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T11:38:59.993127Z\", \"task_id\": \"75b776e5570349cb98435eacfe6320b7\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T11:39:00.204272Z\", \"verification_status\": \"pending\", \"workflow_run_id\": \"work-board:75b776e5570349cb98435eacfe6320b7:acc70d52be80472abe1229456df30552\"}], \"children\": [], \"comments\": [], \"events\": [{\"created_at\": \"2026-10-09T11:38:59.965723Z\", \"event_id\": 1, \"kind\": \"task.created\", \"metadata\": {\"status\": \"todo\", \"task_revision\": 1}, \"task_id\": \"75b776e5570349cb98435eacfe6320b7\"}, {\"created_at\": \"2026-10-09T11:38:59.991516Z\", \"event_id\": 2, \"kind\": \"task.ready\", \"metadata\": {\"status\": \"ready\", \"task_revision\": 2}, \"task_id\": \"75b776e5570349cb98435eacfe6320b7\"}, {\"created_at\": \"2026-10-09T11:39:00.019653Z\", \"event_id\": 3, \"kind\": \"task.claimed\", \"metadata\": {\"attempt_id\": \"acc70d52be80472abe1229456df30552\", \"status\": \"running\", \"task_revision\": 3}, \"task_id\": \"75b776e5570349cb98435eacfe6320b7\"}, {\"created_at\": \"2026-10-09T11:39:00.049099Z\", \"event_id\": 4, \"kind\": \"attempt.linked\", \"metadata\": {\"attempt_id\": \"acc70d52be80472abe1229456df30552\", \"task_revision\": 4, \"workflow_run_id\": \"work-board:75b776e5570349cb98435eacfe6320b7:acc70d52be80472abe1229456df30552\"}, \"task_id\": \"75b776e5570349cb98435eacfe6320b7\"}], \"parent_handoffs\": [], \"parents\": [], \"revision\": 5, \"task\": {\"archived_at\": null, \"artifact_refs\": [], \"assignee_id\": null, \"block_kind\": \"needs_input\", \"block_reason\": \"general_task_native_wait\", \"block_source_status\": \"running\", \"body\": \"General registered-tool task\", \"cancel_requested_at\": null, \"capability_id\": \"agent.task.v1\", \"completed_at\": null, \"completed_dependency_count\": 0, \"created_at\": \"2026-10-09T11:38:59.961957Z\", \"creation_sequence\": 1, \"dependency_count\": 0, \"dispatch_rank\": null, \"dispatch_wait_reason\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"goal_id\": \"goal:fixture\", \"goal_revision\": 1, \"idempotency_key\": \"source-original\", \"idempotency_scope\": \"general-task\", \"input_artifact_id\": \"c264a2d5-6248-56da-85ce-0717d07b9225\", \"latest_attempt\": {\"attempt_id\": \"acc70d52be80472abe1229456df30552\", \"cancel_requested_at\": null, \"created_at\": \"2026-10-09T11:39:00.011566Z\", \"ended_at\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 1, \"heartbeat_at\": \"2026-10-09T11:39:00.204272Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": null, \"readback_status\": \"pending\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T11:38:59.993127Z\", \"task_id\": \"75b776e5570349cb98435eacfe6320b7\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T11:39:00.204272Z\", \"verification_status\": \"pending\", \"workflow_run_id\": \"work-board:75b776e5570349cb98435eacfe6320b7:acc70d52be80472abe1229456df30552\"}, \"origin_session_id\": \"5742c38f91bf4081ad42c73b6fe1551a\", \"origin_thread_id\": null, \"owner_principal_id\": \"operator:root:dcfe0d0be99a4f24a8351dcd19e0b649\", \"owner_session_id\": \"5742c38f91bf4081ad42c73b6fe1551a\", \"pipeline_operation_id\": null, \"pipeline_slot\": null, \"priority\": 50, \"readback_status\": \"pending\", \"recovery_action\": \"approve_existing_run\", \"repository_review\": {\"contact_state\": \"not_started\", \"iteration_id\": \"a94f6d1186c6b0d3382227b447023313871beff69a63ba6e9958b94226938be1\", \"iteration_index\": 1, \"native_child_id\": \"general-tool:83cf72e6da4c6ff1cca8bb38f4d28b18514233d78d4e5442\", \"preparation_digest\": \"7b991f921d6adf967414ba6ffc0f2365b9d95a71768ed203817d6fd08486e55f\", \"repository_job_id\": \"repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8\", \"source_preview_path\": \"/api/workflows/repo-repair/repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8/source-preview\"}, \"requires_review\": true, \"result_refs\": [], \"review_expires_at\": null, \"reviewer_id\": \"operator:root:dcfe0d0be99a4f24a8351dcd19e0b649\", \"scheduled_at\": null, \"status\": \"blocked\", \"task_id\": \"75b776e5570349cb98435eacfe6320b7\", \"task_revision\": 5, \"title\": \"Repair the selected repository\", \"typed_input_digest\": \"1f785127d9c1d6c4ea5504a134e0194bf9ff306ee3087540fb887ce979a4b261\", \"typed_input_ref\": \"workspace-json:artifacts/work-board/inputs/c264a2d5-6248-56da-85ce-0717d07b9225-1f785127d9c1d6c4ea5504a134e0194bf9ff306ee3087540fb887ce979a4b261.json\", \"updated_at\": \"2026-10-09T11:39:00.204272Z\", \"verification_status\": \"pending\"}}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:105f447ba9fc14d1ff355228492f0ad1c6e1b6c2fcd1af2677e9437801c9f8d8\", \"response\": {\"detail\": {\"code\": \"repo_repair_owner_mismatch\"}}, \"status\": 403}], \"owner\": {\"principal_id\": \"operator:root:dcfe0d0be99a4f24a8351dcd19e0b649\", \"session_id\": \"5742c38f91bf4081ad42c73b6fe1551a\"}}" },
+  { state: "unknown_pending", sha256: "6bc22abf011c28a27d61018d7282ad13333d9d351a5d1055b10e43f3020b9086", raw: "{\"captures\": [{\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b\", \"response\": {\"detail\": {\"code\": \"authentication_required\"}}, \"status\": 401}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b\", \"response\": {\"approval\": null, \"iteration_states\": [], \"iterations\": [], \"job_id\": \"repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b\", \"no_learning\": true, \"operator_visible\": true, \"patch_proposal\": null, \"provider_contacted\": false, \"recovery_action\": \"repository_stop_pending\", \"repository_review\": {\"contact_state\": \"not_started\", \"iteration_id\": \"9096b922453cb5f835888887e62f96a6953fc6b0b7e5067f4daf9d5222fd0d56\", \"iteration_index\": 1, \"native_child_id\": \"general-tool:1f3f586fe34ef76d8e4a74bb3caa775eda843f8f861dd8e3\", \"preparation_digest\": \"9f13e8b313b4fd747f4aec3ea143737bb3a1f0cdc7295d496f0109edc4f757a3\", \"repository_job_id\": \"repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b\", \"source_preview_path\": \"/api/workflows/repo-repair/repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b/source-preview\"}, \"repository_stop\": {\"limit_evidence\": null, \"limit_evidence_digest\": null, \"pending\": true, \"reason\": \"operator_cancelled\"}, \"revision\": 8, \"status\": \"unknown_external_effect\"}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/work-board/tasks/9957f99759e94c7b995064036ff2601f\", \"response\": {\"attempts\": [{\"attempt_id\": \"f6c14b6efc344cb0a6f9905594ae1d97\", \"cancel_requested_at\": null, \"created_at\": \"2026-10-09T12:59:08.476730Z\", \"ended_at\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 1, \"heartbeat_at\": \"2026-10-09T12:59:08.589924Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": null, \"readback_status\": \"pending\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T12:59:08.465965Z\", \"task_id\": \"9957f99759e94c7b995064036ff2601f\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T12:59:08.589924Z\", \"verification_status\": \"pending\", \"workflow_run_id\": \"work-board:9957f99759e94c7b995064036ff2601f:f6c14b6efc344cb0a6f9905594ae1d97\"}], \"children\": [], \"comments\": [], \"events\": [{\"created_at\": \"2026-10-09T12:59:08.450010Z\", \"event_id\": 1, \"kind\": \"task.created\", \"metadata\": {\"status\": \"todo\", \"task_revision\": 1}, \"task_id\": \"9957f99759e94c7b995064036ff2601f\"}, {\"created_at\": \"2026-10-09T12:59:08.465104Z\", \"event_id\": 2, \"kind\": \"task.ready\", \"metadata\": {\"status\": \"ready\", \"task_revision\": 2}, \"task_id\": \"9957f99759e94c7b995064036ff2601f\"}, {\"created_at\": \"2026-10-09T12:59:08.480348Z\", \"event_id\": 3, \"kind\": \"task.claimed\", \"metadata\": {\"attempt_id\": \"f6c14b6efc344cb0a6f9905594ae1d97\", \"status\": \"running\", \"task_revision\": 3}, \"task_id\": \"9957f99759e94c7b995064036ff2601f\"}, {\"created_at\": \"2026-10-09T12:59:08.499383Z\", \"event_id\": 4, \"kind\": \"attempt.linked\", \"metadata\": {\"attempt_id\": \"f6c14b6efc344cb0a6f9905594ae1d97\", \"task_revision\": 4, \"workflow_run_id\": \"work-board:9957f99759e94c7b995064036ff2601f:f6c14b6efc344cb0a6f9905594ae1d97\"}, \"task_id\": \"9957f99759e94c7b995064036ff2601f\"}, {\"created_at\": \"2026-10-09T12:59:09.637871Z\", \"event_id\": 9, \"kind\": \"attempt.repository_stop_requested\", \"metadata\": {\"attempt_id\": \"f6c14b6efc344cb0a6f9905594ae1d97\"}, \"task_id\": \"9957f99759e94c7b995064036ff2601f\"}], \"parent_handoffs\": [], \"parents\": [], \"revision\": 5, \"task\": {\"archived_at\": null, \"artifact_refs\": [], \"assignee_id\": null, \"block_kind\": \"needs_input\", \"block_reason\": \"general_task_native_wait\", \"block_source_status\": \"running\", \"body\": \"General registered-tool task\", \"cancel_requested_at\": null, \"capability_id\": \"agent.task.v1\", \"completed_at\": null, \"completed_dependency_count\": 0, \"created_at\": \"2026-10-09T12:59:08.447358Z\", \"creation_sequence\": 1, \"dependency_count\": 0, \"dispatch_rank\": null, \"dispatch_wait_reason\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"goal_id\": \"goal:fixture\", \"goal_revision\": 1, \"idempotency_key\": \"source-original\", \"idempotency_scope\": \"general-task\", \"input_artifact_id\": \"88cf2051-8949-5a35-9ddd-b8d722fc0943\", \"latest_attempt\": {\"attempt_id\": \"f6c14b6efc344cb0a6f9905594ae1d97\", \"cancel_requested_at\": null, \"created_at\": \"2026-10-09T12:59:08.476730Z\", \"ended_at\": null, \"executor_id\": \"seraph-work-board:agent.task.v1\", \"fencing_token\": 1, \"heartbeat_at\": \"2026-10-09T12:59:08.589924Z\", \"lease_expires_at\": null, \"lease_owner\": null, \"outcome\": null, \"readback_status\": \"pending\", \"receipt_refs\": [], \"started_at\": \"2026-10-09T12:59:08.465965Z\", \"task_id\": \"9957f99759e94c7b995064036ff2601f\", \"task_revision_at_claim\": 2, \"updated_at\": \"2026-10-09T12:59:08.589924Z\", \"verification_status\": \"pending\", \"workflow_run_id\": \"work-board:9957f99759e94c7b995064036ff2601f:f6c14b6efc344cb0a6f9905594ae1d97\"}, \"origin_session_id\": \"0dd94e1ed5b94dd89296c6b1dd746808\", \"origin_thread_id\": null, \"owner_principal_id\": \"operator:root:0fce5f53a2d54f9288d819f9804078b8\", \"owner_session_id\": \"0dd94e1ed5b94dd89296c6b1dd746808\", \"pipeline_operation_id\": null, \"pipeline_slot\": null, \"priority\": 50, \"readback_status\": \"pending\", \"recovery_action\": \"approve_existing_run\", \"repository_review\": {\"contact_state\": \"not_started\", \"iteration_id\": \"9096b922453cb5f835888887e62f96a6953fc6b0b7e5067f4daf9d5222fd0d56\", \"iteration_index\": 1, \"native_child_id\": \"general-tool:1f3f586fe34ef76d8e4a74bb3caa775eda843f8f861dd8e3\", \"preparation_digest\": \"9f13e8b313b4fd747f4aec3ea143737bb3a1f0cdc7295d496f0109edc4f757a3\", \"repository_job_id\": \"repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b\", \"source_preview_path\": \"/api/workflows/repo-repair/repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b/source-preview\"}, \"requires_review\": true, \"result_refs\": [], \"review_expires_at\": null, \"reviewer_id\": \"operator:root:0fce5f53a2d54f9288d819f9804078b8\", \"scheduled_at\": null, \"status\": \"blocked\", \"task_id\": \"9957f99759e94c7b995064036ff2601f\", \"task_revision\": 5, \"title\": \"Repair the selected repository\", \"typed_input_digest\": \"c0daa8d34be470b9e8d6744ecc30337aa189908d47ce98987c7858d3e35ff72a\", \"typed_input_ref\": \"workspace-json:artifacts/work-board/inputs/88cf2051-8949-5a35-9ddd-b8d722fc0943-c0daa8d34be470b9e8d6744ecc30337aa189908d47ce98987c7858d3e35ff72a.json\", \"updated_at\": \"2026-10-09T12:59:08.589924Z\", \"verification_status\": \"pending\"}}, \"status\": 200}, {\"method\": \"GET\", \"path\": \"/api/workflows/repo-repair/repository:2f501b2bd93025ad2e1ee6b5985ab4ae47505e4992936bc4083c6e81ef5c706b\", \"response\": {\"detail\": {\"code\": \"repo_repair_owner_mismatch\"}}, \"status\": 403}], \"owner\": {\"principal_id\": \"operator:root:0fce5f53a2d54f9288d819f9804078b8\", \"session_id\": \"0dd94e1ed5b94dd89296c6b1dd746808\"}}" },
+] as const;
+
+function capturedRepositoryState(raw: string) {
+  const capture = JSON.parse(raw) as {
+    owner: { principal_id: string; session_id: string };
+    captures: { method: string; path: string; status: number; response: Record<string, unknown> }[];
+  };
+  const sourceCall = capture.captures.find((call) => call.status === 200 && call.path.startsWith('/api/workflows/repo-repair/'))!;
+  const taskCall = capture.captures.find((call) => call.status === 200 && call.path.startsWith('/api/work-board/tasks/'))!;
+  // Preserve the literal R199 capture and its hash. This derived parser input
+  // adds the current owner's explicit not-applicable field; it is not a fresh
+  // current API receipt or proof of Source recovery execution.
+  const source = { ...sourceCall.response, source_recovery: null } as Record<string, unknown>;
+  const task = taskCall.response.task as Record<string, unknown>;
+  const review = task.repository_review as Record<string, unknown>;
+  return { capture, source, sourceCall, task, review, props: {
+    jobId: String(review.repository_job_id),
+    ownerPrincipalId: capture.owner.principal_id,
+    ownerSessionId: capture.owner.session_id,
+    taskOwnerPrincipalId: String(task.owner_principal_id),
+    taskOwnerSessionId: String(task.owner_session_id),
+  } };
+}
+
+function expectNoRepositoryEffects() {
+  expect(screen.queryByRole('button', { name: 'Inspect exact source and diagnostics' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: "Allow this iteration's source and diagnostics" })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Execute this approved patch' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Review exact patch approval' })).not.toBeInTheDocument();
+}
+
+async function capturedBytesDigest(raw: string): Promise<string> {
+  // Vitest runs in Node; the browser TypeScript project has no Node type package.
+  const moduleName = 'node:crypto';
+  const crypto = await import(moduleName) as {
+    createHash(algorithm: 'sha256'): { update(data: string): { digest(encoding: 'hex'): string } };
+  };
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+describe('RepoRepairInspector literal authenticated Source captures R199', () => {
+  beforeEach(() => { window.sessionStorage.clear(); });
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); window.sessionStorage.clear(); });
+
+  it.each(repositorySourceCaptureBytes)('binds historical $state capture plus current nullable schema to the same owner and Task review', async ({ state, raw, sha256 }) => {
+    expect(await capturedBytesDigest(raw)).toBe(sha256);
+    const { capture, source, sourceCall, task, review, props } = capturedRepositoryState(raw);
+    expect(source.repository_review).toEqual(review);
+    expect(Object.keys(review)).toHaveLength(7);
+    expect(task.owner_principal_id).toBe(capture.owner.principal_id);
+    expect(task.owner_session_id).toBe(capture.owner.session_id);
+    expect(sourceCall.path).toBe(`/api/workflows/repo-repair/${props.jobId}`);
+    const fetch = vi.fn().mockResolvedValue(response(source));
+    const openApprovals = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...props} onOpenApprovals={openApprovals} />);
+    await screen.findByRole('button', { name: 'Refresh repair status' });
+    if (state === 'prepared') {
+      expect(await screen.findByText('running · iteration 1 of at most 3')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Inspect exact source and diagnostics' })).toBeInTheDocument();
+      expect(source).not.toHaveProperty('repository_stop');
+      expect(screen.queryByText(/Stop reason:/)).not.toBeInTheDocument();
+    } else {
+      const stop = source.repository_stop as Record<string, unknown>;
+      const evidence = stop.limit_evidence as Record<string, unknown> | null;
+      expect(await screen.findByText(`Stop reason: ${stop.reason}`)).toBeInTheDocument();
+      if (state === 'unknown_pending') {
+        expect(stop.reason).toBe('operator_cancelled');
+        expect(evidence).toBeNull();
+        expect(stop.limit_evidence_digest).toBeNull();
+      } else {
+        expect(evidence).not.toBeNull();
+        expect(screen.getByText(`Original cutoff: ${evidence!.original_deadline_at}`)).toBeInTheDocument();
+        expect(screen.getByText(`Recorded Root cost: ${evidence!.root_liability_microusd} microusd · original limit ${evidence!.original_root_max_cost_microusd} microusd`)).toBeInTheDocument();
+        expect(screen.getByText(`Recorded group calls: ${evidence!.group_calls} · original limit ${evidence!.original_group_max_calls}`)).toBeInTheDocument();
+      }
+      if (review.contact_state === 'not_prepared') {
+        expect(screen.queryByText(/iteration .*of at most 3/)).not.toBeInTheDocument();
+      }
+      if (source.status === 'unknown_external_effect') {
+        expect(stop.pending).toBe(true);
+        expect(screen.getByText(/unknown external effect/)).toBeInTheDocument();
+        expect(screen.getByText('Unknown outcome. Reconcile the original repository execution, reservation and debt. Physical cleanup is pending verification.')).toBeInTheDocument();
+      }
+      expectNoRepositoryEffects();
+      expect(screen.getByText(stop.pending ? 'Original reservation remains held. Physical cleanup is pending verification.' : 'Original repository stop recorded.')).toBeInTheDocument();
+      expect(screen.queryByText('Stop pending. Original durable and physical capacities remain retained.')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      expectNoRepositoryEffects();
+      expect(openApprovals).not.toHaveBeenCalled();
+    }
+    expect(fetch.mock.calls.every((call) => !call[1]?.method || call[1].method === 'GET')).toBe(true);
+  });
+
+  it.each([401, 403])('renders the actual authenticated capture rejection %s without controls', async (status) => {
+    const { capture, props } = capturedRepositoryState(repositorySourceCaptureBytes[0].raw);
+    const rejection = capture.captures.find((call) => call.status === status)!;
+    const fetch = vi.fn().mockResolvedValue(response(rejection.response, false, status));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...props} />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expectNoRepositoryEffects();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['missing stop', (source: Record<string, unknown>) => { delete source.repository_stop; }],
+    ['null stop', (source: Record<string, unknown>) => { source.repository_stop = null; }],
+    ['copied Root', (source: Record<string, unknown>) => { source.job_id = 'repository:foreign'; }],
+    ['mixed preparation', (source: Record<string, unknown>) => { (source.repository_review as Record<string, unknown>).iteration_id = 'a'.repeat(64); }],
+    ['private extra field', (source: Record<string, unknown>) => { (source.repository_stop as Record<string, unknown>).private_source = 'must not render'; }],
+    ['wrong state', (source: Record<string, unknown>) => { source.status = 'failed'; }],
+    ['unsupported pending state', (source: Record<string, unknown>) => { source.status = 'paused'; }],
+    ['malformed pending state', (source: Record<string, unknown>) => { source.status = 'unknown'; }],
+    ['unsafe cost', (source: Record<string, unknown>) => { ((source.repository_stop as Record<string, unknown>).limit_evidence as Record<string, unknown>).root_liability_microusd = Number.MAX_SAFE_INTEGER + 1; }],
+    ['foreign cause', (source: Record<string, unknown>) => { ((source.repository_stop as Record<string, unknown>).limit_evidence as Record<string, unknown>).cause = 'goal_limit_exhausted'; }],
+    ['malformed cutoff', (source: Record<string, unknown>) => { ((source.repository_stop as Record<string, unknown>).limit_evidence as Record<string, unknown>).original_deadline_at = 'not a timestamp'; }],
+    ['missing digest', (source: Record<string, unknown>) => { (source.repository_stop as Record<string, unknown>).limit_evidence_digest = null; }],
+  ])('rejects %s in literal Pending metadata', async (_label, mutate) => {
+    const { source, props } = capturedRepositoryState(repositorySourceCaptureBytes[0].raw);
+    mutate(source);
+    const fetch = vi.fn().mockResolvedValue(response(source));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...props} />);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expectNoRepositoryEffects();
+    expect(screen.queryByText(/Stop reason:/)).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it('clears the actual prepared controls when a foreign captured Root is returned by refresh', async () => {
+    const prepared = capturedRepositoryState(repositorySourceCaptureBytes[2].raw);
+    const pending = capturedRepositoryState(repositorySourceCaptureBytes[0].raw);
+    const fetch = vi.fn().mockResolvedValueOnce(response(prepared.source)).mockResolvedValueOnce(response(pending.source));
+    vi.stubGlobal('fetch', fetch);
+    render(<RepoRepairInspector {...prepared.props} />);
+    expect(await screen.findByRole('button', { name: 'Inspect exact source and diagnostics' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh repair status' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expectNoRepositoryEffects();
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

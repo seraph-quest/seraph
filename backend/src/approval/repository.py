@@ -9,7 +9,9 @@ from typing import Any, Mapping
 from sqlalchemy import or_, update
 from sqlmodel import select, col
 
-from src.db.engine import get_session
+from sqlalchemy.exc import OperationalError
+
+from src.db.engine import bound_lock_wait, get_session, is_database_locked
 from src.db.models import ApprovalRequest, Session
 from src.db.session_refs import ensure_sessions_exist
 from src.approval.runtime import (
@@ -1589,17 +1591,11 @@ class ApprovalRepository:
             result = await db.execute(stmt)
             requests = result.scalars().all()
             output: list[dict[str, Any]] = []
+            expired_ids: list[str] = []
             for request in requests:
                 if _approval_is_expired(request.expires_at):
-                    await db.execute(
-                        update(ApprovalRequest)
-                        .execution_options(synchronize_session=False)
-                        .where(
-                            ApprovalRequest.id == request.id,
-                            ApprovalRequest.status == "pending",
-                        )
-                        .values(status="expired", resolved_at=datetime.now(timezone.utc))
-                    )
+                    # Never shown as pending; persisted below if the lock allows.
+                    expired_ids.append(request.id)
                     continue
                 try:
                     details = json.loads(request.details_json) if request.details_json else {}
@@ -1656,7 +1652,35 @@ class ApprovalRepository:
                         "created_at": _approval_timestamp(request.created_at),
                     }
                 )
+            if expired_ids:
+                await _persist_read_expiry(db, expired_ids)
             return output
+
+
+# The cockpit's pending-approval read waits at most this long to persist the
+# expiry it already applied to its answer (#1074).
+_READ_EXPIRY_WAIT_MS = 250
+
+
+async def _persist_read_expiry(db, expired_ids: list[str]) -> None:
+    await bound_lock_wait(db, _READ_EXPIRY_WAIT_MS)
+    try:
+        await db.execute(
+            update(ApprovalRequest)
+            .execution_options(synchronize_session=False)
+            .where(
+                ApprovalRequest.id.in_(expired_ids),
+                ApprovalRequest.status == "pending",
+            )
+            .values(status="expired", resolved_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+    except OperationalError as exc:
+        if not is_database_locked(exc):
+            raise
+        # Expiry is time-derived, so every later read and resolution sees it
+        # regardless; the status column catches up on the next free read.
+        await db.rollback()
 
 
 approval_repository = ApprovalRepository()

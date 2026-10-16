@@ -14,6 +14,12 @@ it.each(["node_unsupported", "node_missing", "runtime_build_stale", "runtime_pac
   expect(screen.getByText(/Restore the reviewed host build/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /activate|restart/i })).toBeNull();
 });
+it("names the exact operator fix the backend reports for a blocked host", async () => {
+  const recovery = "Install Node 22.12+ or 24.x and set CORDIS_NODE_PATH to it (or put it first on PATH), then run ./manage.sh -e dev cordis build and restart with ./manage.sh -e dev local up.";
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: { ...snapshot, recovery } }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText(`Fix: ${recovery}`)).toBeInTheDocument();
+});
 it("preserves last confirmed state through failed metadata refresh", async () => {
   vi.mocked(apiFetch).mockResolvedValueOnce(response({ cordis_runtime: snapshot })).mockResolvedValueOnce(response({}, 503));
   render(<CordisRuntimePanel />); await screen.findByText("blocked · node_unsupported");

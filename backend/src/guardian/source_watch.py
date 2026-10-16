@@ -89,9 +89,63 @@ NO_LEARNING = "no_learning"
 
 logger = logging.getLogger(__name__)
 
-_HTML_SCRIPT_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", re.I | re.S)
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+# Linear equivalents of ``<!--.*?-->`` (S), ``<(script|style|noscript)\b[^>]*>.*?</\1\s*>``
+# (I, S) and ``<[^>]+>``: identical output, but an unclosed construct is scanned
+# once instead of once per opening (adversarial pages stalled the regex forms).
+_HTML_SCRIPT_OPEN_RE = re.compile(r"<(script|style|noscript)\b", re.I)
+
+
+def _strip_comments(value: str) -> str:
+    parts, cursor = [], 0
+    while (start := value.find("<!--", cursor)) >= 0:
+        end = value.find("-->", start + 4)
+        if end < 0:
+            break  # No later opening can close either.
+        parts.append(value[cursor:start])
+        cursor = end + 3
+    return "".join(parts) + value[cursor:]
+
+
+def _strip_scripts(value: str) -> str:
+    parts, cursor, position, closing = [], 0, 0, {}
+    while (opening := _HTML_SCRIPT_OPEN_RE.search(value, position)) is not None:
+        start = opening.start()
+        name_end = value.find(">", opening.end())
+        if name_end < 0:
+            break  # ``[^>]*>`` can never complete for this or any later opening.
+        name = opening.group(1)
+        key = name.lower()
+        cached = closing.get(key)
+        if cached is None or (cached[0] != -1 and cached[0] < name_end + 1):
+            # ``\1`` under re.I compares lower() per character (so ``ſ`` is not ``s``).
+            letters = "".join(f"[{c.lower()}{c.upper()}]" if c.isascii() and c.isalpha() else re.escape(c) for c in name)
+            pattern = re.compile(r"</" + letters + r"\s*>")
+            found = pattern.search(value, name_end + 1)
+            cached = (found.start(), found.end()) if found else (-1, -1)
+            closing[key] = cached
+        if cached[0] < 0:
+            position = start + 1  # No closing after here: this opening never matches.
+            continue
+        parts.append(value[cursor:start])
+        parts.append("\n")
+        cursor = position = cached[1]
+    return "".join(parts) + value[cursor:]
+
+
+def _strip_tags(value: str) -> str:
+    parts, cursor, position = [], 0, 0
+    while (start := value.find("<", position)) >= 0:
+        end = value.find(">", start + 1)
+        if end < 0:
+            break
+        if end == start + 1:
+            position = start + 1  # ``<>`` needs at least one character.
+            continue
+        parts.append(value[cursor:start])
+        cursor = position = end + 1
+    return "".join(parts) + value[cursor:]
+
+
 _REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?im)(authorization\s*:\s*bearer\s+)[^\s]+"), r"\1[REDACTED]"),
     (re.compile(r"(?im)(\b(?:api[_-]?key|secret|token|password)\b\s*[:=]\s*[\"']?)[^\s,\"']+"), r"\1[REDACTED]"),
@@ -701,10 +755,10 @@ def _schedule_enabled(schedule: Mapping[str, Any], *, default: bool = True) -> b
 def normalize_source_text(content: str, *, html_content: bool = False) -> str:
     value = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
     if html_content:
-        value = _COMMENT_RE.sub("", value)
-        value = _HTML_SCRIPT_RE.sub("\n", value)
+        value = _strip_comments(value)
+        value = _strip_scripts(value)
         value = re.sub(r"</(p|div|li|h[1-6]|br|tr|section|article)>", "\n", value, flags=re.I)
-        value = _HTML_TAG_RE.sub("", value)
+        value = _strip_tags(value)
         value = html.unescape(value)
     lines = [" ".join(line.split()) for line in value.split("\n")]
     normalized = "\n".join(line for line in lines if line).strip()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from collections.abc import AsyncIterator, Awaitable, Callable
-from threading import Thread
+from threading import Thread, get_ident, local
 from typing import Any, Protocol, TypeVar
 
 from .contracts import (
@@ -72,6 +72,19 @@ async def _persist_bound_admission_receipt(
     )
 
 
+_sync_bridge = local()
+
+
+def sync_bridge_blocked_callers() -> tuple[int, ...]:
+    """Thread ids blocked, directly or through nested bridges, on this thread.
+
+    Each of them is joining a bridge thread in the chain that leads here, so
+    none can release anything it holds until this bridge returns; a lock held
+    by any of them must fail fast instead of waiting forever.
+    """
+    return getattr(_sync_bridge, "callers", ())
+
+
 def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
     """Resolve repository coroutines from sync callers, including active loops."""
     try:
@@ -82,8 +95,11 @@ def _run_awaitable_sync(awaitable: Awaitable[_SyncResult]) -> _SyncResult:
     result: list[_SyncResult] = []
     error: list[BaseException] = []
     caller_context = contextvars.copy_context()
+    # A bridge started from inside another bridge inherits its blocked chain.
+    blocked_callers = (*sync_bridge_blocked_callers(), get_ident())
 
     def runner() -> None:
+        _sync_bridge.callers = blocked_callers
         try:
             result.append(caller_context.run(asyncio.run, awaitable))
         except BaseException as exc:  # pragma: no cover - defensive thread bridge

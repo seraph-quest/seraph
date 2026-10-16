@@ -269,11 +269,18 @@ class InferenceAccountingRepositoryMixin:
                 return _operation_payload(row)
 
     async def recover_inference_accounting(self, *, now: datetime | None = None, job_id: str | None = None) -> list[dict[str, object]]:
+        from src.workflows.repo_repair_source import _repository_startup_mutation_fence
+        async with _repository_startup_mutation_fence():
+            return await self._recover_inference_accounting_locked(now=now, job_id=job_id)
+
+    async def _recover_inference_accounting_locked(self, *, now: datetime | None = None, job_id: str | None = None) -> list[dict[str, object]]:
         """Classify stale provider work without replaying ephemeral callbacks."""
         observed = _utc(now or datetime.now(timezone.utc))
         recovered = []
         async with self._session() as db:
             await self._accounting_begin(db)
+            from src.workflows.repo_repair_source import _repository_startup_protected_lineage
+            protected = await _repository_startup_protected_lineage(db)
             account, rows = await self._accounting_rows(db)
             if account is None:
                 return []
@@ -281,6 +288,8 @@ class InferenceAccountingRepositoryMixin:
                 self._assert_accounting_continuity(workspace, account, rows)
                 changed = False
                 for row in rows:
+                    if row.job_id in protected:
+                        continue
                     if job_id is not None and row.job_id != job_id:
                         continue
                     if row.state not in {"reserved", "contact_started", "unknown"}:
@@ -637,10 +646,10 @@ class InferenceAccountingRepositoryMixin:
                         group_rows = await self._group_rows(db, ledger, group.group_id) if hasattr(group, "group_id") else []
                         task_group_entry = await reserve_entry(db, run, group_rows, general_task_binding,
                             operation_id=operation_id, bound=bound, runtime_path=runtime_path, deadline_at=deadline,
-                            policy_digest=policy_digest)
+                            policy_digest=policy_digest, payload_digest=payload_digest)
                         await self._shadow_helper(db, lambda rows: reserve_entry(db, run, rows, general_task_binding,
                             operation_id=operation_id, bound=bound, runtime_path=runtime_path, deadline_at=deadline,
-                            policy_digest=policy_digest), group_rows)
+                            policy_digest=policy_digest, payload_digest=payload_digest), group_rows)
                     period = period_id(observed)
                     from src.workspace.accounting_witness import (
                         held_microusd, period_state, totals_overrun_rows, totals_period_rows, unreviewed_overruns,

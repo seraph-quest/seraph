@@ -41,7 +41,8 @@ async function main(): Promise<void> {
         if (!client.isActive()) throw new ProtocolError("stale native service scope");
         if (pending.size + scopes.size >= MAX_PENDING) return {status: "blocked", reason_code: "bridge_capacity_exceeded", memory_status: "no_learning"};
         const seq = ++outboundSeq;
-        const request: Frame = { ...incoming, seq, request_id: `c-${seq}`, kind: "request", payload: validateInput(method, input) as unknown as Record<string, Json> };
+        // The callback keeps the original's invocation, epoch and deadline but names its own method.
+        const request: Frame = { ...incoming, seq, request_id: `c-${seq}`, kind: "request", method, payload: validateInput(method, input) as unknown as Record<string, Json> };
         const result = new Promise<unknown>((resolve, reject) => {
           const timer = setTimeout(() => fence(new ProtocolError("native service acknowledgement expired")), Math.max(1, incoming.deadline_at - Date.now()));
           pipes.track(`service-${request.request_id}`, () => { clearTimeout(timer); });

@@ -287,7 +287,10 @@ def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_paren
         # The strict total wall bound includes readback. Slow test hosts may
         # reap the descendant inside that bound yet lack time to adopt output.
         assert exc.terminal_status=="unknown_external_effect"
-        assert "deadline" in str(exc) or "timed out" in str(exc) or "terminal cleanup is unproven" in str(exc)
+        # On a loaded host the 3s wall bound can also expire before the
+        # supervisor's output EOF is observed; that is the same Unknown.
+        assert ("deadline" in str(exc) or "timed out" in str(exc) or "terminal cleanup is unproven" in str(exc)
+                or str(exc) == "supervisor_output_eof_unproven")
         durable=executor._read_job_marker(job.job_id)
         assert durable["status"]=="unknown_external_effect" and durable["cleanup_proven"] is False
         # An expired proof is never adopted. The authenticated ten-second

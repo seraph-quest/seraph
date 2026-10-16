@@ -17,7 +17,7 @@ from src.db.models import Goal, WorkflowRunState, InferenceCostReservation
 from src.guardian.goal_programmes import goal_programme_service, _load
 from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
 from src.guardian.research_plan_contracts import (
-    GoalResearchPlanSpecV1, SearchManifestV1, SourceSelectionV1, PublicSnapshotV1, Closed)
+    GoalResearchPlanSpecV1, SearchManifestV1, SourceSelectionV1, Closed)
 from src.work_board.contracts import TaskStrategyBinding, WorkBoardOwner
 from src.work_board.research_parent import DISCOVERY_KIND, DISCOVERY_CAPABILITY, DISCOVERY_SERVICE, GoalDiscoveryAuthority
 from src.work_board.research_artifacts import json_bytes, sha, stage_discovery_artifact
@@ -28,9 +28,61 @@ from src.workflows.research_provider import execute_discovery_request, validated
 from src.workflows.job_runtime import DurableJobRepository, DurableJobSpec, DurableJobIdentity, _canonical, _digest, _effect_ledger_or_raise, _job_has_unsafe_effects
 from src.guardian.discovery_search import DiscoverySearch, DiscoverySearchBlocked
 
+# Media types Python admits for Cordis source extraction (#1008).
+SOURCE_MEDIA_TYPES = ("text/plain", "text/html", "application/rss+xml", "application/atom+xml")
+RESEARCH_RECOVERY = ("Restore the reviewed Cordis research runtime and its planning/source providers "
+    "(reviewed Node 22.12+/24 on PATH, runtime/cordis installed with npm ci and built with "
+    "'./manage.sh -e dev cordis build', then restart the backend); the original occurrence is never "
+    "replayed and a new occurrence is admitted on the next eligible day.")
+
+
+RECOVERY_BY_REASON = {
+    "research_composition_binding_missing": ("This occurrence was admitted before discovery ran through Cordis and "
+        "cannot execute; it is never replayed. A new occurrence is admitted on the next eligible day."),
+    "stale_output": ("The reviewed research providers or their configuration changed after this occurrence was "
+        "admitted; it is never replayed. A new occurrence uses the current composition on the next eligible day."),
+}
+
+
+def _reason_code(value):
+    """Operator projections carry only finite reason codes."""
+    import re
+    return value if type(value) is str and re.fullmatch(r"[a-z0-9_]{1,128}", value) else "research_provider_blocked"
+
+
+class ResearchRuntimeBlocked(ValueError):
+    """Operator-visible Cordis research block; there is no Python fallback."""
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 SEARCH_BLOCK_REASONS = frozenset({"search_limits_invalid", "search_query_invalid", "search_deadline_expired",
     "search_timeout", "search_response_byte_cap", "search_response_unsupported", "search_captcha",
     "search_markup_drift", "search_redirect_wrapper_invalid", "search_result_url_unsupported", "search_title_unsupported"})
+
+
+async def write_discovery_output(jobs, job_id, owner, fence, kind, value, slot=0):
+    """Stage and adopt one bounded output under the original attempt's lease."""
+    stage = {"queries": "plan_queries", "manifest": "search_public", "selection": "search_public",
+        "snapshot": "extract_sources", "snapshots": "extract_sources", "brief": "prepare_brief",
+        "raw_source": "extract_sources", "extraction": "extract_sources"}.get(kind)
+    witness = await physical_discovery_inputs(jobs, job_id)
+    from src.workflows.research_sources import discovery_stage_inputs, is_local_unsupported_discovery_brief
+    current = await jobs.get_job(job_id)
+    if stage is not None:
+        discovery_stage_inputs(witness.plan, witness.artifacts,
+            "plan_queries" if kind == "brief" and is_local_unsupported_discovery_brief(value, witness.artifacts, current["effects"]) else stage)
+    raw = json_bytes(value)
+    declared = next((output for step in witness.plan.steps for output in step.output_slots if output.slot == kind), None)
+    if kind not in {"raw_source", "extraction"} and len(raw) > min(witness.plan.limits.max_output_bytes,
+            declared.max_bytes if declared else witness.plan.limits.max_output_bytes):
+        raise ValueError("programme declared output byte cap exceeded")
+    artifact = stage_discovery_artifact(programme_id=witness.plan.programme_id.hex,
+        job_id=job_id, kind=kind, slot=slot, content=raw)
+    async with discovery_writer_scope(witness=witness):
+        await adopt_discovery_artifact(jobs, job_id=job_id, owner=owner, fence=fence, artifact=artifact)
+    return artifact
 
 
 def discovery_external_effect_state(run):
@@ -43,13 +95,21 @@ def discovery_external_effect_state(run):
 
 
 class GoalDiscoveryService:
-    def __init__(self, *, jobs=None, search=None, strategy_resolver=None, resolver=None, transport=None):
+    def __init__(self, *, jobs=None, search=None, strategy_resolver=None, resolver=None, transport=None, cordis=None):
         self.jobs = jobs or DurableJobRepository()
         self.search = search or DiscoverySearch()
         self.strategy_resolver = strategy_resolver
         self.resolver, self.transport = resolver, transport
+        # The reviewed Cordis host composing planning, extraction and consumer.
+        self.cordis = cordis
         self.started = False
         self._tasks = set()
+
+    def _cordis(self):
+        if self.cordis is not None:
+            return self.cordis
+        from src.runtime_plugins.bridge import cordis_host
+        return cordis_host
 
     async def start(self):
         if self.started:
@@ -128,28 +188,20 @@ class GoalDiscoveryService:
         deadline = min(programme.expires_at, now + timedelta(seconds=300))
         brief = stage_discovery_artifact(programme_id=programme.id, job_id=job_id,
             kind="public_brief", slot=0, content=programme.public_brief.encode())
-        from src.guardian.research_plan_contracts import STAGES
-        caps = {"queries": 16384, "manifest": 65536, "selection": 8192, "snapshots": 65536, "brief": 65536}
-        refs = [[brief.reference.model_dump(mode="json")],
-            [{"producer_step_id": "plan_queries", "output_slot": "queries", "json_pointer": ""}],
-            [{"producer_step_id": "search_public", "output_slot": name, "json_pointer": ""} for name in ("manifest", "selection")],
-            [{"producer_step_id": "extract_sources", "output_slot": "snapshots", "json_pointer": ""}]]
-        plan = GoalResearchPlanSpecV1.model_validate({"schema_version": 1, "plan_id": str(identifier),
-            "programme_id": programme.id, "programme_revision": programme.grant_revision,
-            "goal_id": goal_id, "goal_revision": programme.goal_revision, "grant_id": programme.id,
-            "grant_revision": programme.grant_revision, "public_brief_digest": programme.brief_digest,
-            "route_epoch": programme.route_epoch, "strategy_binding": strategy.model_dump(mode="json"),
-            "issued_at": now.isoformat(), "deadline_at": deadline.isoformat(), "idempotency_key": str(identifier),
-            "limits": {"max_queries": 3, "max_results": 15, "max_sources": 4, "max_inference_requests": 4,
-                "max_wall_seconds": 300, "max_search_seconds": 20, "max_search_bytes": 524288,
-                "max_source_bytes": 262144, "max_output_bytes": 65536,
-                "cost_limit_microusd": programme.budget.max_inference_microusd},
-            "steps": [{"step_id": name, "capability_id": capability, "capability_version": 1,
-                "input_refs": refs[index], "output_slots": [{"slot": slot, "artifact_type": kind,
-                    "max_bytes": caps[slot]} for slot, kind in outputs]}
-                for index, (name, capability, outputs) in enumerate(STAGES)]})
-        staged = stage_discovery_artifact(programme_id=programme.id, job_id=job_id,
-            kind="plan", slot=0, content=json_bytes(plan.model_dump(mode="json")))
+        staged = await self._plan(programme=programme, binding=binding, strategy=strategy, identifier=identifier,
+            job_id=job_id, day=day, now=now, deadline=deadline, brief=brief)
+        # The accepted plan's original issue time and cutoff are the job's; a
+        # reused sealed plan keeps both.
+        accepted = GoalResearchPlanSpecV1.model_validate(json.loads(staged.content))
+        now, deadline = accepted.issued_at, accepted.deadline_at
+        host = self._cordis()
+        if not host.admitting or host.reviewed is None:
+            raise ResearchRuntimeBlocked("research_runtime_unavailable")
+        from src.runtime_plugins.ownership import bind_invocation
+        async with self.jobs._session() as db:
+            # Pin the exact reviewed package/profile (providers and config) to this job.
+            composition = await bind_invocation(db, method="research.executeAccepted", native_branch="programme_discovery",
+                goal_bound=True, reviewed_composition=host.reviewed)
         authority = GoalDiscoveryAuthority(authority_type="goal_programme_discovery_v1",
             principal=DISCOVERY_SERVICE, owner_kind="service", service_id=DISCOVERY_SERVICE,
             capability_id=DISCOVERY_CAPABILITY, capability_version="1",
@@ -164,6 +216,7 @@ class GoalDiscoveryService:
             goal_id=goal_id, goal_revision=binding.goal_revision, priority=50, service_id=DISCOVERY_SERVICE,
             resource_claims=("goal-discovery:" + binding.owner_identity_id,), declared_authority=authority.model_dump(mode="json"),
             deadline_at=deadline, max_attempts=1, budget_microusd=binding.cost_ceiling_microusd,
+            composition_binding=composition,
             run_fingerprint=_digest({"inputs": inputs, "authority": authority.model_dump(mode="json")}))
 
         async def admission(db, run):
@@ -192,6 +245,85 @@ class GoalDiscoveryService:
             await self.jobs.admit_job(spec, admission_authority_check=admission)
         return await self._queue(job_id)
 
+    async def _plan(self, *, programme, binding, strategy, identifier, job_id, day, now, deadline, brief):
+        """research.buildPlan through the composed Cordis planner, once per occurrence."""
+        from src.runtime_plugins.bridge import HostBlocked
+        from src.runtime_plugins.dispatch import NativeServiceBlocked, read_context
+        from src.runtime_plugins.ownership import bind_invocation
+        from src.runtime_plugins.service_jobs import _block, claim_service_job, open_invocation
+        from src.work_board.research_parent import PLANNING_KIND
+        plan_job_id = "goal-discovery-plan:" + identifier.hex
+        if await self.jobs.get_job(plan_job_id) is not None:
+            # One planning call per occurrence: reuse its sealed plan, never re-plan.
+            return await self._sealed_plan(plan_job_id, programme.id, job_id)
+        host = self._cordis()
+        if not host.admitting or host.reviewed is None:
+            raise ResearchRuntimeBlocked("research_runtime_unavailable")
+        limits = {"max_queries": 3, "max_results": 15, "max_sources": 4, "max_inference_requests": 4,
+            "max_wall_seconds": 300, "max_search_seconds": 20, "max_search_bytes": 524288,
+            "max_source_bytes": 262144, "max_output_bytes": 65536,
+            "cost_limit_microusd": programme.budget.max_inference_microusd}
+        request = {"schema_version": 1, "plan_id": str(identifier), "programme_id": str(UUID(programme.id)),
+            "programme_revision": programme.grant_revision, "goal_id": binding.goal_id, "goal_revision": programme.goal_revision,
+            "grant_id": programme.id, "grant_revision": programme.grant_revision, "public_brief_digest": programme.brief_digest,
+            "public_brief_ref": brief.reference.model_dump(mode="json"), "route_epoch": programme.route_epoch,
+            "strategy_binding": strategy.model_dump(mode="json"), "issued_at": now.isoformat(),
+            "deadline_at": deadline.isoformat(), "idempotency_key": str(identifier), "limits_ceiling": limits,
+            "output_caps": {"queries": 16384, "manifest": 65536, "selection": 8192, "snapshots": 65536, "brief": 65536}}
+        planning = stage_discovery_artifact(programme_id=programme.id, job_id=job_id, kind="planning_request",
+            slot=0, content=json_bytes(request))
+        authority = {"authority_type": "goal_programme_planning_v1", "principal": DISCOVERY_SERVICE,
+            "owner_kind": "service", "service_id": DISCOVERY_SERVICE, "capability_id": DISCOVERY_CAPABILITY,
+            "programme_binding": binding.model_dump(mode="json"), "occurrence_day": day,
+            "discovery_job_id": job_id, "planning_job_id": plan_job_id, "no_learning": True}
+        inputs = {"planning_request_ref": planning.reference.model_dump(mode="json"),
+            "planning_request_file_path": planning.file_path, "no_learning": True}
+        async with self.jobs._session() as db:
+            composition = await bind_invocation(db, method="research.buildPlan", native_branch="programme_planning",
+                reviewed_composition=host.reviewed)
+        job = await self.jobs.admit_job(DurableJobSpec(identity=DurableJobIdentity(job_id=plan_job_id, owner_kind="service",
+            owner_principal_id=DISCOVERY_SERVICE, job_kind=PLANNING_KIND, capability_version="1",
+            idempotency_scope="goal-programme-planning", idempotency_key=identifier.hex), inputs=inputs,
+            service_id=DISCOVERY_SERVICE, declared_authority=authority, max_attempts=1,
+            deadline_at=min(deadline, now + timedelta(seconds=30)), composition_binding=composition,
+            run_fingerprint=_digest({"inputs": inputs, "authority": authority})))
+        owner, fence = await claim_service_job(job, host=host, jobs=self.jobs)
+        scope = await open_invocation(job_id=plan_job_id, owner=owner, fence=fence, host=host,
+            admission_replayed=False, candidate=inputs, jobs=self.jobs)
+        try:
+            result = await host.request_service("research.buildPlan", {"task_ref": planning.reference.artifact_id},
+                original_scope=scope)
+            if result["status"] != "succeeded":
+                raise NativeServiceBlocked(result["reason_code"])
+            async with self.jobs._session() as db:
+                sealed = read_context(await self.jobs._fetch(db, plan_job_id))["result"]
+            # The child's answer is accepted only as an echo of Python's sealed plan.
+            if sealed is None or result["value"] != {"plan_ref": sealed["payload"]["value"]["artifact_ref"], "revision": 1}:
+                raise NativeServiceBlocked("native_child_result_mismatch")
+            await self.jobs.transition_job(plan_job_id, "succeeded", owner=owner, fencing_token=fence,
+                result={"plan_ref": sealed["plan_ref"], "plan_provider_digest": host.reviewed.plugin_digests.get("seraph.goal-plan.v1"),
+                    "no_learning": True}, result_summary="Cordis research plan validated and staged; no_learning")
+        except (NativeServiceBlocked, HostBlocked) as exc:
+            from src.runtime_plugins.research_dispatch import operator_reason
+            reason = operator_reason(exc.reason_code) if isinstance(exc, NativeServiceBlocked) else "research_runtime_unavailable"
+            await _block(self.jobs, scope, reason)
+            raise ResearchRuntimeBlocked(reason) from exc
+        return await self._sealed_plan(plan_job_id, programme.id, job_id)
+
+    async def _sealed_plan(self, plan_job_id, programme_id, job_id):
+        from src.runtime_plugins.dispatch import read_context
+        from src.guardian.research_plan_contracts import ArtifactRef
+        from src.work_board.research_artifacts import DiscoveryStagedArtifact, read_discovery
+        async with self.jobs._session() as db:
+            run = await self.jobs._fetch(db, plan_job_id)
+            status, sealed = run.status, (read_context(run)["result"] if run.status == "succeeded" else None)
+        if status != "succeeded" or sealed is None:
+            raise ResearchRuntimeBlocked("programme_planning_requires_recovery")
+        reference = ArtifactRef.model_validate(sealed["plan_ref"])
+        content = read_discovery(sealed["plan_file_path"], reference.digest, programme_id=programme_id, max_bytes=65536)
+        return DiscoveryStagedArtifact(programme_id=programme_id, job_id=job_id, kind="plan", slot=0,
+            file_path=sealed["plan_file_path"], reference=reference, content=content)
+
     async def _queue(self, job_id):
         witness = await physical_discovery_inputs(self.jobs, job_id)
         async with discovery_writer_scope(witness=witness):
@@ -213,23 +345,7 @@ class GoalDiscoveryService:
                 raise ValueError("programme_outstanding_occurrence_requires_recovery")
 
     async def _write(self, job_id, owner, fence, kind, value, slot=0):
-        stage = {"queries": "plan_queries", "manifest": "search_public", "selection": "search_public",
-            "snapshot": "extract_sources", "snapshots": "extract_sources", "brief": "prepare_brief"}.get(kind)
-        witness = await physical_discovery_inputs(self.jobs, job_id)
-        from src.workflows.research_sources import discovery_stage_inputs, is_local_unsupported_discovery_brief
-        current = await self.jobs.get_job(job_id)
-        if stage is not None:
-            discovery_stage_inputs(witness.plan, witness.artifacts,
-                "plan_queries" if kind == "brief" and is_local_unsupported_discovery_brief(value, witness.artifacts, current["effects"]) else stage)
-        raw = json_bytes(value)
-        declared = next((output for step in witness.plan.steps for output in step.output_slots if output.slot == kind), None)
-        if len(raw) > min(witness.plan.limits.max_output_bytes, declared.max_bytes if declared else witness.plan.limits.max_output_bytes):
-            raise ValueError("programme declared output byte cap exceeded")
-        artifact = stage_discovery_artifact(programme_id=witness.plan.programme_id.hex,
-            job_id=job_id, kind=kind, slot=slot, content=raw)
-        async with discovery_writer_scope(witness=witness):
-            await adopt_discovery_artifact(self.jobs, job_id=job_id, owner=owner, fence=fence, artifact=artifact)
-        return artifact
+        return await write_discovery_output(self.jobs, job_id, owner, fence, kind, value, slot)
 
     async def _contact(self, job_id, owner, fence, effect_id, target):
         witness = await physical_discovery_inputs(self.jobs, job_id,
@@ -289,7 +405,8 @@ class GoalDiscoveryService:
                 if job is not None and job["status"] == "running":
                     witness = await physical_discovery_inputs(self.jobs, job_id)
                     async with discovery_writer_scope(witness=witness):
-                        reason = exc.reason if isinstance(exc, DiscoverySearchBlocked) and exc.reason in SEARCH_BLOCK_REASONS else "programme_execution_requires_review"
+                        reason = (exc.reason if isinstance(exc, DiscoverySearchBlocked) and exc.reason in SEARCH_BLOCK_REASONS
+                            else exc.reason if isinstance(exc, ResearchRuntimeBlocked) else "programme_execution_requires_review")
                         await self.jobs.transition_job(job_id, "blocked", reason=reason,
                             owner=owner, fencing_token=job["lease"]["fencing_token"])
             except Exception:
@@ -298,7 +415,25 @@ class GoalDiscoveryService:
         finally:
             self._tasks.discard(task)
 
+    async def _current_composition(self, job_id):
+        """The job's admitted reviewed package/profile must still be the live host's."""
+        from src.runtime_plugins.ownership import RuntimeCompositionBinding
+        host = self._cordis()
+        async with self.jobs._session() as db:
+            raw = (await self.jobs._fetch(db, job_id)).composition_binding_json
+        if raw is None:
+            raise ResearchRuntimeBlocked("research_composition_binding_missing")
+        if not host.admitting or host.reviewed is None:
+            raise ResearchRuntimeBlocked("research_runtime_unavailable")
+        binding = RuntimeCompositionBinding.from_json(raw)
+        # Provider/config replacement affects only future admissions.
+        if (binding.host_package_digest, binding.host_composition_digest) != (host.reviewed.package_digest, host.reviewed.composition_digest):
+            raise ResearchRuntimeBlocked("stale_output")
+        return host, binding
+
     async def _execute(self, job_id, owner, fence):
+        # Fail before any inference or public contact when Cordis cannot finish this job.
+        await self._current_composition(job_id)
         from pydantic import Field, StrictInt, model_validator
         from typing import Annotated, Literal
         class Queries(Closed):
@@ -410,10 +545,11 @@ class GoalDiscoveryService:
             "denied": denied, "quoted": quoted, "freshness": "current", "semantic_truth_verified": False, "no_learning": True})
 
     async def _extract(self, job_id, owner, fence, manifest, selection):
+        """Python keeps public HTTPS, SSRF policy and consent; Cordis extracts."""
         from src.security.site_policy import evaluate_site_access
         from src.security.http_transport import request_pinned_https
-        from src.guardian.source_watch import normalize_source_text
-        snapshots, denied = [], []
+        from src.work_board.research_artifacts import DISCOVERY_ARTIFACT_LIMITS
+        denied, staged = [], []
         known = {r.result_id: r for r in manifest.results}
         for index, identifier in enumerate(selection.selected_result_ids):
             witness = await physical_discovery_inputs(self.jobs, job_id, stage_id="extract_sources")
@@ -423,7 +559,7 @@ class GoalDiscoveryService:
             item = known[identifier]
             policy = evaluate_site_access(item.exact_url, resolve_dns=False)
             if not policy.allowed:
-                denied.append({"result_id": identifier, "reason": policy.reason})
+                denied.append((index, {"result_id": identifier, "reason": policy.reason}))
                 continue
             effect = f"discovery-source:{job_id}:{index}"
             async def contact():
@@ -433,31 +569,82 @@ class GoalDiscoveryService:
             kwargs = {"transport": self.transport}
             if self.resolver is not None:
                 kwargs["resolver"] = self.resolver
-            response = await request_pinned_https(item.exact_url, method="GET", headers={"Accept": "text/plain,text/html"},
+            response = await request_pinned_https(item.exact_url, method="GET", headers={"Accept": ",".join(SOURCE_MEDIA_TYPES)},
                 timeout_seconds=min(20, witness.plan.deadline_at.timestamp() - datetime.now(timezone.utc).timestamp()),
                 max_bytes=witness.plan.limits.max_source_bytes, authority_check=contact, **kwargs)
             mime = response.headers.get("content-type", "").split(";")[0].strip().lower()
-            if response.status_code != 200 or mime not in {"text/plain", "text/html"}:
-                # The exact HTTP response is known; record physical readback
-                # while retaining explicit unsupported source coverage.
-                await self._readback(job_id, owner, fence, effect, item.exact_url, sha(response.content))
-                denied.append({"result_id": identifier, "reason": "source_response_unsupported"})
+            # The exact HTTP response is known; record its physical readback.
+            await self._readback(job_id, owner, fence, effect, item.exact_url, sha(response.content))
+            if response.status_code != 200 or mime not in SOURCE_MEDIA_TYPES:
+                denied.append((index, {"result_id": identifier, "reason": "source_response_unsupported"}))
                 continue
             try:
-                normalized = normalize_source_text(response.content.decode("utf-8", errors="strict"), html_content=mime == "text/html")
-            except (ValueError, UnicodeError):
-                normalized = ""
-            if not normalized or len(normalized.encode()) > 65536:
-                await self._readback(job_id, owner, fence, effect, item.exact_url, sha(response.content))
-                denied.append({"result_id": identifier, "reason": "source_normalized_unsupported"})
+                body = response.content.decode("utf-8", errors="strict")
+            except UnicodeError:
+                body = ""
+            envelope = {"schema_version": 1, "source_slot": index, "media_type": mime, "body": body}
+            # Only bounded public snapshot bytes cross to Cordis (read in 64 KiB chunks);
+            # never paths or credentials. The body is already capped by max_source_bytes.
+            if not body or len(json_bytes(envelope)) > DISCOVERY_ARTIFACT_LIMITS["raw_source"]:
+                denied.append((index, {"result_id": identifier, "reason": "source_normalized_unsupported"}))
                 continue
-            snapshot = PublicSnapshotV1(result_id=identifier, url=item.exact_url, digest=sha(normalized.encode()),
-                lines=normalized.split("\n"), fetched_at=datetime.now(timezone.utc), mime=mime)
-            await self._write(job_id, owner, fence, "snapshot", snapshot.model_dump(mode="json"), slot=index)
-            await self._readback(job_id, owner, fence, effect, item.exact_url, sha(response.content))
-            snapshots.append(snapshot)
+            raw = await self._write(job_id, owner, fence, "raw_source", envelope, slot=index)
+            staged.append({"source_slot": index, "artifact_ref": raw.reference.artifact_id, "acquisition_receipt_ref": effect})
+        if staged:
+            denied.extend(await self._execute_extraction(job_id, owner, fence, staged, selection))
+        witness = await physical_discovery_inputs(self.jobs, job_id, stage_id="extract_sources")
+        snapshots = [a["parsed"] for a in sorted((a for a in witness.artifacts.values() if a["kind"] == "snapshot"),
+            key=lambda a: a["slot"])]
+        denied = [entry for _, entry in sorted(denied, key=lambda pair: pair[0])]
         await self._write(job_id, owner, fence, "snapshots", {"snapshots": self._source_metadata(snapshots), "denied": denied})
         return snapshots, denied
+
+    async def _execute_extraction(self, job_id, owner, fence, sources, selection):
+        """One research.executeAccepted invocation; returns per-slot rejections."""
+        from src.runtime_plugins.bridge import HostBlocked
+        from src.runtime_plugins.composition import plugin_config_digest
+        from src.runtime_plugins.dispatch import NativeServiceBlocked, read_context
+        from src.runtime_plugins.research_dispatch import operator_reason, rejected_slots
+        from src.runtime_plugins.service_jobs import open_invocation
+        host, _ = await self._current_composition(job_id)
+        reviewed = host.reviewed
+        async with self.jobs._session() as db:
+            inputs = json.loads((await self.jobs._fetch(db, job_id)).arguments_json)
+        extraction_id = "seraph.source-extraction.v1"
+        pins = {"package_digest": reviewed.package_digest, "composition_digest": reviewed.composition_digest,
+            "research_digest": reviewed.plugin_digests.get("seraph.research.v1"),
+            "consumer_digest": reviewed.plugin_digests.get("seraph.guardian-research.v1"),
+            "source_provider_digest": reviewed.plugin_digests.get(extraction_id),
+            "source_config_digest": plugin_config_digest(extraction_id, reviewed.profile)
+                if any(spec["id"] == extraction_id for spec in reviewed.profile["plugins"]) else None,
+            # Which format provider handles each media type, so Python can recheck its own normalizer's output.
+            "formats": next((spec["config"]["formats"] for spec in reviewed.profile["plugins"] if spec["id"] == extraction_id), {})}
+        request = await self._write(job_id, owner, fence, "extraction",
+            {"schema_version": 1, "job_ref": job_id, "pins": pins, "sources": sources})
+        try:
+            scope = await open_invocation(job_id=job_id, owner=owner, fence=fence, host=host,
+                admission_replayed=False, candidate=inputs, jobs=self.jobs)
+            result = await host.request_service("research.executeAccepted",
+                {"plan_ref": request.reference.artifact_id}, original_scope=scope)
+        except NativeServiceBlocked as exc:
+            raise ResearchRuntimeBlocked(operator_reason(exc.reason_code)) from exc
+        except HostBlocked as exc:
+            raise ResearchRuntimeBlocked("research_runtime_unavailable") from exc
+        if result["status"] != "succeeded":
+            # The child's reason_code is untrusted text; record only reviewed codes.
+            raise ResearchRuntimeBlocked(operator_reason(result["reason_code"]))
+        current = await self.jobs.get_job(job_id)
+        if result["value"] != {"job_ref": job_id, "revision": current["revision"], "state": current["status"]}:
+            raise ResearchRuntimeBlocked("native_child_result_mismatch")
+        witness = await physical_discovery_inputs(self.jobs, job_id, stage_id="extract_sources")
+        async with self.jobs._session() as db:
+            rejected = rejected_slots(read_context(await self.jobs._fetch(db, job_id)))
+        adopted = {a["slot"] for a in witness.artifacts.values() if a["kind"] == "snapshot"}
+        if any(source["source_slot"] not in adopted | set(rejected) for source in sources):
+            # A consumer that claims success without an outcome per source is not trusted.
+            raise ResearchRuntimeBlocked("research_consumer_incomplete")
+        return [(slot, {"result_id": selection.selected_result_ids[slot], "reason": reason})
+            for slot, reason in rejected.items()]
 
     @staticmethod
     def _source_metadata(snapshots):
@@ -592,9 +779,27 @@ class GoalDiscoveryService:
                     "outstanding_held": held, "accounting_liability": liability,
                     "denial_cause": run.result_summary if run.status == "cancelled" else None,
                     "search_blocked_reason": run.failure_reason if run.failure_reason in SEARCH_BLOCK_REASONS else None,
+                    "research_blocked_reason": _reason_code(run.failure_reason) if run.status == "blocked"
+                        and run.failure_reason not in SEARCH_BLOCK_REASONS else None,
                     "outcome": outcome, "no_learning": True,
-                    "recovery": "Review original Goal, programme, route and unresolved receipts; provider replay is forbidden." if held else None})
-        return {"goal_id": goal_id, "runs": runs, "current_day_only": True, "no_learning": True}
+                    "recovery": (RECOVERY_BY_REASON.get(run.failure_reason,
+                        "Review original Goal, programme, route and unresolved receipts; provider replay is forbidden.")
+                        if held else None)})
+            from src.work_board.research_parent import PLANNING_KIND, planning_authority
+            planning = []
+            for run in (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == PLANNING_KIND)
+                    .order_by(WorkflowRunState.started_at.desc()))).scalars():
+                plan_authority = planning_authority(run.declared_authority_json)
+                if plan_authority.programme_binding.goal_id != goal_id or plan_authority.programme_binding.programme_id not in ids:
+                    continue
+                held = run.status != "succeeded"
+                planning.append({"job_id": run.run_identity, "discovery_job_id": plan_authority.discovery_job_id,
+                    "programme_id": plan_authority.programme_binding.programme_id,
+                    "occurrence_day": plan_authority.occurrence_day, "status": run.status,
+                    "blocked_reason": _reason_code(run.failure_reason) if run.status == "blocked" else None,
+                    "recovery": RESEARCH_RECOVERY if held else None, "no_learning": True})
+        return {"goal_id": goal_id, "runs": runs, "planning": planning,
+            "research_runtime": research_runtime_state(self._cordis()), "current_day_only": True, "no_learning": True}
 
     async def read_brief(self, *, operator, goal_id, programme_id, job_id):
         self._ready()
@@ -633,6 +838,26 @@ class GoalDiscoveryService:
             prepared.append({"artifact_ref": reference, "content": draft["parsed"]})
         return {"job_id": job_id, "programme_id": programme_id, "artifact_ref": briefs[0]["reference"].model_dump(mode="json"),
             "brief": briefs[0]["parsed"], "prepared_artifacts": prepared, "physical_readback": True, "no_learning": True}
+
+
+def research_runtime_state(host):
+    """Live operator projection of the composed research roles; no fallback."""
+    required = {"seraph.research.v1": "research_service_unavailable",
+        "seraph.goal-plan.v1": "research_plan_provider_unavailable",
+        "seraph.guardian-research.v1": "research_consumer_unavailable",
+        "seraph.source-extraction.v1": "source_extraction_provider_unavailable"}
+    if not host.admitting or host.reviewed is None:
+        from src.runtime_plugins.bridge import cordis_recovery
+        # Name the host's own reason and its exact fix (Node, build or restart).
+        if host.state in {"blocked", "cleanup_unknown"} and host.reason:
+            return {"state": "blocked", "reason": host.reason, "recovery": cordis_recovery(host.state, host.reason)}
+        return {"state": "blocked", "reason": "research_runtime_unavailable", "recovery": RESEARCH_RECOVERY}
+    ready = {plugin.get("id") for plugin in getattr(host, "_plugins", ()) if plugin.get("state") == "ready"}
+    missing = [reason for identifier, reason in required.items() if identifier not in ready]
+    if missing:
+        return {"state": "blocked", "reason": missing[0], "recovery": RESEARCH_RECOVERY}
+    return {"state": "ready", "reason": None, "recovery": None,
+        "composition_digest": host.reviewed.composition_digest, "package_digest": host.reviewed.package_digest}
 
 
 goal_discovery_service = GoalDiscoveryService()

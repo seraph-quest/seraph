@@ -66,6 +66,7 @@ git clone https://github.com/seraph-quest/seraph.git
 cd seraph
 uv sync --project backend --locked --group dev
 npm ci --prefix frontend
+npm ci --prefix runtime/cordis --ignore-scripts
 cp env.dev.example .env.dev
 ./manage.sh -e dev local up
 ./manage.sh -e dev local status
@@ -76,6 +77,14 @@ Open the **[cockpit](http://127.0.0.1:3001)** or
 key. To enable model work, open **Settings → Models & OpenRouter** and configure
 your key, models, allowed upstreams, explicit cloud consent, and a finite budget.
 Text, vision, and embedding have separate controls.
+
+Goal discovery (programme research) runs through the reviewed Cordis host. It
+needs Node 22.12+ or 24.x (npm 11.8.0, bundled with Node 24.13.1): put it on PATH
+or set `CORDIS_NODE_PATH` in `.env.dev`. After the `npm ci` above, `local up`
+builds `runtime/cordis` when needed (it never installs dependencies) and the
+backend starts the host. Without it, core startup continues and
+discovery shows as blocked with the exact fix in Settings and the discovery
+panel; `./manage.sh -e dev cordis build` repeats the build.
 
 Use `./manage.sh -e dev local run` for a foreground session, particularly in
 managed development shells. Stop with `./manage.sh -e dev local down`.

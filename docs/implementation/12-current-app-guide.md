@@ -197,7 +197,8 @@ Native owners in this slice: `authority.resolve`, `goals.read`, `tasks.admit`
 `tasks.cancel`, `capabilities.list`/`describe`, `connections.inspect`,
 `memory.retrieve` (owner list-safe redacted summaries only), and
 `artifacts.stage`/`adopt`/`read` plus `audit.append` for the temporary read
-journey. That journey admits one `runtime_service_read_v1` job, performs the
+journey (and, for guardian research, the bounded callbacks described in
+[Cordis guardian research (#1008)](#cordis-guardian-research-1008)). That journey admits one `runtime_service_read_v1` job, performs the
 read, stages the sealed result as a private 0600 workspace file (intent before
 effect), adopts and reads it back, appends one `runtime_service_observed` audit
 event and settles the job with explicit `no_learning`. The child's answer to
@@ -210,7 +211,9 @@ stays visibly unresolved as an `intent` effect. All other methods (`tasks.settle
 `capabilities.invoke`, `inference.request`, `memory.propose`,
 `memory.applyReviewed`, `memory.forget`, `research.*`, `conversation.*`,
 `agent-loop.*`, `scheduler.*`, `connections.invokeBoundAdapter`,
-`source-extraction.extract`) return a typed `blocked` reason, also listed in
+`source-extraction.extract`) return a typed `blocked` reason as Python callbacks
+(`research.*` and `source-extraction.extract` are Cordis-owned since #1008 and
+only originated by Python), also listed in
 the runtime status `native_services` block. No HTTP route yet exposes the bridge
 to the browser, and the Memory composition-snapshot accounting amendments
 recorded on #1007 are not implemented. The acceptance tests deny every Python
@@ -316,7 +319,11 @@ Narrower accepted plan limits apply to the actual query, result, source and
 inference counts and declared output bytes. Search uses each plan's per-request
 time and response-byte cap within the original deadline. The fixed four-stage
 graph consumes whole original physical outputs; alternate graphs and JSON
-pointers are unsupported rather than silently ignored.
+pointers are unsupported rather than silently ignored. Planning and source
+extraction run only through the composed Cordis research roles described in
+[Cordis guardian research (#1008)](#cordis-guardian-research-1008); without a
+running reviewed host or provider, discovery is blocked and visible rather than
+falling back to Python.
 
 Use **Inspect discovery runs** to inspect canonical status, freshness/coverage,
 held effects and cost liability. Selecting a completed brief performs an explicit
@@ -577,6 +584,90 @@ document attempt or bypass its retry and positive cleanup requirements.
 **Status:** Partial
 **Scope:** current `develop` baseline and its named partial proof boundaries;
 new target architecture is owned by the Constitution and ADRs
+
+
+### Cordis guardian research (#1008)
+
+[#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2
+goal-research pipeline through three composed Cordis roles in the reviewed
+profile: the research service (`seraph.research.v1`), the planning provider
+`seraph.goal-plan.v1` (`runtime/cordis/src/providers/goal-plan.ts`) and the
+guardian consumer `seraph.guardian-research.v1`
+(`runtime/cordis/src/plugins/research/guardian.ts`). `seraph.source-extraction.v1`
+selects a format provider per media type from its closed profile config:
+`plain-text` and `html-text` (a port of `normalize_source_text`, including the
+WHATWG entity table, with a parity test) and `rss-atom`, a hand-written bounded
+reader (256 KiB input, depth 32, 4,096 elements, 64 items, 4 KiB per field)
+that rejects DOCTYPE/ENTITY declarations, non-predefined entities and non-UTF-8
+declarations; feed links stay inert text. An absent planner, consumer, source
+extraction plugin or format mapping returns a typed block
+(`research_plan_provider_unavailable`, `research_consumer_unavailable`,
+`source_extraction_provider_unavailable`, `source_format_provider_unavailable`);
+there is no Python planning or extraction fallback. Changing the profile config
+is the only way to replace a provider; consumer code is unchanged.
+
+Admission stages a bounded planning request (identities, revisions, public
+brief reference/digest, route epoch, strategy binding, issue time, original
+deadline and the limit/output ceilings) and admits one goal-less
+`goal_discovery_planning_v1` service job per occurrence. Its single
+`research.buildPlan` invocation may only read that request and stage one plan;
+Python checks every binding field against the request, every limit and output
+cap against the ceiling, then `validate_goal_research_plan`, and writes its own
+canonical bytes as the plan artifact before the existing discovery admission.
+A planning job that did not succeed is never re-run for that occurrence
+(`programme_planning_requires_recovery`). Both jobs bind the reviewed package
+and profile digests (and so every provider implementation and its config);
+a later replacement only affects new admissions and an older job fails with
+`stale_output` before any inference or contact.
+
+Python keeps pinned HTTPS, site policy/SSRF checks, consent and readback
+receipts. Each fetched public source is adopted as a bounded `raw_source`
+artifact (media type and UTF-8 body only, no URL, path or credential), then one
+`research.executeAccepted` call lets the consumer read the adopted extraction
+request and raw sources, extract them, stage each normalized snapshot and read
+it back. A snapshot is adopted through the existing discovery artifact owner
+only when it binds the raw digest and the job's pinned source provider and
+config digests. For the `plain-text` and `html-text` providers Python also
+recomputes `normalize_source_text` over the staged bytes (before taking the
+job writer) and rejects a differing output for that slot only
+(`source_output_mismatch`); the HTML provider matches Python's `re.I` tag-name
+case folding (`ı`/`İ`/`ſ`) with explicit character classes; `rss-atom` output is provider-attested (Python
+bounds it but has no reference feed parser). Both normalizers strip comments,
+script/style blocks and tags with linear scans, so unclosed constructs cannot
+stall the shared child. Feed, size and line-ending rejections are recorded per
+source slot and appear as unavailable coverage. Block reasons shown to the
+operator come from a fixed Python allowlist; any other child reason is recorded
+as `research_provider_blocked`. The canonical `DiscoveryBriefV1`, Inbox digest and Work
+Board projection are unchanged, the first run still returns findings, and every
+result records `no_learning`. **Inspect discovery runs** adds `research_runtime`
+(live role readiness and recovery), `planning` jobs and per-run
+`research_blocked_reason`, each with its recovery text.
+
+Discovery therefore requires the Cordis host. The backend lifespan starts it
+with `CORDIS_NODE_PATH` when set, otherwise the `node` on PATH (Node 22.12+ or
+24.x). `./manage.sh -e dev local up|run` first runs a keyless preflight with the
+same Node: when the package is missing or stale it runs `cordis build`; like the
+frontend it never installs dependencies, so a fresh checkout first runs
+`npm ci --prefix runtime/cordis --ignore-scripts`. Otherwise it prints the
+blocked reason (`build_dependencies_missing`, `node_unsupported`, ...) and the
+exact fix while core startup continues. Runtime status (Settings → Cordis runtime host)
+and the discovery panel carry the same fix (`recovery`): install Node 22.12+/24
+and set `CORDIS_NODE_PATH`, run the `npm ci` above, or run
+`./manage.sh -e dev cordis build`, then restart. The backend container image
+builds `runtime/cordis` in a pinned `node:24.13.1-bookworm-slim` stage (Compose
+`additional_contexts`, npm 11.8.0, `npm ci --ignore-scripts`, `npm run build`)
+and copies that Node binary and the built package to `/runtime/cordis`, the
+path the backend resolves.
+
+Raw public sources up to the plan's `max_source_bytes` (256 KiB) cross to Cordis
+as one staged envelope read in bounded 64 KiB `artifacts.read` chunks at UTF-8
+aligned offsets, ending with an empty chunk; the digest covers the whole
+artifact and the frame limit is unchanged. Normalized snapshots stay capped at
+64 KiB. The guardian research invocation may make up to 64 callbacks (other
+invocations keep 16). Real-child acceptance tests deny Python sockets/DNS and
+use fixed in-memory transports; CI builds the package with Node 24.13.1 (npm
+11.8.0) and sets `SERAPH_CORDIS_TEST_NODE`, and the suites skip elsewhere
+without it.
 
 ### Bounded general document reading
 
@@ -1158,6 +1249,16 @@ the writer lock and takes it only to persist a newly observed accounting
 period; admission still re-checks the ledger under that lock. Native
 notification reads write only when an expiry or binding transition is due and,
 while the lock is held, present that transition as terminal until it persists.
+Chat turns and the memory panes check canonical memory tombstones in a
+read-only snapshot and take the writer lock only to re-apply one after a stale
+restore (#1074); one guardian-state build checks once, and its snapshot cache
+write waits at most 250 ms. Expired queued insights and pending approvals are
+never shown as active; their cleanup is best-effort on read. Diagnostic audits
+emitted by reads and idle daemon polls wait at most 250 ms and are otherwise
+retried in the background, not dropped (empty polls are audited once per worker
+per 5 minutes); write-path and inference-policy refusal audits keep the normal
+wait. Write transactions that hold the lock for 1 s or more are logged with
+their call site.
 
 ## Current Capability Summary
 
@@ -1989,6 +2090,30 @@ has independent preparation, interface-authority, and dispatcher recovery
 validation.
 
 ### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
+
+Bounded iterative repository work is **Partial** under
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md). An accepted
+`repository_work` Task runs up to three manually approved patch iterations within
+its original limits. The plan can be literal or a reviewed planner proposal. Each
+iteration returns a local patch and the actual pytest or npm output. A check that
+exits non-zero feeds the next iteration, and base drift or a dirty tree blocks
+execution. One original holds the workspace repository lane, and other repository
+Tasks get `repository_execution_busy`. A timed-out, truncated or interrupted check
+is a partial: Stop closes it and releases the lane. An expired original closes by
+its deadline on Stop, on the next repository admission or on the dispatcher tick.
+Only a lost producer or Unknown result stays held. Crash recovery under
+[ADR-032](./decisions/032-repository-crash-recovery-evidence.md) remains **Planned**
+([#1063](https://github.com/seraph-quest/seraph/issues/1063)), and
+`POST /api/workflows/repo-repair/{id}/source-recovery` returns 503. Ordinary repair
+behavior below is unchanged.
+
+Checks run as `local_host_execution` with no isolation. The tests can use the
+network and read the Seraph user's files (`~/.ssh`, Seraph's database and vault).
+A detached process can outlive "cleanup proven", and diagnostics redaction is
+pattern-based. The inspector and the patch approval state these limitations;
+host isolation is tracked in [#1065](https://github.com/seraph-quest/seraph/issues/1065).
+Approved patches may contain only text sections on allowed paths, and an
+iterative publication must equal the base plus the approved input patch.
 
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)

@@ -31,6 +31,16 @@ from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.runtime_plugins.agent_turns import chat_runtime_status
+
+
+async def _chat_runtime_or_unavailable() -> dict:
+    """Runtime status never fails because the composition inventory is unreadable."""
+    try:
+        return await chat_runtime_status(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Chat runtime status unavailable", exc_info=True)
+        return {"loop": "blocked", "route": "chat_agent", "owner_epoch": None, "owner_kind": None,
+                "reason": "chat_runtime_status_unavailable", "recovery": "Restart Seraph; the runtime inventory is unreadable."}
 from src.runtime_plugins.bridge import cordis_host
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
@@ -665,7 +675,7 @@ def create_app() -> FastAPI:
             "model_fabric": fabric_status,
             "cordis_runtime": await cordis_host.refresh_status(),
             # Which agent loop chat runs on, from the agent-loop owner row (#1019).
-            "chat_runtime": await chat_runtime_status(cordis_host),
+            "chat_runtime": await _chat_runtime_or_unavailable(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

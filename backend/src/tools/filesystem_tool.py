@@ -286,18 +286,34 @@ class RuntimeOwnedWorkspacePathError(ValueError):
         )
 
 
-def _assert_agent_workspace_access(file_path: str, resolved: Path, operation: str, *, write: bool) -> None:
+def _assert_agent_workspace_access(resolved: Path, file_path: str | None, operation: str, *, write: bool) -> None:
     """Refuse registry-owned state after traversal and symlinks are resolved."""
     workspace = Path(settings.workspace_dir).resolve()
-    if resolved != workspace:
+    relative = resolved.relative_to(workspace).as_posix() if resolved != workspace else ""
+    if relative:
         # Repeat the name check on the resolved spelling as defence in depth.
-        _assert_not_secret_like_path(resolved.relative_to(workspace).as_posix(), operation)
+        _assert_not_secret_like_path(relative, operation)
     access = canonical_agent_workspace_access(workspace, resolved)
     if access is AgentWorkspaceAccess.READ_WRITE:
         return
     if access is AgentWorkspaceAccess.READ_ONLY and not write:
         return
-    raise RuntimeOwnedWorkspacePathError(file_path, operation, access)
+    raise RuntimeOwnedWorkspacePathError(file_path or relative, operation, access)
+
+
+def assert_agent_readable(resolved: Path, *, file_path: str | None = None, operation: str = "read") -> None:
+    """Refuse an agent-reachable read of registry-owned workspace state.
+
+    ``resolved`` must come from ``_safe_resolve``.  Every path where an agent,
+    a tool argument, or agent-authored configuration chooses the file and its
+    content can reach a model or tool output must call this before reading.
+    """
+    _assert_agent_workspace_access(resolved, file_path, operation, write=False)
+
+
+def assert_agent_writable(resolved: Path, *, file_path: str | None = None, operation: str = "write") -> None:
+    """Refuse an agent-reachable write to registry-owned workspace state."""
+    _assert_agent_workspace_access(resolved, file_path, operation, write=True)
 
 
 def _sha256_text(content: str) -> str:
@@ -392,7 +408,7 @@ def read_file(file_path: str) -> str:
     try:
         _assert_not_secret_like_path(file_path, "read")
         resolved = _safe_resolve(file_path)
-        _assert_agent_workspace_access(file_path, resolved, "read", write=False)
+        assert_agent_readable(resolved, file_path=file_path, operation="read")
     except ValueError as exc:
         log_integration_event_sync(
             integration_type="filesystem",
@@ -454,7 +470,7 @@ def write_file(file_path: str, content: str) -> str:
         _assert_bounded_text(content, limit=_MAX_FILE_WRITE_BYTES, label="file content")
         _assert_not_secret_like_path(file_path, "write")
         resolved = _safe_resolve(file_path)
-        _assert_agent_workspace_access(file_path, resolved, "write", write=True)
+        assert_agent_writable(resolved, file_path=file_path, operation="write")
     except ValueError as exc:
         log_integration_event_sync(
             integration_type="filesystem",
@@ -507,7 +523,7 @@ def preview_workspace_patch(
         _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "preview_patch")
         resolved = _safe_resolve(file_path)
-        _assert_agent_workspace_access(file_path, resolved, "preview_patch", write=True)
+        assert_agent_writable(resolved, file_path=file_path, operation="preview_patch")
         before, truncated = _read_workspace_text_bounded(resolved)
         if truncated:
             raise ValueError("File exceeds the bounded workspace read policy")
@@ -580,7 +596,7 @@ def apply_workspace_patch(
         _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "apply_patch")
         resolved = _safe_resolve(file_path)
-        _assert_agent_workspace_access(file_path, resolved, "apply_patch", write=True)
+        assert_agent_writable(resolved, file_path=file_path, operation="apply_patch")
         with _open_workspace_text(resolved, write=True) as stream:
             before, truncated = _read_text_stream_bounded(stream)
             if truncated:

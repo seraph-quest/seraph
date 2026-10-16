@@ -1,6 +1,7 @@
 """Workspace state inspection and bounded lifecycle contracts."""
 
 from src.workspace.state_registry import (
+    AgentAccessIndex,
     AgentWorkspaceAccess,
     AmbiguousWorkspaceRootsError,
     ExternalReferencePolicy,
@@ -75,6 +76,7 @@ from src.workspace.production import (
 )
 
 __all__ = [
+    "AgentAccessIndex",
     "AgentWorkspaceAccess",
     "AmbiguousWorkspaceRootsError",
     "ExternalReferencePolicy",

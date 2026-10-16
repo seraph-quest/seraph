@@ -24,7 +24,7 @@ from smolagents import Tool
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
 from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
-from src.workspace import AgentWorkspaceAccess, canonical_agent_workspace_access
+from src.workspace import AgentAccessIndex, AgentWorkspaceAccess
 
 logger = logging.getLogger(__name__)
 
@@ -387,7 +387,12 @@ def _ensure_workspace_scoped_path(raw_path: str, cwd: Path, *, label: str) -> No
         raise ValueError(f"{label} must stay within the workspace.") from exc
 
 
-def _is_secret_like_workspace_path(path: Path) -> bool:
+def _is_secret_like_workspace_path(
+    path: Path,
+    index: AgentAccessIndex | None = None,
+    *,
+    include_ancestors: bool = True,
+) -> bool:
     workspace_relative = path.relative_to(_workspace_root())
     normalized_parts = tuple(part.lower() for part in workspace_relative.parts)
     normalized_posix = "/".join(normalized_parts)
@@ -407,20 +412,41 @@ def _is_secret_like_workspace_path(path: Path) -> bool:
     # Process arguments are reads, so only registry state denied outright
     # (secrets, the database and its sidecars, credential-bearing settings)
     # is refused here; the name lists above stay as defence in depth.
-    return canonical_agent_workspace_access(_workspace_root(), path) is AgentWorkspaceAccess.DENIED
+    index = index or AgentAccessIndex(_workspace_root())
+    return index.access(path, include_ancestors=include_ancestors) is AgentWorkspaceAccess.DENIED
 
 
 def _directory_contains_secret_like_workspace_path(path: Path) -> bool:
     if not path.exists() or not path.is_dir():
         return False
-    for candidate in path.rglob("*"):
+    workspace = _workspace_root()
+    # One registry index serves the whole scan.  The search root and its
+    # ancestors were already classified by the caller, and this top-down walk
+    # classifies every directory before entering it, so each entry needs only
+    # its own name and inode checked; the first refused entry ends the scan.
+    index = AgentAccessIndex(workspace)
+    pending = [path]
+    while pending:
+        directory = pending.pop()
         try:
-            resolved = candidate.resolve()
-            resolved.relative_to(_workspace_root())
-        except (OSError, ValueError):
+            entries = list(os.scandir(directory))
+        except OSError:
             return True
-        if _is_secret_like_workspace_path(resolved):
-            return True
+        for entry in entries:
+            candidate = Path(entry.path)
+            try:
+                is_symlink = entry.is_symlink()
+                resolved = candidate.resolve() if is_symlink else candidate
+                resolved.relative_to(workspace)
+            except (OSError, ValueError):
+                return True
+            if _is_secret_like_workspace_path(resolved, index, include_ancestors=is_symlink):
+                return True
+            try:
+                if not is_symlink and entry.is_dir(follow_symlinks=False):
+                    pending.append(candidate)
+            except OSError:
+                return True
     return False
 
 
@@ -437,7 +463,10 @@ def _ensure_process_search_path(raw_path: str, cwd: Path, *, label: str) -> None
     candidate = (raw_path or "").strip()
     resolved = (Path(candidate) if Path(candidate).is_absolute() else (cwd / candidate)).resolve()
     if _directory_contains_secret_like_workspace_path(resolved):
-        raise ValueError(f"{label} cannot recursively search workspace paths containing secret-like files.")
+        raise ValueError(
+            f"{label} cannot recursively search workspace paths containing secret-like files; "
+            "search a subdirectory such as notes/ instead."
+        )
 
 
 def _normalize_command(command: str) -> str:
@@ -784,6 +813,38 @@ def _validate_git_workspace_args(args: list[str], cwd: Path) -> None:
         index += 1
 
 
+def _sed_in_place_requested(args: list[str]) -> bool:
+    for arg in args:
+        if arg == "--":
+            return False
+        if arg.startswith("--"):
+            if arg == "--in-place" or arg.startswith("--in-place="):
+                return True
+            continue
+        if not arg.startswith("-") or arg == "-":
+            continue
+        for flag in arg[1:]:
+            if flag == "i":
+                return True
+            if flag in {"e", "f", "l"}:
+                # The rest of the cluster is this option's argument.
+                break
+    return False
+
+
+def _sed_sandboxed_args(executable: str, args: list[str]) -> list[str]:
+    """Force GNU sed's sandbox, which rejects the r/R/w/W/e commands and the
+    s///w and s///e flags.
+
+    Those commands name files or shell commands inside the script text, where
+    the path-argument checks cannot see them.  A sed without ``--sandbox``
+    fails to start rather than running unsandboxed.
+    """
+    if Path(executable).name != "sed" or "--sandbox" in args:
+        return args
+    return ["--sandbox", *args]
+
+
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
     command_name = Path(executable).name
 
@@ -852,6 +913,11 @@ def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path)
             _ensure_process_accessible_path(arg, cwd, label="path argument")
             index += 1
         return
+
+    if command_name == "sed" and _sed_in_place_requested(args):
+        raise ValueError(
+            "sed in-place editing is blocked in the process runtime; use apply_workspace_patch for workspace edits."
+        )
 
     if command_name in {"grep", "rg", "sed"}:
         pattern_consumed = False
@@ -1614,7 +1680,7 @@ def _normalize_command_invocation(
     resolved_cwd = _normalize_cwd(cwd)
     _validate_interpreter_args(executable, args)
     _validate_workspace_scoped_args(executable, args, resolved_cwd)
-    return executable, args, resolved_cwd
+    return executable, _sed_sandboxed_args(executable, args), resolved_cwd
 
 
 @dataclass

@@ -8,7 +8,7 @@ import pytest
 from src.tools import filesystem_tool
 from src.tools.filesystem_tool import (
     RuntimeOwnedWorkspacePathError,
-    _assert_agent_workspace_access,
+    assert_agent_readable,
     apply_workspace_patch,
     preview_workspace_patch,
     read_file,
@@ -29,6 +29,8 @@ _DENIED_PATHS = (
     "mcp-servers.json",
     "stdio-proxies.json",
     "artifacts/mail/private/message.json",
+    "seraph.db.bak",
+    ".vault-key.old",
 )
 # Runtime-owned registry paths agents may inspect but not edit.
 _READ_ONLY_PATHS = (
@@ -41,6 +43,9 @@ _READ_ONLY_PATHS = (
     "local-runtime-profile-receipts/receipt.json",
     ".seraph-extension-snapshots/pack.json",
     "cache/entry.txt",
+    "evolution/runtime-state.json",
+    ".seraph-extension-lifecycle.lock",
+    "artifacts/tool-package-runtime/profile/state.json",
 )
 _ORDINARY_PATHS = (
     "notes/today.md",
@@ -170,7 +175,7 @@ def test_registry_judges_the_symlink_target_not_the_alias(workspace, without_nam
     # ``_safe_resolve`` blocks symlinks first; the registry check must still
     # classify the resolved file if that boundary ever changes.
     with pytest.raises(RuntimeOwnedWorkspacePathError):
-        _assert_agent_workspace_access("notes/alias.md", alias.resolve(), "read", write=False)
+        assert_agent_readable(alias.resolve(), file_path="notes/alias.md")
 
 
 @pytest.mark.parametrize("operation", _OPERATIONS)
@@ -285,7 +290,7 @@ def test_ordinary_workspace_files_remain_readable_and_writable(workspace, logica
 
 
 def test_lookalike_names_are_not_mistaken_for_registry_state(workspace):
-    for logical_path in ("seraph.dbx", "notes/seraph.db", "projects/cache/out.txt", "extensions.md"):
+    for logical_path in ("my-seraph.db", "notes/seraph.db", "projects/cache/out.txt", "extensions.md", "notes/.seraph-x"):
         assert "Successfully wrote" in write_file.forward(logical_path, "ok\n")
         assert read_file.forward(logical_path) == "ok\n"
 

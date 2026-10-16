@@ -67,18 +67,24 @@ async def _skip_disabled_inference_job(job_id: str) -> bool:
         background_inference_job_enabled,
         is_whole_job_toggle,
         read_background_inference_settings,
+        record_background_inference_run,
         record_background_inference_skip,
     )
 
-    if not is_whole_job_toggle(job_id) or background_inference_job_enabled(job_id):
+    if not is_whole_job_toggle(job_id):
+        return False
+    if background_inference_job_enabled(job_id):
+        record_background_inference_run(job_id)
         return False
     _enabled, error = read_background_inference_settings()
     reason = SETTINGS_UNREADABLE if error else DISABLED_BY_OPERATOR
-    record_background_inference_skip(job_id, reason)
-    from src.audit.runtime import log_scheduler_job_event
+    # Audited once per transition, then hourly (#1112): screenshot folder
+    # analysis polls every second.
+    if record_background_inference_skip(job_id, reason):
+        from src.audit.runtime import log_scheduler_job_event
 
-    await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})
-    logger.info("Scheduled job %s skipped: %s", job_id, reason)
+        await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})
+        logger.info("Scheduled job %s skipped: %s", job_id, reason)
     return True
 
 
@@ -152,6 +158,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
     from src.scheduler.jobs.audio_ingress_cleanup import run_audio_ingress_cleanup
+    from src.runtime_plugins.bound_adapters import run_cordis_mail_retention
     from src.scheduler.jobs.inference_ledger_verification import run_inference_ledger_verification
 
     jobs = [
@@ -298,6 +305,15 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "name": "Audio ingress retention cleanup",
             "next_run_time": _startup_next_run(True, delay_seconds=60),
             "misfire_grace_time": 120,
+        },
+        {
+            # #1092: an idle server still deletes Cordis mail results past their retention.
+            "func": _async_job_wrapper(run_cordis_mail_retention, loop, job_id="cordis_mail_retention"),
+            "trigger": IntervalTrigger(minutes=15),
+            "id": "cordis_mail_retention",
+            "name": "Cordis mail result retention",
+            "next_run_time": _startup_next_run(True, delay_seconds=120),
+            "misfire_grace_time": 900,
         },
         {
             # Bounds how long an edit to an untouched ledger row can go

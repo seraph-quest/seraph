@@ -30,6 +30,17 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
+from src.runtime_plugins.agent_turns import chat_runtime_status
+
+
+async def _chat_runtime_or_unavailable() -> dict:
+    """Runtime status never fails because the composition inventory is unreadable."""
+    try:
+        return await chat_runtime_status(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Chat runtime status unavailable", exc_info=True)
+        return {"loop": "blocked", "route": "chat_agent", "owner_epoch": None, "owner_kind": None,
+                "reason": "chat_runtime_status_unavailable", "recovery": "Restart Seraph; the runtime inventory is unreadable."}
 from src.runtime_plugins.bridge import cordis_host
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
@@ -388,6 +399,14 @@ async def lifespan(app: FastAPI):
         # is fail-closed and operator-visible; a failed recovery is not hidden as
         # a healthy startup.
         try:
+            # Retention for Cordis-originated Gmail reads (#1092): revoked, expired or
+            # TTL-elapsed encrypted owner artifacts are deleted at startup as well.
+            from src.runtime_plugins.bound_adapters import purge_cordis_mail_results
+
+            await purge_cordis_mail_results()
+        except Exception:
+            logging.getLogger(__name__).warning("Cordis mail result purge deferred at startup", exc_info=True)
+        try:
             from src.workflows.job_runtime import durable_job_repository
 
             recovered_jobs = await durable_job_repository.recover_stale_jobs()
@@ -419,9 +438,9 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception(
                 "Routine install restart recovery failed; partial staging remains non-discoverable"
             )
-        # Audio quarantine files and unconfirmed transcript state are process-local
-        # and must never resume after a crash.  Run the durable cleanup before any
-        # scheduler work can admit a stale audio job.
+        # The existing Python audio owner recovers its paired native Workflow
+        # lease before legacy quarantine cleanup. Contacted jobs retain their
+        # original liability; private settled reviews survive until expiry.
         try:
             from src.guardian.audio_worker import cleanup_audio_ingress_jobs
 
@@ -434,6 +453,19 @@ async def lifespan(app: FastAPI):
         except Exception:
             logging.getLogger(__name__).exception(
                 "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
+            )
+        try:
+            from src.model_fabric.repository import ModelFabricRepository
+
+            documentary_cleanup = await ModelFabricRepository().cleanup_settled_audio_documentation()
+            if documentary_cleanup['inspected']:
+                logging.getLogger(__name__).warning(
+                    "Audio documentary cleanup inspected %d; deleted %d; unknown charged %d",
+                    documentary_cleanup['inspected'], documentary_cleanup['deleted'], documentary_cleanup['unknown'],
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Audio documentary cleanup failed; private staging remains charged"
             )
         ensure_soul_exists()
         init_llm_logging()
@@ -512,6 +544,14 @@ async def lifespan(app: FastAPI):
                         await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
+                    try:
+                        # Default Cordis owner cutover (#1019): once per workspace and domain,
+                        # forward-only; a missing runtime leaves the domain blocked with its fix.
+                        from src.runtime_plugins.cutover import run_boot_cutover
+                        for receipt in await run_boot_cutover(cordis_host):
+                            logging.getLogger(__name__).warning("Cordis owner cutover: %s", receipt)
+                    except Exception:
+                        logging.getLogger(__name__).exception("Cordis owner cutover deferred")
                     yield
                 finally:
                     session_manager.bind_task_continuity(None)
@@ -655,6 +695,8 @@ def create_app() -> FastAPI:
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
             "cordis_runtime": await cordis_host.refresh_status(),
+            # Which agent loop chat runs on, from the agent-loop owner row (#1019).
+            "chat_runtime": await _chat_runtime_or_unavailable(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

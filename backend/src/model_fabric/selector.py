@@ -505,6 +505,15 @@ def _proof_reason(
                 exact[proof.capability] = proof
             elif proof.outcome == "passed" and proof.expires_at <= now:
                 expired.add(proof.capability)
+    if "audio_input" in required:
+        from .audio_contracts import validate_audio_route_proof
+        try:
+            validate_audio_route_proof(exact.get("audio_input"), candidate.profile, now=now)
+            # Structural documentary JSON cannot replace an issued source
+            # attestation. The current repository has no adopted issuer.
+            return "audio_documentary_acquisition_unavailable"
+        except (ValueError, TypeError, AttributeError):
+            return "audio_format_unverified"
     if missing := sorted(required - exact.keys()):
         # An exactly bound proof that passed but aged out needs a re-run of
         # the same canary, not new configuration; name it distinctly.

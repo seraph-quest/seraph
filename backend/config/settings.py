@@ -38,6 +38,9 @@ class RepoSandboxSettings(BaseModel):
     max_cpu_seconds: int = 120
     max_memory_bytes: int = 512 * 1024 * 1024
     max_pids: int = 64
+    # Refuse to run repository commands when the OS sandbox (#1065) is not
+    # available. When false, the posture and approval say "NOT ISOLATED".
+    require_isolation: bool = False
 
     model_config = {"extra": "forbid"}
 

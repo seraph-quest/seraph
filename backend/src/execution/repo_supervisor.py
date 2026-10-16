@@ -23,6 +23,8 @@ MAX_CHILDREN = 1024
 MAX_CHILD_READ = 16 * 1024
 CANCELLED = False
 ORIGINAL_PRODUCER = None
+# Active OS isolation for repository commands (#1065); None = not isolated.
+ISOLATION = None
 PYTHON_PROFILE = "repo-python-pytest-iterative-supervisor-v1"
 
 
@@ -164,6 +166,35 @@ def owned_children() -> list[int]:
     return result
 
 
+def live_owned_children() -> list[int]:
+    """Owned children that are not already-exited zombies."""
+    live=[]
+    for pid in owned_children():
+        try:
+            raw=Path(f"/proc/{pid}/stat").read_bytes()
+        except OSError:
+            continue
+        # The state follows the parenthesised command name.
+        if raw[raw.rfind(b")")+2:raw.rfind(b")")+3]!=b"Z":
+            live.append(pid)
+    return live
+
+
+def settled_live_children(deadline: float, grace: float = 2.0) -> list[int]:
+    """Isolated commands: let the kernel finish tearing down the sandbox.
+
+    bwrap's helpers and every in-namespace process die with the pid namespace
+    (and --die-with-parent) right after the command exits; anything still live
+    after this bounded grace is a genuine leftover.
+    """
+    until=min(deadline,time.monotonic()+grace)
+    live=live_owned_children()
+    while live and time.monotonic()<until:
+        time.sleep(.005)
+        live=live_owned_children()
+    return live
+
+
 def cleanup(deadline: float) -> dict[str,Any]:
     reaped=0;signalled=0;wait_statuses={}
     while time.monotonic()<deadline:
@@ -201,7 +232,12 @@ def run_command(argv: list[str], cwd: Path, env: dict[str,str], deadline: float,
             raise ValueError("original_producer_no_spawn_after_parent_eof")
         if time.monotonic() >= command_deadline:
             raise ValueError("original_producer_command_reserve_exhausted")
-    process=subprocess.Popen(argv,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+    launched,launch_env=argv,env
+    if ISOLATION is not None:
+        # The authorized argv above is what runs, inside the approved sandbox;
+        # receipts keep recording that argv, not the sandbox wrapper.
+        launched,launch_env=ISOLATION.command(argv,cwd,env)
+    process=subprocess.Popen(launched,cwd=cwd,env=launch_env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
     selector=selectors.DefaultSelector();buffers={"stdout":bytearray(),"stderr":bytearray()};truncated=False
     for name,stream in (("stdout",process.stdout),("stderr",process.stderr)):
         os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ,name)
@@ -215,7 +251,10 @@ def run_command(argv: list[str], cwd: Path, env: dict[str,str], deadline: float,
             code=process.poll()
             if proof is None and (code is not None or CANCELLED or time.monotonic()>=command_deadline):
                 timed_out=code is None and not CANCELLED
-                leftover=code is not None and bool(owned_children())
+                # bwrap's own already-exited helpers reparent here as zombies;
+                # only a live descendant is a leftover. Without isolation any
+                # owned child, even a zombie, still counts as before.
+                leftover=code is not None and bool(owned_children() if ISOLATION is None else settled_live_children(deadline))
                 proof=cleanup(deadline)
                 if not proof["cleanup_proven"]:raise ValueError("node_cleanup_unproven")
                 if code is None:
@@ -238,6 +277,16 @@ def run_command(argv: list[str], cwd: Path, env: dict[str,str], deadline: float,
     finally:
         selector.close()
         process.stdout.close();process.stderr.close()
+
+
+def activate_isolation(job: dict[str, Any], stage: Path) -> None:
+    """Re-probe the approved isolation now; any difference fails closed."""
+    global ISOLATION
+    spec = job.get("isolation")
+    if spec is None:
+        return
+    from src.execution.repo_isolation import activate
+    ISOLATION = activate(spec, stage_root=stage, extra_writable=(stage / "home", stage / "tmp"))
 
 
 def run_python(job: dict[str, Any]) -> int:
@@ -263,6 +312,7 @@ def run_python(job: dict[str, Any]) -> int:
         or runtime.get("worker_source_sha256") != hashlib.sha256(Path(repo_worker.__file__).read_bytes()).hexdigest()
         or job.get("supervisor_source_sha256") != hashlib.sha256(Path(__file__).read_bytes()).hexdigest()):
         raise ValueError("python_supervisor_runtime_changed")
+    activate_isolation(job, stage)
     selector = selectors.DefaultSelector()
     selector.register(sys.stdin, selectors.EVENT_READ)
     try:
@@ -328,8 +378,8 @@ def main(request_file: Path) -> int:
     signal.signal(signal.SIGINT,cancel)
     # Insert only the server-owned backend, never the staged repository.
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-    from src.execution.repo_node import PROFILE, execution_plan, hash_file, immutable, read_regular, worker_sources_digest, NodeRepoRepairExecutor
-    from src.execution.repo_sandbox import _patch_paths_from_diff, _digest_entries, SnapshotEntry
+    from src.execution.repo_node import PROFILE, execution_plan, hash_file, hash_regular, immutable, read_regular, worker_sources_digest, NodeRepoRepairExecutor
+    from src.execution.repo_sandbox import _patch_paths_from_diff, _digest_entries, RepoSandboxError, SnapshotEntry
     from src.execution.repo_worker import _write_private_output, verify_exported_diff
     descriptor=os.open(request_file,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
     try:
@@ -376,6 +426,7 @@ def main(request_file: Path) -> int:
              "npm_package_sha256":hash_file(npm/"package.json"),"npm_entry_sha256":hash_file(npm/"bin/npm-cli.js")}
     if runtime.get("interpreter_entry_path")!=str(Path(sys.executable).absolute()) or any(runtime.get(key)!=value for key,value in checked.items()):
         raise ValueError("node_toolchain_drift_before_dispatch")
+    activate_isolation(job,stage)
     plan=execution_plan(workspace,job["plan"]["selection"],job["allowed_paths"],runtime)
     for key,value in plan.items():
         if job["plan"].get(key)!=value:raise ValueError("node_execution_plan_drift")
@@ -400,7 +451,13 @@ def main(request_file: Path) -> int:
             # every descendant remains subject to the strict cleanup oracle.
             result=command(["/usr/bin/git","-c","maintenance.auto=false","-c","gc.auto=0",*args])
             if result["exit_code"]!=0:raise ValueError("node_git_stage_failed")
-        before_inputs={path:hash_file(workspace/path) for path in ("package.json","package-lock.json")}
+        def regular_digest(path):
+            # Repository commands may swap these for links, FIFOs or devices.
+            try:
+                return hash_regular(workspace,path)
+            except RepoSandboxError as exc:
+                raise ValueError("node_immutable_input_not_regular") from exc
+        before_inputs={path:regular_digest(path) for path in ("package.json","package-lock.json")}
         for entry in plan["commands"]:
             # Generated test paths must now exist as bounded regular files.
             for path in entry["paths"]:read_regular(workspace,path,job["limits"]["max_file_bytes"])
@@ -412,7 +469,7 @@ def main(request_file: Path) -> int:
                 reason="node_command_failed_or_cancelled_or_timeout_or_descendant";break
         if reason and not job.get("iteration_binding"):
             raise ValueError(reason)
-        if any(hash_file(workspace/path)!=value for path,value in before_inputs.items()):raise ValueError("node_immutable_input_changed")
+        if any(regular_digest(path)!=value for path,value in before_inputs.items()):raise ValueError("node_immutable_input_changed")
         output_dir=plan["output_directory"]
         # Validate every output path and byte through descriptor-safe snapshot;
         # dependency/config changes cannot be adopted as source patch evidence.
@@ -450,7 +507,7 @@ def main(request_file: Path) -> int:
             apply_patch=apply_exported,
             ignore=lambda path:path.startswith("node_modules/") or bool(output_dir and path.startswith(output_dir+"/")))
         _write_private_output(output,"diff.patch",diff)
-    except (ValueError,OSError) as exc:
+    except (ValueError,OSError,RepoSandboxError) as exc:
         reason=str(exc)[:512]
     finally:
         proof=cleanup(deadline)

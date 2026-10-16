@@ -164,9 +164,12 @@ async def settle_specialist_callback(jobs,invocation_id):
 
 async def settle_specialist_waits(jobs,parent_job_id):
     """Finite existing manifest trigger; remaining/Unknown waits stay paused."""
-    from src.workflows.general_task_guard import _current,child_binding
+    from src.workflows.general_task_guard import _current,child_binding,stage_positive_parent
     from src.work_board.general_task_runtime_artifacts import read_bound_native_tool_input
     async with jobs._session() as db:
+        # _current verifies only receipts its fixed owner staged first.
+        await stage_positive_parent(jobs,db,parent_job_id)
+        await db.rollback()
         parent,_task,_attempt,manifest,_envelope = await _current(jobs,db,parent_job_id)
         if parent.status!='paused' or manifest.phase!='native_wait':
             return []

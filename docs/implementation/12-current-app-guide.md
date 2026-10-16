@@ -1089,11 +1089,23 @@ costs, and embedding usefulness remain externally unverified.
   and keeps Unknown handling, but starts no assessment or second attempt; a
   queued candidate keeps `reason_code` `disabled_by_operator` (or
   `background_inference_settings_unreadable`) until its deadline, then closes
-  as `assessment_deadline_expired`. `screenshot_folder_analysis` (#1112, vision
+  as `assessment_deadline_expired`. A paused tick never overwrites an operator
+  cancel (`cancel_requested`, `assessment_cancel_requested`,
+  `operator_cancelled`), so after re-enabling, the admission authority check
+  still refuses the cancelled row. `screenshot_folder_analysis` (#1112, vision
   route) is a whole-job toggle; pending screenshots wait until it is on again.
-  Both are event-driven, so the panel shows their basis ("per queued item")
-  instead of a calls/day figure. Explicitly outside the toggles: chat title
-  generation (one text call per new conversation, chat-triggered).
+  While it is off, the skip is audited once per transition (into the skip, or
+  to a different reason) and then at most hourly, because the job polls every
+  second; the panel's `last_skip` still updates on every run. Both toggles are
+  read when work starts, not mid-call: an assessment whose execution task was
+  started before the switch still makes its one call, and a screenshot tick
+  already running finishes its current batch. Both are event-driven, so the
+  panel shows their basis ("per queued item") instead of a calls/day figure.
+  Explicitly outside the toggles: chat title generation (one text call per new
+  conversation, chat-triggered) and
+  `POST /api/observer/screen-artifacts/{id}/reanalyze`, an explicit operator
+  action on one screenshot that runs even while `screenshot_folder_analysis`
+  is off.
 
 ### Local cockpit interaction boundaries
 

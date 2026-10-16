@@ -63,7 +63,7 @@ class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
             stream=ResponseBytes(json.dumps(payload).encode()))
 
 
-@pytest.mark.parametrize("scenario", ["completed", "silent", "citation_tampered", "invented_reference",
+@pytest.mark.parametrize("scenario", ["completed", "paused_resume", "silent", "citation_tampered", "invented_reference",
     "pii_output", "secret_output", "missing_snapshot", "cancel_contacted", "coalesce_uncontacted", "outstanding_one", "cancel_uncontacted", "startup_recovery"])
 async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_auth, monkeypatch, scenario, home_observer=None):
     from config.settings import settings
@@ -87,7 +87,7 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
     await durable_job_repository.configure_inference_accounting(1000)
     calls, source_calls = [], []
     controls = {"scenario": scenario}
-    if scenario == "completed":
+    if scenario in {"completed", "paused_resume"}:
         # The reviewed snooze must fit a real finite Root. The shared research
         # fixture's five-minute Root deliberately cannot grant a 20min snooze.
         from config.settings import settings
@@ -319,11 +319,26 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             assert response.json()["quiescent"] is True and response.json()["status"] == "unknown"
             assert closed.is_set() and active.done()
             assert (await run_opportunity_tick())["started"] == 0 and len(calls) == 5
-        elif scenario == "completed":
+        elif scenario in {"completed", "paused_resume"}:
             from src.scheduler.engine import _async_job_wrapper
             from src.guardian.opportunity_runtime import run_opportunity_tick, _executions
             wrapper = _async_job_wrapper(run_opportunity_tick, asyncio.get_running_loop(),
                 job_id="guardian_opportunity_assessment", allow_model_inference=True)
+            if scenario == "paused_resume":
+                # #1112: switched off, the scheduled tick makes no assessment
+                # call and leaves the admitted candidate visibly queued; switched
+                # back on, the same candidate is assessed through the real path.
+                from src.scheduler import background_inference
+                background_inference.write_background_inference_settings({"guardian_opportunity_assessment": False})
+                await wrapper()
+                assert row.id not in _executions and len(calls) == 4
+                async with factory.accounting_sessions() as db:
+                    paused = await db.get(GuardianOpportunity, row.id)
+                    assert (paused.status, paused.reason_code) == ("queued", "disabled_by_operator")
+                    assert (await db.execute(select(InferenceCostReservation).where(
+                        InferenceCostReservation.job_id == row.job_id))).scalars().first() is None
+                assert (await durable_job_repository.get_job(row.job_id))["status"] == "queued"
+                background_inference.write_background_inference_settings({"guardian_opportunity_assessment": True})
             await wrapper()
             await asyncio.wait_for(_executions[row.id], timeout=50)
         elif scenario not in {"coalesce_uncontacted", "outstanding_one", "startup_recovery"}:
@@ -331,9 +346,9 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
         async with factory.accounting_sessions() as db:
             final = await db.get(GuardianOpportunity, row.id)
             expected = "silent" if scenario == "silent" else "unknown" if scenario == "cancel_contacted" else (
-                "proposed" if scenario in {"completed", "coalesce_uncontacted", "outstanding_one", "startup_recovery"} else "blocked")
+                "proposed" if scenario in {"completed", "paused_resume", "coalesce_uncontacted", "outstanding_one", "startup_recovery"} else "blocked")
             assert final.status == expected, final.reason_code
-            if scenario not in {"completed", "coalesce_uncontacted", "outstanding_one", "startup_recovery"}:
+            if scenario not in {"completed", "paused_resume", "coalesce_uncontacted", "outstanding_one", "startup_recovery"}:
                 assert final.intervention_id is None
                 assert (await db.execute(select(func.count()).select_from(GuardianIntervention))).scalar() == 0
                 assert (await db.execute(select(func.count()).select_from(NativeNotificationOutbox))).scalar() == 0

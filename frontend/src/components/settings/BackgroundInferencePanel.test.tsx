@@ -96,6 +96,8 @@ describe("BackgroundInferencePanel", () => {
     // Both are now real toggles, so they are no longer listed as excluded.
     expect(screen.queryByText(/Not covered by these toggles:.*Guardian opportunity/)).toBeNull();
     expect(screen.queryByText(/Not covered by these toggles:.*Screenshot folder analysis/)).toBeNull();
+    // The explicit per-screenshot reanalyze action stays outside the toggle.
+    expect(screen.getByText(/Not covered by these toggles:.*Reanalyze on one screenshot/)).toBeInTheDocument();
     fireEvent.click(opportunity);
     await waitFor(() => expect(screen.getByLabelText("Background inference: Guardian opportunity assessment")).not.toBeChecked());
     const put = fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;

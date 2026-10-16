@@ -18,6 +18,9 @@ EVIDENCE_LIMIT = 16384
 SERVICE_ID = "guardian-opportunity"
 SERVICE_PRINCIPAL = "service:guardian-opportunity"
 RUNNER = "scheduler:guardian-opportunity"
+# Reason codes recording an operator cancel. No tick may overwrite them, or a
+# later execution would no longer see the cancel.
+OPERATOR_CANCEL_REASONS = frozenset({"cancel_requested", "assessment_cancel_requested", "operator_cancelled"})
 _executions: dict[str, asyncio.Task] = {}
 
 
@@ -142,7 +145,7 @@ async def _authority(db, opportunity_id, *, evidence=None, execution=False):
     row = await db.get(GuardianOpportunity, opportunity_id)
     if row is None or row.status not in {"queued", "assessing"}:
         raise OpportunityError("opportunity_not_pending")
-    if row.reason_code == "cancel_requested":
+    if row.reason_code in OPERATOR_CANCEL_REASONS:
         raise OpportunityError("assessment_cancel_requested")
     if execution and utc(row.assessment_deadline_at) <= now():
         raise OpportunityError("assessment_deadline_expired")
@@ -747,6 +750,8 @@ async def run_opportunity_tick():
                     try:
                         await assert_coalesced_predecessor_closed(db, row)
                     except OpportunityError as exc:
+                        if row.reason_code in OPERATOR_CANCEL_REASONS:
+                            continue  # Keep the cancel visible to the next execution check.
                         await db.execute(text("BEGIN IMMEDIATE"))
                         expired = utc(row.assessment_deadline_at) <= now()
                         reason = "assessment_deadline_expired" if expired else exc.code
@@ -831,11 +836,13 @@ async def run_opportunity_tick():
                             status="blocked", reason_code=exc.code,
                             revision=GuardianOpportunity.revision + 1))
                     continue
-            if paused and row.status == "queued":
+            if paused and row.status == "queued" and row.reason_code not in OPERATOR_CANCEL_REASONS:
                 async with db_engine.get_session() as db:
                     await db.execute(text("BEGIN IMMEDIATE"))
                     expired = utc(row.assessment_deadline_at) <= now()
                     reason = "assessment_deadline_expired" if expired else paused
+                    # The revision fence also loses to a cancel committed after
+                    # this page was read; the next enabled tick closes it in _authority.
                     await db.execute(update(GuardianOpportunity).where(
                         GuardianOpportunity.id == row.id, GuardianOpportunity.revision == row.revision,
                         GuardianOpportunity.status == "queued",

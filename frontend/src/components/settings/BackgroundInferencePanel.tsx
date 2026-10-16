@@ -24,6 +24,7 @@ const ENDPOINT = "/api/settings/background-inference";
 /** Model callers deliberately outside these toggles, with where each is gated. */
 export const EXCLUDED_MODEL_CALLERS: ReadonlyArray<{ label: string; reason: string }> = [
   { label: "Chat title generation", reason: "one text call per new conversation, triggered by chat rather than the scheduler" },
+  { label: "Reanalyze on one screenshot", reason: "an explicit operator action, so it runs even while folder analysis is off" },
 ];
 
 function recordOf(value: unknown): Record<string, unknown> | null {

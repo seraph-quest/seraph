@@ -67,18 +67,24 @@ async def _skip_disabled_inference_job(job_id: str) -> bool:
         background_inference_job_enabled,
         is_whole_job_toggle,
         read_background_inference_settings,
+        record_background_inference_run,
         record_background_inference_skip,
     )
 
-    if not is_whole_job_toggle(job_id) or background_inference_job_enabled(job_id):
+    if not is_whole_job_toggle(job_id):
+        return False
+    if background_inference_job_enabled(job_id):
+        record_background_inference_run(job_id)
         return False
     _enabled, error = read_background_inference_settings()
     reason = SETTINGS_UNREADABLE if error else DISABLED_BY_OPERATOR
-    record_background_inference_skip(job_id, reason)
-    from src.audit.runtime import log_scheduler_job_event
+    # Audited once per transition, then hourly (#1112): screenshot folder
+    # analysis polls every second.
+    if record_background_inference_skip(job_id, reason):
+        from src.audit.runtime import log_scheduler_job_event
 
-    await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})
-    logger.info("Scheduled job %s skipped: %s", job_id, reason)
+        await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})
+        logger.info("Scheduled job %s skipped: %s", job_id, reason)
     return True
 
 

@@ -9,7 +9,7 @@ one private workspace JSON file, not in environment variables.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -25,7 +25,11 @@ DISABLED_BY_OPERATOR = "disabled_by_operator"
 SETTINGS_UNREADABLE = "background_inference_settings_unreadable"
 _MAX_SETTINGS_BYTES = 16_384
 _lock = RLock()
-_last_status: dict[str, dict[str, str]] = {}
+_last_status: dict[str, dict[str, object]] = {}
+# A switched-off job polled every second would otherwise write one audit row
+# per poll. The audit records each transition into a skip reason, then at most
+# hourly while it persists; the visible ``last_skip`` still updates every run.
+SKIP_AUDIT_INTERVAL = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -174,19 +178,35 @@ def is_whole_job_toggle(job_id: str) -> bool:
     return job is not None and job.scope == "job"
 
 
-def record_background_inference_skip(job_id: str, reason: str = DISABLED_BY_OPERATOR) -> None:
+def record_background_inference_skip(job_id: str, reason: str = DISABLED_BY_OPERATOR) -> bool:
+    """Record a visible skip; return whether it is due an audit event."""
+    current = datetime.now(timezone.utc)
     with _lock:
+        previous = _last_status.get(job_id) or {}
+        audited = previous.get("_audited_at") if previous.get("reason") == reason else None
+        due = not isinstance(audited, datetime) or current - audited >= SKIP_AUDIT_INTERVAL
         _last_status[job_id] = {
             "status": "skipped",
             "reason": reason,
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": current.isoformat(),
+            "_audited_at": current if due else audited,
         }
+    return due
+
+
+def record_background_inference_run(job_id: str) -> None:
+    """Mark that the job ran, so its next skip is a new transition."""
+    with _lock:
+        entry = _last_status.get(job_id)
+        if entry is not None:
+            entry.pop("_audited_at", None)
 
 
 def background_inference_status() -> dict[str, object]:
     enabled, error = read_background_inference_settings()
     with _lock:
-        last = {job_id: dict(value) for job_id, value in _last_status.items()}
+        last = {job_id: {key: value for key, value in entry.items() if not key.startswith("_")}
+                for job_id, entry in _last_status.items()}
     jobs = []
     for job in BACKGROUND_INFERENCE_JOBS:
         jobs.append({

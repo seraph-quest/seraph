@@ -78,9 +78,13 @@ no model call and shows `skipped: disabled by operator`. The memory
 consolidation switch also stops the consolidation that otherwise runs after a
 reply, after a workflow, before context compaction and when a session is
 deleted. With guardian opportunity assessment off, queued opportunities stay
-visible with the reason until their deadline, then close as expired. Not
-covered by these switches: chat title generation (one text call per new
-conversation). If the
+visible with the reason until their deadline, then close as expired; an
+opportunity you cancelled stays cancelled. A switch stops new calls only: an
+assessment already admitted before you switched it off still makes its call,
+and a screenshot analysis run already in progress finishes its current batch.
+Not covered by these switches: chat title generation (one text call per new
+conversation) and **Reanalyze** on a single screenshot, which is an explicit
+action and runs even while screenshot folder analysis is off. If the
 stored switches become unreadable, every scheduled model call pauses and the
 panel asks you to set every job and confirm before replacing them.
 `SCHEDULER_ENABLED=false` still stops all scheduled work, including Work

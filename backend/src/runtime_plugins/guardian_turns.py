@@ -306,7 +306,7 @@ class GuardianTurn:
 
     # -------------------------------------------------------- fenced state
 
-    async def _fetch_live(self, db):
+    async def _fetch_live(self, db, *, adopting: bool = False):
         from .ownership import CompositionBindingError, RuntimeCompositionBinding, validate_invocation
         run = await self.jobs._fetch(db, self.job_id)
         now = datetime.now(timezone.utc)
@@ -323,8 +323,9 @@ class GuardianTurn:
             await _parent_live(db, authority)
         except NativeServiceBlocked as exc:
             raise GuardianBlocked("guardian_parent_inactive") from exc
-        if run.owner_kind == "user":
-            # An operator-owned turn adopts nothing once its Root is revoked or its grants changed.
+        if adopting and run.owner_kind == "user":
+            # An operator-owned turn adopts nothing once its Root is revoked or its grants changed;
+            # a blocked settlement still records the outcome.
             from .dispatch import current_operator_root
             try:
                 await current_operator_root(db, run, authority)
@@ -336,7 +337,7 @@ class GuardianTurn:
                              readback: dict | None = None):
         async with self.jobs._session() as db:
             await _writer(db)
-            run = await self._fetch_live(db)
+            run = await self._fetch_live(db, adopting=(settlement or {}).get("outcome") == "succeeded")
             context = json.loads(run.checkpoint_context_json) if run.checkpoint_context_json else None
             if initial:
                 context = {"schema_version": 1, "context_tag": CONTEXT_TAG, "preset_id": self.preset_id,
@@ -601,7 +602,10 @@ async def _cordis_completion(preset_id, call, *, timeout_seconds, parent, root, 
         await turn.settle("blocked", reason=exc.reason_code)
         raise
     if not await turn.settle("succeeded"):
-        raise GuardianBlocked(turn.blocked_reason or "guardian_turn_settlement_refused")
+        reason = turn.blocked_reason or "guardian_turn_settlement_refused"
+        # Refused adoption (a revoked Root) is still recorded; a lost lease leaves it to recovery.
+        await turn.settle("blocked", reason=reason)
+        raise GuardianBlocked(reason)
     return response
 
 

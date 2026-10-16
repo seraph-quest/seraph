@@ -393,16 +393,44 @@ async def test_existing_chat_turn_ids_survive_the_presets_upgrade(accounting_db,
 from tests.test_research_native_vertical import real_auth  # noqa: E402,F401
 
 
-@needs_cordis
-@pytest.mark.asyncio
-async def test_daily_briefing_parity_on_the_legacy_and_cordis_guardian_owners(  # noqa: F811
-        accounting_db, monkeypatch, mocked_canonical_inference_context):
-    """One scripted completion, two owners: the same provider request and the same delivered briefing."""
-    deny_sockets(monkeypatch)
+def _report_patches(job: str):
+    """Today's inputs for one scheduled report, from its own test module's fixtures."""
     from unittest.mock import AsyncMock, MagicMock, patch
     from src.observer.context import CurrentContext
-    from src.scheduler.jobs.daily_briefing import run_daily_briefing
-    from tests.test_daily_briefing import _hybrid_memories, _mock_litellm_response
+    context = MagicMock()
+    if job == "daily_briefing":
+        from src.scheduler.jobs.daily_briefing import run_daily_briefing
+        from tests.test_daily_briefing import _hybrid_memories
+        context.refresh = AsyncMock(return_value=CurrentContext(time_of_day="morning", day_of_week="Monday",
+                                                                is_working_hours=True,
+                                                                active_goals_summary="3 active goals"))
+        return run_daily_briefing, (
+            patch("src.observer.manager.context_manager", context),
+            patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+            patch("src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
+                  new=AsyncMock(return_value=_hybrid_memories(("User likes mornings",)))))
+    from src.scheduler.jobs.evening_review import run_evening_review
+    context.refresh = AsyncMock(return_value=CurrentContext(time_of_day="evening", day_of_week="Monday",
+                                                            is_working_hours=False,
+                                                            active_goals_summary="2 active goals"))
+    return run_evening_review, (
+        patch("src.observer.manager.context_manager", context),
+        patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
+        patch("src.scheduler.jobs.evening_review._count_messages_today", AsyncMock(return_value=(15, False))),
+        patch("src.scheduler.jobs.evening_review._get_completed_goals_today",
+              AsyncMock(return_value=(["Exercise"], False))))
+
+
+@needs_cordis
+@pytest.mark.asyncio
+@pytest.mark.parametrize("job", ["daily_briefing", "evening_review"])
+async def test_scheduled_report_parity_on_the_legacy_and_cordis_guardian_owners(  # noqa: F811
+        accounting_db, monkeypatch, mocked_canonical_inference_context, job):
+    """One scripted completion, two owners: the same provider request and the same delivered report."""
+    deny_sockets(monkeypatch)
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock, patch
+    from tests.test_daily_briefing import _mock_litellm_response
     runs = {}
     async with guardian_host(cordis=False) as host:
         monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
@@ -413,21 +441,319 @@ async def test_daily_briefing_parity_on_the_legacy_and_cordis_guardian_owners(  
 
             def completion(**kwargs):
                 requests.append({key: kwargs.get(key) for key in ("messages", "temperature", "max_tokens")})
-                return _mock_litellm_response("Good morning, Hero! Here's your briefing...")
-            context = MagicMock()
-            context.refresh = AsyncMock(return_value=CurrentContext(time_of_day="morning", day_of_week="Monday",
-                                                                    is_working_hours=True,
-                                                                    active_goals_summary="3 active goals"))
-            with (patch("src.observer.manager.context_manager", context),
-                  patch("src.memory.soul.read_soul", return_value="# Soul\nName: Hero"),
-                  patch("src.scheduler.jobs.daily_briefing.retrieve_hybrid_memory",
-                        new=AsyncMock(return_value=_hybrid_memories(("User likes mornings",)))),
-                  patch("litellm.completion", side_effect=completion),
-                  patch("src.observer.delivery.deliver_or_queue", delivered)):
-                await run_daily_briefing()
+                return _mock_litellm_response(f"Hello Hero, here is your {job}.")
+            run, patches = _report_patches(job)
+            with ExitStack() as stack:
+                for item in (*patches, patch("litellm.completion", side_effect=completion),
+                             patch("src.observer.delivery.deliver_or_queue", delivered)):
+                    stack.enter_context(item)
+                async with service_principal(job):
+                    await run()
             delivered.assert_called_once()
-            runs[owner] = (requests, delivered.call_args[0][0].content, delivered.call_args[1])
+            message = delivered.call_args[0][0]
+            runs[owner] = (requests, message.content, message.intervention_type, delivered.call_args[1])
     assert runs["legacy"] == runs["cordis"]
     assert len(runs["cordis"][0]) == 1
     turns = await _jobs_of_kind("cordis_guardian_turn_v1")
     assert [turn["status"] for turn in turns] == ["succeeded"]  # only the Cordis-owned run made a turn
+
+
+# ---------------------------------------------------------------- boot cutover order
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_boot_cuts_presets_over_first_and_introduces_new_domains_into_a_1019_inventory(  # noqa: F811
+        accounting_db, real_auth):
+    """A #1019 install (agent-loop already Cordis, no #1020 rows) gains both rows at boot, presets first."""
+    from sqlalchemy import delete, select
+    from src.db.engine import get_session
+    from src.db.models import AuditEvent, RuntimeCompositionState
+    from src.runtime_plugins.agent_turns import AGENT_LOOP_DOMAIN, chat_runtime_status
+    from src.runtime_plugins.cutover import cutover_manifest, run_boot_cutover
+    from src.runtime_plugins.ownership import DOMAIN_INTRODUCTIONS, inventory
+    from tests.cordis_agent_loop import cutover_agent_loop
+    manifest = cutover_manifest()
+    assert [entry.domain for entry in manifest] == [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+    # Every turn binds the presets, so every later domain waits for them.
+    assert all(PRESETS_DOMAIN in entry.prerequisites for entry in manifest[1:])
+    async with research_host(durable_job_repository) as host:
+        loop_epoch = await cutover_agent_loop(host)
+        async with get_session() as db:
+            await db.execute(delete(RuntimeCompositionState).where(
+                RuntimeCompositionState.runtime_domain.in_(list(DOMAIN_INTRODUCTIONS))))
+            await db.commit()
+        receipts = await run_boot_cutover(host)
+        assert [item["runtime_domain"] for item in receipts] == [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+        async with get_session() as db:
+            rows = await inventory(db)
+            introduced = (await db.execute(select(AuditEvent.details_json).where(
+                AuditEvent.event_type == "runtime_composition_domain_introduced"))).scalars().all()
+        assert sorted(json.loads(item)["runtime_domain"] for item in introduced) == sorted(DOMAIN_INTRODUCTIONS)
+        for domain in DOMAIN_INTRODUCTIONS:
+            # Introduced as legacy@1, then cut over at epoch 2 on this boot's proof.
+            assert (rows[domain].owner_kind, rows[domain].epoch, rows[domain].state) == ("cordis", 2, "ready")
+        assert rows[AGENT_LOOP_DOMAIN].epoch == loop_epoch  # the cut-over chat owner is untouched
+        assert (await chat_runtime_status(host))["loop"] == "cordis.agent-loop.v1"
+        assert (await guardian_runtime_status(host))["loop"] == "cordis.guardian.v1"
+        assert await run_boot_cutover(host) == []
+
+
+# ---------------------------------------------------------------- blocked and fenced turns
+
+@needs_cordis
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["blocked", "missing"])
+async def test_a_presets_owner_that_is_not_ready_blocks_every_guardian_call(accounting_db, monkeypatch, change):  # noqa: F811
+    deny_sockets(monkeypatch)
+    from sqlalchemy import delete, update
+    from src.db.engine import get_session
+    from src.db.models import RuntimeCompositionState
+    calls = []
+
+    async def call():
+        calls.append(1)
+        return _response("must not run")
+    async with guardian_host() as host:
+        async with get_session() as db:
+            where = RuntimeCompositionState.runtime_domain == PRESETS_DOMAIN
+            await db.execute(update(RuntimeCompositionState).where(where).values(state="blocked")
+                             if change == "blocked" else delete(RuntimeCompositionState).where(where))
+            await db.commit()
+        status = await guardian_runtime_status(host)
+        expected = "agent_presets_owner_blocked" if change == "blocked" else "composition_dependency_missing"
+        assert (status["loop"], status["reason"]) == ("blocked", expected) and status["recovery"]
+        async with service_principal("daily_briefing"):
+            with pytest.raises(GuardianBlocked) as blocked:
+                await guardian_completion("guardian.daily_briefing", call, timeout_seconds=30,
+                                          runtime_path="daily_briefing", temperature=0.6, max_tokens=512, host=host)
+        assert blocked.value.reason_code == expected
+    assert calls == [] and await _jobs_of_kind("cordis_guardian_turn_v1") == []
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_a_restart_mid_turn_never_adopts_the_output(accounting_db, monkeypatch):  # noqa: F811
+    """The process restarted while the call ran: stale-lease recovery owns the turn, nothing is used."""
+    deny_sockets(monkeypatch)
+    from datetime import datetime, timedelta, timezone
+    async with guardian_host() as host:
+        async def call():
+            (turn,) = await _jobs_of_kind("cordis_guardian_turn_v1")
+            await durable_job_repository.recover_stale_job(turn["job_id"],
+                                                           now=datetime.now(timezone.utc) + timedelta(hours=1))
+            return _response("late")
+        async with service_principal("weekly_activity_review"):
+            with pytest.raises(GuardianBlocked) as blocked:
+                await guardian_completion("guardian.weekly_activity_review", call, timeout_seconds=30,
+                                          runtime_path="weekly_activity_review", temperature=0.6, max_tokens=1024,
+                                          host=host)
+    assert blocked.value.reason_code == "guardian_turn_attempt_changed"
+    (turn,) = await _jobs_of_kind("cordis_guardian_turn_v1")
+    assert turn["status"] != "succeeded"
+    assert await _jobs_of_kind("cordis_guardian_step_v1") == []  # no step ran for a recovered turn
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_a_disabled_toggle_admits_no_turn_and_unreadable_settings_pause_every_job(  # noqa: F811
+        accounting_db, monkeypatch):
+    deny_sockets(monkeypatch)
+    import asyncio
+    from src.scheduler import background_inference
+    from src.scheduler.engine import _async_job_wrapper
+    calls = []
+
+    async def job():
+        async def call():
+            calls.append(1)
+            return _response("must not run")
+        await guardian_completion("guardian.daily_briefing", call, timeout_seconds=30, runtime_path="daily_briefing",
+                                  temperature=0.6, max_tokens=512)
+    async with guardian_host() as host:
+        monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
+        background_inference.write_background_inference_settings({"daily_briefing": False})
+        await _async_job_wrapper(job, asyncio.get_running_loop(), job_id="daily_briefing",
+                                 allow_model_inference=True)()
+        background_inference.background_inference_settings_path().write_text("{not json", encoding="utf-8")
+        for job_id in ("daily_briefing", "evening_review", "strategist_tick"):
+            await _async_job_wrapper(job, asyncio.get_running_loop(), job_id=job_id, allow_model_inference=True)()
+        # The same wrapper runs the job, on the Cordis owner, once the toggle is back on.
+        background_inference.background_inference_settings_path().unlink()
+        await _async_job_wrapper(job, asyncio.get_running_loop(), job_id="daily_briefing",
+                                 allow_model_inference=True)()
+    assert calls == [1]
+    assert len(await _jobs_of_kind("cordis_guardian_turn_v1")) == 1
+    assert len(await _jobs_of_kind("cordis_guardian_step_v1")) == 1
+
+
+# ---------------------------------------------------------------- the strategist tick, both owners
+
+STRATEGIST_SCENARIOS = {
+    "intervene": ('{"should_intervene": true, "content": "Time to refocus.", "intervention_type": "advisory", '
+                  '"urgency": 3, "reasoning": "Focus drift"}'),
+    "no_intervene": ('{"should_intervene": false, "content": "", "intervention_type": "nudge", "urgency": 0, '
+                     '"reasoning": "fine"}'),
+    "parse_failure": "this is not a decision",
+    "timeout": None,
+}
+
+
+async def _strategist_tick(monkeypatch, occurrence: str, content: str | None) -> tuple:
+    """Run one real tick with a scripted decision completion; returns what it asked, delivered and recorded."""
+    import asyncio
+    from src.observer.user_state import DeliveryDecision
+    from src.scheduler.jobs import strategist_tick
+    requests, delivered = [], []
+
+    async def scripted(**kwargs):
+        requests.append({key: kwargs[key] for key in ("temperature", "max_tokens", "runtime_path", "timeout")}
+                        | {"roles": [message["role"] for message in kwargs["messages"]]})
+        if content is None:
+            raise asyncio.TimeoutError()
+        return _response(content)
+
+    async def deliver(message, **_kwargs):
+        delivered.append(message.content)
+        return DeliveryDecision.deliver
+    monkeypatch.setattr("src.agent.strategist.completion_with_fallback", scripted)
+    monkeypatch.setattr("src.observer.delivery.deliver_or_queue", deliver)
+    monkeypatch.setattr(strategist_tick, "_occurrence_identity", lambda now=None: occurrence)
+    async with service_principal():
+        await strategist_tick.run_strategist_tick()
+    tick = await durable_job_repository.get_job(occurrence)
+    return requests, delivered, tick["status"], tick.get("failure_reason")
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_strategist_tick_is_identical_on_both_owners_and_blocked_without_cordis(accounting_db, monkeypatch):  # noqa: F811
+    deny_sockets(monkeypatch)
+    from unittest.mock import AsyncMock
+    from src.scheduler.jobs import strategist_tick
+    from tests.test_strategist_tick import _make_guardian_state
+    monkeypatch.setattr(strategist_tick, "build_guardian_state", AsyncMock(return_value=_make_guardian_state()))
+    outcomes = {}
+    async with guardian_host(cordis=False) as host:
+        monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
+        for owner in ("legacy", "cordis"):
+            if owner == "cordis":
+                await cutover(host, GUARDIAN_DOMAIN)
+            for scenario, content in STRATEGIST_SCENARIOS.items():
+                outcomes[(owner, scenario)] = await _strategist_tick(
+                    monkeypatch, f"strategist_tick:{owner}-{scenario}", STRATEGIST_SCENARIOS[scenario])
+        for scenario in STRATEGIST_SCENARIOS:
+            assert outcomes[("legacy", scenario)] == outcomes[("cordis", scenario)], scenario
+        assert outcomes[("cordis", "intervene")][1] == ["Time to refocus."]
+        assert outcomes[("cordis", "no_intervene")][1] == []
+        turns = await _jobs_of_kind("cordis_guardian_turn_v1")
+        assert len(turns) == len(STRATEGIST_SCENARIOS)  # the Cordis owner adds lineage, nothing else
+        # Cordis is the owner but its runtime is down: blocked, no model call, no decision delivered.
+        await host.stop()
+        requests, delivered, status, reason = await _strategist_tick(
+            monkeypatch, "strategist_tick:cordis-down", STRATEGIST_SCENARIOS["intervene"])
+        await host.start()
+    assert requests == [] and status == "blocked" and reason.startswith("cordis_")
+    assert len(delivered) == 1 and "Strategist tick is blocked" in delivered[0]  # the one operator notice
+
+
+# ---------------------------------------------------------------- memory consolidation: two admissions
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_a_flush_inside_an_operator_turn_is_owned_by_that_root_and_a_revoked_root_adopts_nothing(  # noqa: F811
+        accounting_db, real_auth, monkeypatch):
+    deny_sockets(monkeypatch)
+    from datetime import datetime, timezone
+    from sqlalchemy import update
+    from src.auth.service import bind_operator_principal
+    from src.db.engine import get_session
+    from src.db.models import OperatorSession
+    from tests.test_cordis_agent_loop import _session
+    async with guardian_host() as host:
+        operator = await _session()
+        root = bind_operator_principal(operator, "chat-1")
+
+        async def call():
+            return _response('{"facts": []}')
+        response = await guardian_completion("guardian.memory_consolidation", call, timeout_seconds=30,
+                                             runtime_path="session_consolidation", temperature=0.3, max_tokens=1024,
+                                             root=root, host=host)
+        assert response.choices[0].message.content == '{"facts": []}'
+        (turn,) = await _jobs_of_kind("cordis_guardian_turn_v1")
+        (step,) = await _jobs_of_kind("cordis_guardian_step_v1")
+        async with get_session() as db:
+            for job in (turn, step):
+                run = await durable_job_repository._fetch(db, job["job_id"])
+                assert (run.owner_kind, run.owner_principal_id, run.service_id) == (
+                    "user", operator.principal.principal_id, None)
+                assert run.operator_session_id == run.session_id == operator.session_id
+        assert turn["status"] == step["status"] == "succeeded"
+
+        async def revoking_call():
+            # The operator signs out while the consolidation call runs.
+            async with get_session() as db:
+                await db.execute(update(OperatorSession).where(OperatorSession.id == operator.session_id)
+                                 .values(revoked_at=datetime.now(timezone.utc)))
+                await db.commit()
+            return _response('{"facts": ["late"]}')
+        with pytest.raises(GuardianBlocked) as blocked:
+            await guardian_completion("guardian.memory_consolidation", revoking_call, timeout_seconds=30,
+                                      runtime_path="session_consolidation", temperature=0.3, max_tokens=1024,
+                                      root=root, host=host)
+        assert blocked.value.reason_code == "native_original_root_inactive"
+        # A revoked Root admits nothing more.
+        with pytest.raises(GuardianBlocked):
+            await guardian_completion("guardian.memory_consolidation", call, timeout_seconds=30,
+                                      runtime_path="session_consolidation", temperature=0.3, max_tokens=1024,
+                                      root=root, host=host)
+        # Revoked after the sequencer decided but before adoption: the settlement CAS refuses it.
+        from src.runtime_plugins.guardian_turns import GuardianTurn
+        decide = GuardianTurn.decide_final
+        second = await _session()
+
+        async def decide_then_revoke(self, digest):
+            await decide(self, digest)
+            async with get_session() as db:
+                await db.execute(update(OperatorSession).where(OperatorSession.id == second.session_id)
+                                 .values(revoked_at=datetime.now(timezone.utc)))
+                await db.commit()
+        monkeypatch.setattr(GuardianTurn, "decide_final", decide_then_revoke)
+        with pytest.raises(GuardianBlocked) as late:
+            await guardian_completion("guardian.memory_consolidation", call, timeout_seconds=30,
+                                      runtime_path="session_consolidation", temperature=0.3, max_tokens=1024,
+                                      root=bind_operator_principal(second, "chat-1"), host=host)
+        assert late.value.reason_code == "native_original_root_inactive"
+    turns = await _jobs_of_kind("cordis_guardian_turn_v1")
+    assert sorted(turn["status"] for turn in turns) == ["blocked", "blocked", "succeeded"]
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_a_blocked_guardian_domain_skips_every_flush_and_keeps_its_fingerprint_uncached(  # noqa: F811
+        accounting_db, monkeypatch, mocked_canonical_inference_context):
+    deny_sockets(monkeypatch)
+    import asyncio
+    from unittest.mock import patch
+    from src.agent.session import session_manager
+    from src.memory import flush
+    from src.scheduler import background_inference
+    flush._reset_memory_flush_state()
+    monkeypatch.setattr(flush, "get_session", accounting_db[2].accounting_sessions)
+    await session_manager.get_or_create("s-flush")
+    await session_manager.add_message("s-flush", "user", "My name is Alice and I work at ACME Corp as an engineer.")
+    await session_manager.add_message("s-flush", "assistant", "Nice to meet you, Alice! ACME Corp sounds great.")
+    async with guardian_host() as host:
+        monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
+        await host.stop()
+        with patch("litellm.completion") as completion:
+            assert await flush.flush_session_memory("s-flush", trigger="post_response") is False
+            # The synchronous workflow trigger never raises into its workflow.
+            assert await asyncio.to_thread(flush.flush_session_memory_sync, session_id="s-flush",
+                                           trigger="workflow_completed") is False
+        completion.assert_not_called()
+        assert flush._last_flushed_session_fingerprints == {}  # a later catch-up consolidates once ready
+        row = next(job for job in background_inference.background_inference_status()["jobs"]
+                   if job["job_id"] == "memory_consolidation")
+        assert row["blocked"] is True and row["last_skip"]["reason"].startswith("cordis_")
+        await host.start()
+    assert await _jobs_of_kind("cordis_guardian_turn_v1") == []

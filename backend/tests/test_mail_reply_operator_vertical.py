@@ -97,7 +97,7 @@ def model_response(request, calls):
         "usage": {"cost": "0.000002", "prompt_tokens": 20, "completion_tokens": 20}})
 
 
-async def prepared_flow(accounting_db, real_auth, monkeypatch):
+async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, until=None):
     from src.api import auth, work_board, model_fabric_settings, goals, mail
     from src.model_fabric.configuration import write_model_fabric_configuration
     from src.integrations import gmail_read, mail_reply_runtime
@@ -178,6 +178,10 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch):
     draft = await client.get("/api/capabilities/mail/reply-tasks/"+task_id+"/draft")
     assert draft.status_code == 200 and draft.json()["status"] == "verified", (result,draft.text)
     assert len(model_calls) == 5  # four actual canaries + one governed draft call
+    if until == "draft":
+        # The flow's goal admits one outstanding job; a later paused send would take it.
+        return client, post, google, model_calls, None, None, owner, {"consent": consent, "source": source,
+                                                                       "connection_id": legacy_id, "revision": rev}
     profiles = {}
     for service in (READ_SERVICE,SEND_SERVICE):
         profiles[service] = (await post("reply-profiles", {"service":service,"label":service,"client_id":"dummy-client","refresh_token":service,"declared_scopes":sorted(SCOPES[service]),
@@ -190,6 +194,9 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch):
     preview_body.update(task_id=task_id,expected_message_revision=source["message_revision"],acknowledge_identity_source_read=True,acknowledge_exact_reply_send=True,request_uuid="preview-once")
     preview = await post("reply-sends/preview", preview_body)
     assert preview["status"] == "paused" and preview["contacts_spent"] == 5 and preview["preview"]["recipient"] == "reply@example.test"
+    if not approve:
+        return client, post, google, model_calls, preview, preview_body, owner, {"consent": consent, "source": source,
+                                                                                 "connection_id": legacy_id, "revision": rev}
     approved = await post("reply-sends/"+preview["job_id"]+"/decision", {"decision":"approved","expected_digest":preview["preview"]["decision_digest"]})
     assert approved["preview"]["approval_status"] == "approved"
     return client, post, google, model_calls, preview, preview_body, owner

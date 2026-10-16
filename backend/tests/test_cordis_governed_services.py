@@ -368,33 +368,47 @@ async def _contacted(model, tag):
 
 # ---------------------------------------------------------------- connections
 
-async def test_bound_adapter_requires_a_current_connection_and_finite_operation_then_fails_closed(accounting_db, real_auth, monkeypatch):  # noqa: F811
+async def test_bound_adapter_requires_a_current_active_connection_and_finite_operation(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    """Full composed operations are covered by tests/test_cordis_bound_adapters.py (#1092)."""
     from src.db.engine import get_session
     from src.db.models import GoogleServiceConnection
     from src.runtime_plugins.governed_services import execute_native_connection_operation
     async with governed(accounting_db, monkeypatch) as env:
         operator = env["operator"]
         async with get_session() as db:
+            # ``ready`` is not an owner state: the mail/calendar owners write ``active``.
             db.add(GoogleServiceConnection(connection_id="conn-1018", owner_principal_id=operator.principal.principal_id,
                 owner_session_id=operator.session_id, service="calendar_readonly", vault_secret_key="vault-conn-1018",
-                state="ready", revision=2))
-        for kwargs, reason in (
-                ({"expected_connection_revision": 2, "operation": "calendar.read_events"}, "native_adapter_operation_not_composed"),
-                ({"expected_connection_revision": 1, "operation": "calendar.read_events"}, "native_connection_candidate_changed"),
-                ({"expected_connection_revision": 2, "operation": "gmail.read_messages"}, "native_adapter_operation_unknown")):
+                state="ready", revision=2, setup_idempotency_key="setup-1018-ready"))
+            db.add(GoogleServiceConnection(connection_id="conn-1018-active", owner_principal_id=operator.principal.principal_id,
+                owner_session_id=operator.session_id, service="calendar_readonly", vault_secret_key="vault-conn-1018b",
+                state="active", revision=2, setup_idempotency_key="setup-1018-active"))
+
+        def calendar(connection_ref, revision):
+            return {"connection_ref": connection_ref, "expected_connection_revision": revision,
+                    "calendar_consent_id": "consent-1018", "expected_consent_revision": 1, "max_events": 5}
+        for index, (operation, arguments, reason) in enumerate((
+                ("calendar.read_events", calendar("conn-1018", 2), "native_connection_unavailable"),
+                ("calendar.read_events", calendar("conn-1018-active", 1), "native_connection_candidate_changed"),
+                ("gmail.read_message", {"connection_ref": "conn-1018-active", "expected_connection_revision": 2,
+                                        "mail_consent_id": "c", "expected_source_consent_revision": 1,
+                                        "message_binding_id": "b", "expected_message_revision": "sha256:message"},
+                 "native_adapter_operation_unknown"))):
             with pytest.raises(NativeServiceBlocked) as blocked:
-                await execute_native_connection_operation(operator=operator, connection_ref="conn-1018", host=env["host"],
-                    idempotency_key="conn-" + str(kwargs["expected_connection_revision"]) + kwargs["operation"], **kwargs)
+                await execute_native_connection_operation(operator=operator, operation=operation, arguments=arguments,
+                                                          idempotency_key=f"conn-{index}", host=env["host"])
             assert blocked.value.reason_code == reason
             job = (await _governed_jobs(env["jobs"]))[-1]
             # The block is durable and operator-visible; no credential or effect was touched.
             assert job["status"] == "blocked" and job["failure_reason"] == reason and job["effects"] == []
         assert [method for method, _ in env["frames"]] == ["connections.invokeBoundAdapter"] * 3
         assert env["frames"][0][1] == {"operation_ref": (await _governed_jobs(env["jobs"]))[0]["job_id"]}
-        with pytest.raises(NativeServiceBlocked) as unknown:
-            await execute_native_connection_operation(operator=operator, connection_ref="conn-1018", expected_connection_revision=2,
-                                                      operation="calendar.delete_everything", idempotency_key="conn-x", host=env["host"])
-        assert unknown.value.reason_code == "native_adapter_operation_unknown" and len(env["frames"]) == 3
+        for operation, arguments in (("calendar.delete_everything", {}), ("calendar.read_events", {"connection_ref": "x"})):
+            with pytest.raises(NativeServiceBlocked) as unknown:
+                await execute_native_connection_operation(operator=operator, operation=operation, arguments=arguments,
+                                                          idempotency_key="conn-x", host=env["host"])
+            assert unknown.value.reason_code in {"native_adapter_operation_unknown", "native_adapter_arguments_invalid"}
+        assert len(env["frames"]) == 3
 
 
 # ---------------------------------------------------------------- security review fixes

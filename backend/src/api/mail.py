@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Request
@@ -83,6 +84,7 @@ from src.work_board.repository import BoardError, WorkBoardRepository
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 repository = WorkBoardRepository()
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _SAFE_REQUEST = re.compile(r"^[A-Za-z0-9_.:@+,-]{1,256}$")
@@ -592,6 +594,10 @@ def _json_list(value: str | None) -> list[dict[str, Any]]:
 
 
 async def _cleanup_connection_mail_artifacts(owner: WorkBoardOwner, connection_id: str) -> bool:
+    return await _cleanup_mail_artifacts(owner, lambda _run_id, inputs: inputs.get("connection_id") == connection_id)
+
+
+async def _cleanup_mail_artifacts(owner: WorkBoardOwner, select_job, *, require_live_session: bool = True) -> bool:
     """Redact/delete only deterministic, receipt-backed Mail artifacts.
 
     The database snapshot is collected before filesystem work.  A terminal
@@ -601,7 +607,8 @@ async def _cleanup_connection_mail_artifacts(owner: WorkBoardOwner, connection_i
     """
     snapshots: list[tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]] = []
     async with get_session() as db:
-        await _assert_live_session(db, owner)
+        if require_live_session:
+            await _assert_live_session(db, owner)
         rows = (
             await db.execute(
                 select(WorkflowRunState).where(
@@ -616,7 +623,7 @@ async def _cleanup_connection_mail_artifacts(owner: WorkBoardOwner, connection_i
                 inputs = json.loads(run.arguments_json or "{}")
             except (TypeError, ValueError):
                 inputs = {}
-            if not isinstance(inputs, dict) or inputs.get("connection_id") != connection_id:
+            if not isinstance(inputs, dict) or not select_job(str(run.run_identity), inputs):
                 continue
             snapshots.append(
                 (
@@ -674,7 +681,8 @@ async def _cleanup_connection_mail_artifacts(owner: WorkBoardOwner, connection_i
     if redactions:
         async with get_session() as db:
             await _begin_serialized(db)
-            await _assert_live_session(db, owner)
+            if require_live_session:
+                await _assert_live_session(db, owner)
             for job_id, (expected_receipts, receipts) in redactions.items():
                 row = (
                     await db.execute(
@@ -1980,7 +1988,14 @@ async def revoke_consent(request: Request, consent_id: str) -> dict[str, Any]:
         row.revision += 1
         row.updated_at = _now()
         await db.flush()
-        return {"consent": _consent_metadata(row)}
+        revoked = {"consent": _consent_metadata(row)}
+    # Cordis-originated reads under this consent lose their encrypted owner artifacts (#1092).
+    from src.runtime_plugins.bound_adapters import purge_cordis_mail_results
+    try:
+        await purge_cordis_mail_results(owner=owner, consent_id=consent_id)
+    except Exception:
+        logger.warning("Cordis mail result purge deferred after consent revoke", exc_info=True)
+    return revoked
 
 
 @router.post("/capabilities/mail/messages/scan")
@@ -2139,39 +2154,48 @@ async def read_message(request: Request, message_binding_id: str) -> dict[str, A
     operator = _operator(request)
     body = await _json_body(request, MessageRead)
     owner = _owner(operator)
+    try:
+        return await read_bound_message(owner, message_binding_id, body)
+    except GmailReadError as exc:
+        raise _error(exc) from exc
+
+
+async def preflight_bound_message(owner: WorkBoardOwner, message_binding_id: str, body: MessageRead):
+    """The owner's pre-contact fence for one bound body read (session, connection, consent, binding)."""
     async with get_session() as db:
         await _assert_live_session(db, owner)
         connection = await _connection_for(db, owner, body.connection_id)
         if connection.state != "active" or connection.revision != body.expected_connection_revision:
-            raise HTTPException(status_code=409, detail={"code": "mail_connection_revision_stale", "message": "The Gmail connection changed", "recovery_action": "reload_connection"})
-        try:
-            consent = await _consent_for(db, owner, body.mail_consent_id)
-            await _validate_source_scope(
-                db,
-                owner,
-                connection=connection,
-                consent=consent,
-                expected_source_revision=body.expected_source_consent_revision,
-                max_messages=1,
-            )
-        except GmailReadError as exc:
-            raise _error(exc) from exc
+            raise GmailReadError("mail_connection_revision_stale", "The Gmail connection changed", status_code=409, recovery_action="reload_connection")
+        consent = await _consent_for(db, owner, body.mail_consent_id)
+        await _validate_source_scope(
+            db,
+            owner,
+            connection=connection,
+            consent=consent,
+            expected_source_revision=body.expected_source_consent_revision,
+            max_messages=1,
+        )
         binding = await _binding_for(db, owner, message_binding_id, connection.connection_id)
         if binding.connection_revision != connection.revision or binding.message_revision != body.expected_message_revision:
-            raise HTTPException(status_code=409, detail={"code": "mail_message_revision_stale", "message": "The Mail message changed", "recovery_action": "rescan_messages"})
+            raise GmailReadError("mail_message_revision_stale", "The Mail message changed", status_code=409, recovery_action="rescan_messages")
         if (
             binding.source_consent_id != consent.consent_id
             or binding.source_consent_revision != body.expected_source_consent_revision
             or binding.source_label_scope_digest != _source_label_scope_digest(connection, consent)
         ):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "mail_message_scope_stale",
-                    "message": "The selected Mail message is bound to a different reviewed source scope",
-                    "recovery_action": "rescan_messages",
-                },
-            )
+            raise GmailReadError("mail_message_scope_stale", "The selected Mail message is bound to a different reviewed source scope", status_code=409, recovery_action="rescan_messages")
+    return connection, consent, binding
+
+
+async def read_bound_message(owner: WorkBoardOwner, message_binding_id: str, body: MessageRead, *,
+                             outer_check: Callable[[], Awaitable[None]] | None = None) -> dict[str, Any]:
+    """One bounded, consented Gmail body read through the durable mail source control.
+
+    The HTTP route and the Cordis bound adapter (#1092) share this owner; ``outer_check``
+    is the caller's own fence (the governed job's lease), run before every contact.
+    """
+    connection, consent, binding = await preflight_bound_message(owner, message_binding_id, body)
     request_digest = "sha256:" + digest(
         {
             "operation": "mail_message_read",
@@ -2227,6 +2251,8 @@ async def read_message(request: Request, message_binding_id: str) -> dict[str, A
             except Exception as exc:
                 raise GmailReadError("mail_credential_unavailable", "The selected Mail message is unavailable", status_code=409, recovery_action="restore_prerequisite") from exc
         async def authority_check() -> None:
+            if outer_check is not None:
+                await outer_check()
             await assert_mail_source_lease(_lease)
             await _authority_check(
                 owner,
@@ -2267,11 +2293,10 @@ async def read_message(request: Request, message_binding_id: str) -> dict[str, A
             "provider_contact": True,
         }
 
-    try:
-        payload = await run_mail_source_control(control_request, execute)
-        return {**payload, "control_job_id": control_request.job_id}
-    except GmailReadError as exc:
-        raise _error(exc) from exc
+    if outer_check is not None:
+        await outer_check()
+    payload = await run_mail_source_control(control_request, execute)
+    return {**payload, "control_job_id": control_request.job_id}
 
 
 def _reply_input(body: ReplyTaskCreate) -> dict[str, Any]:
@@ -3052,6 +3077,35 @@ async def execute_reply_send(request: Request, job_id: str):
         return await runtime.run_owned(operator, job_id, lambda: runtime.execute(operator, job_id))
     except Exception as exc:
         raise _error(exc) from exc
+
+
+class ReplyCordisExecute(_Strict):
+    decision: Literal["approved"]
+    expected_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post("/capabilities/mail/reply-sends/{job_id}/cordis-execute")
+async def cordis_execute_reply_send(request: Request, job_id: str):
+    """The only admission of ``gmail.send_reviewed_reply`` (#1092): the operator's
+    approval decision and the Cordis send are one authenticated, CSRF-checked request."""
+    from src.integrations import mail_reply_runtime as runtime
+    from src.runtime_plugins.dispatch import NativeServiceBlocked
+    from src.runtime_plugins.governed_services import execute_native_connection_operation
+    operator = _operator(request)
+    body = await _json_body(request, ReplyCordisExecute)
+    try:
+        await runtime.decide(operator, job_id, decision=body.decision, expected_digest=body.expected_digest)
+        reply = await runtime.get_run(operator, job_id)
+        done = await execute_native_connection_operation(
+            operator=operator, operation="gmail.send_reviewed_reply",
+            arguments={"reply_send_job_id": job_id, "expected_reply_send_revision": int(reply.revision)},
+            idempotency_key="mail-reply-cordis:" + job_id, admitted_by="mail_reply_cordis_execute_route")
+    except NativeServiceBlocked as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.reason_code, "message": "The Cordis send was refused",
+                                                     "recovery_action": "reload_reply_send"}) from exc
+    except Exception as exc:
+        raise _error(exc) from exc
+    return {"job": done["job"], "result": done.get("adapter_result"), "replayed": done["replayed"]}
 
 
 @router.post("/capabilities/mail/reply-sends/{job_id}/cancel")

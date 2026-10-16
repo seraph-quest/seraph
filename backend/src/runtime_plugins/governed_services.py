@@ -33,6 +33,8 @@ MAX_INFERENCE_TOKENS = 1024
 # preview_workspace_patch returns a pre-encoded JSON diff receipt in which an exact
 # Vault value can be escaped or split across lines; it stays approval-gated here.
 READ_ONLY_CAPABILITIES = frozenset({"read_file", "list_processes", "read_process_output"})
+# Owner-private mail artifacts (encrypted bodies, drafts) are never Cordis-readable (#1092).
+MAIL_PRIVATE_ROOT = "artifacts/mail/private"
 # Runtime-owned files are never readable through Cordis, whatever their registry class.
 RUNTIME_OWNED_PATHS = frozenset({"seraph.db", "seraph.db-wal", "seraph.db-shm", "seraph.db-journal", ".vault-key"})
 # Concurrent Cordis inference per operator: a burst can never take the broker's
@@ -41,11 +43,7 @@ CORDIS_INFERENCE_PER_OWNER = 4
 _cordis_inflight: dict[str, int] = {}
 # Tools that return or manage Vault material are never Cordis capabilities.
 SECRET_TOOLS = frozenset({"get_secret", "get_secret_ref", "list_secrets", "store_secret", "delete_secret"})
-# Finite adapter operations per connection service. None is composed yet: a
-# valid current request fails closed with ADAPTER_NOT_COMPOSED (follow-up).
-ADAPTER_OPERATIONS = {"calendar_readonly": frozenset({"calendar.read_events"}),
-                      "gmail_readonly": frozenset({"gmail.read_messages"})}
-ADAPTER_NOT_COMPOSED = "native_adapter_operation_not_composed"
+# Bound Gmail/Calendar adapter operations live in bound_adapters (#1092).
 _JSON_TYPES = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "object": dict, "array": list}
 
 
@@ -151,11 +149,12 @@ def validate_governed_candidate(candidate) -> dict:
             raise NativeServiceBlocked("native_inference_candidate_invalid")
         return dict(candidate)
     if method == "connections.invokeBoundAdapter":
-        if (set(candidate) != {"schema_version", "method", "connection_ref", "expected_connection_revision", "operation"}
-                or type(candidate["connection_ref"]) is not str or not 0 < len(candidate["connection_ref"]) <= 128
-                or type(candidate["expected_connection_revision"]) is not int or candidate["expected_connection_revision"] < 1
-                or not any(candidate["operation"] in ops for ops in ADAPTER_OPERATIONS.values())):
+        from .bound_adapters import validate_arguments as validate_adapter_arguments
+        if set(candidate) != {"schema_version", "method", "operation", "arguments", "arguments_digest"}:
             raise NativeServiceBlocked("native_adapter_operation_unknown")
+        validate_adapter_arguments(candidate["operation"], candidate["arguments"])
+        if candidate["arguments_digest"] != _digest(candidate["arguments"]):
+            raise NativeServiceBlocked("native_adapter_input_digest_changed")
         return dict(candidate)
     raise NativeServiceBlocked("native_governed_candidate_invalid")
 
@@ -163,22 +162,6 @@ def validate_governed_candidate(candidate) -> dict:
 def wire_inputs(job_id: str, method: str = "capabilities.invoke") -> dict:
     """The exact plugin-visible request: only the canonical job reference."""
     return {"operation_ref": job_id} if method == "connections.invokeBoundAdapter" else {"request_ref": job_id}
-
-
-async def current_connection(db, run, candidate) -> None:
-    """The connection must be the caller's current, ready, unchanged row; installation alone authorizes nothing."""
-    from sqlalchemy import select
-    from src.db.models import GoogleServiceConnection
-    row = (await db.execute(select(GoogleServiceConnection.revision, GoogleServiceConnection.state, GoogleServiceConnection.service)
-                            .where(GoogleServiceConnection.connection_id == candidate["connection_ref"],
-                                   GoogleServiceConnection.owner_principal_id == run.owner_principal_id,
-                                   GoogleServiceConnection.owner_session_id == run.operator_session_id))).one_or_none()
-    if row is None or row.revision != candidate["expected_connection_revision"]:
-        raise NativeServiceBlocked("native_connection_candidate_changed")
-    if row.state != "ready":
-        raise NativeServiceBlocked("native_connection_unavailable")
-    if candidate["operation"] not in ADAPTER_OPERATIONS.get(row.service, frozenset()):
-        raise NativeServiceBlocked("native_adapter_operation_unknown")
 
 
 async def _redacted(text: str) -> str:
@@ -229,7 +212,7 @@ def _path_allowed(file_path) -> None:
     folded = _fold(logical)
     if logical in {"", "."} or folded.split("/")[0] in {_fold(name) for name in RUNTIME_OWNED_PATHS}:
         raise NativeServiceBlocked("native_capability_path_denied")
-    protected = {*RUNTIME_OWNED_PATHS, *(spec.logical_path for spec in registry.config.declared_paths
+    protected = {*RUNTIME_OWNED_PATHS, MAIL_PRIVATE_ROOT, *(spec.logical_path for spec in registry.config.declared_paths
                                          if spec.state_class in {WorkspaceStateClass.SECRET,
                                                                  WorkspaceStateClass.SECRET_RECOVERY})}
     if any(folded == _fold(path) or folded.startswith(_fold(path) + "/") for path in protected):
@@ -414,6 +397,10 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
     jobs = dispatcher.jobs
     if method != scope.binding.origin_method:
         raise NativeServiceBlocked("native_method_candidate_not_bound")
+    if method == "connections.invokeBoundAdapter":
+        # Bound Gmail/Calendar adapters (#1092) run through their own owners.
+        from .bound_adapters import dispatch_adapter
+        return await dispatch_adapter(dispatcher, frame, payload, scope)
     async with jobs._session() as db:
         await _writer(db)
         run, _, _ = await dispatcher.current(db, scope, method)
@@ -423,11 +410,6 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
         context = read_context(run)
         if payload != wire_inputs(run.run_identity, method) or candidate["method"] != method:
             raise NativeServiceBlocked("native_governed_reference_not_bound")
-        if method == "connections.invokeBoundAdapter":
-            # A current canonical connection and finite operation, then fail closed: no
-            # adapter is composed in this slice, so no credential or effect is touched.
-            await current_connection(db, run, candidate)
-            raise NativeServiceBlocked(ADAPTER_NOT_COMPOSED)
         if context["operations"] or context["result"] is not None:
             # An interrupted effect stays an unresolved intent; it is never re-executed.
             raise NativeServiceBlocked("native_governed_replay_denied")
@@ -491,7 +473,8 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
 
 # ---------------------------------------------------------------- Python owners
 
-async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, host=None, jobs=None) -> dict:
+async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, host=None, jobs=None,
+                            extra_authority: dict | None = None) -> dict:
     from .bridge import HostBlocked, cordis_host
     from .service_artifacts import assert_child_echo
     from .service_jobs import _block, _jobs, admit_service_job, claim_service_job, open_invocation
@@ -503,7 +486,8 @@ async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, 
         raise NativeServiceBlocked("native_governed_host_unavailable")
     job, replayed = await admit_service_job(operator=operator, origin_method=method, native_branch="governed",
                                             candidate=candidate, idempotency_key=idempotency_key,
-                                            reviewed_composition=host.reviewed, jobs=jobs)
+                                            reviewed_composition=host.reviewed, jobs=jobs,
+                                            extra_authority=extra_authority)
     if job["status"] != "accepted":
         # An exact retry reuses the original job; it never re-executes.
         return {"job": job, "replayed": True, "memory_status": "no_learning"}
@@ -522,8 +506,13 @@ async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, 
             result={"no_learning": True, "method": method, "sealed_result_digest": sealed["result_digest"]},
             result_summary="Cordis governed " + method + " completed by its Python owner; no_learning")
         # Only Python-owned values leave: the sealed result, bounded redacted output and usage receipt.
-        return {"job": completed, "result": sealed["payload"], **sealed["outcome"], "replayed": False,
+        done = {"job": completed, "result": sealed["payload"], **sealed["outcome"], "replayed": False,
                 "memory_status": "no_learning"}
+        if method == "connections.invokeBoundAdapter":
+            from .bound_adapters import take_result
+            # The labelled plaintext reaches this Python caller once, in memory only.
+            done["adapter_result"] = take_result(job["job_id"])
+        return done
     except (NativeServiceBlocked, HostBlocked) as exc:
         reason = getattr(exc, "reason_code", None) or "native_governed_host_unavailable"
         await _block(jobs, scope, reason)
@@ -548,11 +537,28 @@ async def execute_native_capability(*, operator, capability_id: str, arguments: 
     return await _execute_governed(operator=operator, candidate=candidate, idempotency_key=idempotency_key, host=host, jobs=jobs)
 
 
-async def execute_native_connection_operation(*, operator, connection_ref: str, expected_connection_revision: int,
-                                             operation: str, idempotency_key: str, host=None, jobs=None) -> dict:
-    candidate = {"schema_version": 1, "method": "connections.invokeBoundAdapter", "connection_ref": connection_ref,
-                 "expected_connection_revision": expected_connection_revision, "operation": operation}
-    return await _execute_governed(operator=operator, candidate=candidate, idempotency_key=idempotency_key, host=host, jobs=jobs)
+async def execute_native_connection_operation(*, operator, operation: str, arguments: dict, idempotency_key: str,
+                                             admitted_by: str | None = None, host=None, jobs=None) -> dict:
+    """One bound adapter operation (#1092). The send is admitted only by its authenticated route."""
+    from .bound_adapters import SEND_OPERATION, SEND_ROUTE_SCOPE, purge_cordis_mail_results
+    from .bound_adapters import validate_arguments as validate_adapter_arguments
+    from .service_jobs import _jobs
+    if (operation == SEND_OPERATION) != (admitted_by == SEND_ROUTE_SCOPE):
+        raise NativeServiceBlocked("native_adapter_send_route_required" if operation == SEND_OPERATION
+                                   else "native_adapter_scope_changed")
+    arguments = validate_adapter_arguments(operation, arguments)
+    try:
+        # Lazy retention sweep: expired, revoked or TTL-elapsed Cordis mail results go first.
+        from src.work_board.contracts import WorkBoardOwner
+        await purge_cordis_mail_results(owner=WorkBoardOwner(principal_id=operator.principal.principal_id,
+                                                             session_id=operator.session_id))
+    except Exception:
+        pass
+    candidate = {"schema_version": 1, "method": "connections.invokeBoundAdapter", "operation": operation,
+                 "arguments": arguments, "arguments_digest": _digest(arguments)}
+    return await _execute_governed(operator=operator, candidate=candidate, idempotency_key=idempotency_key, host=host,
+                                   jobs=_jobs(jobs), extra_authority={"adapter_scope": {"operation": operation,
+                                                                                        "admitted_by": admitted_by}})
 
 
 async def execute_native_inference(*, operator, purpose: str, messages: list[dict], max_tokens: int, idempotency_key: str,

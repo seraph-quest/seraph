@@ -388,6 +388,14 @@ async def lifespan(app: FastAPI):
         # is fail-closed and operator-visible; a failed recovery is not hidden as
         # a healthy startup.
         try:
+            # Retention for Cordis-originated Gmail reads (#1092): revoked, expired or
+            # TTL-elapsed encrypted owner artifacts are deleted at startup as well.
+            from src.runtime_plugins.bound_adapters import purge_cordis_mail_results
+
+            await purge_cordis_mail_results()
+        except Exception:
+            logging.getLogger(__name__).warning("Cordis mail result purge deferred at startup", exc_info=True)
+        try:
             from src.workflows.job_runtime import durable_job_repository
 
             recovered_jobs = await durable_job_repository.recover_stale_jobs()

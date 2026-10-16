@@ -728,7 +728,9 @@ post-turn side effects. Measured offline on a loaded host over 110 samples of
 the real path: a startTurn step p50/p95 92/106 ms, a tool's intent and outcome
 receipts 18/24 ms, and the turn admission (the only Cordis work before a
 direct-chat first delta; the sequencer runs after the stream) 31/40 ms, all
-under one 250 ms p95 budget asserted by the suite.
+under one 250 ms p95 budget (asserted with `SERAPH_CORDIS_LATENCY_BUDGET=1`; at
+load average ~35 the step p95 rose to about 245 ms, so shared runners assert a
+1 s regression ceiling instead).
 
 ### Cordis guardian research (#1008)
 

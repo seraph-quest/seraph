@@ -14,7 +14,7 @@ from config.settings import settings
 from src.approval.exceptions import ApprovalRequired
 from src.approval.repository import approval_repository
 from src.approval.runtime import get_current_approval_mode, reset_runtime_context, set_runtime_context
-from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
+from src.auth.cancellation import RuntimeRevokedError, reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import (
     openrouter_route_blocked_message,
@@ -1448,6 +1448,29 @@ async def websocket_chat(websocket: WebSocket):
                 active_turn_completed = True
                 await _cordis_blocked("native_original_root_inactive")
                 raise
+            except RuntimeRevokedError:
+                # A revocation observed inside the agent (for example by a
+                # tool) ends the turn and closes the socket as the session
+                # watcher does. The run is audited as revoked, never as a
+                # success or a generic agent error.
+                active_turn_completed = True
+                auth_revoked.set()
+                await log_agent_run_event(
+                    session_id=session.id,
+                    transport="websocket",
+                    is_onboarding=is_onboarding,
+                    outcome="revoked",
+                    policy_mode=get_current_tool_policy_mode(),
+                    details={
+                        "reason": "session_revoked",
+                        "step_count": step_num,
+                        "tool_call_count": tool_call_count,
+                        "request_id": llm_request_id,
+                    },
+                )
+                with suppress(Exception):
+                    await websocket.close(code=4401, reason="session_revoked")
+                raise _OperatorSessionRevoked from None
             except NoCompliantModelRouteError as exc:
                 await _cordis_blocked(NoCompliantModelRouteError.code)
                 safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)

@@ -1530,7 +1530,11 @@ surface for the current single-operator deployment. Host headers with ports
 such as `127.0.0.1:8004` are normalized against the configured allow-list.
 Unauthenticated API requests fail closed; the explicit unauthenticated bypass
 is accepted only by test configuration. A WebSocket rechecks the session at a
-bounded interval and closes when the session is revoked or expires. The cockpit
+bounded interval and closes when the session is revoked or expires. A
+revocation observed inside an agent tool (#1116) ends the agent run at once,
+without another model request. REST returns 401 `session_revoked`. The
+WebSocket records `agent_run_revoked` and closes with code 4401
+`session_revoked`, with no final or error frame. The cockpit
 now gates protected UI startup on `/api/auth/session`, provides a login form,
 and returns to login after a revoked or expired session. When no server-side
 credential is configured it shows the PBKDF2 provisioning command and keeps the

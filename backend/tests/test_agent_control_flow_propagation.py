@@ -10,6 +10,7 @@ no provider is contacted and nothing is spent.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from contextlib import ExitStack
 from typing import Any
@@ -593,3 +594,87 @@ def test_plain_string_generate_on_a_flatten_model_sends_the_legacy_body(scripted
     messages = [{"role": "system", "content": "You draft replies."}, {"role": "user", "content": "Reply to Ann."}]
     model.generate(messages)
     assert provider.bodies[0]["messages"] == messages
+
+
+# ---------------------------------------------------------------- revocation inside a tool (#1116)
+
+def test_revocation_raised_by_a_tool_leaves_the_agent_loop():
+    from src.auth.cancellation import RuntimeRevokedError
+    error = RuntimeRevokedError("authenticated operator session was revoked")
+    tool = _RaisingTool(error)
+    agent = _agent([tool], [[("probe", {"value": "x"})]])
+    with pytest.raises(RuntimeRevokedError) as raised:
+        agent.run("go")
+    assert raised.value is error and isinstance(raised.value, PermissionError)
+    assert len(agent.model.seen) == 1
+
+
+@pytest.fixture
+def revoke_after_model_reply(monkeypatch):
+    """Revoke the operator session after the provider replied, before the tool runs.
+
+    The real tool wrapper then observes the revocation itself.
+    """
+    from src import llm_runtime
+    from src.auth import cancellation
+    real = llm_runtime._governed_agent_chat_message
+
+    def revoking(*args, **kwargs):
+        message = real(*args, **kwargs)
+        guard = cancellation._guard.get()
+        if guard is None:
+            # The auth-bypass REST test client has no session cookie, so no
+            # watcher installed a guard; install the one a cookie would.
+            guard = threading.Event()
+            cancellation._guard.set(guard)
+        guard.set()
+        return message
+    monkeypatch.setattr(llm_runtime, "_governed_agent_chat_message", revoking)
+
+
+@pytest.mark.asyncio
+async def test_rest_revocation_inside_a_tool_returns_session_revoked_without_another_model_turn(
+        client, scripted_chat_model, recorded_generate, revoke_after_model_reply):
+    await _onboarded()
+    _write_soul("MARKER-1116")
+    provider = scripted_chat_model("view_soul", {})
+    response = await client.post("/api/chat", json={"message": "who am I?"})
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"]["code"] == "session_revoked"
+    # One model turn, one provider request: the revoking tool call ended the run.
+    assert len(recorded_generate) == 1 and len(provider.bodies) == 1
+
+
+def test_ws_revocation_inside_a_tool_closes_the_socket_without_another_model_turn(
+        scripted_chat_model, recorded_generate, revoke_after_model_reply, monkeypatch):
+    from starlette.websockets import WebSocketDisconnect
+    from src.api import ws as ws_module
+    from tests.test_websocket import _close_sync_client_with_db, _make_sync_client_with_db
+    outcomes: list[str] = []
+    real_log = ws_module.log_agent_run_event
+
+    async def record_outcome(**kwargs):
+        outcomes.append(kwargs["outcome"])
+        await real_log(**kwargs)
+    monkeypatch.setattr(ws_module, "log_agent_run_event", record_outcome)
+    client, patches, stack = _make_sync_client_with_db()
+    try:
+        _write_soul("MARKER-1116-WS")
+        provider = scripted_chat_model("view_soul", {})
+        frames: list[dict] = []
+        with patch("src.memory.consolidator.consolidate_session"), client.websocket_connect("/ws/chat") as ws:
+            _ws_frames(ws, until={"proactive"})
+            ws.send_text(json.dumps({"type": "skip_onboarding"}))
+            _ws_frames(ws, until={"status", "proactive", "onboarding_skipped", "final"}, limit=3)
+            _ws_send(ws, "who am I?", None)
+            from tests.test_e2e_conversation import _receive_text
+            with pytest.raises(WebSocketDisconnect) as closed:
+                for _ in range(20):
+                    frames.append(json.loads(_receive_text(ws, timeout_seconds=15.0)))
+        assert closed.value.code == 4401 and closed.value.reason == "session_revoked"
+        assert not any(frame["type"] in {"final", "error"} for frame in frames), frames
+        assert len(recorded_generate) == 1 and len(provider.bodies) == 1
+        # The explicit revoked outcome, not a success or the generic error path.
+        assert outcomes == ["revoked"], outcomes
+    finally:
+        _close_sync_client_with_db(patches, stack)

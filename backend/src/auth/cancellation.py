@@ -1,9 +1,15 @@
 from contextvars import ContextVar, Token
 from threading import Event
 
+from src.agent.exceptions import AgentControlFlowInterrupt
 
-class RuntimeRevokedError(PermissionError):
-    pass
+
+class RuntimeRevokedError(PermissionError, AgentControlFlowInterrupt):
+    """The authenticated operator session was revoked while work was running.
+
+    It is also an agent control-flow interrupt: raised inside a tool, it
+    leaves the agent loop at once instead of becoming an observation (#1116).
+    """
 
 
 _guard: ContextVar[Event | None] = ContextVar("operator_revocation_guard", default=None)

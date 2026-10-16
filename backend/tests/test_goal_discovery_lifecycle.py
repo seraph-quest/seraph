@@ -16,8 +16,11 @@ async def test_actual_app_public_discovery_failure_releases_exact_owner(client, 
     host = CordisHost(node_path=tmp_path / "owned-absent-node")
     monkeypatch.setattr(app_module, "cordis_host", host)
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    for name in ("init_db", "close_db", "sync_scheduled_jobs", "drain_tracked_tasks"):
+    for name in ("sync_scheduled_jobs", "drain_tracked_tasks"):
         monkeypatch.setattr(app_module, name, AsyncMock())
+    # The state provider owns init_db/close_db (#1024).
+    for name in ("init_db", "close_db"):
+        monkeypatch.setattr("src.runtime_plugins.worker." + name, AsyncMock())
     for name in ("ensure_soul_exists", "init_llm_logging", "init_scheduler", "shutdown_scheduler"):
         monkeypatch.setattr(app_module, name, Mock())
     for manager, methods in [(app_module.mcp_manager, ("load_config", "disconnect_all")),

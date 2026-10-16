@@ -652,7 +652,11 @@ Chat routes on the `seraph.agent-loop.v1` owner row. While the row's owner is
 `legacy` (the seeded default, or an entirely unseeded inventory) REST and WS chat
 run the existing smolagents loop unchanged. A partial inventory without the row
 blocks chat as `agent_loop_owner_missing` and a malformed inventory as
-`agent_loop_inventory_invalid`, on both routes and in `/api/runtime/status`. After the fenced cutover
+`agent_loop_inventory_invalid`, on both routes and in `/api/runtime/status`.
+No product path repairs such an inventory (for example after a partial restore):
+the operator restores the row with the fenced owner transition (`ready` ->
+`draining` -> `blocked` at a higher epoch -> `ready` on boot proof), under the
+workspace maintenance fence, and chat stays blocked until then. After the fenced cutover
 (`ready -> draining -> blocked` at a higher epoch with owner `cordis` -> `ready`
 on the running child's boot proof) every chat ingress runs through the Cordis
 agent loop; a Cordis owner that is not ready, a host that is not admitting, or
@@ -691,7 +695,8 @@ cancellation and the memory revocation marker, which is read at admission
 or canonical delete mid-turn stops the turn before the next prompt assembly and
 refuses its output (`agent_turn_memory_revoked`). Supersede, decay and other
 lifecycle archiving do not trip it, and direct chat (no memory in its prompt)
-skips it. Tool intents and outcomes (`succeeded`, `failed`,
+skips it. The marker is global, not per retrieved record, so any operator forget
+during a turn stops that turn (deliberately conservative). Tool intents and outcomes (`succeeded`, `failed`,
 `no_effect` for approval/clarification gates) are receipts on the turn job; the
 reply row is inserted by its deterministic id (insert-if-absent, an existing
 different row is `turn_transcript_conflict`) in the same writer transaction as
@@ -712,7 +717,11 @@ the error alone (legacy drops sibling observations the same way). A step asking
 for more than 12 tool calls runs none of them and gets a model-visible
 observation saying so. The tool surface digest is pinned at step 1 and compared
 at every later step (`agent_turn_surface_changed`); the child's `output_ref` is a
-per-turn HMAC of the sealed output, never a guessable digest of model text. `store_secret` returns a
+per-turn HMAC of the sealed output, never a guessable digest of model text (the
+key is per turn owner and ephemeral, so refs cannot be re-derived after a
+restart; nothing needs them then, because restart never resumes a turn).
+Any failure between REST admission and settlement (agent build, guardian state,
+ingress logging, a client disconnect) closes the turn as blocked. `store_secret` returns a
 visible denial pointing to Settings -> Vault and its value never enters turn
 state (operator decision; per-argument sensitivity redaction is follow-up work).
 Unchanged by construction: a failed max-steps final call returns smolagents'

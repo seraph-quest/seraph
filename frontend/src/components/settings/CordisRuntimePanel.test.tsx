@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { apiFetch } from "../../lib/api";
-import { normalizeCordisRuntime } from "../../lib/cordisRuntime";
+import { normalizeChatRuntime, normalizeCordisRuntime } from "../../lib/cordisRuntime";
 import { CordisRuntimePanel } from "./CordisRuntimePanel";
 vi.mock("../../lib/api", () => ({ apiFetch: vi.fn() }));
 const snapshot = { state: "blocked", reason: "node_unsupported", profile_id: "core.cpu", cordis_version: "4.0.0-rc.10", node_version: "22.11.0", composition_digest: null, package_digest: null, plugins: [{ id: "authority", state: "blocked", reason: "host_unavailable" }], cleanup: { state: "not_started", process_reaped: false, resources_remaining: null, cordis_disposal: "not_started" } };
@@ -57,4 +57,26 @@ it("reports missing host metadata as unavailable rather than ready", async () =>
   render(<CordisRuntimePanel />);
   await waitFor(() => expect(screen.getByText("Host state unavailable")).toBeInTheDocument());
   expect(screen.queryByText("ready")).toBeNull();
+});
+it("names the actual chat agent loop, route and owner epoch from the server's owner row", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText("Chat: Cordis agent loop (cordis.agent-loop.v1) · route chat_agent · owner epoch 2")).toBeInTheDocument();
+  expect(screen.queryByText(/Chat fix:/)).toBeNull();
+});
+it("shows a blocked chat loop with its exact fix and never a legacy fallback", async () => {
+  const recovery = "Run ./manage.sh -e dev cordis build, then restart with ./manage.sh -e dev local up.";
+  const chat_runtime = { loop: "blocked", route: "chat_agent", owner_epoch: 2, reason: "cordis_runtime_build_stale", recovery };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText("Chat blocked · cordis_runtime_build_stale")).toBeInTheDocument();
+  expect(screen.getByText(`Chat fix: ${recovery}`)).toBeInTheDocument();
+  expect(screen.queryByText(/legacy agent loop/)).toBeNull();
+});
+it("drops a malformed chat runtime status instead of guessing a loop", () => {
+  expect(normalizeChatRuntime({ loop: "blocked", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null })).toBeNull();
+  expect(normalizeChatRuntime({ loop: "smolagents", route: "chat_agent", owner_epoch: 1, reason: null, recovery: null })).toBeNull();
+  expect(normalizeChatRuntime({ loop: "legacy.smolagents", route: "chat_agent", owner_epoch: null, reason: null, recovery: null, secret: "x" }))
+    .toEqual({ loop: "legacy.smolagents", route: "chat_agent", owner_epoch: null, reason: null, recovery: null });
 });

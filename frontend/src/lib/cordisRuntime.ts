@@ -37,3 +37,23 @@ export function normalizeCordisRuntime(value: unknown): CordisRuntimeSnapshot | 
     cleanup: { state: value.cleanup.state as CordisRuntimeSnapshot["cleanup"]["state"], process_reaped: value.cleanup.process_reaped,
       resources_remaining: value.cleanup.resources_remaining as number | null, cordis_disposal: value.cleanup.cordis_disposal as CordisRuntimeSnapshot["cleanup"]["cordis_disposal"] } };
 }
+
+/** Which agent loop chat runs on (#1019): never inferred, only the server's owner row. */
+export interface ChatRuntimeStatus {
+  loop: "cordis.agent-loop.v1" | "legacy.smolagents" | "blocked";
+  route: string; owner_epoch: number | null; reason: string | null; recovery: string | null;
+}
+export function normalizeChatRuntime(value: unknown): ChatRuntimeStatus | null {
+  if (!record(value) || !["cordis.agent-loop.v1", "legacy.smolagents", "blocked"].includes(String(value.loop))
+    || typeof value.route !== "string" || value.route.length > 64
+    || !(value.owner_epoch === null || (Number.isSafeInteger(value.owner_epoch) && Number(value.owner_epoch) >= 1))
+    || !nullableText(value.reason) || !(value.recovery === null || (typeof value.recovery === "string" && value.recovery.length <= 512))
+    || (value.loop === "blocked") !== (value.reason !== null)) return null;
+  return { loop: value.loop as ChatRuntimeStatus["loop"], route: value.route, owner_epoch: value.owner_epoch as number | null,
+    reason: value.reason as string | null, recovery: value.recovery as string | null };
+}
+export function chatRuntimeLabel(status: ChatRuntimeStatus): string {
+  if (status.loop === "blocked") return `Chat blocked · ${status.reason}`;
+  const loop = status.loop === "cordis.agent-loop.v1" ? "Cordis agent loop" : "legacy agent loop";
+  return `Chat: ${loop} (${status.loop}) · route ${status.route}${status.owner_epoch === null ? "" : ` · owner epoch ${status.owner_epoch}`}`;
+}

@@ -1,6 +1,7 @@
 import asyncio
 import contextvars
 import json
+import uuid
 import logging
 from threading import Event
 from contextlib import suppress
@@ -65,6 +66,9 @@ from src.scheduler.connection_manager import ws_manager
 from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
+from src.runtime_plugins.agent_turns import (CordisTurn, TurnBlocked, chat_route, chat_runtime_status,
+                                             chat_runtime_status_text, chat_runtime_unavailable_message,
+                                             turn_blocked_message, turn_failure_reason)
 from src.work_board.repository import BoardError
 from src.llm_runtime import (
     _finish_request,
@@ -236,6 +240,31 @@ def _run_agent_to_queue(agent, message: str, queue: asyncio.Queue, loop: asyncio
         loop.call_soon_threadsafe(queue.put_nowait, route_error_from(exc) or exc)
     finally:
         loop.call_soon_threadsafe(queue.put_nowait, _DONE)
+
+
+async def _settle_cordis_reply(turn, session_id, content, message_id, metadata_json, *, direct=False,
+                               timed_out=False) -> str | None:
+    """Settle a Cordis turn with its reply row; returns None, or the reason nothing was adopted."""
+    if direct:
+        try:
+            await turn.decide_direct(content)
+        except TurnBlocked as exc:
+            await turn.settle("blocked", reason=exc.reason_code)
+            return exc.reason_code
+    settled = await turn.settle(
+        "blocked" if timed_out else "succeeded", reason="agent_turn_timed_out" if timed_out else None,
+        message={"session_id": session_id, "role": "assistant", "content": content,
+                 "message_id": message_id or uuid.uuid4().hex, "metadata_json": metadata_json})
+    return None if settled else (turn.blocked_reason or "agent_turn_settlement_refused")
+
+
+def _settle_cordis_clarification(turn):
+    """The clarification row is the turn's settlement: blocked, no effect."""
+    async def write(session_id, role, content, *, metadata_json=None, message_id=None):
+        await turn.settle("blocked", reason="clarification_required",
+                          message={"session_id": session_id, "role": role, "content": content,
+                                   "message_id": message_id or uuid.uuid4().hex, "metadata_json": metadata_json})
+    return write
 
 
 async def _build_agent(
@@ -554,6 +583,8 @@ async def websocket_chat(websocket: WebSocket):
     active_turn_session_id: str | None = None
     active_turn_ingress: ChatIngressEnvelope | None = None
     active_turn_completed = True
+    # The Cordis turn owner of the active ingress (#1019); None on the legacy loop.
+    active_cordis_turn: CordisTurn | None = None
     revocation_guard_token = None
 
     def _next_seq() -> int:
@@ -567,6 +598,17 @@ async def websocket_chat(websocket: WebSocket):
             return
         active_turn_completed = True
         with suppress(Exception):
+            if active_cordis_turn is not None:
+                # The turn owner is the only writer: cancel, then one fenced interrupted row.
+                message_id = (assistant_message_id_for_ingress(active_turn_ingress, suffix="interrupted")
+                              if active_turn_ingress is not None else uuid.uuid4().hex)
+                await active_cordis_turn.interrupt({
+                    "session_id": active_turn_session_id, "role": "assistant", "content": _INTERRUPTED_TURN_MESSAGE,
+                    "message_id": message_id,
+                    "metadata_json": chat_assistant_metadata(active_turn_ingress, message_id=message_id,
+                                                             degraded_state="connection_interrupted")
+                    if active_turn_ingress is not None else None})
+                return
             if active_turn_ingress is not None:
                 message_id = assistant_message_id_for_ingress(active_turn_ingress, suffix="interrupted")
                 await session_manager.add_message(
@@ -851,6 +893,53 @@ async def websocket_chat(websocket: WebSocket):
             except Exception:
                 pass
 
+            # The agent-loop owner row decides the loop; a blocked Cordis owner never falls back.
+            chat_status = await chat_runtime_status()
+            chat_loop = chat_route(chat_status)
+            active_cordis_turn = None
+            turn_message_id = ingress.message_id if ingress is not None else "resume:" + uuid.uuid4().hex
+            if chat_loop == "blocked":
+                active_turn_completed = True
+                await websocket.send_text(
+                    WSResponse(
+                        type="error",
+                        content=chat_runtime_unavailable_message(chat_status),
+                        session_id=session.id,
+                        reason=chat_status["reason"],
+                        seq=_next_seq(),
+                    ).model_dump_json()
+                )
+                continue
+
+            async def _admit_cordis_turn(profile_name: str, timeout_seconds: float) -> bool:
+                nonlocal active_cordis_turn, active_turn_completed
+                try:
+                    turn, _replayed = await CordisTurn.admit(
+                        operator=operator, conversation_session_id=session.id, message_id=turn_message_id,
+                        profile=profile_name, timeout_seconds=timeout_seconds)
+                    reason = None if turn is not None else "chat_message_duplicate"
+                except TurnBlocked as exc:
+                    turn, reason = None, exc.reason_code
+                if turn is None:
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=("This message was already accepted for this session."
+                                     if reason == "chat_message_duplicate" else turn_blocked_message(reason)),
+                            session_id=session.id,
+                            reason=reason,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    return False
+                active_cordis_turn = turn
+                return True
+
+            async def _cordis_blocked(reason: str) -> None:
+                if active_cordis_turn is not None:
+                    await active_cordis_turn.settle("blocked", reason=reason)
+
             profile = await get_or_create_profile()
             direct_is_onboarding = not profile.onboarding_completed
             direct_runtime_path = "onboarding_agent" if direct_is_onboarding else "chat_agent"
@@ -903,6 +992,9 @@ async def websocket_chat(websocket: WebSocket):
                         ).model_dump_json()
                     )
                     continue
+                if chat_loop == "cordis" and not await _admit_cordis_turn(
+                        "direct", min(settings.agent_chat_timeout, 60)):
+                    continue
                 llm_request_id = f"direct-ws:{session.id}:{started_at}"
                 _register_request(llm_request_id)
                 auth_tokens = set_runtime_context(
@@ -915,7 +1007,7 @@ async def websocket_chat(websocket: WebSocket):
                     await websocket.send_text(
                     WSResponse(
                         type="status",
-                        content="Seraph is using the governed OpenRouter chat runtime.",
+                        content=chat_runtime_status_text(chat_loop),
                         session_id=session.id,
                         **_ws_lineage_kwargs(session.id, operator, ingress),
                         seq=_next_seq(),
@@ -971,8 +1063,10 @@ async def websocket_chat(websocket: WebSocket):
                     final_result = await redact_secrets_in_text(final_result, fail_closed=True)
                 except _OperatorSessionRevoked:
                     active_turn_completed = True
+                    await _cordis_blocked("native_original_root_inactive")
                     raise
                 except asyncio.TimeoutError:
+                    await _cordis_blocked("agent_turn_timed_out")
                     _mark_request_timed_out(llm_request_id)
                     await log_agent_run_event(
                         session_id=session.id,
@@ -999,6 +1093,7 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 except NoCompliantModelRouteError as exc:
+                    await _cordis_blocked(NoCompliantModelRouteError.code)
                     safe_error = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
                     blocked_message = openrouter_route_blocked_message(
                         exc, minimum_bound_microusd=await route_block_overrun_minimum(exc),
@@ -1033,6 +1128,7 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 except _DirectStreamOutcomeUncertain as exc:
+                    await _cordis_blocked("provider_outcome_uncertain")
                     logger.warning(
                         "Direct OpenRouter websocket stream ended with an uncertain outcome; automatic retry suppressed",
                         exc_info=True,
@@ -1071,6 +1167,7 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     continue
                 except Exception as e:
+                    await _cordis_blocked("agent_turn_failed")
                     logger.exception("Direct OpenRouter websocket chat failed")
                     safe_error = await redact_secrets_in_text(f"Agent error: {e}")
                     await log_agent_run_event(
@@ -1107,20 +1204,38 @@ async def websocket_chat(websocket: WebSocket):
                 direct_assistant_message_id = (
                     assistant_message_id_for_ingress(ingress) if ingress is not None else None
                 )
-                await session_manager.add_message(
-                    session.id,
-                    "assistant",
-                    final_result,
-                    metadata_json=(
-                        chat_assistant_metadata(
-                            ingress,
-                            message_id=direct_assistant_message_id,
-                        )
-                        if ingress is not None and direct_assistant_message_id is not None
-                        else None
-                    ),
-                    message_id=direct_assistant_message_id,
+                direct_metadata = (
+                    chat_assistant_metadata(
+                        ingress,
+                        message_id=direct_assistant_message_id,
+                    )
+                    if ingress is not None and direct_assistant_message_id is not None
+                    else None
                 )
+                if active_cordis_turn is not None:
+                    settle_reason = await _settle_cordis_reply(
+                        active_cordis_turn, session.id, final_result, direct_assistant_message_id, direct_metadata,
+                        direct=True)
+                    if settle_reason is not None:
+                        active_turn_completed = True
+                        await websocket.send_text(
+                            WSResponse(
+                                type="error",
+                                content=turn_blocked_message(settle_reason),
+                                session_id=session.id,
+                                reason=settle_reason,
+                                seq=_next_seq(),
+                            ).model_dump_json()
+                        )
+                        continue
+                else:
+                    await session_manager.add_message(
+                        session.id,
+                        "assistant",
+                        final_result,
+                        metadata_json=direct_metadata,
+                        message_id=direct_assistant_message_id,
+                    )
                 active_turn_completed = True
                 await log_agent_run_event(
                     session_id=session.id,
@@ -1172,10 +1287,15 @@ async def websocket_chat(websocket: WebSocket):
                 owner_session_id=operator.session_id,
                 trust_principal=chat_principal,
             )
+            if chat_loop == "cordis":
+                if not await _admit_cordis_turn("onboarding" if is_onboarding else "agent",
+                                                settings.agent_chat_timeout):
+                    continue
+                active_cordis_turn.attach(agent)
             await websocket.send_text(
                 WSResponse(
                     type="status",
-                    content="Seraph is using the governed OpenRouter chat runtime.",
+                    content=chat_runtime_status_text(chat_loop),
                     session_id=session.id,
                     **_ws_lineage_kwargs(session.id, operator, ingress),
                     seq=_next_seq(),
@@ -1271,8 +1391,10 @@ async def websocket_chat(websocket: WebSocket):
 
             except _OperatorSessionRevoked:
                 active_turn_completed = True
+                await _cordis_blocked("native_original_root_inactive")
                 raise
             except NoCompliantModelRouteError as exc:
+                await _cordis_blocked(NoCompliantModelRouteError.code)
                 safe_reason = await redact_secrets_in_text(str(exc) or NoCompliantModelRouteError.code)
                 # Earlier steps of this turn may already have called the
                 # provider; then the denial is a mid-turn block, not preflight.
@@ -1318,6 +1440,9 @@ async def websocket_chat(websocket: WebSocket):
             except asyncio.TimeoutError:
                 logger.warning("Agent timed out after %ds for session %s", settings.agent_chat_timeout, session.id)
                 run_outcome = "timed_out"
+                if active_cordis_turn is not None:
+                    # Stop the worker at its next boundary; the timeout reply still settles once.
+                    active_cordis_turn.cancel()
                 _mark_request_timed_out(llm_request_id)
                 await log_agent_run_event(
                     session_id=session.id,
@@ -1337,6 +1462,7 @@ async def websocket_chat(websocket: WebSocket):
                 final_result = "I'm taking too long on this one. Let me try a simpler approach — could you rephrase or narrow your request?"
 
             except ApprovalRequired as exc:
+                await _cordis_blocked("approval_required")
                 await approval_repository.merge_details(
                     exc.approval_id,
                     {"resume_message": ws_msg.message},
@@ -1385,7 +1511,8 @@ async def websocket_chat(websocket: WebSocket):
                     if ingress is not None
                     else None
                 )
-                await session_manager.add_message(
+                await (_settle_cordis_clarification(active_cordis_turn) if active_cordis_turn is not None
+                       else session_manager.add_message)(
                     session.id,
                     "assistant",
                     rendered,
@@ -1444,8 +1571,11 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             except Exception as e:
+                turn_reason = turn_failure_reason(e) if active_cordis_turn is not None else None
+                await _cordis_blocked(turn_reason or "agent_turn_failed")
                 logger.exception("Agent streaming failed")
-                safe_error = await redact_secrets_in_text(f"Agent error: {e}")
+                safe_error = await redact_secrets_in_text(
+                    turn_blocked_message(turn_reason) if turn_reason else f"Agent error: {e}")
                 await log_agent_run_event(
                     session_id=session.id,
                     transport="websocket",
@@ -1481,20 +1611,38 @@ async def websocket_chat(websocket: WebSocket):
             generic_assistant_message_id = (
                 assistant_message_id_for_ingress(ingress) if ingress is not None else None
             )
-            await session_manager.add_message(
-                session.id,
-                "assistant",
-                final_result,
-                metadata_json=(
-                    chat_assistant_metadata(
-                        ingress,
-                        message_id=generic_assistant_message_id,
-                    )
-                    if ingress is not None and generic_assistant_message_id is not None
-                    else None
-                ),
-                message_id=generic_assistant_message_id,
+            generic_metadata = (
+                chat_assistant_metadata(
+                    ingress,
+                    message_id=generic_assistant_message_id,
+                )
+                if ingress is not None and generic_assistant_message_id is not None
+                else None
             )
+            if active_cordis_turn is not None:
+                settle_reason = await _settle_cordis_reply(
+                    active_cordis_turn, session.id, final_result, generic_assistant_message_id, generic_metadata,
+                    timed_out=run_outcome == "timed_out")
+                if settle_reason is not None:
+                    active_turn_completed = True
+                    await websocket.send_text(
+                        WSResponse(
+                            type="error",
+                            content=turn_blocked_message(settle_reason),
+                            session_id=session.id,
+                            reason=settle_reason,
+                            seq=_next_seq(),
+                        ).model_dump_json()
+                    )
+                    continue
+            else:
+                await session_manager.add_message(
+                    session.id,
+                    "assistant",
+                    final_result,
+                    metadata_json=generic_metadata,
+                    message_id=generic_assistant_message_id,
+                )
             active_turn_completed = True
             if run_outcome == "succeeded":
                 await log_agent_run_event(
@@ -1555,6 +1703,14 @@ async def websocket_chat(websocket: WebSocket):
             await _record_interrupted_turn()
         ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")
+    except asyncio.CancelledError:
+        # A Cordis turn never outlives its socket handler: cancel it and write the
+        # one fenced interrupted row (legacy keeps its prior behaviour).
+        if active_cordis_turn is not None and not auth_revoked.is_set():
+            with suppress(Exception):
+                await asyncio.shield(_record_interrupted_turn())
+        ws_manager.disconnect(websocket)
+        raise
     except RuntimeError as exc:
         ws_manager.disconnect(websocket)
         if "WebSocket is not connected" in str(exc):

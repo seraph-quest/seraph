@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import { normalizeCordisRuntime } from "../../lib/cordisRuntime";
-import type { CordisRuntimeSnapshot } from "../../lib/cordisRuntime";
+import { chatRuntimeLabel, normalizeChatRuntime, normalizeCordisRuntime } from "../../lib/cordisRuntime";
+import type { ChatRuntimeStatus, CordisRuntimeSnapshot } from "../../lib/cordisRuntime";
 
 export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: unknown; managed?: boolean }) {
   const [snapshot, setSnapshot] = useState<CordisRuntimeSnapshot | null>(null);
+  const [chat, setChat] = useState<ChatRuntimeStatus | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const generation = useRef(0), controller = useRef<AbortController | null>(null);
   async function refresh() {
@@ -18,7 +19,8 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       const value: unknown = await response.json();
       const result = normalizeCordisRuntime(value && typeof value === "object" && "cordis_runtime" in value ? value.cordis_runtime : null);
       if (!result) throw Error("Cordis runtime metadata missing or invalid");
-      if (version === generation.current) { setSnapshot(result); setError(null); }
+      const chatStatus = normalizeChatRuntime(value && typeof value === "object" && "chat_runtime" in value ? value.chat_runtime : null);
+      if (version === generation.current) { setSnapshot(result); setChat(chatStatus); setError(null); }
     } catch { if (version === generation.current) setError("Cordis runtime metadata is unavailable. Last confirmed state remains visible; refresh after restoring the host. Artifact settings remain usable."); }
     finally { clearTimeout(timeout); if (version === generation.current) setBusy(false); }
   }
@@ -31,7 +33,9 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
   }, [managed, metadata]);
   return <section aria-label="Cordis runtime host" className="mb-3 rounded border border-retro-text/10 p-2 text-[10px]">
     <div className="flex items-center justify-between gap-2"><h3>Cordis runtime host</h3><button type="button" disabled={busy} onClick={() => void refresh()}>{busy ? "Checking host…" : "Refresh Cordis host"}</button></div>
-    <p>This lifecycle host reports composition and cleanup. Agent-loop migration remains planned.</p>
+    <p>This lifecycle host reports composition and cleanup. Chat runs on the agent loop its owner row names.</p>
+    {chat && <p role="status" aria-label="Chat agent loop">{chatRuntimeLabel(chat)}</p>}
+    {chat?.loop === "blocked" && chat.recovery && <p role="status">Chat fix: {chat.recovery}</p>}
     {error && <p role="status" className="text-yellow-400">{error}</p>}
     {!snapshot && <p role="status">{busy ? "Loading host state…" : "Host state unavailable"}</p>}
     {snapshot && <>

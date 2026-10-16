@@ -114,7 +114,10 @@ def schedule_tombstone_vector_purge() -> None:
     if _task is not None and not _task.done() and _task.get_loop() is loop:
         _rerun = True
         return
-    _task = loop.create_task(_drain(), name="memory-tombstone-vector-purge")
+    from src.utils.background import track_task
+    # Tracked, so shutdown (and each test's teardown) drains it before the
+    # database it writes to goes away.
+    _task = track_task(_drain(), name="memory-tombstone-vector-purge")
 
 
 async def _drain() -> None:

@@ -37,8 +37,10 @@ RUN uv sync --frozen
 RUN uv run playwright install chromium
 
 # The backend resolves the Cordis package at /runtime/cordis (parents of
-# src/runtime_plugins/composition.py) and starts it with `node` on PATH.
+# src/runtime_plugins/composition.py) and starts it with CORDIS_NODE_PATH.
+# Follow-up: pin node:24.13.1-bookworm-slim by digest once a registry is reachable.
 COPY --from=cordis-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=cordis-build /runtime/cordis /runtime/cordis
+ENV CORDIS_NODE_PATH=/usr/local/bin/node
 
 CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]

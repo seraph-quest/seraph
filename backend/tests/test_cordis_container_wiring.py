@@ -44,6 +44,10 @@ def test_final_image_places_node_and_package_where_the_backend_resolves_them():
     final = DOCKERFILE[DOCKERFILE.index("FROM ghcr.io/astral-sh/uv"):]
     assert "COPY --from=cordis-build /usr/local/bin/node /usr/local/bin/node" in final
     assert "COPY --from=cordis-build /runtime/cordis /runtime/cordis" in final
+    # The backend lifespan hands this reviewed Node to cordis_host (settings.cordis_node_path).
+    assert re.search(r"^ENV CORDIS_NODE_PATH=/usr/local/bin/node$", final, re.M)
+    from config.settings import Settings
+    assert "cordis_node_path" in Settings.model_fields
     # The image ADDs backend/ at /app; composition.PACKAGE_ROOT is parents[3] / runtime / cordis.
     assert re.search(r"^ADD \. /app$", final, re.M) and re.search(r"^WORKDIR /app$", final, re.M)
     in_image = PurePosixPath("/app/src/runtime_plugins/composition.py").parents[3] / "runtime" / "cordis"

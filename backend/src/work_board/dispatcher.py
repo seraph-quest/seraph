@@ -554,10 +554,10 @@ def _typed_input_model(capability_id: str) -> type[BaseModel] | None:
         # so the workflow module can import the board contracts without a
         # dispatcher import cycle during application startup.
         try:
-            from src.workflows.repo_repair import RepoRepairInput
+            from src.workflows.repo_repair import RepoRepairCapabilityInput
         except (ImportError, ModuleNotFoundError):
             return None
-        return RepoRepairInput
+        return RepoRepairCapabilityInput
     return None
 
 
@@ -831,14 +831,16 @@ async def _reserve_repo_repair_execution_capacity(
     authority_digest: str,
     execution_deadline_at: str,
     expected_revision: int | None,
+    lane: RepoRepairCapacityLane | None = None,
 ) -> RepoRepairCapacityLane:
-    """Acquire the physical lane and its exact durable reservation."""
+    """Acquire the physical lane (unless already held) and its exact durable reservation."""
 
-    lane = await asyncio.to_thread(
-        try_acquire_repo_repair_capacity,
-        workspace_root,
-        job_id=job_id,
-    )
+    if lane is None:
+        lane = await asyncio.to_thread(
+            try_acquire_repo_repair_capacity,
+            workspace_root,
+            job_id=job_id,
+        )
     if lane is None:
         raise DurableJobAdmissionDenied("repo_repair_execution_busy")
     try:
@@ -2896,6 +2898,15 @@ class WorkBoardDispatcher:
             await self._recover_linked_pipelines()
         except Exception:
             logger.warning("bounded linked pipeline recovery unavailable")
+        source = getattr(self.general_tasks, "repository_source_service", None)
+        if source is not None and getattr(source, "jobs", None) is self.jobs:
+            # Expired repository originals release their workspace lane on the
+            # managed tick, including after restart, without an operator session.
+            try:
+                from src.workflows.repo_repair_stop import close_expired_repository_roots
+                await close_expired_repository_roots(source, self.jobs)
+            except Exception:
+                logger.warning("expired repository original closure unavailable")
         async with self.session_provider() as db:
             candidates = await self.repository.list_dispatch_candidates(
                 db,
@@ -3528,6 +3539,17 @@ class WorkBoardDispatcher:
             latest = detail["attempts"][0] if detail["attempts"] else None
             if latest is None or not latest.workflow_run_id:
                 raise BoardError("admission_reconcile_required", "The original task admission must be reconciled before cancellation", status_code=409)
+            source = self.general_tasks.repository_source_service if self.general_tasks is not None else None
+            if source is not None:
+                from src.workflows.repo_repair_stop import repository_stop_for_parent
+                try:
+                    stopped = await repository_stop_for_parent(source, self.jobs,
+                        parent_id=latest.workflow_run_id, general_task_service=self.general_tasks,
+                        owner=owner, request_stop=True)
+                except Exception as exc:
+                    raise BoardError("repository_stop_blocked", "Inspect the original repository stop evidence", status_code=409) from exc
+                if stopped is not None:
+                    return stopped["projection"]
             try:
                 cancelled = await self.jobs.cancel_general_task_native_parent(latest.workflow_run_id,
                     operator_owner=owner, expected_task_revision=expected_revision,
@@ -3573,6 +3595,21 @@ class WorkBoardDispatcher:
                 "Cancellation waits for the pending admission binding to be reconciled",
                 status_code=409,
             )
+
+        if task.capability_id == "engineering.repo-repair.v1" and self.general_tasks is not None:
+            source = self.general_tasks.repository_source_service
+            if source is not None:
+                from src.workflows.repo_repair_source import repository_source_root
+                async with self.session_provider() as db:
+                    source_owned = await repository_source_root(db, job_id=job_id, owner=owner)
+                if source_owned:
+                    from src.workflows.repo_repair_stop import stop_repository_root
+                    try:
+                        stopped = await stop_repository_root(source, self.jobs, job_id=job_id,
+                            owner=owner, general_task_service=self.general_tasks)
+                    except Exception as exc:
+                        raise BoardError("repository_stop_blocked", "Inspect the original repository stop evidence", status_code=409) from exc
+                    return stopped["repository_projection"]
 
         # Validate the complete immutable binding before recording intent.  A
         # caller must never cancel a run merely because it guessed its ID.
@@ -6837,6 +6874,14 @@ class WorkBoardDispatcher:
         if capability_id == "engineering.repo-repair.v1":
             from src.workflows.repo_repair import RepoRepairService, _executor_preflight
             from src.workflows.job_runtime import _digest as _durable_digest
+
+            if "repository_ref" in inputs:
+                # Typed seven-field selection is not an original C1 source
+                # grant. Its fixed native owner must supply the protected
+                # handoff; never enter legacy proposal/model admission here.
+                return {"status": "blocked", "reason_code": "repository_original_source_required",
+                    "recovery_action": "inspect_and_create_repository_source_task",
+                    "admission_only": False, "no_learning": True}
 
             job_id, owner_principal, job_kind, service_id, binding_key = self._direct_job_identity(
                 task,
@@ -11625,6 +11670,19 @@ class WorkBoardDispatcher:
                         recovered.append(job_id)
                         continue
                     try:
+                        # A fixed repository preparation has already claimed
+                        # its original child. Only its exact consent/start CAS
+                        # may invoke that child; generic recovery must not
+                        # reclaim it or use the postcontact resume path.
+                        from src.workflows.repo_repair_source import repository_review_projection
+                        async with self.session_provider() as review_db:
+                            review = await repository_review_projection(review_db,
+                                task=task, attempt=attempt,
+                                owner=WorkBoardOwner(principal_id=task.owner_principal_id,
+                                    session_id=task.owner_session_id))
+                        if review is not None:
+                            recovered.append(job_id)
+                            continue
                         from src.workflows.specialist_result import settle_specialist_waits
                         await settle_specialist_waits(self.jobs,job_id)
                         task, attempt, _owner, parent_fence = await self._refresh_general_task_dispatch(task, attempt, job_id)

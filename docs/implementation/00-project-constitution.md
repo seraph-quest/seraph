@@ -164,7 +164,9 @@ The following architecture decisions are normative:
 27. [ADR-027: Finite standing public goal programmes](./decisions/027-standing-public-goal-programmes.md)
 28. [ADR-028: Reviewed typed task methods and reusable procedures](./decisions/028-reviewed-task-methods.md)
 29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
+30. [ADR-030: Bounded iterative repository work and original-producer recovery](./decisions/030-bounded-iterative-repository-work.md)
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
+32. [ADR-032: Repository crash recovery evidence](./decisions/032-repository-crash-recovery-evidence.md) (supersedes selected ADR-030 recovery clauses)
 33. [ADR-033: Optional governed OpenRouter audio transcription](./decisions/033-governed-optional-audio-route.md)
 
 ADR-033 extends only the versioned setup.v3 target with one optional disabled

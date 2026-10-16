@@ -368,7 +368,7 @@ async def physical_discovery_inputs(jobs, job_id, *, completed_read=False, stage
         kind, slot = payload["kind"], payload["slot"]
         if kind not in DISCOVERY_ARTIFACT_LIMITS or type(slot) is not int or not 0 <= slot < 4:
             raise ValueError("programme artifact shape changed")
-        if (kind, slot) in adopted_slots or (kind in {"queries", "manifest", "selection", "snapshots", "brief"} and slot != 0):
+        if (kind, slot) in adopted_slots or (kind in {"queries", "manifest", "selection", "snapshots", "brief", "extraction"} and slot != 0):
             raise ValueError("programme physical output slot is ambiguous")
         adopted_slots.add((kind, slot))
         reference = ArtifactRef.model_validate(payload["artifact_ref"])

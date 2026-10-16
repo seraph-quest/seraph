@@ -155,7 +155,9 @@ from src.guardian.research_plan_contracts import ArtifactRef
 
 DISCOVERY_ARTIFACT_LIMITS = {"public_brief": 8000, "plan": 65536, "queries": 16384,
     "manifest": 65536, "selection": 8192, "snapshot": 65536, "snapshots": 65536,
-    "coverage": 16384, "brief": 65536, "draft": 16384, "prompt": 8192, "child": 16384}
+    "coverage": 16384, "brief": 65536, "draft": 16384, "prompt": 8192, "child": 16384,
+    # Cordis research (#1008): planning request, staged public sources, extraction request.
+    "planning_request": 65536, "raw_source": 524288, "extraction": 16384}
 
 
 @dataclass(frozen=True)
@@ -195,7 +197,7 @@ def read_discovery(reference, expected_digest, *, programme_id, max_bytes=OUTPUT
         os.close(parent_fd)
     if not 0 < size <= max_bytes:
         raise ValueError("discovery artifact exceeds its immutable byte allowance")
-    return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size)
+    return _safe_file_bytes(path, expected_digest=expected_digest, expected_size=size, max_bytes=max_bytes)
 
 
 def stage_discovery_artifact(*, programme_id, job_id, kind, slot, content):

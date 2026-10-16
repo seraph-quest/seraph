@@ -1,5 +1,5 @@
 /** Finite wire schemas. No policy, state owner, dispatch or transport lives here. */
-import { decodeJson, ProtocolError } from '../protocol.js';
+import { decodeJson, ProtocolError, type Json } from '../protocol.js';
 
 export interface Schema<T> { parse(value: unknown): T; }
 export type Infer<S> = S extends Schema<infer T> ? T : never;
@@ -43,4 +43,10 @@ export const array = <T>(schema: Schema<T>, max: number): Schema<T[]> => ({ pars
 export function bounded(value: unknown): unknown {
   // Reuse raw frame complexity/UTF-8/duplicate-key bounds on both directions.
   return decodeJson(Buffer.from(JSON.stringify(value), 'utf8'));
+}
+/** Sorted-key JSON; identical to Python ``json.dumps(sort_keys=True, separators=(",", ":"))`` for ASCII keys. */
+export function canonicalJson(value: Json): string {
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonicalJson(value[key]!)).join(',') + '}';
+  return JSON.stringify(value);
 }

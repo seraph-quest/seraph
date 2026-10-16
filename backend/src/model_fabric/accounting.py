@@ -74,6 +74,27 @@ def bind_general_task_accounting(group, *, role="initial_proposal", task_id=None
 
 
 @contextmanager
+def bind_repository_iteration_accounting(witness):
+    """The fixed source producer alone joins repository work to C1's group."""
+    from src.workflows.repo_repair_source import assert_repository_iteration_witness
+    try:
+        assert_repository_iteration_witness(witness)
+    except (PermissionError, TypeError, ValueError) as exc:
+        raise InferenceAccountingError("repository_iteration_witness_invalid") from exc
+    token = _task_group.set({"group": witness.group, "role": "repository_iteration",
+        "repository_witness": witness})
+    try:
+        yield
+    finally:
+        _task_group.reset(token)
+
+
+def current_repository_iteration_accounting_witness():
+    binding = _task_group.get()
+    return binding.get("repository_witness") if isinstance(binding, dict) and binding.get("role") == "repository_iteration" else None
+
+
+@contextmanager
 def bind_near_contact_authority(witness):
     from src.work_board.near_text_native import NearContactWitness
     if not isinstance(witness, NearContactWitness):
@@ -413,12 +434,20 @@ class DurableInferenceBrokerMixin:
                 raise InferenceAccountingError("accounting_server_bound_required")
             request = replace(request, estimated_cost_microusd=bound)
             task_binding = _task_group.get()
-            expected_task_route = ("strategist_agent" if task_binding is not None
-                and task_binding.get("role") == "communication_preparation" else "general_task_planner")
+            repository_witness = current_repository_iteration_accounting_witness()
+            expected_task_route = ("strategist_agent" if repository_witness is not None
+                or (task_binding is not None and task_binding.get("role") == "communication_preparation")
+                else "general_task_planner")
             if task_binding is not None and request.runtime_path != expected_task_route:
                 raise InferenceAccountingError("general_task_group_runtime_invalid")
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
+            if repository_witness is not None and (ephemeral
+                or binding.repository_iteration_witness is not repository_witness
+                or request.operation_id != repository_witness.operation_id):
+                raise InferenceAccountingError("repository_iteration_receipt_binding_invalid")
+            if not ephemeral and binding.repository_iteration_witness is not None and repository_witness is None:
+                raise InferenceAccountingError("repository_iteration_receipt_binding_invalid")
             if request.runtime_path == "audio_transcription":
                 if setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
                     raise InferenceAccountingError("audio_setup_v3_required")

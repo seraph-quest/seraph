@@ -181,6 +181,18 @@ composition-snapshot/census/frame-accounting amendments recorded on #1007 are
 not implemented by this slice. Current app details are in the
 [current app guide](../12-current-app-guide.md#cordis-typed-service-bridge-1007).
 
+### Guardian research composition (#1008)
+
+[#1008](https://github.com/seraph-quest/seraph/issues/1008) is the first
+capability composed from Cordis providers rather than forwarding proxies: the
+research service delegates planning to an injected goal-plan provider and
+execution to the guardian consumer, and source extraction selects interchangeable
+format providers from closed profile config. Providers propose; Python remains
+the validator, artifact owner and transport/consent owner, and pins every job
+to the reviewed package/profile digests. Missing providers are typed blocks,
+never a fallback. Details are in the
+[current app guide](../12-current-app-guide.md#cordis-guardian-research-1008).
+
 ## Verification And Consequences
 
 This decision requires source/path/link and contradiction checks, both docs

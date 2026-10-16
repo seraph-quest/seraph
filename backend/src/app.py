@@ -1,5 +1,6 @@
 import os
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -519,6 +520,8 @@ async def lifespan(app: FastAPI):
                     await profiled_interaction_sessions.start()
                     # Optional native owners remain inside the current Python lifecycle.
                     try:
+                        if settings.cordis_node_path and cordis_host.node_path is None:
+                            cordis_host.node_path = Path(settings.cordis_node_path)
                         await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")

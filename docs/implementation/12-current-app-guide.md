@@ -958,6 +958,55 @@ container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
 and the container preflight fails closed before startup when the bind evidence
 is missing.
 
+### Agent command sandbox in containers (#1103)
+
+The backend container runs agent commands (`run_command`, `start_process`) in
+the same bubblewrap sandbox as the host
+([ADR-036](./decisions/036-agent-process-sandbox.md)). Both Compose files give
+the backend service these settings:
+- `security_opt: seccomp=./deploy/seccomp/seraph-backend.json`;
+- `apparmor=seraph-backend`;
+- `systempaths=unconfined`;
+- `no-new-privileges:true`;
+- `cap_drop: [ALL]`.
+
+The seccomp profile is Docker's default plus only the namespace and mount
+syscalls bubblewrap needs. Run Compose from the repository root, which
+`manage.sh` does, so the relative profile path resolves.
+
+One-time host and workspace preparation:
+
+```bash
+# AppArmor hosts (Ubuntu): load the container profile once per boot/update.
+sudo apparmor_parser -r -W deploy/apparmor/seraph-backend
+# Workspaces written by an earlier root container: the image now runs as uid 10001.
+docker compose -f docker-compose.<env>.yaml run --rm --no-deps --user root <backend service> \
+  chown -R 10001:10001 /app/data /app/logs
+```
+
+On AppArmor 3 hosts (Ubuntu 23.04 and earlier), delete the profile's
+`userns,` line before loading it. For a development data directory that
+should stay owned by your own host user, use a Compose override that sets
+`user: "<uid>:<gid>"` instead of the `chown`. The sandbox does not depend on
+the uid.
+
+At startup the container preflight (production) and the backend lifespan
+(development) refuse a foreign-owned workspace with
+`workspace_ownership_mismatch`, and record the sandbox posture. A container
+started without the shipped profiles keeps running, but agent commands return
+a typed `process_isolation_unavailable:<reason>`:
+- `container_seccomp_profile_missing`;
+- `container_apparmor_denies_mount`;
+- `container_proc_masked`.
+
+These settings widen the kernel surface reachable from the container. User,
+mount, pid, net, ipc and uts namespaces become reachable, as on a bare-metal
+Ubuntu host with the bwrap AppArmor profile, and Docker's masked `/proc`
+paths are exposed to the non-root, capability-free user. ADR-036 describes
+what stays denied. `scripts/check_container_process_sandbox.py` builds the
+image and probes inside it: the shipped profiles must isolate, and Docker
+defaults must block.
+
 ### Configure the OpenRouter route (Epic #736/#775)
 
 Open **Settings → Models & OpenRouter** (formerly the Screenshot/VLM tab) and
@@ -2235,6 +2284,56 @@ approval, so a change between variants invalidates earlier approvals. Setting
 instead. Diagnostics redaction is pattern-based either way.
 Approved patches may contain only text sections on allowed paths, and an
 iterative publication must equal the base plus the approved input patch.
+
+#### Agent command tools (#1103)
+
+`run_command` and `start_process` always run in an OS sandbox built from the
+same bubblewrap probe machinery
+([ADR-036](./decisions/036-agent-process-sandbox.md)). The command sees the
+workspace through a kernel-enforced view:
+
+- **DENIED state:** an unopenable placeholder. This covers `.vault-key`,
+  `seraph.db` and sidecars, `mcp-servers.json`, `stdio-proxies.json`,
+  `google_calendar_token.json`, `artifacts/mail/private` and
+  `.seraph-workspace-maintenance.lock`.
+- **READ_ONLY state:** read-only. This covers `extensions/`,
+  `extensions-state.json`, caches and derived state.
+- **Read-only levels:** the workspace top level, `artifacts/` and
+  `artifacts/mail/` are read-only, so commands cannot create, rename or
+  delete entries there (for example `sed -i soul.md`, or `./out.txt` with
+  `cwd` at the root). In-place writes to existing files work. A failed
+  command that hit this gets a hint line.
+- **Everything else:** subfolders such as `notes/`, `plans/` and projects are
+  unchanged.
+
+This holds whatever the script does: python and node file opens, `sed w`,
+`sed -i` and shell redirection are all refused by the kernel. The agent file
+tools are unaffected.
+
+`run_command` has a loopback-only network. `start_process` shares the host
+network, and its approval says it can reach localhost services, including
+Seraph's own API. Every launch drops all capabilities and hides host files
+outside the workspace and runtime; hard-coded `/tmp` writes go to a private
+tmpfs. A stop, timeout, cancel or exit tears down the command's pid
+namespace, so double-forked children cannot outlive it. A signal death is
+reported as exit code 128 + signal.
+
+A top-level file is bound by inode at launch. If Seraph replaces it by rename
+while a command runs, the command keeps the old file. Workspace restore,
+recovery and rollback stop process-tool children before swapping the root,
+and so does backend shutdown.
+
+On a host without the sandbox (no `bwrap`, user namespaces denied, macOS,
+Windows, or a container without the shipped profiles), these tools return
+`process_isolation_unavailable:<reason>` before any approval is created.
+There is no unprotected mode. A launch is also blocked, with
+`workspace_view_unsafe:<reason>`, when:
+- a top-level symlink points outside the workspace;
+- a DENIED file has another hard link;
+- there are more than 512 entries at a level.
+
+The approval binds the sandbox posture digest, so a posture change requires a
+new approval (`process_isolation_posture_changed`).
 
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)

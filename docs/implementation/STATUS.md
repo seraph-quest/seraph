@@ -69,6 +69,44 @@ server-captured base and the tested tree. It must also reproduce the tested byte
 when applied to a fresh base copy outside the workspace, so a test that commits or
 configures Git textconv cannot misreport its change.
 
+Agent command sandbox ([#1103](https://github.com/seraph-quest/seraph/issues/1103),
+[ADR-036](./decisions/036-agent-process-sandbox.md)) is **Partial**. On Linux
+hosts where bubblewrap user namespaces work (verified on Ubuntu 26.04 x86_64
+with bwrap 0.11.1), every `run_command` and `start_process` runs in an OS
+sandbox whose workspace is a kernel-enforced view. The view gives:
+
+- **DENIED state:** unreadable through any channel, including interpreter
+  file opens, `sed w`, `sed -i` and shell redirection from scripts. This
+  covers `.vault-key`, `seraph.db` and its sidecars, credential-bearing
+  settings and `artifacts/mail/private`.
+- **READ_ONLY state:** read-only.
+- **Read-only levels:** commands cannot create, rename or delete entries at
+  the workspace top level, `artifacts/` or `artifacts/mail/`.
+- **Network:** loopback only for `run_command`; shared for `start_process`,
+  whose approval says so.
+
+The sandbox also has these properties:
+
+- all capabilities are dropped;
+- host files outside the workspace and runtime are not visible;
+- detached children end with the command's pid namespace.
+
+Hosts without the sandbox, including macOS and Windows, are **blocked**: these
+tools return `process_isolation_unavailable:<reason>` before any approval, and
+there is no unprotected mode.
+
+The Docker deployment uses the shipped seccomp and AppArmor profiles,
+`systempaths=unconfined`, `cap_drop: [ALL]` and a non-root uid 10001. It is
+verified by the `container-process-sandbox` CI job, not on this
+implementation host, which has no Docker daemon.
+
+Limits:
+- a pre-existing hard-link alias of a READ_ONLY file stays writable through
+  that alias;
+- top-level files are bound by inode for the length of a command;
+- a macOS Seatbelt adapter and a `start_process` network policy are
+  follow-up work.
+
 **Project issues and pull requests to goal tasks: Partial (#1017).** An explicit
 sync reads only the connected repository's issues and pull requests: at most 50
 items over 3 pages, newest updates first, with no webhooks, comments, reviews or

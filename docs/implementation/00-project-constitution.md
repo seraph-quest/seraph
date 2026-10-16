@@ -168,6 +168,7 @@ The following architecture decisions are normative:
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
 32. [ADR-032: Repository crash recovery evidence](./decisions/032-repository-crash-recovery-evidence.md) (supersedes selected ADR-030 recovery clauses)
 34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
+36. [ADR-036: OS-enforced workspace view for agent commands](./decisions/036-agent-process-sandbox.md)
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

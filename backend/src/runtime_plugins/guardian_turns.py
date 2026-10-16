@@ -33,6 +33,7 @@ import logging
 import secrets
 import uuid
 
+from .cutover import legacy_turns, register_cutover_domain
 from .dispatch import NativeServiceBlocked, _append_receipt, _canonical, _digest, _writer, cas_run, read_context
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,10 @@ CONTEXT_TAG = "cordis-guardian-turn.v1"
 STEP_TIMEOUT = timedelta(seconds=30)
 SETTLEMENT_GRACE = timedelta(seconds=30)
 LOOP_NAMES = {"cordis": "cordis.guardian.v1", "legacy": "legacy.guardian", "blocked": "blocked"}
+# Default cutover order (#1019 manifest): the presets every turn binds, then the
+# guardian loop that needs them. Boot moves each once to Cordis; rollback is sticky.
+register_cutover_domain(PRESETS_DOMAIN)
+register_cutover_domain(GUARDIAN_DOMAIN, prerequisites=(PRESETS_DOMAIN,))
 
 
 class GuardianBlocked(Exception):
@@ -462,7 +467,17 @@ async def guardian_completion(preset_id: str, call, *, timeout_seconds: float, r
         raise GuardianBlocked(exc.reason_code) from exc
     status = await guardian_runtime_status(host)
     if status["loop"] == LOOP_NAMES["legacy"]:
-        return await call()
+        # A legacy call is not bound to the owner row, so it holds the drain gate:
+        # a boot cutover defers while it runs, and none starts during one.
+        from .ownership import CompositionBindingError
+        try:
+            legacy_turns.enter(GUARDIAN_DOMAIN)
+        except CompositionBindingError as exc:
+            raise GuardianBlocked(exc.reason_code) from exc
+        try:
+            return await call()
+        finally:
+            legacy_turns.leave(GUARDIAN_DOMAIN)
     if status["loop"] != LOOP_NAMES["cordis"]:
         raise GuardianBlocked(status["reason"], status.get("recovery"))
     from .bridge import cordis_host

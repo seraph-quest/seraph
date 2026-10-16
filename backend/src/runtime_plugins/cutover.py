@@ -221,7 +221,14 @@ async def _boot_domain(db, entry: CutoverDomain, host) -> dict | None:
     rows = await inventory(db)
     row = rows.get(entry.domain)
     if row is None:
-        return None
+        from .ownership import DOMAIN_INTRODUCTIONS, introduce_domain
+        if entry.domain not in DOMAIN_INTRODUCTIONS or not rows:
+            return None
+        # A domain introduced after this inventory existed (#1020) is seeded as
+        # its legacy owner in this same writer, then cut over like any other.
+        await introduce_domain(db, entry.domain)
+        rows = await inventory(db)
+        row = rows[entry.domain]
     intent = await _pending_intent(db, entry.domain)
     if intent is not None:
         if row.epoch != intent["expected_epoch"]:
@@ -280,6 +287,10 @@ async def run_boot_cutover(host) -> list[dict]:
             receipts.append({"runtime_domain": entry.domain, "action": "deferred", "reason": exc.reason_code})
     return receipts
 
+
+# Domain owners register their manifest entries at import; importing them here
+# makes the manifest complete before any boot step, whatever imported first.
+from . import guardian_turns  # noqa: E402,F401
 
 __all__ = ["CUTOVER_EVENT", "INTENT_EVENT", "OPERATOR_EVENT", "RECOVERY_EVENT", "CompositionDependency", "CutoverDomain",
            "cutover_manifest", "legacy_turns", "pending_intents", "record_operator_intent", "register_cutover_domain",

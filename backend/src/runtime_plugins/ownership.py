@@ -347,6 +347,27 @@ def seed_legacy_inventory_sync(connection) -> int:
     return len(DOMAINS)
 
 
+async def introduce_domain(db, domain: str) -> None:
+    """The async form of one introduction, inside the caller's composition writer."""
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    if domain not in DOMAIN_INTRODUCTIONS:
+        raise CompositionBindingError("composition_domain_unknown")
+    await db.execute(text(
+        "INSERT INTO runtime_composition_states "
+        "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "
+        "VALUES (:domain, 'legacy', 1, :digest, 'ready', NULL)"),
+        {"domain": domain, "digest": legacy_composition_digest(domain)})
+    await db.execute(text(
+        "INSERT INTO audit_events (id, session_id, actor, event_type, tool_name, risk_level, policy_mode, summary, "
+        "details_json, created_at) VALUES (:id, NULL, 'system', 'runtime_composition_domain_introduced', NULL, "
+        "'low', 'full', :summary, :details, :at)"),
+        {"id": str(uuid4()), "summary": f"Runtime domain {domain} introduced as its legacy owner",
+         "details": _canonical({"runtime_domain": domain, "owner_kind": "legacy", "epoch": 1,
+                                "introduced_by": DOMAIN_INTRODUCTIONS[domain]}),
+         "at": datetime.now(timezone.utc).replace(tzinfo=None)})
+
+
 def introduce_domains_sync(connection) -> list[str]:
     """Insert each introduced domain missing from a non-empty inventory once, as its legacy owner.
 

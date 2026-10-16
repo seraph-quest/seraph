@@ -100,7 +100,7 @@ jobs:
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
           uv run playwright install --with-deps chromium
 
-      - name: Enable bubblewrap for repository and process isolation tests (#1065, #1103)
+      - name: Enable bubblewrap for repository isolation tests (#1065)
         timeout-minutes: 3
         run: |
           sudo apt-get install -y --no-install-recommends bubblewrap || { sudo apt-get update -q && sudo apt-get install -y --no-install-recommends bubblewrap; }
@@ -126,28 +126,6 @@ jobs:
           OPENROUTER_API_KEY: test-key
         timeout-minutes: 40
         run: uv run python scripts/run_backend_test_shard.py --shard-count 10 --shard-index ${{ matrix.shard }} --file-timeout-seconds 900 --exclude-cancelled-eval-harness
-
-  container-process-sandbox:
-    # #1103: build the backend image and probe the agent process sandbox
-    # inside it with the shipped seccomp/AppArmor profiles (must be isolated)
-    # and under Docker's defaults (must be blocked with a typed reason).
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Load the seraph-backend AppArmor profile
-        run: sudo apparmor_parser -r -W deploy/apparmor/seraph-backend
-
-      - name: Compare the vendored seccomp base with Docker's pinned default profile
-        # Every rule of deploy/seccomp/docker-default.json must appear
-        # unchanged in moby v28.0.0's default profile (see deploy/seccomp/README.md).
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/moby/moby/v28.0.0/profiles/seccomp/default.json -o "$RUNNER_TEMP/docker-default-seccomp.json"
-          python3 scripts/check_container_process_sandbox.py --compare-seccomp "$RUNNER_TEMP/docker-default-seccomp.json" --compare-only
-
-      - name: Build the backend image and probe the sandbox inside it
-        run: python3 scripts/check_container_process_sandbox.py --require-docker
 
   frontend-tests:
     runs-on: ubuntu-latest

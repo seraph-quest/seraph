@@ -25,9 +25,7 @@ from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 
 from src.workspace.production import (
-    OWNERSHIP_MIGRATION,
     ProductionWorkspaceMountError,
-    container_ownership_problems,
     validate_container_workspace_mount,
 )
 
@@ -119,34 +117,6 @@ def _workspace_check(env: Mapping[str, str]) -> Check:
         return Check("canonical_workspace", "unavailable", f"workspace parent is not writable: {parent}")
     except OSError as exc:
         return Check("canonical_workspace", "unavailable", f"workspace check failed: {exc}")
-
-
-def _workspace_ownership_check(env: Mapping[str, str]) -> Check:
-    """The non-root image user must own the workspace before startup (#1103)."""
-    path = Path(_value(env, "WORKSPACE_DIR") or DEFAULT_WORKSPACE).expanduser()
-    problems = container_ownership_problems(path, env)
-    if problems:
-        return Check("workspace_ownership", "invalid",
-                     f"{', '.join(problems)}; migrate once with: {OWNERSHIP_MIGRATION}")
-    return Check("workspace_ownership", "ready", "workspace and lifecycle directory are owned by the runtime user")
-
-
-def _process_sandbox_check() -> Check:
-    """The agent process sandbox probed inside this container (#1103).
-
-    A blocked sandbox does not stop the backend: agent command tools return
-    ``process_isolation_unavailable:<reason>`` and everything else runs.
-    """
-    from src.execution import process_isolation
-
-    posture = process_isolation.probe(
-        process_isolation.process_runtime({}),
-        hidden_paths=process_isolation.host_secret_paths(None),
-    )
-    if posture.isolated:
-        return Check("process_sandbox", "ready", "agent commands run in the bubblewrap workspace view")
-    remedy = process_isolation.blocked(posture.reason or "probe_failed")
-    return Check("process_sandbox", "blocked", str(remedy))
 
 
 def _channel_signing_check(env: Mapping[str, str]) -> Check:
@@ -247,10 +217,6 @@ def build_preflight_report(env: Mapping[str, str] | None = None) -> dict[str, ob
     values = env if env is not None else os.environ
     production = _value(values, "DEPLOYMENT_ENVIRONMENT").lower() in {"prod", "production"}
     checks = [_auth_check(values, production=production), _workspace_check(values)]
-    from src.execution.process_isolation import in_container
-
-    if in_container():
-        checks += [_workspace_ownership_check(values), _process_sandbox_check()]
     if production:
         checks.append(_channel_signing_check(values))
         if _bool(_value(values, "SERAPH_PRODUCTION_MOUNT_CHECK"), default=False):

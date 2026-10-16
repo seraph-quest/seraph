@@ -1401,7 +1401,7 @@ def _sandbox_startup_failure(reason: str, diagnostic: str) -> process_sandbox.Pr
         return process_sandbox.blocked("workspace_view_unsafe:entry_changed_during_launch")
     # The host may have changed under the cached probe; re-probe next time.
     process_sandbox.clear_probe_cache()
-    typed = process_sandbox.classify_startup_failure(diagnostic, container=process_sandbox.in_container())
+    typed = process_sandbox.classify_startup_failure(diagnostic)
     code = reason if typed == "probe_failed" else f"{reason}:{typed}"
     # bwrap's own diagnostic line; never command output, because the guard
     # had not reported and the target never ran.

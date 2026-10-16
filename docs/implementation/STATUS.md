@@ -95,14 +95,14 @@ Hosts without the sandbox, including macOS and Windows, are **blocked**: these
 tools return `process_isolation_unavailable:<reason>` before any approval, and
 there is no unprotected mode.
 
-The Docker deployment uses the shipped seccomp profile,
-`systempaths=unconfined`, `cap_drop: [ALL]` and a non-root uid 10001, plus
-the shipped AppArmor profile through an override that `manage.sh` adds once
-that profile is loaded (without it, agent commands are blocked with a typed
-reason and the backend still starts). The process-tool `RLIMIT_AS` is now
-8 GiB (was 512 MiB, under which `node`/`npm` could not start). It is
-verified by the `container-process-sandbox` CI job, not on this
-implementation host, which has no Docker daemon.
+Deployment posture: the native host is the supported runtime for agent
+commands. In a Docker or other container deployment, every other backend
+capability runs, but these tools return
+`process_isolation_unavailable:container_unsupported`, which tells the
+operator to run Seraph on the host. Container support is tracked in
+[#1135](https://github.com/seraph-quest/seraph/issues/1135). The
+process-tool `RLIMIT_AS` is now 8 GiB (it was 512 MiB, under which
+`node` and `npm` could not start).
 
 Limits:
 - a pre-existing hard-link alias of a READ_ONLY file stays writable through

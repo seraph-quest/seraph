@@ -999,63 +999,20 @@ container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
 and the container preflight fails closed before startup when the bind evidence
 is missing.
 
-### Agent command sandbox in containers (#1103)
+### Agent commands and Docker (#1103)
 
-The backend container runs agent commands (`run_command`, `start_process`) in
-the same bubblewrap sandbox as the host
-([ADR-036](./decisions/036-agent-process-sandbox.md)). Both Compose files give
-the backend service these settings:
-- `security_opt: seccomp=./deploy/seccomp/seraph-backend.json`;
-- `systempaths=unconfined`;
-- `no-new-privileges:true`;
-- `cap_drop: [ALL]`.
+Agent command tools (`run_command`, `start_process`) need the native host
+install. Run Seraph with `./manage.sh -e dev local up`, or the equivalent
+production host install
+([ADR-036](./decisions/036-agent-process-sandbox.md#deployment-posture)).
 
-The seccomp profile is the vendored Docker default plus only the namespace
-and mount syscalls bubblewrap needs (`deploy/seccomp/README.md`). Run Compose
-from the repository root, which `manage.sh` does, so the relative profile
-path resolves.
-
-The AppArmor profile is applied through `docker-compose.<env>.apparmor.yaml`
-(`apparmor=seraph-backend`). On an AppArmor host, `manage.sh` adds that
-override only once the `seraph-backend` profile is loaded, and otherwise
-prints the load command. Referencing an unloaded profile would stop the
-container from starting. Without it, Docker's default profile applies and
-agent commands are blocked with `container_apparmor_denies_mount`. Direct
-Compose users add the override file themselves after loading the profile.
-
-One-time host and workspace preparation:
-
-```bash
-# AppArmor hosts (Ubuntu): load the container profile once per boot/update.
-sudo apparmor_parser -r -W deploy/apparmor/seraph-backend
-# Workspaces written by an earlier root container: the image now runs as uid 10001.
-docker compose -f docker-compose.<env>.yaml run --rm --no-deps --user root <backend service> \
-  chown -R 10001:10001 /app/data /app/logs /app/workspace-lifecycle
-```
-
-On AppArmor 3 hosts (Ubuntu 23.04 and earlier), delete the profile's
-`userns,` line before loading it. For a development data directory that
-should stay owned by your own host user, use a Compose override that sets
-`user: "<uid>:<gid>"` instead of the `chown`. The sandbox does not depend on
-the uid.
-
-At startup the container preflight (production) and the backend lifespan
-(development) refuse a foreign-owned workspace or lifecycle directory with
-`workspace_ownership_mismatch` or `workspace_lifecycle_ownership_mismatch`,
-and record the sandbox posture. A container
-started without the shipped profiles keeps running, but agent commands return
-a typed `process_isolation_unavailable:<reason>`:
-- `container_seccomp_profile_missing`;
-- `container_apparmor_denies_mount`;
-- `container_proc_masked`.
-
-These settings widen the kernel surface reachable from the container. User,
-mount, pid, net, ipc and uts namespaces become reachable, as on a bare-metal
-Ubuntu host with the bwrap AppArmor profile, and Docker's masked `/proc`
-paths are exposed to the non-root, capability-free user. ADR-036 describes
-what stays denied. `scripts/check_container_process_sandbox.py` builds the
-image and probes inside it: the shipped profiles must isolate, and Docker
-defaults must block.
+In the Docker Compose deployments the backend and every other capability run
+normally. The agent command tools return
+`process_isolation_unavailable:container_unsupported`, which tells you to
+run Seraph on the host, and the backend logs this once at startup. Running
+the sandbox inside the container would need custom seccomp and AppArmor
+profiles, an unmasked `/proc` and a non-root image; that work is tracked in
+[#1135](https://github.com/seraph-quest/seraph/issues/1135).
 
 ### Configure the OpenRouter route (Epic #736/#775)
 
@@ -2443,7 +2400,7 @@ stop process-tool children before the first root swap, and so does backend
 shutdown.
 
 On a host without the sandbox (no `bwrap`, user namespaces denied, macOS,
-Windows, or a container without the shipped profiles), these tools return
+Windows, or any container: see the Docker note above), these tools return
 `process_isolation_unavailable:<reason>` before any approval is created.
 There is no unprotected mode. A launch is also blocked, with
 `workspace_view_unsafe:<reason>`, when:

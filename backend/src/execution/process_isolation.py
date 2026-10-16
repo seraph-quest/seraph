@@ -75,9 +75,10 @@ POSTURE_CHANGED = "process_isolation_posture_changed"
 # guard ``workspace_view_mismatch:*``.
 HOST_REASONS = frozenset({
     "platform_unsupported", "bwrap_missing", "bwrap_unsupported", "openat2_unavailable", "userns_denied",
-    "probe_failed", "probe_mismatch", "runtime_root_unsafe", "container_seccomp_profile_missing",
-    "container_apparmor_denies_mount", "container_proc_masked",
+    "probe_failed", "probe_mismatch", "runtime_root_unsafe", "container_unsupported",
 })
+CONTAINER_REMEDY = ("run Seraph on the host (./manage.sh -e dev local up) for agent commands; "
+                    "running them inside a container is tracked in #1135")
 _REMEDIES = {
     "platform_unsupported": "agent command tools need the Linux bubblewrap sandbox; macOS and Windows are not supported yet",
     "bwrap_missing": "install bubblewrap (apt install bubblewrap)",
@@ -88,11 +89,7 @@ _REMEDIES = {
     "probe_failed": "the sandbox self-test did not complete; check that bwrap runs for this user",
     "probe_mismatch": "the sandbox self-test observed weaker isolation than required",
     "runtime_root_unsafe": "a command runtime lies in or contains $HOME, credentials or the workspace",
-    "container_seccomp_profile_missing": ("start the backend container with "
-                                          "security_opt seccomp=deploy/seccomp/seraph-backend.json"),
-    "container_apparmor_denies_mount": ("load deploy/apparmor/seraph-backend and start the container with "
-                                        "security_opt apparmor=seraph-backend"),
-    "container_proc_masked": "start the backend container with security_opt systempaths=unconfined",
+    "container_unsupported": CONTAINER_REMEDY,
     "sandbox_startup_failed": "bubblewrap exited before the command started; the host is re-probed on the next command",
     "sandbox_startup_timeout": "the sandbox did not start in time; nothing ran",
     "workspace_view_mismatch": "the in-sandbox guard found the workspace view weaker than built; nothing ran",
@@ -626,15 +623,37 @@ def _unavailable(reason: str, *, in_container: bool = False) -> ProcessIsolation
     return ProcessIsolationPosture("unavailable", reason=reason, in_container=in_container)
 
 
-def in_container() -> bool:
-    """True inside Docker/Podman/Kubernetes (used only to type a probe failure)."""
-    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
+_CONTAINER_MARKERS = ("docker", "containerd", "kubepods", "libpod", "containers/storage", "/kubelet/")
+
+
+def in_container(*, root: Path = Path("/"), environ: Mapping[str, str] | None = None) -> bool:
+    """True inside Docker, Podman, Kubernetes or another OCI container runtime.
+
+    Several independent signals, because cgroup v2 with a private cgroup
+    namespace (Docker's default) shows only ``0::/`` in ``/proc/1/cgroup``:
+    the runtime marker files, the ``container``/Kubernetes environment, cgroup
+    v1 paths, and a root filesystem mounted from a container runtime's
+    storage (``/proc/self/mountinfo``).
+    """
+    environ = os.environ if environ is None else environ
+    if (root / ".dockerenv").exists() or (root / "run" / ".containerenv").exists():
+        return True
+    if environ.get("container") or environ.get("KUBERNETES_SERVICE_HOST"):
         return True
     try:
-        text = Path("/proc/1/cgroup").read_text(errors="replace")
+        if any(marker in (root / "proc" / "1" / "cgroup").read_text(errors="replace") for marker in _CONTAINER_MARKERS):
+            return True
+    except OSError:
+        pass
+    try:
+        mountinfo = (root / "proc" / "self" / "mountinfo").read_text(errors="replace").splitlines()
     except OSError:
         return False
-    return any(marker in text for marker in ("docker", "containerd", "kubepods", "libpod"))
+    for line in mountinfo:
+        fields = line.split()
+        if len(fields) > 4 and fields[4] == "/" and any(marker in line for marker in _CONTAINER_MARKERS):
+            return True
+    return False
 
 
 _help_cache: dict[str, frozenset[str]] = {}
@@ -652,18 +671,12 @@ def bwrap_flags(bwrap_path: str) -> frozenset[str]:
     return _help_cache[bwrap_path]
 
 
-def classify_startup_failure(stderr: str, *, container: bool) -> str:
+def classify_startup_failure(stderr: str) -> str:
     """Map a bwrap startup diagnostic to a typed host reason."""
     text = stderr or ""
-    if "Can't mount proc" in text or "mount proc" in text:
-        return "container_proc_masked" if container else "probe_failed"
     userns = ("No permissions to create new namespace" in text or "setting up uid map" in text
               or "Creating new namespace failed" in text or "unshare" in text.lower() and "permitted" in text)
-    if userns:
-        return "container_seccomp_profile_missing" if container else "userns_denied"
-    if "Operation not permitted" in text or "Permission denied" in text:
-        if container:
-            return "container_apparmor_denies_mount" if "mount" in text.lower() else "container_seccomp_profile_missing"
+    if userns or "Operation not permitted" in text or "Permission denied" in text:
         return "userns_denied"
     return "probe_failed"
 
@@ -928,6 +941,11 @@ def probe(runtime: IsolationRuntime, *, hidden_paths: Sequence[str] = (), forbid
     container = in_container()
     if sys.platform != "linux":
         return _unavailable("platform_unsupported", in_container=container)
+    if container:
+        # The native host is the supported runtime for agent commands
+        # (ADR-036 deployment posture); running them in a container needs the
+        # profile work tracked in #1135, so they are blocked here.
+        return _unavailable("container_unsupported", in_container=True)
     if runtime_root_problem(runtime.read_only_paths, forbidden_ancestors=forbidden_ancestors,
                             forbidden_trees=forbidden_trees):
         return _unavailable("runtime_root_unsafe", in_container=container)
@@ -1011,7 +1029,7 @@ def _run_probe(candidate: ProcessIsolationPosture, runtime: IsolationRuntime, hi
         if started is not None:
             if started.startswith("workspace_view_mismatch"):
                 return "probe_mismatch"
-            return classify_startup_failure(stderr.decode(errors="replace"), container=candidate.in_container)
+            return classify_startup_failure(stderr.decode(errors="replace"))
         if process.returncode != 0:
             return "probe_failed"
         try:

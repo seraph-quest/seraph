@@ -775,20 +775,69 @@ def _fake_bwrap(tmp_path: Path, stderr: str) -> Path:
     return fake
 
 
-@pytest.mark.parametrize(("stderr", "container", "reason"), [
-    ("bwrap: setting up uid map: Permission denied", False, "userns_denied"),
-    ("bwrap: No permissions to create new namespace", True, "container_seccomp_profile_missing"),
-    ("bwrap: Can't mount proc on /newroot/proc: Operation not permitted", True, "container_proc_masked"),
-    ("bwrap: Failed to mount tmpfs: Permission denied", True, "container_apparmor_denies_mount"),
-    ("bwrap: something unexpected", False, "probe_failed"),
+@pytest.mark.parametrize(("stderr", "reason"), [
+    ("bwrap: setting up uid map: Permission denied", "userns_denied"),
+    ("bwrap: No permissions to create new namespace", "userns_denied"),
+    ("bwrap: something unexpected", "probe_failed"),
 ])
-def test_probe_types_host_failures(tmp_path, monkeypatch, stderr, container, reason):
+def test_probe_types_host_failures(tmp_path, monkeypatch, stderr, reason):
     fake = _fake_bwrap(tmp_path, stderr)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
-    monkeypatch.setattr(process_isolation, "in_container", lambda: container)
+    monkeypatch.setattr(process_isolation, "in_container", lambda: False)
     runtime = process_isolation.process_runtime({})
     posture = process_isolation.probe(runtime, use_cache=False)
     assert posture.isolated is False and posture.reason == reason
+
+
+@pytest.mark.parametrize("signal_name", ["dockerenv", "containerenv", "env", "kubernetes", "cgroup_v1", "mountinfo"])
+def test_container_detection_signals(tmp_path, signal_name):
+    """cgroup v2 with a private namespace shows only 0::/, so other signals count."""
+    root = tmp_path / "root"
+    (root / "proc" / "1").mkdir(parents=True)
+    (root / "proc" / "self").mkdir(parents=True)
+    (root / "proc" / "1" / "cgroup").write_text("0::/\n")
+    (root / "proc" / "self" / "mountinfo").write_text(
+        "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n")
+    environ: dict = {}
+    assert process_isolation.in_container(root=root, environ=environ) is False
+    if signal_name == "dockerenv":
+        (root / ".dockerenv").write_text("")
+    elif signal_name == "containerenv":
+        (root / "run").mkdir()
+        (root / "run" / ".containerenv").write_text("")
+    elif signal_name == "env":
+        environ["container"] = "podman"
+    elif signal_name == "kubernetes":
+        environ["KUBERNETES_SERVICE_HOST"] = "10.0.0.1"
+    elif signal_name == "cgroup_v1":
+        (root / "proc" / "1" / "cgroup").write_text("12:pids:/docker/0123abcd\n")
+    else:
+        (root / "proc" / "self" / "mountinfo").write_text(
+            "600 500 0:52 / / rw,relatime master:1 - overlay overlay "
+            "rw,lowerdir=/var/lib/docker/overlay2/l/ABC,upperdir=/var/lib/docker/overlay2/x/diff\n")
+    assert process_isolation.in_container(root=root, environ=environ) is True
+
+
+def test_containers_block_agent_commands_with_the_host_remedy(monkeypatch, tmp_path):
+    """Native host first (ADR-036): in a container agent commands are blocked, typed."""
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(process_isolation, "in_container", lambda: True)
+    monkeypatch.setattr(process_tools_module, "_spawn_process", lambda *a, **k: pytest.fail("launched"))
+    posture = process_isolation.probe(process_isolation.process_runtime({}), use_cache=False)
+    assert posture.reason == "container_unsupported" and posture.in_container is True
+    with pytest.raises(ValueError, match=r"^process_isolation_unavailable:container_unsupported .*"
+                                         r"\./manage\.sh -e dev local up.*#1135"):
+        process_runtime_manager.run_command(command="git", args_json='["--version"]')
+    with pytest.raises(ValueError, match="^process_isolation_unavailable:container_unsupported"):
+        process_runtime_manager.start_process(command="git", args_json='["--version"]')
+    assert run_command(command="git", args_json='["--version"]').startswith(
+        "Error: process_isolation_unavailable:container_unsupported")
+    assert start_process.get_approval_preflight_error({}).startswith(
+        "Error: process_isolation_unavailable:container_unsupported")
+    # Argument validation and the other process tools keep working.
+    with pytest.raises(ValueError, match="not allowed"):
+        process_runtime_manager.run_command(command="curlx")
+    assert process_runtime_manager.list_processes() == []
 
 
 def test_probe_requires_every_flag_the_sandbox_uses(tmp_path, monkeypatch):

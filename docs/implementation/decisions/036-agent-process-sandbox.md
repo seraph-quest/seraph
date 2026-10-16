@@ -142,8 +142,7 @@ workspace, at its resolved path, is a view:
   - `platform_unsupported`, `bwrap_missing`, `bwrap_unsupported`,
     `openat2_unavailable`, `userns_denied`, `probe_failed`, `probe_mismatch`,
     `runtime_root_unsafe`;
-  - in containers: `container_seccomp_profile_missing`,
-    `container_apparmor_denies_mount`, `container_proc_masked`.
+  - `container_unsupported` inside any container (see Deployment posture).
 - **Blocked hosts.** Hosts that cannot provide the sandbox, including macOS
   and Windows, block `run_command` and `start_process` with
   `process_isolation_unavailable:<reason>` before any approval is created.
@@ -155,59 +154,38 @@ workspace, at its resolved path, is a view:
   `process_isolation_posture_changed`. The approval text lists the view,
   including the stale-inode behaviour below and the network line.
 
-### Container deployment
+### Deployment posture
 
-The backend container runs process tools in the same sandbox. Its Compose
-service sets:
+**The native host is the primary and recommended runtime for agent
+commands.** Run Seraph on the host (`./manage.sh -e dev local up`, or the
+equivalent production host install) to use `run_command` and `start_process`.
 
-- `security_opt: seccomp=./deploy/seccomp/seraph-backend.json`. This is
-  the vendored Docker default (`deploy/seccomp/docker-default.json`; see the
-  provenance note in `deploy/seccomp/README.md`) plus only:
-  - `clone` with user, mount, pid, net, ipc or uts namespace flags (a cgroup
-    namespace stays denied);
-  - `unshare` without the cgroup or time namespace flags;
-  - `mount`, `umount2` and `pivot_root`.
+**Docker is supported without agent command tools.** Inside a container
+(detected from `/.dockerenv`, `/run/.containerenv`, the `container` or
+Kubernetes environment, cgroup v1 paths, or a root filesystem mounted from a
+container runtime's storage), the probe reports
+`process_isolation_unavailable:container_unsupported`. Its remedy is to run
+Seraph on the host, with #1135 tracked for container support. The block is
+the same as on any other host without the sandbox: it is typed, it is
+returned before any approval, and it is logged once at startup. Every other
+backend capability keeps working in the container.
 
-  `setns` stays denied and `clone3` stays ENOSYS.
-- `apparmor=seraph-backend` (`deploy/apparmor/seraph-backend`), through a
-  per-environment override (`docker-compose.<env>.apparmor.yaml`) that
-  `manage.sh` adds only when the profile is loaded on the host. Referencing
-  an unloaded profile would stop the container from starting. Without the
-  override, AppArmor hosts apply Docker's `docker-default`; the backend runs
-  and agent commands are blocked with `container_apparmor_denies_mount`. The
-  profile is `docker-default` without its blanket `deny mount`, plus
-  `userns`, `mount` and `pivot_root`. The only additional `/proc/sys` write
-  it permits is `user/max_user_namespaces`, which `--disable-userns` sets
-  inside its own user namespace.
-- `systempaths=unconfined`. Docker masks `/proc` paths, and the kernel
-  refuses a fresh procfs mount for a pid namespace under a partially masked
-  `/proc`.
-- `no-new-privileges:true` and `cap_drop: [ALL]`.
-
-The image runs as `USER seraph` (uid and gid 10001). A workspace or managed
-lifecycle directory (`/app/workspace-lifecycle`, which holds the accounting
-witness) owned by an earlier root container is refused at startup
-(`workspace_ownership_mismatch`, `workspace_lifecycle_ownership_mismatch`)
-until a one-time `chown` migration of `/app/data`, `/app/logs` and
-`/app/workspace-lifecycle`. The probe runs at container startup and
-before each launch.
+Why (operator decision, 2026-10-16, on #1103):
+- **Precedent.** The operator's stated rationale is that this matches
+  IronClaw and Hermes, which run agent commands on the native host first.
+  This ADR records that decision and does not independently re-verify those
+  products.
+- **Complexity.** Running bubblewrap inside Docker needs a custom seccomp
+  profile, a custom AppArmor profile that must be loaded on the host, an
+  unmasked `/proc`, a non-root image user and a workspace ownership
+  migration. That widens the container's kernel surface and adds deployment
+  failure modes.
+- **Follow-up.** The container work is preserved on
+  `backup/1103-docker-sandbox` and tracked in
+  [#1135](https://github.com/seraph-quest/seraph/issues/1135).
 
 ## Consequences
 
-- **Kernel surface (containers).** Inside the backend container, user, mount,
-  pid, net, ipc and uts namespace creation and mount operations become
-  reachable. This is the same kernel attack surface as on a bare-metal
-  Ubuntu host with the bwrap AppArmor profile, and wider than Docker's
-  default seccomp, which reserves these syscalls for `CAP_SYS_ADMIN`.
-  `systempaths=unconfined` also exposes `/proc` entries that Docker masks
-  (for example `/proc/kcore` and `/proc/sys`). They stay unreadable or
-  unwritable to the non-root, capability-free container user through file
-  permissions and the AppArmor denies. The cgroup namespace, `setns`,
-  `clone3`, the new mount API and `bpf` stay denied.
-- **AppArmor loading.** On AppArmor hosts the profile must be loaded once:
-  `sudo apparmor_parser -r -W deploy/apparmor/seraph-backend`. AppArmor 3
-  parsers (Ubuntu 23.04 and earlier) do not know the `userns` rule. Delete
-  that line there; those kernels do not mediate user namespaces.
 - **Read-only levels (parity cost).** Commands cannot create, rename or
   delete entries at the workspace top level, `artifacts/` or
   `artifacts/mail/`. This affects `sed -i soul.md`, rename-replace editors
@@ -227,7 +205,8 @@ before each launch.
     that run;
   - correctness depends on `agent_protected_paths()` declaring every
     protected name.
-- **Follow-ups:** a macOS Seatbelt adapter
+- **Follow-ups:** agent commands inside containers
+  ([#1135](https://github.com/seraph-quest/seraph/issues/1135)), a macOS Seatbelt adapter
   ([#1129](https://github.com/seraph-quest/seraph/issues/1129)), and a network policy for
   `start_process` ([#1130](https://github.com/seraph-quest/seraph/issues/1130)).
 
@@ -244,9 +223,6 @@ before each launch.
   - typed host reasons, blocking before approval, posture changes, guard
     mismatch and startup failure.
 - `test_process_launch_sites.py` allowlists every subprocess launch site.
-- `test_container_process_sandbox.py` parses Compose, the Dockerfile and both
-  profiles.
-- The CI job `container-process-sandbox` builds the image. Under the shipped
-  profiles it must report an isolated posture and refuse `.vault-key` to a
-  real command. Under Docker's defaults it must report a typed blocked
-  reason.
+- Container detection covers each signal, and a container blocks agent
+  commands with `container_unsupported` and the host remedy, while argument
+  validation and the other process tools keep working.

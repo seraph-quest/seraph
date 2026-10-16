@@ -22,19 +22,6 @@ services:
       - ${BACKEND_DATA_PATH_DEV}:/app/data
       - ${BACKEND_LOGS_PATH_DEV}:/app/logs
       - ./shared:/app/shared
-    # Agent process sandbox (#1103): Docker's default seccomp profile plus
-    # exactly the user/mount/pid/net/ipc/uts namespace and mount syscalls
-    # bubblewrap needs; /proc unmasked so the sandbox can mount its own
-    # procfs; no capabilities. On AppArmor hosts manage.sh adds
-    # docker-compose.dev.apparmor.yaml once the seraph-backend profile is
-    # loaded; without it Docker's default profile applies and agent commands
-    # are blocked (container_apparmor_denies_mount) while the backend runs.
-    security_opt:
-      - seccomp=./deploy/seccomp/seraph-backend.json
-      - systempaths=unconfined
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
     env_file:
       - .env.dev
     environment:

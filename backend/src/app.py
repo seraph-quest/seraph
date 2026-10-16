@@ -1,5 +1,4 @@
 import os
-import asyncio
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -343,23 +342,16 @@ def _augment_inference_readiness(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     workspace_owner = None
-    from src.execution.process_isolation import in_container
+    from src.execution.process_isolation import CONTAINER_REMEDY, in_container
 
     if in_container():
-        # The image runs as uid 10001 (#1103): refuse to start on a workspace
-        # an earlier root container still owns, rather than failing mid-write,
-        # and record the agent process sandbox posture probed in here.
-        from src.workspace.production import OWNERSHIP_MIGRATION, container_ownership_problems
-
-        ownership = container_ownership_problems(settings.workspace_dir)
-        if ownership:
-            raise RuntimeError(f"{', '.join(ownership)}; migrate once with: {OWNERSHIP_MIGRATION}")
-        from src.tools.process_tools import _sandbox_posture
-
-        posture = await asyncio.to_thread(_sandbox_posture)
+        # The native host is the supported runtime for agent commands (#1103,
+        # ADR-036); inside a container they are blocked with a typed reason
+        # and everything else runs. Say so once at startup.
         logging.getLogger(__name__).warning(
-            "Agent process sandbox: %s",
-            "isolated" if posture.isolated else posture.code,
+            "Agent command tools are blocked in this container "
+            "(process_isolation_unavailable:container_unsupported): %s",
+            CONTAINER_REMEDY,
         )
     if settings.deployment_environment.strip().lower() in {"prod", "production"}:
         # The container preflight proves the /app/data bind.  Hold the same

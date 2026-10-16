@@ -811,6 +811,12 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                     **(await _route_block_detail(exc)),
                 },
             ) from exc
+        except asyncio.CancelledError:
+            # A REST client disconnect cancels the handler; the Cordis turn settles visibly.
+            if cordis_turn is not None:
+                cordis_turn.cancel()
+                await asyncio.shield(cordis_blocked("agent_turn_cancelled"))
+            raise
         except Exception as e:
             await cordis_blocked("agent_turn_failed")
             logger.exception("Direct OpenRouter chat failed")
@@ -1078,6 +1084,11 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
             },
         )
         raise HTTPException(status_code=504, detail="Agent timed out — try a simpler request")
+    except asyncio.CancelledError:
+        if cordis_turn is not None:
+            cordis_turn.cancel()
+            await asyncio.shield(cordis_blocked("agent_turn_cancelled"))
+        raise
     except Exception as e:
         turn_reason = turn_failure_reason(e) if cordis_turn is not None else None
         await cordis_blocked(turn_reason or "agent_turn_failed")

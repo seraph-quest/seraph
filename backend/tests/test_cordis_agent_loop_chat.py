@@ -48,6 +48,19 @@ class Env:
         rows = self.client.portal.call(session_manager.get_messages, session_id)
         return [(row["role"], row["content"]) for row in rows]
 
+    def tool_effects(self):
+        from sqlalchemy import select
+        from src.db.engine import get_session
+        from src.db.models import WorkflowRunState
+        from src.runtime_plugins.agent_turns import TURN_JOB_KIND
+
+        async def read():
+            async with get_session() as db:
+                rows = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.job_kind == TURN_JOB_KIND))).scalars()
+                return [((item.get("details") or {}).get("tool_name"), item.get("status")) for row in rows
+                        for item in json.loads(row.effect_receipts_json or "[]") if item.get("effect_type") == "cordis_turn_tool"]
+        return self.client.portal.call(read)
+
     def turns(self):
         from sqlalchemy import select
         from src.db.engine import get_session
@@ -288,3 +301,84 @@ def test_ws_disconnect_cancels_the_turn_and_writes_one_fenced_interrupted_row(tm
         assert env.turns() == [("blocked", "agent_turn_cancelled")]
         rows = env.messages(session_id)
         assert [role for role, _ in rows].count("assistant") == 1 and "never adopted" not in json.dumps(rows)
+
+
+def test_ws_broken_direct_stream_keeps_honest_uncertainty_like_legacy(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    async def broken(*_args, **_kwargs):
+        yield "Partial"
+        raise RuntimeError("provider stream reset")
+
+    def drive(env):
+        with patch("src.api.ws.should_use_direct_local_chat", return_value=True), \
+             patch("src.api.ws.direct_local_chat_route_error", new=AsyncMock(return_value=None)), \
+             patch("src.api.ws.stream_direct_local_chat", broken):
+            frames = ws_turn(env, "hi")
+        return shape(frames), env.messages(frames[0]["session_id"]), env.turns()
+    legacy, cordis = both(tmp_path, monkeypatch, lambda: [], drive)
+    assert legacy[0] == cordis[0] and legacy[1] == cordis[1]
+    assert cordis[0][-1][0] == "error" and "remote outcome is uncertain" in cordis[0][-1][1]
+    # The committed user row stays; no assistant row is invented; the turn is honestly blocked.
+    assert [role for role, _ in cordis[1]] == ["user"]
+    assert cordis[2] == [("blocked", "provider_outcome_uncertain")]
+
+
+def test_ws_approval_gate_matches_legacy_and_records_no_effect(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    def script():
+        return [tools(call("write_file", {"file_path": "plan.txt", "content": "ship it"})),
+                final("Approve the write first.")]
+
+    def drive(env):
+        from src.approval.repository import approval_repository
+        # The operator requires approval for write_file (tool approval behaviour "always").
+        with patch("src.tools.approval.get_tool_approval_behavior", return_value="always"):
+            frames = ws_turn(env, "write ship it into plan.txt")
+        session_id = frames[-1]["session_id"]
+        pending = env.client.portal.call(lambda: approval_repository.list_pending(session_id=session_id))
+        rows = [(item["tool_name"], item["risk_level"], item["status"], item.get("fingerprint")) for item in pending]
+        return (shape(frames), env.messages(session_id), rows, (env.workspace / "plan.txt").exists(), env.turns(),
+                env.tool_effects())
+    legacy, cordis = both(tmp_path, monkeypatch, script, drive)
+    assert legacy[:4] == cordis[:4]
+    assert cordis[2] and cordis[2][0][:3] == ("write_file", "medium", "pending") and cordis[3] is False
+    assert cordis[4] == [("succeeded", None)]
+    # The gated call never ran: its Cordis intent resolved as no effect.
+    assert cordis[5] == [("write_file", "no_effect")]
+
+
+def test_onboarding_runs_its_per_turn_surface_through_cordis(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    def drive(env):
+        # On the OpenRouter profile onboarding defaults to direct chat; this case drives its agent.
+        with patch("src.api.ws.should_use_direct_local_chat", return_value=False):
+            frames = ws_turn(env, "I am Ada and I build compilers for a living")
+        return shape(frames), env.messages(frames[-1]["session_id"]), env.turns(), env.model.calls[0]["tools"]
+    legacy, cordis = both(tmp_path, monkeypatch, lambda: [final("Nice to meet you, Ada.")], drive, onboarded=False)
+    assert legacy[:2] == cordis[:2] and legacy[3] == cordis[3]
+    assert "update_soul" in cordis[3] and "write_file" not in cordis[3]
+    assert cordis[2] == [("succeeded", None)]
+
+
+def test_delegation_fails_closed_visibly_on_the_cordis_loop(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    with chat_env(tmp_path, monkeypatch, [final("never")], loop="cordis") as env:
+        monkeypatch.setattr(settings, "use_delegation", True)
+        frames = ws_turn(env, "delegate this research please")
+        assert frames[-1]["type"] == "error" and frames[-1]["reason"] == "delegation_pending_1020"
+        assert env.model.calls == [] and env.turns() == []
+
+
+def test_store_secret_is_denied_and_its_value_never_enters_turn_state(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    from sqlalchemy import select
+    from src.db import engine as db_engine
+    from src.db.models import WorkflowRunState
+    with chat_env(tmp_path, monkeypatch, [tools(call("store_secret", {"key": "api", "value": SECRET})),
+                                          final("Use Settings for secrets.")], loop="cordis") as env:
+        frames = ws_turn(env, "remember my api token please")
+        assert frames[-1]["type"] == "final"
+        assert any("Settings -> Vault" in str(frame.get("content")) for frame in frames if frame["type"] == "step")
+
+        async def persisted():
+            async with db_engine.get_session() as db:
+                return json.dumps([row.model_dump() for row in (await db.execute(select(WorkflowRunState))).scalars()],
+                                  default=str)
+        assert SECRET not in env.client.portal.call(persisted)
+        from src.vault.repository import vault_repository
+        assert env.client.portal.call(vault_repository.get, "api") is None

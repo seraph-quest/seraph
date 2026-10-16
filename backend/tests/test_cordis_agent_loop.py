@@ -248,3 +248,35 @@ async def test_runtime_status_names_the_actual_loop_and_route(accounting_db, rea
     status = await chat_runtime_status(host)
     assert status["loop"] == "blocked" and status["reason"].startswith("cordis_") and status["recovery"]
     assert Path(__file__).exists()
+
+
+async def test_measured_step_overhead_and_direct_first_delta_budget(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    """Design caps: <= 250 ms added per step and <= 300 ms added before a direct-chat first delta."""
+    import statistics
+    import time
+    deny_sockets(monkeypatch)
+    jobs = DurableJobRepository()
+    steps = 5
+
+    def script():
+        return [tools(call("echo", {"text": str(index)}, f"call-{index}")) for index in range(steps)] + [final("done")]
+    async with agent_loop_host(jobs) as host:
+        operator = await _session()
+        loop = asyncio.get_running_loop()
+        legacy, cordis, admissions = [], [], []
+        for attempt in range(3):
+            agent = ToolCallingAgent(tools=[Echo()], model=ScriptedModel(script()), max_steps=10, verbosity_level=0)
+            began = time.perf_counter()
+            await loop.run_in_executor(None, lambda: agent.run("go"))
+            legacy.append(time.perf_counter() - began)
+            began = time.perf_counter()
+            turn = await _turn(operator, host, jobs, message_id=f"measure-{attempt}")
+            admissions.append(time.perf_counter() - began)
+            agent = ToolCallingAgent(tools=[Echo()], model=ScriptedModel(script()), max_steps=10, verbosity_level=0)
+            await _run(turn, agent, "go")
+            assert await turn.settle("succeeded", message=_reply(f"measure-reply-{attempt}", "done"))
+            cordis.append(time.perf_counter() - began)
+        per_step = (statistics.median(cordis) - statistics.median(legacy)) / (steps + 1)
+        first_delta = statistics.median(admissions)
+        print(f"MEASURED per-step overhead {per_step * 1000:.1f} ms; direct first-delta overhead {first_delta * 1000:.1f} ms")
+        assert per_step <= 0.250 and first_delta <= 0.300

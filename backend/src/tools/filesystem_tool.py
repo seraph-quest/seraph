@@ -14,6 +14,7 @@ from config.settings import settings
 from src.artifacts.registry import build_artifact_record
 from src.audit.runtime import log_integration_event_sync
 from src.security.authority_envelope import check_filesystem_scope
+from src.workspace import AgentWorkspaceAccess, canonical_agent_workspace_access
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,10 @@ _SECRET_FILE_NAMES = {
     ".env.production",
     ".npmrc",
     ".pypirc",
+    ".vault-key",
     "credentials",
     "credentials.json",
+    "google_calendar_token.json",
     "google_credentials.json",
     "id_dsa",
     "id_ecdsa",
@@ -266,6 +269,37 @@ def _assert_not_secret_like_path(file_path: str, operation: str) -> None:
     )
 
 
+class RuntimeOwnedWorkspacePathError(ValueError):
+    """Typed refusal for a workspace path the state registry keeps from agents."""
+
+    reason_code = "workspace_path_runtime_owned"
+
+    def __init__(self, file_path: str, operation: str, access: AgentWorkspaceAccess) -> None:
+        self.file_path = file_path
+        self.operation = operation
+        self.access = access
+        allowed = "read-only for agents" if access is AgentWorkspaceAccess.READ_ONLY else "not available to agents"
+        super().__init__(
+            f"Runtime-owned workspace path blocked for {operation}: {file_path} is Seraph "
+            f"runtime state ({allowed}). Use the vault, settings, or workspace lifecycle "
+            "surface that owns it instead."
+        )
+
+
+def _assert_agent_workspace_access(file_path: str, resolved: Path, operation: str, *, write: bool) -> None:
+    """Refuse registry-owned state after traversal and symlinks are resolved."""
+    workspace = Path(settings.workspace_dir).resolve()
+    if resolved != workspace:
+        # Repeat the name check on the resolved spelling as defence in depth.
+        _assert_not_secret_like_path(resolved.relative_to(workspace).as_posix(), operation)
+    access = canonical_agent_workspace_access(workspace, resolved)
+    if access is AgentWorkspaceAccess.READ_WRITE:
+        return
+    if access is AgentWorkspaceAccess.READ_ONLY and not write:
+        return
+    raise RuntimeOwnedWorkspacePathError(file_path, operation, access)
+
+
 def _sha256_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -358,6 +392,7 @@ def read_file(file_path: str) -> str:
     try:
         _assert_not_secret_like_path(file_path, "read")
         resolved = _safe_resolve(file_path)
+        _assert_agent_workspace_access(file_path, resolved, "read", write=False)
     except ValueError as exc:
         log_integration_event_sync(
             integration_type="filesystem",
@@ -419,6 +454,7 @@ def write_file(file_path: str, content: str) -> str:
         _assert_bounded_text(content, limit=_MAX_FILE_WRITE_BYTES, label="file content")
         _assert_not_secret_like_path(file_path, "write")
         resolved = _safe_resolve(file_path)
+        _assert_agent_workspace_access(file_path, resolved, "write", write=True)
     except ValueError as exc:
         log_integration_event_sync(
             integration_type="filesystem",
@@ -471,6 +507,7 @@ def preview_workspace_patch(
         _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "preview_patch")
         resolved = _safe_resolve(file_path)
+        _assert_agent_workspace_access(file_path, resolved, "preview_patch", write=True)
         before, truncated = _read_workspace_text_bounded(resolved)
         if truncated:
             raise ValueError("File exceeds the bounded workspace read policy")
@@ -543,6 +580,7 @@ def apply_workspace_patch(
         _assert_bounded_text(new_text, limit=_MAX_PATCH_INPUT_BYTES, label="new_text")
         _assert_not_secret_like_path(file_path, "apply_patch")
         resolved = _safe_resolve(file_path)
+        _assert_agent_workspace_access(file_path, resolved, "apply_patch", write=True)
         with _open_workspace_text(resolved, write=True) as stream:
             before, truncated = _read_text_stream_bounded(stream)
             if truncated:

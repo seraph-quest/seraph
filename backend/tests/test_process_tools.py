@@ -738,6 +738,64 @@ def test_run_command_rejects_search_of_secret_like_workspace_file(command):
     assert result == "Error: path argument cannot target secret-like workspace files."
 
 
+@pytest.fixture
+def isolated_workspace(tmp_path, monkeypatch):
+    """Keep registry-owned fixtures out of the shared test workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    return workspace
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    [".vault-key", "google_calendar_token.json", "seraph.db", "seraph.db-wal", "mcp-servers.json", "SERAPH.DB"],
+)
+@pytest.mark.parametrize("command", ["cat", "head", "grep"])
+def test_run_command_rejects_registry_owned_secret_and_database_files(command, file_name, isolated_workspace):
+    _write_workspace_file(file_name, "SERAPH_TEST_SECRET=do-not-read\n")
+    args = ["SERAPH_TEST_SECRET", file_name] if command == "grep" else [file_name]
+
+    result = run_command(command=command, args_json=json.dumps(args))
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+def test_run_command_rejects_traversal_to_registry_owned_file(isolated_workspace):
+    _write_workspace_file("notes/today.md", "ok\n")
+    _write_workspace_file("seraph.db", "SERAPH_TEST_SECRET=do-not-read\n")
+
+    result = run_command(command="cat", args_json='["notes/../seraph.db"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+def test_run_command_rejects_hard_link_alias_of_registry_owned_file(isolated_workspace):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    (isolated_workspace / "notes").mkdir()
+    (isolated_workspace / "notes" / "vault-alias.md").hardlink_to(isolated_workspace / ".vault-key")
+
+    result = run_command(command="cat", args_json='["notes/vault-alias.md"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+def test_run_command_rejects_recursive_search_over_registry_owned_files(isolated_workspace):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-search\n")
+
+    result = run_command(command="grep", args_json='["-R","SERAPH_TEST_SECRET","."]')
+
+    assert result == "Error: path argument cannot recursively search workspace paths containing secret-like files."
+
+
+def test_run_command_still_reads_ordinary_and_read_only_runtime_files(isolated_workspace):
+    _write_workspace_file("notes/today.md", "ordinary note\n")
+    _write_workspace_file("model-fabric-settings.json", "{}\n")
+
+    assert "ordinary note" in run_command(command="cat", args_json='["notes/today.md"]')
+    assert "{}" in run_command(command="cat", args_json='["model-fabric-settings.json"]')
+
+
 @pytest.mark.parametrize(
     ("command", "args_json", "label"),
     [

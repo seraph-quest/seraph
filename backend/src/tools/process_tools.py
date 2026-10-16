@@ -24,6 +24,7 @@ from smolagents import Tool
 from config.settings import settings
 from src.approval.runtime import get_current_session_id
 from src.tools.policy import get_tool_execution_boundaries, get_tool_risk_level
+from src.workspace import AgentWorkspaceAccess, canonical_agent_workspace_access
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,10 @@ _SECRET_FILE_NAMES = {
     ".netrc",
     ".npmrc",
     ".pypirc",
+    ".vault-key",
     "credentials",
     "credentials.json",
+    "google_calendar_token.json",
     "google_credentials.json",
     "id_dsa",
     "id_ecdsa",
@@ -399,7 +402,12 @@ def _is_secret_like_workspace_path(path: Path) -> bool:
         return True
     if any(name.endswith(suffix) for suffix in _SECRET_FILE_SUFFIXES):
         return True
-    return any(token in name for token in ("credential", "secret", "token"))
+    if any(token in name for token in ("credential", "secret", "token")):
+        return True
+    # Process arguments are reads, so only registry state denied outright
+    # (secrets, the database and its sidecars, credential-bearing settings)
+    # is refused here; the name lists above stay as defence in depth.
+    return canonical_agent_workspace_access(_workspace_root(), path) is AgentWorkspaceAccess.DENIED
 
 
 def _directory_contains_secret_like_workspace_path(path: Path) -> bool:

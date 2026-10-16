@@ -173,8 +173,8 @@ def test_probe_reports_not_isolated_when_bwrap_is_missing(tmp_path, monkeypatch)
     posture = probe(RUNTIME, SMALL, use_cache=False)
     assert posture.variant == "not_isolated" and posture.reason == "bwrap_missing"
     assert posture.payload() == {
-        "variant": "not_isolated", "isolation_claim": "none", "network_isolation": "not_isolated",
-        "resource_enforcement": "admission_and_wall_timeout_only", "host_access": "operator_user_full_access",
+        "variant": "not_isolated", "isolation_claim": "none", "network_isolation": "not_verified",
+        "resource_enforcement": "admission_and_wall_timeout_only", "host_access": "explicit_job_approval_required",
         "limits_digest": SMALL.digest, "isolation_unavailable_reason": "bwrap_missing"}
     # No silent fallback: an unisolated posture can never produce a command.
     with pytest.raises(IsolationUnavailable):

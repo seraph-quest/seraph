@@ -355,7 +355,12 @@ Goal/configuration/profile gates still apply; old Source TTL is not renewed.
 
 ### Trust and preservation
 
-Retain `isolation_claim=none` and host-user execution trust. Signing authenticates
+Retain host-user execution trust. (Amendment, #1065: where the host supports
+bubblewrap user namespaces, repository commands now run in an OS sandbox and the
+posture records `isolation_claim=bwrap_userns`; otherwise it keeps
+`isolation_claim=none` with an explicit `isolation_variant=not_isolated` reason.
+The sandbox constrains the repository's commands, not the trusted producer or
+signer described here.) Signing authenticates
 the original trusted producer under that assumption, not hostile-code isolation;
 same-user code can attack files/processes or the signer. CPU/memory/PID ceilings
 are not newly enforced. Unsupported Linux prerequisites or native-host proof

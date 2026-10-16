@@ -207,12 +207,21 @@ def safe_node_posture(authority, *, expected_posture=None):
         "interpreter_sha256", "worker_source_sha256", "supervisor_source_sha256", "git_sha256",
     }
     string_fields = {"node_path", "node_version", "npm_version", "interpreter_entry_path"}
-    fixed = {"kind": "local", "profile": PROFILE, "isolation_claim": "none",
-             "network_isolation": "not_verified", "resource_enforcement": "admission_and_wall_timeout_only",
-             "host_access": "explicit_job_approval_required", "process_supervision": "linux_per_job_subreaper",
-             "npm_executed": False}
-    allowed = digest_fields | string_fields | set(fixed) | {"unenforced_limits", "dependency_limits", "execution_plan"}
-    required = allowed - {"execution_plan"}
+    # Two closed variants (#1065). Either way the posture digest binds the
+    # variant into the approval, so a change invalidates earlier approvals.
+    isolated = posture.get("isolation_variant") == "isolated"
+    fixed = {"kind": "local", "profile": PROFILE, "process_supervision": "linux_per_job_subreaper",
+             "npm_executed": False, **(
+                 {"isolation_claim": "bwrap_userns", "network_isolation": "netns_loopback_only_verified",
+                  "resource_enforcement": "rlimit_cpu_as_fsize_nproc_and_wall_timeout",
+                  "host_access": "snapshot_bind_only"} if isolated else
+                 {"isolation_claim": "none", "network_isolation": "not_verified",
+                  "resource_enforcement": "admission_and_wall_timeout_only",
+                  "host_access": "explicit_job_approval_required"})}
+    from src.execution.repo_isolation import ISOLATION_FIELDS, valid_posture_fields
+    allowed = digest_fields | string_fields | set(fixed) | {"unenforced_limits", "dependency_limits",
+                                                             "execution_plan"} | ISOLATION_FIELDS
+    required = allowed - {"execution_plan"} - ISOLATION_FIELDS
     def digest(value):
         return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
     def text(value, bound=512):
@@ -236,7 +245,9 @@ def safe_node_posture(authority, *, expected_posture=None):
         return None
     if not posture["node_path"].startswith("/") or not posture["interpreter_entry_path"].startswith("/"):
         return None
-    if posture["unenforced_limits"] != ["cpu", "memory", "pids"]:
+    if posture["unenforced_limits"] != (["memory"] if isolated else ["cpu", "memory", "pids"]):
+        return None
+    if not valid_posture_fields(posture):
         return None
     limits = posture["dependency_limits"]
     if limits != {"files": 512, "file_bytes": 16777216, "aggregate_bytes": 67108864} or any(type(value) is not int for value in limits.values()):
@@ -466,6 +477,14 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
             self._trusted_workspace()
             identity=runtime_identity(self.config)
             posture.update(identity)
+            isolation,isolation_spec=self._isolation_probe([identity["node_path"],identity["interpreter_entry_path"]])
+            posture.update(isolation)
+            if isolation["isolation_variant"]=="isolated":
+                # RLIMIT_CPU and the in-namespace RLIMIT_NPROC are enforced;
+                # RLIMIT_AS bounds address space, not resident memory.
+                posture["unenforced_limits"]=["memory"]
+            elif bool(getattr(self.config,"require_isolation",False)):
+                raise RepoSandboxError("isolation_required_unavailable")
             if authority and authority.get("repository_ref"):
                 root=self.validate_snapshot_root(str(authority["repository_ref"]))
                 # Approval binds original dependency link topology as well as
@@ -479,7 +498,7 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                     plan["dependency_aliases"]={entry.relative_path:entry.kind for entry in snapshot.entries if entry.kind.startswith("alias:")}
                     plan["snapshot_sha256"]=snapshot.digest
                     posture["execution_plan"]=plan
-            return RepoSandboxPreflight(True,"ready","node_local_staging_available",info={"runtime_identity":identity},executor_kind="local",posture=posture,posture_digest=executor_posture_digest(posture))
+            return RepoSandboxPreflight(True,"ready","node_local_staging_available",info={"runtime_identity":identity,"isolation_spec":isolation_spec},executor_kind="local",posture=posture,posture_digest=executor_posture_digest(posture))
         except (OSError, TypeError, ValueError, subprocess.SubprocessError, RepoSandboxError) as exc:
             return RepoSandboxPreflight(False,"blocked",str(exc)[:512],executor_kind=str(self.config.executor_kind),posture=posture)
 
@@ -550,6 +569,8 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
                 payload={"profile":PROFILE,"stage":str(stage),"plan":plan,"runtime":preflight.info["runtime_identity"],"deadline_at":deadline,
                          "allowed_paths":list(job.allowed_paths),"patch_paths":patch_paths,"job_id":job.job_id,"authority_digest":job.authority_digest,
                          "token":token,"environment":env,"limits":asdict(self.limits)}
+                if preflight.info.get("isolation_spec") is not None:
+                    payload["isolation"]=preflight.info["isolation_spec"]
                 if job.iteration_binding is not None:
                     payload["iteration_binding"] = iteration_process_projection(job.iteration_binding)
                 request=stage/"supervisor.json";request.write_text(json.dumps(payload));request.chmod(0o600)

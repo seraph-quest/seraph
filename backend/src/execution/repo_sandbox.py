@@ -3171,15 +3171,21 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             posture = _local_posture(self.limits, runtime_identity, profile=str(self.config.profile))
         except (OSError, RepoSandboxError, ValueError):
             return RepoSandboxPreflight(False, "blocked", "local_runtime_unavailable", executor_kind="local", posture=posture)
+        isolation, isolation_spec = self._isolation_probe([runtime_identity[key] for key in (
+            "interpreter_entry_path", "interpreter_path", "pytest_executable_path", "pytest_package_path")])
+        posture.update(isolation)
+        if bool(getattr(self.config, "require_isolation", False)) and isolation["isolation_variant"] != "isolated":
+            return RepoSandboxPreflight(False, "blocked", "isolation_required_unavailable", executor_kind="local", posture=posture)
         return RepoSandboxPreflight(
             True,
             "ready",
             "local_staging_available",
             info={
-                "host_access": "explicit_job_approval_required",
-                "isolation_claim": "none",
+                "host_access": posture["host_access"],
+                "isolation_claim": posture["isolation_claim"],
                 "runtime_identity": runtime_identity,
                 "git_sha256": _digest_file(git_path),
+                "isolation_spec": isolation_spec,
             },
             executor_kind="local",
             posture=posture,
@@ -3234,6 +3240,29 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or not os.access(path, os.X_OK):
             raise RepoSandboxError(f"local {label} is not a trusted executable")
         return _digest_file(path)
+
+    def _isolation_probe(self, runtime_files) -> tuple[dict, dict]:
+        """Probe OS isolation for these runtime files (#1065); never a fallback.
+
+        Returns the executor-posture fields (bound into the posture digest and
+        therefore into every approval) and the supervisor handoff spec.
+        """
+        from src.execution.repo_isolation import (executor_posture_fields, host_secret_paths, job_spec,
+            limits_for, probe, runtime_for)
+        runtime = runtime_for(runtime_files)
+        limits = limits_for(self.config)
+        hidden = host_secret_paths(self.workspace_dir)
+        posture = probe(runtime, limits, hidden_paths=hidden)
+        # A not-isolated posture runs exactly as before; only an isolated one
+        # hands a spec to the supervisor, which re-probes and must match.
+        spec = job_spec(posture, runtime, limits, hidden) if posture.isolated else None
+        return executor_posture_fields(posture), spec
+
+    def _activate_direct_isolation(self, preflight, stage: Path):
+        """In-process activation for direct worker commands (non-iterative path)."""
+        from src.execution.repo_isolation import activate
+        spec = (preflight.info or {}).get("isolation_spec")
+        return None if spec is None else activate(spec, stage_root=stage, extra_writable=(stage / "home", stage / "tmp"))
 
     def _local_runtime_identity(self) -> dict[str, str]:
         interpreter_entry = Path(sys.executable).absolute()
@@ -3291,7 +3320,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
             return RepoSandboxPreflight(False, "blocked", str(exc)[:512], executor_kind="local", posture=posture)
 
     def _run_supervised_python(self, job: RepoSandboxJob, *, stage: Path, runtime: dict, environment: dict,
-            deadline: float, observe_process: Callable, before_spawn: Callable, posture: Mapping) -> tuple[int, dict]:
+            deadline: float, observe_process: Callable, before_spawn: Callable, posture: Mapping,
+            isolation: Mapping | None = None) -> tuple[int, dict]:
         from src.execution.repo_supervisor import PYTHON_PROFILE, finish_supervisor, exact_signal, start_identity
         projection = iteration_process_projection(job.iteration_binding)
         token = self._job_stage_token(job)
@@ -3302,6 +3332,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         payload = {"profile": PYTHON_PROFILE, "stage": str(stage), "runtime": runtime, "job_id": job.job_id,
                    "iteration_binding": projection, "deadline_at": deadline, "token": token,
                    "supervisor_source_sha256": posture["supervisor_source_sha256"], "git_sha256": posture["git_sha256"], "environment": environment}
+        if isolation is not None:
+            payload["isolation"] = dict(isolation)
         request = stage / "supervisor.json"
         request.write_text(json.dumps(payload, sort_keys=True))
         request.chmod(0o600)
@@ -3790,6 +3822,8 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                         "deadline_at": deadline_at, "token": marker_token, "environment": environment,
                         "supervisor_source_sha256": posture["supervisor_source_sha256"],
                         "git_sha256": posture["git_sha256"]}
+                    if preflight.info.get("isolation_spec") is not None:
+                        payload["isolation"] = preflight.info["isolation_spec"]
                     result = run_original_producer(self, job, stage=root, payload=payload, posture=posture,
                         owner=producer_owner, observe_process=observe_process)
                     return self._finish_original_producer(job, result)
@@ -3801,25 +3835,32 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                             nonlocal supervised_receipt
                             code, supervised_receipt = self._run_supervised_python(job, stage=root,
                                 runtime=current_identity, environment=environment, deadline=deadline_at,
-                                observe_process=observe_process, before_spawn=before_spawn, posture=posture)
+                                observe_process=observe_process, before_spawn=before_spawn, posture=posture,
+                                isolation=preflight.info.get("isolation_spec"))
                             return code
-                    worker_exit = worker_runner(
-                        bundle / "job.json",
-                        workspace_root=root / "workspace",
-                        output_root=output_root,
-                        pytest_executable=pytest_executable,
-                        environment=environment,
-                        process_observer=observe_process,
-                        before_spawn=before_spawn,
-                        deadline_at=deadline_at,
-                        expected_identity={
-                            "worker_source_sha256": current_identity["worker_source_sha256"],
-                            "interpreter_sha256": current_identity["interpreter_sha256"],
-                            "pytest_executable_sha256": current_identity["pytest_executable_sha256"],
-                            "pytest_package_sha256": current_identity["pytest_package_sha256"],
-                        },
-                        publication_runtime=publication_runtime,
-                    )
+                    from src.execution.repo_worker import _command_isolation
+                    isolation_token = _command_isolation.set(
+                        self._activate_direct_isolation(preflight, root) if job.iteration_binding is None else None)
+                    try:
+                        worker_exit = worker_runner(
+                            bundle / "job.json",
+                            workspace_root=root / "workspace",
+                            output_root=output_root,
+                            pytest_executable=pytest_executable,
+                            environment=environment,
+                            process_observer=observe_process,
+                            before_spawn=before_spawn,
+                            deadline_at=deadline_at,
+                            expected_identity={
+                                "worker_source_sha256": current_identity["worker_source_sha256"],
+                                "interpreter_sha256": current_identity["interpreter_sha256"],
+                                "pytest_executable_sha256": current_identity["pytest_executable_sha256"],
+                                "pytest_package_sha256": current_identity["pytest_package_sha256"],
+                            },
+                            publication_runtime=publication_runtime,
+                        )
+                    finally:
+                        _command_isolation.reset(isolation_token)
                 except Exception as exc:
                     # A fresh API/dispatcher instance may have set the exact
                     # durable cancellation fence while the worker was

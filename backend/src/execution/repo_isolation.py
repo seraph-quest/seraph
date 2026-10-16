@@ -121,8 +121,9 @@ def _digest(value) -> str:
 
 
 def _not_isolated(reason: NotIsolatedReason, limits: IsolationLimits) -> IsolationPosture:
-    return IsolationPosture("not_isolated", "none", "not_isolated", "admission_and_wall_timeout_only",
-                            "operator_user_full_access", reason=reason, limits_digest=limits.digest)
+    # The values the local executor has always declared; only the reason is new.
+    return IsolationPosture("not_isolated", "none", "not_verified", "admission_and_wall_timeout_only",
+                            "explicit_job_approval_required", reason=reason, limits_digest=limits.digest)
 
 
 def _file_sha256(path: Path) -> str:
@@ -258,3 +259,153 @@ def probe(runtime: IsolationRuntime, limits: IsolationLimits, *, hidden_paths: S
 def clear_probe_cache() -> None:
     with _cache_lock:
         _cache.clear()
+
+
+# ---------------------------------------------------------------- integration
+
+ADDRESS_SPACE_BYTES = 8 * 1024 ** 3
+HOME_SECRETS = (".ssh", ".gnupg", ".aws", ".config/gh", ".netrc", ".git-credentials", ".docker/config.json")
+WORKSPACE_SECRETS = ("seraph.db", "seraph.db-wal", "seraph.db-shm", ".vault-key", "google_calendar_token.json")
+
+
+def host_secret_paths(workspace_dir: str | os.PathLike | None = None) -> tuple[str, ...]:
+    """Leaf secrets that must be absent inside the sandbox.
+
+    Leaves, never ancestors: a bound stage under the workspace makes its
+    ancestors exist as empty skeleton directories inside the sandbox.
+    """
+    paths = [Path.home() / name for name in HOME_SECRETS]
+    if workspace_dir is not None:
+        from src.workspace.state_registry import canonical_workspace_database_path
+        root = Path(workspace_dir).expanduser().absolute()
+        database = Path(canonical_workspace_database_path(str(root)))
+        paths += [root / name for name in WORKSPACE_SECRETS]
+        paths += [database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
+    return tuple(sorted({str(Path(os.path.normpath(path))) for path in paths}))
+
+
+def runtime_for(files: Sequence[str | os.PathLike], *, interpreter: str | os.PathLike = sys.executable) -> IsolationRuntime:
+    """Read-only roots for the executables a command needs.
+
+    Each executable's install root (``<root>/bin/<exe>``) is bound, for both
+    the path as configured and its resolved target, plus the probe interpreter.
+    """
+    roots: set[Path] = set()
+    for item in (*files, interpreter):
+        for candidate in (Path(item).absolute(), Path(item).resolve()):
+            root = candidate.parent.parent if candidate.parent.name == "bin" else candidate.parent
+            if not _under_usr(root) and root != Path("/"):
+                roots.add(Path(os.path.normpath(root)))
+    base = IsolationRuntime.for_python(interpreter)
+    roots.update(base.read_only_paths)
+    roots = {root for root in roots if not _under_usr(root)}
+    identity = _digest({"interpreter": str(interpreter), "roots": sorted(map(str, roots))})
+    return IsolationRuntime(Path(interpreter), tuple(sorted(roots)), identity)
+
+
+def limits_for(config) -> IsolationLimits:
+    """Map the operator's repository sandbox settings onto rlimits."""
+    # RLIMIT_AS bounds virtual reservations, not resident memory: V8 and
+    # glibc arenas reserve far more than they touch, so it is a fixed ceiling.
+    return IsolationLimits(cpu_seconds=int(config.max_cpu_seconds),
+                           address_space_bytes=ADDRESS_SPACE_BYTES,
+                           file_size_bytes=max(int(config.max_snapshot_bytes), int(config.max_file_bytes)),
+                           max_processes=int(config.max_pids), tmp_bytes=int(config.max_snapshot_bytes))
+
+
+def executor_posture_fields(posture: IsolationPosture) -> dict:
+    """Flat executor-posture fields (durable authority stores postures flat)."""
+    fields = {"isolation_claim": posture.isolation_claim, "network_isolation": posture.network_isolation,
+              "resource_enforcement": posture.resource_enforcement, "host_access": posture.host_access,
+              "isolation_variant": posture.variant}
+    if posture.isolated:
+        fields.update(isolation_bwrap_sha256=posture.bwrap_sha256, isolation_probe_sha256=posture.probe_sha256)
+    else:
+        fields["isolation_unavailable_reason"] = posture.reason
+    return fields
+
+
+ISOLATION_FIELDS = frozenset({"isolation_variant", "isolation_bwrap_sha256", "isolation_probe_sha256",
+                              "isolation_unavailable_reason"})
+
+
+def job_spec(posture: IsolationPosture, runtime: IsolationRuntime, limits: IsolationLimits,
+             hidden_paths: Sequence[str]) -> dict:
+    """JSON handoff to the supervisor, which re-probes and must match exactly."""
+    return {"payload": posture.payload(), "interpreter": str(runtime.interpreter),
+            "read_only_paths": [str(path) for path in runtime.read_only_paths], "identity": runtime.identity,
+            "limits": dict(limits.__dict__), "hidden_paths": list(hidden_paths)}
+
+
+@dataclass(frozen=True)
+class CommandIsolation:
+    posture: IsolationPosture
+    runtime: IsolationRuntime
+    limits: IsolationLimits
+    stage_root: Path
+    extra_writable: tuple[Path, ...] = ()
+    hidden_paths: tuple[str, ...] = ()
+
+    def command(self, argv: Sequence[str], cwd: Path, env: Mapping[str, str]) -> tuple[list[str], dict]:
+        """(argv, Popen env) for one repository command; unchanged when not isolated.
+
+        Visible: the stage (read-only), the command's cwd and the stage's
+        home/tmp (writable), and any regular file named by an absolute argv
+        entry (read-only, e.g. the trusted verifier's scratch patch file).
+        """
+        if not self.posture.isolated:
+            return list(argv), dict(env)
+        writable = (Path(cwd), *(path for path in self.extra_writable if path.exists()))
+        named = []
+        for item in argv[1:]:
+            path = Path(item)
+            if not path.is_absolute() or path.is_symlink() or not path.is_file() or _under_usr(path):
+                continue
+            path = Path(os.path.normpath(path))
+            if any(path == Path(hidden) or Path(hidden) in path.parents for hidden in self.hidden_paths):
+                raise IsolationUnavailable("a repository command named a hidden host secret")
+            if self.stage_root not in path.parents:
+                named.append(path)
+        stage = StagePaths(writable=writable, read_only=(self.stage_root, *named), cwd=Path(cwd))
+        return (wrap(argv, stage, self.runtime, self.limits, self.posture, env=dict(env)),
+                {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+
+
+def activate(spec: Mapping, *, stage_root: Path, extra_writable: Sequence[Path] = ()) -> CommandIsolation:
+    """Supervisor side: re-probe now and require the exact approved posture."""
+    runtime = IsolationRuntime(Path(spec["interpreter"]), tuple(Path(path) for path in spec["read_only_paths"]),
+                               str(spec["identity"]))
+    limits = IsolationLimits(**spec["limits"])
+    current = probe(runtime, limits, hidden_paths=spec["hidden_paths"])
+    if current.payload() != spec["payload"]:
+        raise IsolationUnavailable("isolation_posture_changed")
+    return CommandIsolation(current, runtime, limits, Path(stage_root), tuple(Path(path) for path in extra_writable),
+                            tuple(spec["hidden_paths"]))
+
+
+def approval_summary_prefix(posture_fields: Mapping) -> str:
+    """"NOT ISOLATED (<reason>): " for any posture that is not the isolated variant."""
+    fields = posture_fields if isinstance(posture_fields, Mapping) else {}
+    if fields.get("isolation_variant") == "isolated":
+        return ""
+    return f"NOT ISOLATED ({fields.get('isolation_unavailable_reason') or 'isolation_not_probed'}): "
+
+
+def valid_posture_fields(posture: Mapping) -> bool:
+    """Closed check of the flat isolation fields of a persisted executor posture."""
+    import re
+    variant = posture.get("isolation_variant")
+    present = ISOLATION_FIELDS & set(posture)
+    if variant == "isolated":
+        expected = {"isolation_variant", "isolation_bwrap_sha256", "isolation_probe_sha256"}
+        flat = ("bwrap_userns", "netns_loopback_only_verified", "rlimit_cpu_as_fsize_nproc_and_wall_timeout",
+                "snapshot_bind_only")
+        return (present == expected and all(isinstance(posture[key], str)
+                and re.fullmatch(r"[0-9a-f]{64}", posture[key]) for key in expected - {"isolation_variant"})
+                and tuple(posture.get(key) for key in ("isolation_claim", "network_isolation",
+                    "resource_enforcement", "host_access")) == flat)
+    if variant == "not_isolated":
+        return (present == {"isolation_variant", "isolation_unavailable_reason"}
+                and posture["isolation_unavailable_reason"] in {"bwrap_missing", "prlimit_missing",
+                    "userns_denied", "probe_failed", "probe_mismatch"})
+    return not present

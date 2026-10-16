@@ -726,6 +726,10 @@ def _run_fixed(
             before_spawn()
         except BaseException as exc:
             raise WorkerInputError("worker dispatch fence rejected process spawn") from exc
+    isolation = _command_isolation.get()
+    if isolation is not None:
+        # Run the already-validated fixed argv inside the approved sandbox.
+        argv, popen_kwargs["env"] = isolation.command(argv, cwd, env)
     process = subprocess.Popen(argv, **popen_kwargs)
     if process_observer is not None:
         try:
@@ -770,6 +774,8 @@ def _run_fixed(
                 raise WorkerInputError("worker wall deadline expired before process completion")
             timeout = min(float(timeout), remaining)
         process.wait(timeout=max(0.0, float(timeout)))
+        if isolation is not None:
+            _settle_isolated_group(process.pid, deadline_at=deadline_at)
         _reject_nested_process_group(process, deadline_at=deadline_at)
         _join_output_threads()
         _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
@@ -1319,6 +1325,24 @@ def main() -> int:
     if args.mode != "--run" or not args.job_file:
         return 2
     return run_job(Path(args.job_file))
+
+
+# Server-activated OS isolation for direct (unsupervised) local commands (#1065).
+_command_isolation: ContextVar[Any] = ContextVar("repo_worker_command_isolation", default=None)
+
+
+def _settle_isolated_group(pgid: int, *, deadline_at: float | None, grace: float = 2.0) -> None:
+    """Let the kernel finish tearing down an exited sandbox's helpers.
+
+    Every process inside the sandbox dies with its pid namespace; only bwrap's
+    own helpers can briefly remain in this group. Anything still present after
+    the bounded grace is rejected as a nested process exactly as before.
+    """
+    until = time.monotonic() + grace
+    if deadline_at is not None:
+        until = min(until, float(deadline_at))
+    while _process_group_members(pgid) and time.monotonic() < until:
+        time.sleep(0.005)
 
 
 if __name__ == "__main__":

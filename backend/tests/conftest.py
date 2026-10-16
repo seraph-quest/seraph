@@ -251,6 +251,32 @@ def reset_bounded_snapshot_cache():
     _reset_bounded_guardian_snapshot_cache()
 
 
+@pytest.fixture
+def real_repo_isolation():
+    """Opt a test into the host's real repository OS sandbox (#1065)."""
+    from src.execution.repo_isolation import clear_probe_cache
+    clear_probe_cache()
+    yield
+    clear_probe_cache()
+
+
+@pytest.fixture(autouse=True)
+def default_repo_isolation_not_isolated(request, monkeypatch):
+    """Repository tests exercise the declared not-isolated path by default.
+
+    Many of them observe host side effects of the repository command (marker
+    files, detached processes), which the real sandbox correctly prevents.
+    Tests that request ``real_repo_isolation`` use the actual host probe.
+    """
+    if "real_repo_isolation" in request.fixturenames:
+        return
+    from src.execution import repo_isolation
+
+    def not_isolated(runtime, limits, **_kwargs):
+        return repo_isolation._not_isolated("bwrap_missing", limits)
+    monkeypatch.setattr(repo_isolation, "probe", not_isolated)
+
+
 @pytest.fixture(autouse=True)
 def reset_process_singletons(monkeypatch):
     """Give each test the fresh per-process state a real app boot has.

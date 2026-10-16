@@ -180,6 +180,13 @@ async def test_screenshot_folder_analysis_digest_report_and_status_loop(
     finally:
         reset_runtime_context(tokens)
 
+    # This loop asserts the summaries' contents, so they must finish. On a slow
+    # runner the 0.25 s production budgets can expire, and cancelling a summary
+    # mid-query invalidates the single in-memory test connection: the next
+    # session then reconnects to an empty database ("no such table").
+    for budget in ("_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", "_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S",
+                   "_REPORT_RECEIPT_SUMMARY_TIMEOUT_S", "_LOCAL_RUNTIME_PROOF_SUMMARY_TIMEOUT_S"):
+        monkeypatch.setattr("src.api.settings." + budget, 30.0)
     status = (await client.get("/api/settings/artifact-storage")).json()
     async with async_db() as db:
         observations = list((await db.execute(select(ScreenObservation))).scalars().all())

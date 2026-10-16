@@ -173,6 +173,16 @@ async function selectExistingRoutine(routineId: string): Promise<HTMLSelectEleme
   return selector;
 }
 
+/**
+ * Click a control that appears or enables only after an awaited server step
+ * re-renders. A waitFor on a mock call can resolve before that render, and a
+ * synchronous get (or a click on a still-disabled button) then races it.
+ */
+async function clickWhenEnabled(name: string): Promise<void> {
+  await waitFor(() => expect(screen.getByRole("button", { name })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name }));
+}
+
 describe("ProcedureV2Review", () => {
   it("requires an explicit preview and never renders a private source body", async () => {
     vi.spyOn(procedureV2Api, "listSourceTasks").mockResolvedValue([{
@@ -1031,33 +1041,33 @@ describe("ProcedureV2Review", () => {
     await screen.findByRole("region", { name: "Procedure package preview" });
     fireEvent.click(screen.getByRole("button", { name: "Install with exact approval" }));
     await waitFor(() => expect(procedureV2Api.lifecycle).toHaveBeenCalledWith("routine-1", "install", expect.objectContaining({ approval_id: "approval-install-1" })));
-    fireEvent.click(screen.getByRole("button", { name: "Record package review" }));
+    await clickWhenEnabled("Record package review");
     fireEvent.click(await screen.findByRole("button", { name: "Prepare activation approval" }));
     fireEvent.click(await screen.findByRole("button", { name: "Approve activation" }));
     fireEvent.click(await screen.findByRole("button", { name: "Activate reviewed package" }));
     await waitFor(() => expect(screen.getByText(/The reviewed package is active/)).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Invoke for this goal" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Activate procedure" }));
+    expect(await screen.findByRole("button", { name: "Invoke for this goal" })).toBeDisabled();
+    await clickWhenEnabled("Activate procedure");
     await waitFor(() => expect(lifecycle).toHaveBeenCalledWith("routine-1", "activate", {
       version: 1,
       expected_routine_revision: 2,
     }));
-    fireEvent.click(screen.getByRole("button", { name: "Invoke for this goal" }));
+    await clickWhenEnabled("Invoke for this goal");
     await waitFor(() => expect(invokeCall).toHaveBeenCalledWith("routine-1", expect.objectContaining({ parameters: { goal_id: "goal-1", expected_goal_revision: 4 } })));
-    fireEvent.change(screen.getByLabelText("Schedule expiry"), { target: { value: "2026-10-05T09:00" } });
-    fireEvent.click(screen.getByRole("button", { name: "Create finite schedule" }));
+    fireEvent.change(await screen.findByLabelText("Schedule expiry"), { target: { value: "2026-10-05T09:00" } });
+    await clickWhenEnabled("Create finite schedule");
     await screen.findByText(/Schedule unknown/);
     const firstScheduleRequest = scheduleCall.mock.calls[0]?.[1];
-    fireEvent.click(screen.getByRole("button", { name: "Retry exact request" }));
+    await clickWhenEnabled("Retry exact request");
     await waitFor(() => expect(scheduleCall).toHaveBeenCalledTimes(2));
     expect(scheduleCall.mock.calls[1]?.[1]).toEqual(firstScheduleRequest);
     await screen.findByText(/finite schedule outcome (?:is|remains) blocked/);
     expect(window.sessionStorage.getItem("seraph.procedure-v2.pending:operator%3Aone:session-1")).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Retry exact request" }));
+    await clickWhenEnabled("Retry exact request");
     await waitFor(() => expect(scheduleCall).toHaveBeenCalledTimes(3));
     expect(scheduleCall.mock.calls[2]?.[1]).toEqual(firstScheduleRequest);
     await screen.findByText(/Schedule scheduled/);
-    fireEvent.click(screen.getByRole("button", { name: "Pause schedule" }));
+    await clickWhenEnabled("Pause schedule");
     await waitFor(() => expect(scheduleControl).toHaveBeenCalledWith("schedule-binding-1", expect.objectContaining({ action: "pause", expected_binding_revision: 1 })));
   });
 

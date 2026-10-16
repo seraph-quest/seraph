@@ -300,6 +300,8 @@ async def approve_request(approval_id: str, request: Request):
     if pending is None:
         raise HTTPException(status_code=404, detail="Approval request not found")
     details = _require_approval_owner(request, pending, operator)
+    if pending.tool_name == "browser.forgejo-forms.v1":
+        raise HTTPException(status_code=409, detail={"code": "forgejo_protected_literal_form_review_required"})
     from src.approval.repository import approval_decision_digest
     try:
         request = await approval_repository.resolve_exact(approval_id, "approved",

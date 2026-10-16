@@ -63,6 +63,12 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
                        for item in candidate["checkpoint_refs"])):
             raise NativeServiceBlocked("native_task_candidate_invalid")
         job_kind = TASK_JOB_KIND
+    elif native_branch == "governed":
+        from .governed_services import GOVERNED_JOB_KIND, validate_governed_candidate
+        candidate = validate_governed_candidate(candidate)
+        if candidate["method"] != origin_method:
+            raise NativeServiceBlocked("native_governed_candidate_changed")
+        job_kind = GOVERNED_JOB_KIND
     else:
         raise NativeServiceBlocked("native_branch_unsupported")
     job_id = "cordis-svc:" + _digest({"root": operator.session_id, "kind": job_kind, "key": idempotency_key})
@@ -264,8 +270,10 @@ async def execute_native_read(*, operator, candidate: dict, idempotency_key: str
                     "sealed_result_digest": sealed_digest},
             result_summary="Native service read verified with explicit no_learning",
             terminal_authority_check=completion)
-        # Return only Python-owned values: the sealed read and Python's own readback.
-        return {"job": completed, "result": proof["result"], "artifact_readback": proof["artifact_readback"],
+        # Return only Python-owned values: the child's read answer equals the
+        # digest Python sealed (checked above) and its records were rechecked
+        # as current at completion; the readback is Python's own.
+        return {"job": completed, "result": result, "artifact_readback": proof["artifact_readback"],
                 "completion": proof, "replayed": False, "memory_status": "no_learning"}
     except (NativeServiceBlocked, HostBlocked) as exc:
         reason = getattr(exc, "reason_code", None) or "native_read_execution_blocked"

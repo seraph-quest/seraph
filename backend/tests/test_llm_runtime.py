@@ -4063,6 +4063,11 @@ def test_fallback_litellm_model_deduplicates_chain_targets():
 
 
 @pytest.mark.asyncio
+# The worker thread writes its own audit rows (routing decision) while the
+# caller's loop records the timeout. A file database gives each writer its own
+# pooled connection as in production; the single shared in-memory connection
+# lets one session's rollback discard the other's committed-looking row.
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_completion_with_fallback_timeout_does_not_log_late_success(async_db):
     success_response = MagicMock()
 
@@ -4093,6 +4098,46 @@ async def test_completion_with_fallback_timeout_does_not_log_late_success(async_
     assert timeout_events
     assert timeout_events[0]["details"]["runtime_path"] == "completion"
     assert timeout_events[0]["details"]["timeout_seconds"] == 0.01
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_completion_timeout_ignores_late_success_even_when_the_loop_stalls(async_db):
+    """A provider returning after the caller's deadline is late even if the
+    caller's loop has not yet marked the timeout (a stalled loop)."""
+    import src.llm_runtime as runtime
+
+    success_response = MagicMock()
+    original_mark = runtime._mark_request_timed_out
+
+    def _slow_success(**_kwargs):
+        time.sleep(0.1)
+        return success_response
+
+    def _stalled_mark(request_id):
+        time.sleep(0.25)  # the loop is blocked past the provider's late return
+        original_mark(request_id)
+
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch("litellm.completion", side_effect=_slow_success),
+        patch.object(runtime, "_mark_request_timed_out", side_effect=_stalled_mark),
+    ):
+        with pytest.raises(asyncio.TimeoutError):
+            await completion_with_fallback(
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0.3,
+                max_tokens=256,
+                timeout=0.01,
+            )
+        await asyncio.sleep(0.15)
+
+    events = await audit_repository.list_events(limit=10)
+    assert [e for e in events if e["event_type"] == "llm_primary_success"] == []
+    assert [e for e in events if e["event_type"] == "llm_timed_out"]
 
 
 def test_fallback_litellm_model_logs_primary_success(async_db):

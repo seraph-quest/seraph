@@ -1975,6 +1975,30 @@ validation.
 
 ### Governed repository repair (M4 #887) {#governed-repository-repair-m4-887-branch-local-target}
 
+Bounded iterative repository work is **Partial** under
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md). An accepted
+`repository_work` Task runs up to three manually approved patch iterations within
+its original limits. The plan can be literal or a reviewed planner proposal. Each
+iteration returns a local patch and the actual pytest or npm output. A check that
+exits non-zero feeds the next iteration, and base drift or a dirty tree blocks
+execution. One original holds the workspace repository lane, and other repository
+Tasks get `repository_execution_busy`. A timed-out, truncated or interrupted check
+is a partial: Stop closes it and releases the lane. An expired original closes by
+its deadline on Stop, on the next repository admission or on the dispatcher tick.
+Only a lost producer or Unknown result stays held. Crash recovery under
+[ADR-032](./decisions/032-repository-crash-recovery-evidence.md) remains **Planned**
+([#1063](https://github.com/seraph-quest/seraph/issues/1063)), and
+`POST /api/workflows/repo-repair/{id}/source-recovery` returns 503. Ordinary repair
+behavior below is unchanged.
+
+Checks run as `local_host_execution` with no isolation. The tests can use the
+network and read the Seraph user's files (`~/.ssh`, Seraph's database and vault).
+A detached process can outlive "cleanup proven", and diagnostics redaction is
+pattern-based. The inspector and the patch approval state these limitations;
+host isolation is tracked in [#1065](https://github.com/seraph-quest/seraph/issues/1065).
+Approved patches may contain only text sections on allowed paths, and an
+iterative publication must equal the base plus the approved input patch.
+
 The #912 bounded profile adds explicit `repo-node24-npm-v1` execution behind
 this same Work/API/durable-job journey. [ADR-007](decisions/007-bounded-node-repair-supervision.md)
 owns its accepted contract; availability requires the installed reviewed program revision.

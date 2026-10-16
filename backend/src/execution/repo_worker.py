@@ -9,10 +9,12 @@ fixed file or the loader's inert transfer mode.
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from pathlib import PurePosixPath
 import shutil
@@ -27,6 +29,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 
 PROFILE = "repo-python-pytest-v1"
+_supervised_commands: ContextVar[Any] = ContextVar("repo_worker_supervised_commands", default=None)
 MAX_FILES = 2_000
 MAX_DIRECTORIES = 500
 MAX_DEPTH = 16
@@ -460,26 +463,178 @@ def _validate_allowed_paths(raw: object) -> set[str]:
     return set(normalized)
 
 
+_PATCH_DIFF_GIT = re.compile(r"diff --git a/([^\t ]+) b/([^\t ]+)")
+_PATCH_INDEX = re.compile(r"index [0-9a-f]{7,64}\.\.[0-9a-f]{7,64}(?: 100644| 100755)?")
+_PATCH_HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?")
+
+
+def _patch_header_path(value: str, prefix: str) -> str | None:
+    if value == "/dev/null":
+        return None
+    if not value.startswith(prefix) or "\t" in value:
+        raise WorkerInputError("patch file header is unsupported")
+    raw = value[len(prefix):]
+    path = _safe_relative(raw)
+    if path != raw:
+        raise WorkerInputError("patch path is not canonical")
+    return path
+
+
 def _validate_patch_paths(patch: bytes, allowed_paths: set[str]) -> list[str]:
+    """Strict text-diff grammar: every section names only allowed regular files.
+
+    git apply also honours header-less ``diff --git`` sections, binary
+    patches, renames, copies, mode changes and symlinks. Each of those, and
+    any line outside a counted hunk, is rejected rather than ignored, so the
+    validated path set is exactly the set git can change.
+    """
     if len(patch) > MAX_PATCH_BYTES:
         raise WorkerInputError("patch byte limit exceeded")
-    changed: set[str] = set()
     try:
         text = patch.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise WorkerInputError("patch must be UTF-8") from exc
-    for line in text.splitlines():
-        if line.startswith("+++ b/") or line.startswith("--- a/"):
-            raw = line[6:]
-            if raw == "/dev/null":
-                continue
-            path = _safe_relative(raw)
-            if path not in allowed_paths:
-                raise WorkerInputError(f"patch path is not allowed: {path}")
-            changed.add(path)
+    if "\x00" in text or "\r" in text:
+        raise WorkerInputError("patch contains unsupported control bytes")
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    changed: set[str] = set()
+    index = 0
+    while index < len(lines):
+        header_path = None
+        new_file = deleted = False
+        if lines[index].startswith("diff "):
+            match = _PATCH_DIFF_GIT.fullmatch(lines[index])
+            if match is None or match[1] != match[2]:
+                raise WorkerInputError("patch diff header is unsupported")
+            header_path = _patch_header_path("a/" + match[1], "a/")
+            index += 1
+            while index < len(lines) and not lines[index].startswith("--- "):
+                extended = lines[index]
+                if _PATCH_INDEX.fullmatch(extended):
+                    pass
+                elif extended == "new file mode 100644":
+                    new_file = True
+                elif extended in {"deleted file mode 100644", "deleted file mode 100755"}:
+                    deleted = True
+                else:
+                    raise WorkerInputError("patch section is unsupported: " + " ".join(extended.split()[:3])[:64])
+                index += 1
+        if index + 1 >= len(lines) or not lines[index].startswith("--- ") or not lines[index + 1].startswith("+++ "):
+            raise WorkerInputError("patch section requires ---/+++ file headers")
+        old_path = _patch_header_path(lines[index][4:], "a/")
+        new_path = _patch_header_path(lines[index + 1][4:], "b/")
+        if (old_path is None and new_path is None
+                or old_path is not None and new_path is not None and old_path != new_path
+                or header_path is not None and header_path != (new_path or old_path)
+                or new_file != (header_path is not None and old_path is None)
+                or deleted != (header_path is not None and new_path is None)):
+            raise WorkerInputError("patch section header is inconsistent")
+        path = new_path or old_path
+        if path not in allowed_paths:
+            raise WorkerInputError(f"patch path is not allowed: {path}")
+        index += 2
+        hunks = 0
+        while index < len(lines) and lines[index].startswith("@@"):
+            match = _PATCH_HUNK.fullmatch(lines[index])
+            if match is None:
+                raise WorkerInputError("patch hunk header is malformed")
+            old_count = 1 if match[2] is None else int(match[2])
+            new_count = 1 if match[4] is None else int(match[4])
+            index += 1
+            while old_count or new_count:
+                if index >= len(lines):
+                    raise WorkerInputError("patch hunk is truncated")
+                body = lines[index]
+                if body.startswith("\\"):
+                    index += 1
+                    continue
+                if body == "" or body.startswith(" "):
+                    old_count, new_count = old_count - 1, new_count - 1
+                elif body.startswith("-"):
+                    old_count -= 1
+                elif body.startswith("+"):
+                    new_count -= 1
+                else:
+                    raise WorkerInputError("patch hunk line is malformed")
+                if old_count < 0 or new_count < 0:
+                    raise WorkerInputError("patch hunk counts are inconsistent")
+                index += 1
+            while index < len(lines) and lines[index].startswith("\\"):
+                index += 1
+            hunks += 1
+        if not hunks:
+            raise WorkerInputError("patch section has no text hunks")
+        if path in changed:
+            raise WorkerInputError("patch names one path twice")
+        changed.add(path)
     if not changed:
         raise WorkerInputError("patch has no supported file paths")
     return sorted(changed)
+
+
+def verify_exported_diff(
+    diff: bytes,
+    *,
+    allowed_paths: Iterable[str],
+    base_files: Mapping[str, tuple[str, str | None]],
+    post_files: Mapping[str, tuple[str, str | None]],
+    read_base: Callable[[str], bytes],
+    apply_patch: Callable[[Path, Path, dict[str, str]], None],
+    ignore: Callable[[str], bool] = lambda path: False,
+) -> None:
+    """Prove the exported diff is exactly the change in the tested tree.
+
+    The diff comes from Git state inside the test-writable workspace, where a
+    test can commit changes or configure textconv/attributes. Its paths must
+    equal every base-or-allowed path whose bytes (and mode, when recorded)
+    differ between the server-captured base and the post-test tree. Applying
+    it to a fresh copy of those base files, outside the workspace and any
+    repository, must reproduce the post-test bytes exactly.
+    """
+    allowed = set(allowed_paths)
+    scope = (set(base_files) | allowed)
+    actual = sorted(path for path in scope if not ignore(path) and base_files.get(path) != post_files.get(path))
+    exported = _validate_patch_paths(diff, allowed) if diff else []
+    if exported != actual:
+        raise WorkerInputError("exported diff does not match the tested tree paths")
+    if not exported:
+        return
+    import tempfile
+    scratch = Path(tempfile.mkdtemp(prefix="seraph-diff-verify-"))
+    try:
+        tree = scratch / "tree"
+        tree.mkdir(mode=0o700)
+        for path in exported:
+            if path not in base_files:
+                continue
+            raw = read_base(path)
+            sha, mode = base_files[path]
+            if hashlib.sha256(raw).hexdigest() != sha:
+                raise WorkerInputError("base copy changed before diff verification")
+            target = tree / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+            target.chmod(0o755 if mode == "100755" else 0o644)
+        patch_file = scratch / "exported.diff"
+        patch_file.write_bytes(diff)
+        apply_patch(tree, patch_file, {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(scratch),
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CEILING_DIRECTORIES": str(scratch)})
+        for path in exported:
+            target = tree / path
+            if target.is_symlink():
+                raise WorkerInputError("exported diff content does not match the tested tree")
+            state = None
+            if target.exists():
+                raw = target.read_bytes()
+                recorded_mode = (post_files.get(path) or base_files.get(path) or (None, None))[1]
+                state = (hashlib.sha256(raw).hexdigest(),
+                    None if recorded_mode is None else ("100755" if target.stat().st_mode & 0o111 else "100644"))
+            if state != post_files.get(path):
+                raise WorkerInputError("exported diff content does not match the tested tree")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _validate_changed_paths(
@@ -550,6 +705,11 @@ def _run_fixed(
     # Keep the parameters for the fixed worker call shape and manifest, but
     # make wall deadline the only per-process enforcement performed here.
     _ = cpu_seconds, apply_cpu_limit
+    supervised = _supervised_commands.get()
+    if supervised is not None:
+        if before_spawn is not None:
+            before_spawn()
+        return supervised(argv, cwd=cwd, environment=env, deadline_at=deadline_at, timeout=timeout)
     popen_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
         "env": env,
@@ -977,6 +1137,24 @@ def run_job(
             raise WorkerInputError("diff export failed or exceeded limit")
         if patch_paths and not diff:
             raise WorkerInputError("diff export is missing approved patch paths")
+
+        def _apply_exported(tree: Path, patch_file: Path, git_environment: dict[str, str]) -> None:
+            code, _, _, timed_out = _git(tree, "-c", "core.hooksPath=/dev/null", "apply", "--whitespace=nowarn",
+                str(patch_file), timeout=max(0.01, deadline_at - time.monotonic()), environment=git_environment,
+                deadline_at=deadline_at, apply_cpu_limit=backend_kind != "local",
+                process_observer=process_observer, before_spawn=before_spawn)
+            if code != 0 or timed_out:
+                raise WorkerInputError("exported diff does not apply to the base")
+
+        def _read_base(relative: str) -> bytes:
+            descriptor, _ = _open_source_regular_file(snapshot_root, relative)
+            with os.fdopen(descriptor, "rb") as handle:
+                return handle.read(MAX_FILE_BYTES + 1)
+
+        verify_exported_diff(diff, allowed_paths=allowed_paths,
+            base_files={item["path"]: (item["sha256"], item["mode"]) for item in publication_base_files},
+            post_files={item["path"]: (item["sha256"], item["mode"]) for item in _publication_files(workspace)},
+            read_base=_read_base, apply_patch=_apply_exported)
         if backend_kind == "local":
             _write_private_output(output, "diff.patch", diff)
         else:
@@ -1113,6 +1291,17 @@ def run_local_job(
         expected_identity=expected_identity,
         publication_runtime=publication_runtime,
     )
+
+
+def run_supervised_local_job(job_file: Path, *, command_runner: Callable, **kwargs: Any) -> int:
+    """Dedicated supervisor-only wrapper; legacy/backend workers stay unchanged."""
+    from src.execution.repo_supervisor import require_subreaper
+    require_subreaper()
+    token = _supervised_commands.set(command_runner)
+    try:
+        return run_local_job(job_file, **kwargs)
+    finally:
+        _supervised_commands.reset(token)
 
 
 def main() -> int:

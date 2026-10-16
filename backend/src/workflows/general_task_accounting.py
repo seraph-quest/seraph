@@ -10,6 +10,32 @@ from src.workflows.inference_accounting import InferenceAccountingError, _utc
 KIND = "general_task_group_reservation.v1"
 
 
+class RepositoryIterationEvidenceV1(ClosedTaskModel):
+    group: TaskProposalGroupV1
+    repository_job_id: NativeInvocationIdentity
+    repository_attempt_id: TaskIdentity
+    repository_fence: int = Field(ge=1)
+    parent_task_id: TaskIdentity
+    parent_attempt_id: TaskIdentity
+    native_invocation_id: NativeInvocationIdentity
+    iteration_index: int = Field(ge=1, le=3)
+    iteration_id: TaskDigest
+    operation_id: NativeInvocationIdentity
+    original_deadline_at: datetime
+    original_max_cost_microusd: int = Field(ge=0)
+    source_checkpoint_digest: TaskDigest
+
+    _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @model_validator(mode="after")
+    def original_iteration(self):
+        if (self.operation_id != f"remote:repo-work:{self.iteration_id}"
+            or self.original_deadline_at.tzinfo is None
+            or self.original_deadline_at > self.group.original_deadline_at):
+            raise ValueError("exact original repository iteration identity and cutoff required")
+        return self
+
+
 class CommunicationPreparationEvidenceV1(ClosedTaskModel):
     native: GeneralTaskNativeChildBindingV1
     child_owner: NativeInvocationIdentity
@@ -34,7 +60,7 @@ class GeneralTaskGroupReservationEvidenceV1(ClosedTaskModel):
     kind: Literal["general_task_group_reservation.v1"] = KIND
     group: TaskProposalGroupV1
     group_digest: TaskDigest
-    role: Literal["initial_proposal", "continuation", "specialist", "communication_preparation"]
+    role: Literal["initial_proposal", "continuation", "repository_iteration", "specialist", "communication_preparation"]
     call_ordinal: int = Field(ge=1, le=12)
     original_operation_id: NativeInvocationIdentity
     original_job_id: NativeInvocationIdentity
@@ -45,6 +71,7 @@ class GeneralTaskGroupReservationEvidenceV1(ClosedTaskModel):
     selected_grant_digest: TaskDigest | None
     parent_owner: NativeInvocationIdentity | None
     parent_fence: int | None = Field(ge=1)
+    repository_binding: RepositoryIterationEvidenceV1 | None = None
     delegation_invocation_id: NativeInvocationIdentity | None = None
     delegation_request_digest: TaskDigest | None = None
     preparation: CommunicationPreparationEvidenceV1 | None = None
@@ -54,9 +81,20 @@ class GeneralTaskGroupReservationEvidenceV1(ClosedTaskModel):
         from src.work_board.general_task import digest
         if self.group_digest != digest(self.group.model_dump(mode="json")):
             raise ValueError("original proposal group digest changed")
+        if self.role != "repository_iteration" and self.repository_binding is not None:
+            raise ValueError("repository binding requires its source-specific role")
         if self.role != "communication_preparation" and self.preparation is not None:
             raise ValueError("source preparation evidence requires its exact role")
-        if self.role == "communication_preparation":
+        if self.role == "repository_iteration":
+            repository = self.repository_binding
+            if (repository is None or repository.group != self.group
+                or repository.operation_id != self.original_operation_id
+                or repository.repository_job_id != self.original_job_id
+                or repository.parent_task_id != self.task_id or repository.parent_attempt_id != self.task_attempt_id
+                or self.plan_revision != 0 or self.selected_grant_digest is not None
+                or self.parent_owner is not None or self.parent_fence is not None):
+                raise ValueError("repository iteration cannot carry ordinary continuation authority")
+        elif self.role == "communication_preparation":
             prepared = self.preparation
             if (prepared is None or prepared.group != self.group
                 or prepared.native.task_id != self.task_id or prepared.native.attempt_id != self.task_attempt_id
@@ -102,8 +140,10 @@ def entry_for(row):
         # V1 specialist stop journals hash the original typed defaults. New
         # role fields must not change those retained financial memberships.
         # Explicit fields (including null) keep their original presence.
-        added = (("delegation_invocation_id", "delegation_request_digest")
-            if entry.role == "communication_preparation" else ("preparation",))
+        added = (("preparation", "delegation_invocation_id", "delegation_request_digest")
+            if entry.role == "repository_iteration" else
+            ("delegation_invocation_id", "delegation_request_digest", "repository_binding")
+            if entry.role == "communication_preparation" else ("preparation", "repository_binding"))
         return entry.model_dump(mode="json", exclude={key for key in added if key not in found[0]})
     except (ValidationError, ValueError, TypeError) as exc:
         raise InferenceAccountingError("general_task_group_evidence_invalid") from exc
@@ -137,6 +177,24 @@ async def validate_group(db, run, group):
         raise InferenceAccountingError("general_task_group_authority_invalid")
 
 
+def reservation_liability(row):
+    """Whole original liability, independent of accounting-period rollover."""
+    if type(row.bound_microusd) is not int or row.bound_microusd <= 0:
+        raise InferenceAccountingError("general_task_group_unknown")
+    if row.state in {"reserved", "contact_started", "unknown"}:
+        return row.bound_microusd
+    if row.state == "settled":
+        actual = row.actual_cost_microusd
+        if type(actual) is not int or actual < 0:
+            raise InferenceAccountingError("general_task_group_unknown")
+        if actual > row.bound_microusd:
+            raise InferenceAccountingError("general_task_group_cost_limit")
+        return actual
+    if row.state == "released" and row.contact_started_at is None:
+        return 0
+    raise InferenceAccountingError("general_task_group_unknown")
+
+
 def _validate_specialist_limits(members, binding, limits, *, new_bound=None):
     """Narrow request allowance inside, never instead of, the original group."""
     own = [row for row in members if entry_for(row).get("role") == "specialist"
@@ -156,7 +214,7 @@ def _validate_specialist_limits(members, binding, limits, *, new_bound=None):
         raise InferenceAccountingError("general_task_specialist_cost_limit")
 
 
-async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_path, deadline_at=None, policy_digest=None):
+async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_path, deadline_at=None, policy_digest=None, payload_digest=None):
     from src.work_board.general_task import digest
     if not isinstance(binding, dict) or not isinstance(binding.get("group"), TaskProposalGroupV1):
         raise InferenceAccountingError("general_task_group_binding_invalid")
@@ -175,20 +233,12 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
         raise InferenceAccountingError("general_task_group_call_limit")
     if any(row.state == "unknown" for row in members):
         raise InferenceAccountingError("general_task_group_unknown")
-    def liability(row):
-        if row.state in {"reserved", "contact_started", "unknown"}:
-            return row.bound_microusd
-        if row.state == "settled":
-            if row.actual_cost_microusd is None:
-                raise InferenceAccountingError("general_task_group_unknown")
-            return row.actual_cost_microusd
-        return 0
-    if sum(liability(row) for row in members) + bound > group.max_cost_microusd:
+    if sum(reservation_liability(row) for row in members) + bound > group.max_cost_microusd:
         raise InferenceAccountingError("general_task_group_cost_limit")
     role = binding.get("role")
-    preparation = None
-    expected_route = "strategist_agent" if role == "communication_preparation" else "general_task_planner"
-    if runtime_path != expected_route or role not in {"initial_proposal", "continuation", "specialist", "communication_preparation"}:
+    repository = preparation = None
+    expected_route = "strategist_agent" if role in {"repository_iteration", "communication_preparation"} else "general_task_planner"
+    if runtime_path != expected_route or role not in {"initial_proposal", "continuation", "repository_iteration", "specialist", "communication_preparation"}:
         raise InferenceAccountingError("general_task_group_runtime_invalid")
     initial = next((row for row in members if entry_for(row).get("role") == "initial_proposal"), None)
     if role == "initial_proposal":
@@ -203,6 +253,13 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
             _validate_specialist_limits(members, binding, context.request.limits, new_bound=bound)
         else:
             await validate_continuation(db, group, binding, initial)
+    elif role == "repository_iteration":
+        repository = await validate_repository_iteration(db, run, rows, binding,
+            operation_id=operation_id, payload_digest=payload_digest, bound=bound,
+            deadline_at=deadline_at, already_reserved=False)
+        binding = {**binding, "task_id": repository["parent_task_id"],
+            "task_attempt_id": repository["parent_attempt_id"], "plan_revision": 0,
+            "selected_grant_digest": None, "parent_owner": None, "parent_fence": None}
     else:
         preparation = await validate_preparation(db, run, group, binding, bound=bound)
         if policy_digest != binding["preparation_binding"].policy_digest:
@@ -227,9 +284,31 @@ async def reserve_entry(db, run, rows, binding, *, operation_id, bound, runtime_
         "task_id": binding.get("task_id"), "task_attempt_id": binding.get("task_attempt_id"),
         "plan_revision": binding.get("plan_revision"), "selected_grant_digest": binding.get("selected_grant_digest"),
         "parent_owner": binding.get("parent_owner"), "parent_fence": binding.get("parent_fence"),
+        **({"repository_binding": repository} if repository is not None else {}),
         **({"delegation_invocation_id": binding.get("delegation_invocation_id"),
             "delegation_request_digest": binding.get("delegation_request_digest")} if role == "specialist" else {}),
         **({"preparation": preparation} if preparation is not None else {})}
+
+
+async def validate_repository_iteration(db, run, rows, binding, *, operation_id,
+                                       payload_digest, bound, deadline_at, already_reserved):
+    from src.workflows.repo_repair_source import (assert_repository_iteration_witness,
+        validate_repository_iteration_accounting)
+    if not isinstance(binding, dict) or binding.get("role") != "repository_iteration":
+        raise InferenceAccountingError("repository_iteration_witness_invalid")
+    witness = binding.get("repository_witness")
+    assert_repository_iteration_witness(witness)
+    if witness.group != binding.get("group"):
+        raise InferenceAccountingError("repository_iteration_witness_invalid")
+    projection = await validate_repository_iteration_accounting(db, witness, run,
+        rows=rows, operation_id=operation_id, payload_digest=payload_digest,
+        bound_microusd=bound, deadline_at=deadline_at, already_reserved=already_reserved)
+    evidence = RepositoryIterationEvidenceV1.model_validate(projection)
+    if (evidence.group != witness.group or evidence.operation_id != operation_id
+        or evidence.repository_job_id != run.run_identity or deadline_at is None
+        or _utc(deadline_at) > evidence.original_deadline_at):
+        raise InferenceAccountingError("repository_iteration_witness_invalid")
+    return evidence.model_dump(mode="json")
 
 
 async def validate_preparation(db, run, group, binding, *, bound):
@@ -253,7 +332,7 @@ async def validate_recovered_entry(db, run, row, rows, binding, *, runtime_path)
         or not isinstance(binding.get("group"), TaskProposalGroupV1)
         or binding["group"].model_dump(mode="json") != entry["group"]):
         raise InferenceAccountingError("general_task_group_binding_invalid")
-    expected_route = "strategist_agent" if entry["role"] == "communication_preparation" else "general_task_planner"
+    expected_route = "strategist_agent" if entry["role"] in {"repository_iteration", "communication_preparation"} else "general_task_planner"
     if runtime_path != expected_route:
         raise InferenceAccountingError("general_task_group_runtime_invalid")
     if entry["role"] in {"continuation", "specialist"}:
@@ -315,19 +394,20 @@ async def validate_contact(db, run, row, rows, *, binding=None):
             or entry_for(member).get("group_digest") != digest(group.model_dump(mode="json"))
             for member in members)):
         raise InferenceAccountingError("general_task_group_conflict")
-    liability = 0
-    for member in members:
-        if member.state == "unknown":
-            raise InferenceAccountingError("general_task_group_unknown")
-        if member.state in {"reserved", "contact_started"}:
-            liability += member.bound_microusd
-        elif member.state == "settled" and member.actual_cost_microusd is not None:
-            liability += member.actual_cost_microusd
-        elif member.state != "released":
-            raise InferenceAccountingError("general_task_group_unknown")
+    if any(member.state == "unknown" for member in members):
+        raise InferenceAccountingError("general_task_group_unknown")
+    liability = sum(reservation_liability(member) for member in members)
     if liability > group.max_cost_microusd:
         raise InferenceAccountingError("general_task_group_cost_limit")
-    if entry.get("role") == "communication_preparation":
+    if entry.get("role") == "repository_iteration":
+        if row.runtime_path != "strategist_agent":
+            raise InferenceAccountingError("general_task_group_runtime_invalid")
+        repository = await validate_repository_iteration(db, run, rows, binding,
+            operation_id=row.operation_id, payload_digest=row.payload_digest,
+            bound=row.bound_microusd, deadline_at=_utc(row.deadline_at), already_reserved=True)
+        if repository != entry["repository_binding"]:
+            raise InferenceAccountingError("repository_iteration_witness_invalid")
+    elif entry.get("role") == "communication_preparation":
         if row.runtime_path != "strategist_agent":
             raise InferenceAccountingError("general_task_group_runtime_invalid")
         preparation = await validate_preparation(db, run, group, binding, bound=row.bound_microusd)

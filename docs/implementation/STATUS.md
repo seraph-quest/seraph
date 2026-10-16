@@ -22,6 +22,48 @@ cockpit remain the implementation described here. The architecture documentation
 adds no Cordis dependency, runtime plugin loader or stored-data migration;
 existing extension/capability-pack support does not establish that migration.
 
+**Bounded iterative repository work: Partial; original-producer crash recovery: Planned.**
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md) (#1009) ships one
+`repository_work` Task per bug or change request, whether the operator supplies the
+plan or accepts a reviewed planner proposal. After selected-source consent, up to
+three manually approved patch iterations run under the original deadline, cost and
+iteration limits with Python pytest or Node 24 npm test/build checks. Each run
+records a local patch artifact and the actual requested command output. A requested
+check that exits non-zero continues into the next bounded iteration without renewing
+those limits. Base drift or a dirty live tree blocks before execution; the live tree
+is never overwritten.
+
+One original holds the workspace's single repository lane, so a second repository
+Task is refused with `repository_execution_busy` until the first closes. A
+timed-out, output-truncated or Stop-interrupted check is recorded as a partial with
+its logs, never as a check result. Operator Stop then closes it and releases the
+lane. After its original cutoff, the original closes by its own deadline cause: on
+operator Stop, on the next repository admission, or on the dispatcher tick, with
+no live operator session required. Only an unproven process closure stays held:
+a lost or still-running original producer, or an Unknown result or cost.
+Crash/restart recovery for those cases is the tracked follow-up
+[#1063](https://github.com/seraph-quest/seraph/issues/1063). The public Source
+recovery action stays fail-closed (HTTP 503). New admissions record the
+[ADR-032](./decisions/032-repository-crash-recovery-evidence.md) v4 evidence,
+but that evidence authorizes no recovery yet.
+
+Declared limitation: repository checks run as `local_host_execution` with
+`isolation_claim=none` and `network_isolation=not_verified`. After the exact
+approval, the repository's tests run as the Seraph user. They can use the
+network and read local files, including `~/.ssh` and Seraph's database and
+vault. "Cleanup proven" covers only the supervised process tree (subreaper and
+waitpid); a same-user process that detaches, for example via `systemd-run --user`
+or `at`, can outlive it. Diagnostics redaction is pattern-based, not complete.
+Approve only repositories you trust; host isolation is tracked in
+[#1065](https://github.com/seraph-quest/seraph/issues/1065). Approved patches are limited to text
+sections on allowed paths: binary, rename, copy, mode, symlink and header-less
+sections are rejected by the parent, the worker and git's own numstat and summary.
+Publication of an iterative result must equal the base plus the approved input
+patch. Each exported diff must name exactly the paths that differ between the
+server-captured base and the tested tree. It must also reproduce the tested bytes
+when applied to a fresh base copy outside the workspace, so a test that commits or
+configures Git textconv cannot misreport its change.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

@@ -650,6 +650,112 @@ class GeneralTaskCheckpointReservationV1(ClosedTaskModel):
     no_learning: Literal[True] = True
 
 
+class RepositoryReview(ClosedTaskModel):
+    """Grantless discovery metadata, never an execution authority."""
+    native_child_id: NativeInvocationIdentity
+    repository_job_id: TaskIdentity
+    iteration_index: int | None = Field(ge=1, le=3)
+    iteration_id: TaskDigest | None
+    preparation_digest: TaskDigest | None
+    contact_state: Literal["not_started", "started", "unknown", "closed", "not_prepared"]
+    source_preview_path: str | None = Field(max_length=512)
+
+    @model_validator(mode="after")
+    def exact_preparation_discriminant(self):
+        fields = (self.iteration_index, self.iteration_id, self.preparation_digest, self.source_preview_path)
+        if self.contact_state == "not_prepared":
+            if any(value is not None for value in fields):
+                raise ValueError("not-prepared discovery contains no preparation")
+        elif any(value is None for value in fields):
+            raise ValueError("prepared discovery requires every original preparation field")
+        elif self.source_preview_path != "/api/workflows/repo-repair/" + self.repository_job_id + "/source-preview":
+            raise ValueError("original repository preview identity changed")
+        return self
+
+
+class RepositoryNativeLimitEvidenceV1(ClosedTaskModel):
+    schema_version: Literal["repository.native_limit_evidence.v1"] = "repository.native_limit_evidence.v1"
+    original_limits_digest: TaskDigest
+    original_deadline_at: datetime
+    original_server_bound_microusd: int = Field(gt=0)
+    root_liability_microusd: int = Field(ge=0)
+    group_liability_microusd: int = Field(ge=0)
+    group_calls: int = Field(ge=0)
+    original_root_max_cost_microusd: int = Field(ge=0)
+    original_group_max_cost_microusd: int = Field(ge=0)
+    original_group_max_calls: int = Field(ge=0, le=12)
+    goal_cutoff_at: datetime | None = None
+    cause: Literal["deadline_exhausted", "cost_exhausted", "shared_group_exhausted", "goal_limit_exhausted"]
+
+    _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @field_validator("goal_cutoff_at", mode="before")
+    @classmethod
+    def optional_goal_cutoff(cls, value):
+        return None if value is None else TaskProposalGroupV1.utc_timestamp(value)
+
+
+class RepositoryNativeStopClosureV1(ClosedTaskModel):
+    """Closed metadata for a source-owned repository stop.
+
+    The model is only the durable projection.  A source-private witness must
+    pass the repository source validator before this projection can be used by
+    the cancellation writer; constructing or copying this model grants no
+    authority.
+    """
+
+    schema_version: Literal["repository.native_stop_closure.v1"] = "repository.native_stop_closure.v1"
+    original_binding: GeneralTaskNativeChildBindingV1
+    repository_job_id: NativeInvocationIdentity
+    repository_attempt_id: TaskIdentity
+    repository_fence: int = Field(ge=1)
+    original_input_digest: TaskDigest
+    source_checkpoint_digest: TaskDigest
+    original_group_digest: TaskDigest
+    original_deadline_at: datetime
+    original_claim_fence: int = Field(ge=0)
+    iteration_ids: list[TaskIdentity] = Field(default_factory=list, max_length=3)
+    stop_reason: Literal["operator_cancelled", "iterations_exhausted", "deadline_exhausted", "cost_exhausted",
+        "shared_group_exhausted", "goal_limit_exhausted"]
+    limit_evidence: RepositoryNativeLimitEvidenceV1 | None = None
+    limit_evidence_digest: TaskDigest | None = None
+    stop_intent_digest: TaskDigest
+    model_quiescence_digest: TaskDigest
+    process_quiescence_digest: TaskDigest
+    all_original_accounting_digest: TaskDigest
+    request_response_approval_digest: TaskDigest
+    source_binding_digest: TaskDigest
+    no_learning: Literal[True] = True
+
+    _utc_timestamp = field_validator("original_deadline_at", mode="before")(TaskProposalGroupV1.utc_timestamp.__func__)
+
+    @model_serializer(mode="wrap")
+    def preserve_original_limit_absence(self, handler):
+        result = handler(self)
+        if self.limit_evidence is None:
+            result.pop("limit_evidence", None)
+        if self.limit_evidence_digest is None:
+            result.pop("limit_evidence_digest", None)
+        return result
+
+    @model_validator(mode="after")
+    def exact_limit_cause(self):
+        automatic = self.stop_reason not in {"operator_cancelled", "iterations_exhausted"}
+        if ((automatic and (self.limit_evidence is None or self.limit_evidence_digest is None))
+                or (not automatic and (self.limit_evidence is not None or self.limit_evidence_digest is not None))):
+            raise ValueError("repository limit closure requires exact cause evidence")
+        if self.limit_evidence is not None and self.limit_evidence.cause != self.stop_reason:
+            raise ValueError("repository limit cause changed")
+        return self
+
+    @field_validator("iteration_ids")
+    @classmethod
+    def exact_iteration_identities(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("repository stop iteration identities must be unique")
+        return value
+
+
 class GeneralTaskNativeCancelChildV1(ClosedTaskModel):
     original_binding: GeneralTaskNativeChildBindingV1
     original_binding_digest: TaskDigest
@@ -662,18 +768,33 @@ class GeneralTaskNativeCancelChildV1(ClosedTaskModel):
     artifact_digest: TaskDigest
     checkpoint_digest: TaskDigest
     closure: GeneralTaskToolClosureV1 | None = None
+    repository_closure: RepositoryNativeStopClosureV1 | None = None
     delegation_closure_digest: TaskDigest | None = None
     delegation_stop_checkpoint: str | None = Field(default=None, max_length=512)
     effect_debt: bool
     no_learning: Literal[True] = True
 
     @model_serializer(mode="wrap")
-    def preserve_original_cancel_shape(self, handler):
+    def preserve_legacy_repository_absence(self, handler):
         result = handler(self)
-        for key in ("delegation_closure_digest", "delegation_stop_checkpoint"):
+        # Only absent capability-specific closure fields are omitted. Existing
+        # legacy explicit nulls (notably ``closure``) remain byte-for-byte
+        # present for old cancellation witnesses and their digests.
+        for key in ("repository_closure", "delegation_closure_digest", "delegation_stop_checkpoint"):
             if result.get(key) is None:
                 result.pop(key, None)
         return result
+
+    @model_validator(mode="after")
+    def exact_repository_closure_binding(self):
+        if self.repository_closure is not None and (self.closure is not None
+                or self.delegation_closure_digest is not None or self.delegation_stop_checkpoint is not None):
+            raise ValueError("repository stop closure cannot carry another callback closure")
+        if self.repository_closure is not None:
+            if (self.repository_closure.original_binding != self.original_binding
+                    or self.repository_closure.original_input_digest != self.original_binding.input_digest):
+                raise ValueError("repository stop closure binding changed")
+        return self
 
 
 class GeneralTaskNativeCancelV1(ClosedTaskModel):
@@ -782,6 +903,33 @@ class GeneralTaskToolInputV1(ClosedTaskModel):
         return self
 
 
+class RepositoryTaskSourceBinding(ClosedTaskModel):
+    """Metadata only; a parsed mapping is never repository authority."""
+    schema_version: Literal["RepositoryTaskSource.v1"] = "RepositoryTaskSource.v1"
+    original_input_digest: TaskDigest
+    source_artifact_ref: str = Field(min_length=1, max_length=512,
+        pattern=r"^workspace-json:artifacts/repo-repair/source/[A-Za-z0-9_.:/-]+$")
+    source_artifact_digest: TaskDigest
+    snapshot_ref: str = Field(pattern=r"^repository-snapshot:[a-f0-9]{64}$")
+    snapshot_digest: TaskDigest
+    executor_profile: Literal["repo-python-pytest-v1", "repo-python-pytest-publication-v1", "repo-node24-npm-v1"]
+    executor_profile_digest: TaskDigest
+    owner_principal_id: TaskIdentity
+    original_root_id: TaskIdentity
+    goal_id: TaskIdentity
+    goal_revision: int = Field(ge=1)
+    binding_digest: TaskDigest
+
+    @field_validator("source_artifact_ref")
+    @classmethod
+    def exact_private_reference(cls, value):
+        prefix = "workspace-json:artifacts/repo-repair/source/"
+        if (not value.startswith(prefix) or "\\" in value
+                or any(part in {"", ".", ".."} for part in value.removeprefix("workspace-json:").split("/"))):
+            raise ValueError("fixed private repository source reference required")
+        return value
+
+
 class SpecialistEvidenceEntry(ClosedTaskModel):
     reference: str = Field(min_length=1, max_length=512)
     producer_revision: int = Field(ge=1)
@@ -833,6 +981,14 @@ class GeneralTaskEnvelope(ClosedTaskModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list, max_length=12)
     proposal_group: "TaskProposalGroupV1 | None" = None
     proposal_provenance: "TaskProposalProvenanceV1 | None" = None
+    repository_source: RepositoryTaskSourceBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_repository_absence(self, handler):
+        result = handler(self)
+        if self.repository_source is None:
+            result.pop("repository_source", None)
+        return result
     specialist_handoff: GeneralTaskArtifactRef | None = None
 
     @model_validator(mode="after")
@@ -855,6 +1011,18 @@ class GeneralTaskEnvelope(ClosedTaskModel):
                 or self.proposal_group.max_cost_microusd != limits.max_cost_microusd
                 or self.proposal_group.max_steps != limits.max_steps):
                 raise ValueError("proposal allowance cannot change")
+        if self.repository_source is not None:
+            source = self.repository_source
+            repository_steps = [step for step in self.plan.steps if step.tool_id == "repository_work"] if self.plan else []
+            from src.security.trust_contract import canonical_digest
+            if (len(repository_steps) != 1
+                    or canonical_digest(repository_steps[0].input) != source.original_input_digest
+                    or source.goal_id != self.task_input.goal_ref
+                    or self.proposal_group is None
+                    or source.owner_principal_id != self.proposal_group.owner_principal_id
+                    or source.original_root_id != self.proposal_group.owner_session_id
+                    or source.goal_revision != self.proposal_group.goal_revision):
+                raise ValueError("repository source requires its exact original owner/Goal and fixed plan")
         return self
 
 

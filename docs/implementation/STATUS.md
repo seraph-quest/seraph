@@ -155,6 +155,21 @@ bounded Vault-redacted output and job-bound accounting;
 a closed operation table, then fails closed (no adapter is composed yet). See the
 [guide section](./12-current-app-guide.md#cordis-governed-capabilities-and-inference-1018).
 
+**Python-hosted mandatory providers** from
+[#1024](https://github.com/seraph-quest/seraph/issues/1024) (A3.1): the backend
+activates the state, authority, audit and tasks providers before anything else
+and aborts startup on any failure; goals, memory and artifacts may degrade to
+typed blocks. `get_session` refuses typed once state failed or shutdown began,
+and every startup failure releases the workspace lease, engine and MCP. The
+`seraph.state.v1` domain joins the composition inventory (one audited row added
+to an exact pre-#1024 inventory, forward-only), bindings move to manifest v2
+with byte-identical v1 decoding, and state, authority and audit never move to
+Cordis. The Cordis state, authority and audit facades are mandatory with fixed
+dependencies and only record closed host-to-child provider reports. Verified
+locally with temporary state and the real reviewed child; external network and
+inference denied. See the
+[guide section](./12-current-app-guide.md#python-hosted-mandatory-providers-1024).
+
 **Cordis guardian research** from
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal
 discovery planning and public source extraction run only through the composed

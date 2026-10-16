@@ -796,6 +796,76 @@ after legacy's. The budgets are asserted only with
 `SERAPH_CORDIS_LATENCY_BUDGET=1` on a quiet host; elsewhere the suite prints the
 numbers without gating (at load average ~35 the step p95 rose to ~245 ms).
 
+### Python-hosted mandatory providers (#1024)
+
+Python always hosts the `state`, `authority`, `audit` and `tasks` providers
+(`runtime_plugins/worker.py`, operator decision on #1024): the database must be
+open before the ownership table can be read or the Node child started. The
+backend lifespan constructs one `ProviderWorker`, takes the workspace owner
+lease (production only, as before), and activates the providers in that order
+before anything else. Each activation runs a readiness predicate: `state` runs
+`init_db`, decodes the composition inventory and answers a read; `authority`
+validates the operator auth configuration (and the PBKDF2 hash shape in
+production), the session tables and a resolvable Vault key (configured, or a
+regular 0600 `.vault-key`; an absent file is still generated on first use);
+`audit` writes a probe `runtime_audit_ready` row inside a savepoint that is
+always rolled back; `tasks` checks the job and board tables and opens the
+durable job repository. Any failure aborts startup with that provider's typed
+reason (for example `state_init_db_failed`, `authority_vault_key_unavailable`,
+`audit_write_unavailable`). `goals`, `memory` and `artifacts` follow and may
+only degrade: their Cordis methods then return `native_provider_<name>_unavailable`.
+Importing the worker or `src.app` starts no consumer, connection, task, thread
+(other than the rate limiter's library timer), scheduler job or DB file.
+
+`db.engine.get_session` has a three-state gate. With no worker attached
+(tests, host CLIs, migrations) and while the worker is activating or active it
+is open; once activation failed or shutdown began it raises
+`StateProviderUnavailable` before yielding a session. `override_session_factory`
+scopes (the isolated evaluation databases) are the reviewed bypass, and a guard
+test lists every engine or session-factory constructor outside `db/engine.py`.
+One outer `try/finally` follows the lease, so every failure point disconnects
+MCP, drains tracked tasks, closes the gate, disposes the engine and releases
+the lease. Shutdown runs the service `.stop()` calls with the gate still open,
+then MCP disconnect and the task drain, then closes the gate, then `close_db`,
+then releases the lease.
+
+`seraph.state.v1` is a runtime domain and every method depends on it
+(manifest `runtime-service-methods.v2`). Persisted bindings carry their
+manifest version: a v1 binding decodes and re-encodes byte-identically through
+the frozen `METHOD_DEPENDENCIES_V1` table, so its job CAS predicates still
+match; new bindings are v2. Startup adds the legacy `seraph.state.v1` row (with
+a `runtime_composition_state_domain_added` audit event) only to an inventory
+that is exactly the previous 14 domains, including on the first start after a
+host-CLI restore of an older backup; an empty table is seeded whole and any
+other partial inventory is left to fail closed. The migration is forward-only:
+an older binary rejects the extra row with `composition_inventory_invalid`, so
+rolling back the binary needs a pre-upgrade backup. `state`, `authority` and
+`audit` never move to Cordis (`composition_owner_not_transferable`) and are not
+in the boot cutover manifest. An undecodable binding on a running,
+`unknown_external_effect` or `cost_liability` job refuses every owner
+transition (`composition_not_quiescent`) instead of being skipped; the operator
+resolves that one job through the existing job recovery (cancel or mark
+reconciled), after which it no longer blocks quiescence.
+
+In the Cordis package the `seraph.state.v1` facade (service `seraphState`)
+records what the host reports and owns no store or activation. Both profile
+validators require the host, state, authority and audit plugins with
+`required: true`, and every provider's dependencies are fixed (authority and
+audit on state; tasks, goals and artifacts on state and authority; memory on
+state, authority and audit), so profile configuration can neither remove a
+mandatory facade nor change a dependency. After the child starts, the host
+sends one `provider.readiness` frame per provider and `provider.quiesce` frames
+before `runtime.quiesce` at stop. Both carry only `{domain, state, epoch,
+composition_digest, reason_code}`, flow host to child only (a child-sent
+provider frame fences the host like any unadmitted request), and cannot
+activate or deactivate anything. Private reads recheck tombstones, the Root and
+the composition vector in the transaction that serves them, so a forget,
+revoke or owner change during an in-flight read denies it and the child holds
+no cache. A provider or child restart never touches `unknown_external_effect`
+or `cost_liability` jobs and never replays their effects. Backup and restore
+stay with the host CLI against a stopped backend; there is no in-process
+maintenance handoff.
+
 ### Cordis guardian research (#1008)
 
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2

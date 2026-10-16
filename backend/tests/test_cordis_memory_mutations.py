@@ -8,6 +8,7 @@ model route exists on this path.
 from __future__ import annotations
 
 import ast
+import re
 import dataclasses
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -28,7 +29,8 @@ from src.runtime_plugins.dispatch import BLOCKED_METHODS, SUPPORTED_METHODS, Nat
 from src.runtime_plugins.memory_admission import (build_candidate, execute_memory_mutation,
                                                   outstanding_admission_check)
 from src.runtime_plugins.memory_mutations import (DERIVED_VECTOR_PURGE, MEMORY_JOB_KIND, MUTATION_METHODS,
-                                                  validate_mutation_candidate, wire_inputs)
+                                                  MemoryMutationBlocked, _ADMISSION_SEAL, _MemoryAdmission,
+                                                  _mint_admission, validate_mutation_candidate, wire_inputs)
 from src.runtime_plugins.service_jobs import admit_service_job, claim_service_job, open_invocation
 from tests.test_cordis_services_core import _operator, live_host, needs_host, service_db  # noqa: F401
 
@@ -126,27 +128,79 @@ def test_candidates_are_closed_and_carry_no_text():
     assert wire_inputs(candidate, "job-1") == {"request_ref": "job-1"}
 
 
+_ADMISSION_HANDLERS = {"api/memory.py", "runtime_plugins/memory_admission.py"}
+_TOKEN_NAMES = {"_mint_admission", "_MemoryAdmission", "_ADMISSION_SEAL"}
+
+
+def _imported_names(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            yield module
+            for alias in node.names:
+                yield f"{module}.{alias.name}"
+                yield alias.name
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name
+
+
 def test_only_operator_http_handlers_may_import_the_mutation_admission():
     """Agent tools, the agent loop, native tools and the Cordis path never reach it."""
     offenders = []
     for path in sorted((BACKEND / "src").rglob("*.py")):
         relative = path.relative_to(BACKEND / "src").as_posix()
-        if relative.startswith("api/") or relative == "runtime_plugins/memory_admission.py":
-            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            names = []
-            if isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                names = [module] + [f"{module}.{alias.name}" for alias in node.names]
-                if node.level and module in {"memory_admission", ""}:
-                    names += [alias.name for alias in node.names]
-            elif isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            if any(name.endswith("memory_admission") or name.endswith("execute_memory_mutation")
-                   or name == "memory_admission" for name in names):
-                offenders.append(relative)
+        names = set(_imported_names(tree))
+        # Strings used as dynamic import targets: call arguments (importlib,
+        # __import__, getattr) and subscripts (sys.modules[...]), not docstrings.
+        literals = {item.value for node in ast.walk(tree)
+                    for item in ([*node.args, *[keyword.value for keyword in node.keywords]]
+                                 if isinstance(node, ast.Call) else [node.slice] if isinstance(node, ast.Subscript)
+                                 else [])
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)}
+        if relative not in _ADMISSION_HANDLERS:
+            # Imports, and importlib/__import__ string literals, of the admission.
+            if any(re.search(r"(^|\.)memory_admission$", name) or name.endswith("execute_memory_mutation")
+                   for name in names):
+                offenders.append(f"{relative}: imports the admission")
+            if any(re.search(r"(^|[./])memory_admission(\.py)?$", value) or value == "execute_memory_mutation"
+                   for value in literals):
+                offenders.append(f"{relative}: names the admission in a string")
+        # Only the admission may mint the sealed token; only memory_mutations defines it.
+        if relative not in {"runtime_plugins/memory_admission.py", "runtime_plugins/memory_mutations.py"}:
+            if any(name.rsplit(".", 1)[-1] in _TOKEN_NAMES for name in names) or literals & _TOKEN_NAMES:
+                offenders.append(f"{relative}: reaches the admission token")
+        # Agent tools and the agent loop never reach the service-job admission either.
+        if relative.startswith(("tools/", "agent/", "native_tools/")):
+            if any(name.endswith("service_jobs") or name.endswith("admit_service_job") for name in names):
+                offenders.append(f"{relative}: imports service job admission")
     assert offenders == []
+
+
+@pytest.mark.asyncio
+async def test_admit_service_job_refuses_any_authority_but_the_sealed_token(service_db):
+    """A plain callable cannot skip the gate, candidate binding, source role or cap."""
+    operator = await _operator()
+    await _memory("token-target", session_id=operator.session_id)
+    candidate = {"schema_version": 1, "method": "memory.forget", "memory_id": "token-target",
+                 "mode": "tombstone", "acknowledge_irreversible": True}
+
+    async def anything(_db, _run):
+        return None
+    forged = _MemoryAdmission("memory.forget", operator.session_id, operator.principal.principal_id,
+                              _mint_admission("memory.forget", operator, candidate).input_digest, object())
+    other_method = _MemoryAdmission("memory.propose", operator.session_id, operator.principal.principal_id,
+                                    "0" * 64, _ADMISSION_SEAL)
+    for authority in (None, anything, lambda _db, _run: None, outstanding_admission_check, forged, other_method):
+        with pytest.raises(NativeServiceBlocked) as excinfo:
+            await admit_service_job(operator=operator, origin_method="memory.forget", native_branch="base",
+                                    candidate=candidate, idempotency_key="token-check", reviewed_composition=None,
+                                    admission_authority_check=authority)
+        assert excinfo.value.reason_code == "native_memory_admission_required"
+    async with get_session() as db:
+        assert (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.job_kind == MEMORY_JOB_KIND))).scalars().all() == []
 
 
 # ------------------------------------------------------------------ gate and candidates
@@ -307,6 +361,7 @@ async def test_changed_review_binding_is_refused_and_nothing_is_applied(live_hos
         await execute_memory_mutation(operator=operator, method="memory.applyReviewed", request=request,
                                       idempotency_key=f"a-stale-{change}", host=host, jobs=jobs)
     assert excinfo.value.reason_code == "native_memory_proposal_changed"
+    assert isinstance(excinfo.value, MemoryMutationBlocked) and excinfo.value.effect_committed is False
     current = await _proposal(proposal.proposal_id)
     assert current.status.value == "proposed" and current.accepted_memory_id is None
     rows = await _job_rows()
@@ -373,6 +428,8 @@ async def test_signing_outage_commits_the_recovery_state_and_seals_a_block(live_
                  "expected_task_revision": proposal.source_task_revision,
                  "expected_goal_revision": proposal.goal_revision})
     assert excinfo.value.reason_code == "native_memory_accepted_binding_unavailable"
+    # The owner's recovery state is committed: distinguishable from a no-op.
+    assert isinstance(excinfo.value, MemoryMutationBlocked) and excinfo.value.effect_committed is True
     current = await _proposal(proposal.proposal_id)
     assert current.status.value == "blocked" and current.reason_code == "accepted_binding_unavailable"
 
@@ -435,7 +492,7 @@ async def test_callback_refs_must_name_the_job_and_a_second_callback_is_denied(l
     job, replayed = await admit_service_job(
         operator=operator, origin_method="memory.forget", native_branch="base", candidate=candidate,
         idempotency_key="f-ref", reviewed_composition=host.reviewed, jobs=jobs,
-        admission_authority_check=outstanding_admission_check)
+        admission_authority_check=_mint_admission("memory.forget", operator, candidate))
     owner, fence = await claim_service_job(job, host=host, jobs=jobs)
     scope = await open_invocation(job_id=job["job_id"], owner=owner, fence=fence, host=host,
                                   admission_replayed=replayed, candidate=candidate, jobs=jobs)
@@ -462,7 +519,7 @@ async def test_outstanding_cap_is_per_root_and_per_principal_and_replays_bypass_
         return await admit_service_job(operator=op, origin_method="memory.forget", native_branch="base",
                                        candidate=candidate, idempotency_key=key or f"cap-{index}",
                                        reviewed_composition=host.reviewed, jobs=jobs,
-                                       admission_authority_check=outstanding_admission_check)
+                                       admission_authority_check=_mint_admission("memory.forget", op, candidate))
     for index in range(4):
         await admit(operator, index)
     with pytest.raises(Exception) as excinfo:
@@ -544,3 +601,80 @@ async def test_forget_during_an_in_flight_read_withdraws_the_read(live_host, mon
                                   candidate={"schema_version": 1, "method": "memory.retrieve", "query": "cafe",
                                              "limit": 5, "status": "active"})
     assert forgotten and excinfo.value.reason_code == "native_memory_record_withdrawn"
+
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_accept_readback_requires_the_accepted_status_and_sealed_acceptance(live_host, monkeypatch):
+    """A committed accept whose canonical rows no longer match blocks, effect_committed."""
+    host, jobs, _calls = live_host
+    operator = await _operator()
+    _, proposal = await _propose(host, jobs, operator)
+    original = host.request_service
+
+    async def tamper_after_commit(method, payload, **kwargs):
+        result = await original(method, payload, **kwargs)
+        async with get_session() as db:
+            await db.execute(update(MemoryProposal).where(MemoryProposal.proposal_id == proposal.proposal_id)
+                             .values(acceptance_binding_digest="f" * 64))
+        return result
+    monkeypatch.setattr(host, "request_service", tamper_after_commit)
+    with pytest.raises(MemoryMutationBlocked) as excinfo:
+        await execute_memory_mutation(
+            operator=operator, method="memory.applyReviewed", idempotency_key="a-tamper", host=host, jobs=jobs,
+            request={"proposal_id": proposal.proposal_id, "action": "accept", "expected_revision": proposal.revision,
+                     "expected_preview_text_digest": proposal.preview_text_digest,
+                     "expected_task_revision": proposal.source_task_revision,
+                     "expected_goal_revision": proposal.goal_revision})
+    assert excinfo.value.reason_code == "native_memory_readback_mismatch"
+    assert excinfo.value.effect_committed is True
+    async with get_session() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == excinfo.value.job_id))).scalar_one()
+    assert run.status == "blocked" and run.failure_reason == "native_memory_readback_mismatch"
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_child_mismatch_after_commit_reports_effect_committed(live_host, monkeypatch):
+    host, jobs, _calls = live_host
+    operator = await _operator()
+    await _memory("mismatch", session_id=operator.session_id)
+    original = host.request_service
+
+    async def fabricated(method, payload, **kwargs):
+        await original(method, payload, **kwargs)
+        return {"status": "succeeded", "memory_status": "forgotten",
+                "value": {"record_ref": "mismatch", "receipt_ref": "fabricated"}}
+    monkeypatch.setattr(host, "request_service", fabricated)
+    with pytest.raises(MemoryMutationBlocked) as excinfo:
+        await execute_memory_mutation(operator=operator, method="memory.forget", idempotency_key="f-mismatch",
+                                      host=host, jobs=jobs,
+                                      request={"memory_id": "mismatch", "acknowledge_irreversible": True})
+    assert excinfo.value.reason_code == "native_child_result_mismatch"
+    assert excinfo.value.effect_committed is True
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_a_replayed_proposal_writes_no_second_creation_audit(live_host):
+    host, jobs, _calls = live_host
+    operator = await _operator()
+    first, proposal = await _propose(host, jobs, operator, key="p-first")
+    source = {"task_id": "m1064-task", "attempt_id": "m1064-attempt", "expected_task_revision": 1}
+    replay = await execute_memory_mutation(operator=operator, method="memory.propose", request=source,
+                                           idempotency_key="p-second", host=host, jobs=jobs)
+    assert replay["result"]["value"]["proposal_ref"] == proposal.proposal_id
+    async with get_session() as db:
+        created = (await db.execute(select(AuditEvent).where(
+            AuditEvent.event_type == "memory_proposal_created"))).scalars().all()
+    assert len(created) == 1
+
+
+def test_core_reasons_never_carry_exception_text():
+    from src.runtime_plugins.memory_mutations import _core_reason
+    assert _core_reason(ValueError("stale_task_revision")) == "native_memory_stale_task_revision"
+    assert _core_reason(ValueError("private text 'cafe' leaked")) == "native_memory_mutation_rejected"
+    assert _core_reason(ValueError("unknown_code_x")) == "native_memory_mutation_rejected"
+    assert _core_reason(PermissionError("anything")) == "native_memory_owner_forbidden"

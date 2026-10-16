@@ -2687,6 +2687,11 @@ class DurableJobRepository(InferenceAccountingRepositoryMixin):
             from src.workflows.general_task_guard import is_fixed_child_admission
             if not is_fixed_child_admission(admission_authority_check):
                 raise DurableJobAdmissionDenied("general_task_fixed_native_admission_required")
+        if identity.job_kind == "runtime_service_memory_v1":
+            # Operator-admitted memory mutations (#1064) accept only the sealed token.
+            from src.runtime_plugins.memory_mutations import is_memory_admission
+            if not is_memory_admission(admission_authority_check):
+                raise DurableJobAdmissionDenied("native_memory_admission_required")
         if near_text_policy_scope is not None:
             from src.work_board.near_text_native import validate_native_policy_scope
             validate_native_policy_scope(near_text_policy_scope, run_or_identity=identity, phase="admit")

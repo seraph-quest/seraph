@@ -39,6 +39,83 @@ _FORGET_REASON = "cordis_operator_delete"
 _REF_FIELD = {"memory.propose": "request_ref", "memory.applyReviewed": "review_ref", "memory.forget": "request_ref"}
 
 
+class MemoryMutationBlocked(NativeServiceBlocked):
+    """A typed block that also says whether the effect already committed.
+
+    A committed forget is irreversible, so callers must be able to tell it
+    apart from a mutation that never ran.
+    """
+
+    def __init__(self, reason_code: str, *, effect_committed: bool, job_id: str | None = None):
+        super().__init__(reason_code)
+        self.effect_committed = effect_committed
+        self.job_id = job_id
+
+
+# ---------------------------------------------------------------- admission token
+
+_ADMISSION_SEAL = object()
+
+
+class _MemoryAdmission:
+    """Sealed proof that ``memory_admission`` ran the operator gate for one candidate.
+
+    Only ``memory_admission`` mints it (a guard test enforces the import);
+    ``admit_service_job`` and ``admit_job`` accept no other callable for a
+    memory mutation, so a plain lambda cannot skip the gate, the candidate
+    binding, the source-role check or the cap.
+    """
+
+    __slots__ = ("method", "operator_session_id", "principal_id", "input_digest", "seal")
+
+    def __init__(self, method: str, operator_session_id: str, principal_id: str, input_digest: str, seal):
+        self.method, self.operator_session_id, self.principal_id = method, operator_session_id, principal_id
+        self.input_digest, self.seal = input_digest, seal
+
+    async def __call__(self, db, run) -> None:
+        from src.workflows.job_runtime import DurableJobAdmissionDenied
+        if (self.seal is not _ADMISSION_SEAL or run.job_kind != MEMORY_JOB_KIND
+                or run.operator_session_id != self.operator_session_id
+                or run.owner_principal_id != self.principal_id or run.input_digest != self.input_digest):
+            raise DurableJobAdmissionDenied("native_memory_admission_required")
+        await outstanding_admission_check(db, run)
+
+
+def _mint_admission(method: str, operator, candidate: dict) -> _MemoryAdmission:
+    """Called only by ``memory_admission`` after its operator gate and candidate build."""
+    from src.workflows.job_runtime import _safe_durable_inputs
+    candidate = validate_mutation_candidate(method, candidate)
+    input_digest, _ = _safe_durable_inputs(candidate)
+    return _MemoryAdmission(method, operator.session_id, operator.principal.principal_id, input_digest,
+                            _ADMISSION_SEAL)
+
+
+def is_memory_admission(value, method: str | None = None) -> bool:
+    return (type(value) is _MemoryAdmission and value.seal is _ADMISSION_SEAL
+            and (method is None or value.method == method))
+
+
+async def outstanding_admission_check(db, run) -> None:
+    """At most four live memory-mutation jobs per Root and per principal.
+
+    Runs inside ``admit_job``'s writer before the insert; an exact idempotent
+    replay returns before it and is never counted twice.
+    """
+    from src.db.models import WorkflowRunState
+    from src.workflows.job_runtime import DURABLE_JOB_TERMINAL_STATUSES, DurableJobAdmissionDenied
+    now = datetime.now(timezone.utc)
+    for column, value in ((WorkflowRunState.operator_session_id, run.operator_session_id),
+                          (WorkflowRunState.owner_principal_id, run.owner_principal_id)):
+        # A bounded row select, not an aggregate: the product SQLite
+        # authorizer denies ``count`` (the #1007 census failure).
+        live = (await db.execute(select(WorkflowRunState.run_identity).where(
+            WorkflowRunState.job_kind == MEMORY_JOB_KIND, column == value,
+            WorkflowRunState.status.not_in(tuple(DURABLE_JOB_TERMINAL_STATUSES)),
+            WorkflowRunState.deadline_at > now).limit(OUTSTANDING_LIMIT))).scalars().all()
+        if len(live) >= OUTSTANDING_LIMIT:
+            raise DurableJobAdmissionDenied("native_memory_outstanding_limit")
+
+
 def mutation_key() -> bytes:
     """Per-install MAC key for mutation candidates and sealed results.
 
@@ -124,6 +201,20 @@ async def review_binding_mac(proposal, *, action: str, decision_effect: str, cor
         "preferred_capability_id": capability, "memory_kind": kind or ""}, key=key)
 
 
+def _acceptance_mac(proposal, memory) -> str:
+    """Keyed MAC over the committed acceptance: proposal, binding and accepted row."""
+    from src.memory.m5 import m5_text_digest
+    if proposal is None or memory is None:
+        raise NativeServiceBlocked("native_memory_readback_mismatch")
+    return _mac(b"acceptance", {
+        "proposal_id": proposal.proposal_id, "revision": int(proposal.revision or 0),
+        "status": getattr(proposal.status, "value", proposal.status),
+        "acceptance_binding_digest": proposal.acceptance_binding_digest or "",
+        "accepted_memory_id": proposal.accepted_memory_id or "", "memory_id": memory.id,
+        "memory_kind": getattr(memory.kind, "value", memory.kind) or "",
+        "memory_session": memory.source_session_id or "", "content_digest": m5_text_digest(memory.content or "")})
+
+
 def _assert_memory_owner(memory, session_id: str) -> None:
     """The memory routes' 403 contract, as typed reasons."""
     if memory is None:
@@ -138,6 +229,16 @@ def _assert_memory_owner(memory, session_id: str) -> None:
 # ---------------------------------------------------------------- callback
 
 _CORE_ERRORS = {"accepted_binding_unavailable", "decision_receipt_signing_unavailable", "proposal_expired"}
+# The M5 owners' own typed ValueError codes; anything else (including
+# exception text) maps to one generic reason and never reaches a failure row.
+_KNOWN_CORE_CODES = frozenset({
+    "correction_target_deleted", "correction_target_requires_accept", "correction_target_unavailable",
+    "decision_effect_invalid", "memory_kind_invalid", "memory_scope_invalid", "memory_tombstoned",
+    "preferred_capability_unregistered", "preview_digest_required", "proposal_already_accepted",
+    "proposal_not_accepted", "proposal_not_accepting", "proposal_source_binding_conflict", "stale_goal_revision",
+    "stale_preview_digest", "stale_proposal_revision", "stale_task_revision", "unknown_proposal_action",
+    "verified_source_binding_invalid", "task_method_requires_specialized_review",
+    "procedure_preference_requires_specialized_review", "opportunity_preference_requires_specialized_review"})
 
 
 def _core_reason(exc: BaseException) -> str:
@@ -146,8 +247,8 @@ def _core_reason(exc: BaseException) -> str:
         return "native_memory_accepted_binding_unavailable"
     if isinstance(exc, PermissionError):
         return "native_memory_owner_forbidden"
-    code = "".join(char if char.isalnum() or char == "_" else "_" for char in str(exc).lower())[:80].strip("_")
-    return "native_memory_" + (code or "mutation_rejected")
+    code = exc.args[0] if len(exc.args) == 1 and type(exc.args[0]) is str else None
+    return "native_memory_" + (code if code in _KNOWN_CORE_CODES else "mutation_rejected")
 
 
 async def dispatch_memory_mutation(dispatcher, frame, payload, scope):
@@ -231,9 +332,11 @@ async def _propose(db, run, candidate, _post_commit) -> dict:
         attempt_id=candidate["attempt_id"])
     proposal_id, revision = payload["proposal_id"], int(payload["revision"])
     state = "proposed" if payload.get("status") == "proposed" else "blocked"
-    db.add(_audit_row(run, "memory_proposal_created", {
-        "proposal_id": proposal_id, "revision": revision, "status": payload.get("status"),
-        "reason_code": payload.get("reason_code")}))
+    if not payload.get("idempotent_replay"):
+        # A replayed proposal was already created (and audited) once.
+        db.add(_audit_row(run, "memory_proposal_created", {
+            "proposal_id": proposal_id, "revision": revision, "status": payload.get("status"),
+            "reason_code": payload.get("reason_code")}))
     receipt = {"proposal_id": proposal_id, "revision": revision, "status": payload.get("status"),
                "memory_status": "proposal_only"}
     if payload.get("error_code") in _CORE_ERRORS:
@@ -272,6 +375,12 @@ async def _apply_reviewed(db, run, candidate, _post_commit) -> dict:
                "action": candidate["action"], "accepted_memory_id": payload.get("accepted_memory_id"),
                "memory_status": "reviewed_update" if status == "accepted" else "no_learning",
                "audit_event_ref": payload.get("audit_event_id")}
+    if status == "accepted" and payload.get("accepted_memory_id"):
+        # Sealed, keyed proof of the committed acceptance for the readback.
+        from src.db.models import Memory
+        accepted = await db.get(MemoryProposal, payload["proposal_id"], populate_existing=True)
+        memory = await db.get(Memory, payload["accepted_memory_id"], populate_existing=True)
+        receipt["acceptance_mac"] = _acceptance_mac(accepted, memory)
     if payload.get("error_code") in _CORE_ERRORS or (candidate["action"] == "accept" and status != "accepted"):
         # The owner recorded a recovery state (signing outage, expiry): keep
         # it committed and seal a typed block rather than claim an update.
@@ -347,8 +456,11 @@ async def canonical_readback(db, run, sealed: dict) -> dict:
         if ok and method == "memory.applyReviewed" and sealed["projection"]["status"] == "succeeded":
             if outcome["status"] == "accepted":
                 memory = await db.get(Memory, outcome["accepted_memory_id"], populate_existing=True)
-                ok = (proposal.accepted_memory_id == outcome["accepted_memory_id"] and memory is not None
-                      and memory.source_session_id == run.operator_session_id)
+                ok = (getattr(proposal.status, "value", proposal.status) == "accepted"
+                      and proposal.accepted_memory_id == outcome["accepted_memory_id"] and memory is not None
+                      and memory.source_session_id == run.operator_session_id
+                      and type(outcome.get("acceptance_mac")) is str
+                      and hmac.compare_digest(_acceptance_mac(proposal, memory), outcome["acceptance_mac"]))
             else:
                 ok = getattr(proposal.status, "value", proposal.status) == "rejected"
     elif method == "memory.forget":
@@ -394,9 +506,14 @@ async def complete_mutation(jobs, run_id: str, owner: str, fence: int, method: s
         sealed = sealed_result(await jobs._fetch(db, run_id))
     blocked_reason = sealed and sealed["projection"].get("reason_code")
     if blocked_reason:
+        # The owner's recovery state is committed with the sealed block.
         await jobs.transition_job(run_id, "blocked", owner=owner, fencing_token=fence, reason=blocked_reason)
-        raise NativeServiceBlocked(blocked_reason)
-    await _record_readback(jobs, run_id, owner, fence)
+        raise MemoryMutationBlocked(blocked_reason, effect_committed=True, job_id=run_id)
+    try:
+        await _record_readback(jobs, run_id, owner, fence)
+    except NativeServiceBlocked as exc:
+        await jobs.transition_job(run_id, "blocked", owner=owner, fencing_token=fence, reason=exc.reason_code)
+        raise MemoryMutationBlocked(exc.reason_code, effect_committed=True, job_id=run_id) from exc
     job = await jobs.transition_job(
         run_id, "succeeded", owner=owner, fencing_token=fence,
         result={"method": method, "memory_status": sealed["projection"]["memory_status"] if sealed else None,
@@ -409,5 +526,6 @@ async def complete_mutation(jobs, run_id: str, owner: str, fence: int, method: s
 
 
 __all__ = ["DERIVED_VECTOR_PURGE", "FORGET_LABEL", "MEMORY_JOB_KIND", "MUTATION_METHODS", "OUTSTANDING_LIMIT",
+           "MemoryMutationBlocked", "is_memory_admission", "outstanding_admission_check",
            "canonical_readback", "complete_mutation", "dispatch_memory_mutation", "review_binding_mac",
            "sealed_result", "validate_mutation_candidate", "wire_inputs"]

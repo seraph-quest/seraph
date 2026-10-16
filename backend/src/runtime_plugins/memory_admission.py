@@ -7,15 +7,15 @@ it. It repeats the memory routes' operator checks itself.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from collections.abc import Mapping
 
 from sqlalchemy import select
 
 from .dispatch import NativeServiceBlocked
-from .memory_mutations import (DECISION_EFFECTS, MEMORY_JOB_KIND, MUTATION_METHODS, OUTSTANDING_LIMIT,
-                               REVIEW_ACTIONS, _assert_memory_owner, complete_mutation, review_binding_mac,
-                               sealed_result, validate_mutation_candidate, wire_inputs)
+from .memory_mutations import (DECISION_EFFECTS, MUTATION_METHODS, REVIEW_ACTIONS, MemoryMutationBlocked,
+                               _assert_memory_owner, _mint_admission, complete_mutation,
+                               outstanding_admission_check, review_binding_mac, sealed_result,
+                               validate_mutation_candidate, wire_inputs)
 from .protocol import ProtocolError
 
 
@@ -116,27 +116,6 @@ async def build_candidate(operator, method: str, request: Mapping) -> dict:
         raise NativeServiceBlocked("native_memory_request_invalid") from exc
 
 
-async def outstanding_admission_check(db, run) -> None:
-    """At most four live memory-mutation jobs per Root and per principal.
-
-    Runs inside ``admit_job``'s writer before the insert; an exact idempotent
-    replay returns before it and is never counted twice.
-    """
-    from src.db.models import WorkflowRunState
-    from src.workflows.job_runtime import DURABLE_JOB_TERMINAL_STATUSES, DurableJobAdmissionDenied
-    now = datetime.now(timezone.utc)
-    for column, value in ((WorkflowRunState.operator_session_id, run.operator_session_id),
-                          (WorkflowRunState.owner_principal_id, run.owner_principal_id)):
-        # A bounded row select, not an aggregate: the product SQLite
-        # authorizer denies ``count`` (the #1007 census failure).
-        live = (await db.execute(select(WorkflowRunState.run_identity).where(
-            WorkflowRunState.job_kind == MEMORY_JOB_KIND, column == value,
-            WorkflowRunState.status.not_in(tuple(DURABLE_JOB_TERMINAL_STATUSES)),
-            WorkflowRunState.deadline_at > now).limit(OUTSTANDING_LIMIT))).scalars().all()
-        if len(live) >= OUTSTANDING_LIMIT:
-            raise DurableJobAdmissionDenied("native_memory_outstanding_limit")
-
-
 async def execute_memory_mutation(*, operator, method: str, request: Mapping, idempotency_key: str,
                                   source_role: str = "operator", host=None, jobs=None) -> dict:
     """Operator HTTP handler entry point: admit, cross once, verify, complete."""
@@ -158,7 +137,7 @@ async def execute_memory_mutation(*, operator, method: str, request: Mapping, id
         job, replayed = await admit_service_job(
             operator=operator, origin_method=method, native_branch="base", candidate=candidate,
             idempotency_key=idempotency_key, reviewed_composition=host.reviewed, jobs=jobs,
-            admission_authority_check=outstanding_admission_check)
+            admission_authority_check=_mint_admission(method, operator, candidate))
     except DurableJobAdmissionDenied as exc:
         raise NativeServiceBlocked(exc.reason) from exc
     if job["status"] != "accepted":
@@ -178,10 +157,10 @@ async def execute_memory_mutation(*, operator, method: str, request: Mapping, id
         # Nothing committed: the attempt blocks with the child's typed reason.
         reason = (observed or {}).get("reason_code") or "native_memory_execution_blocked"
         await _block(jobs, scope, reason)
-        raise NativeServiceBlocked(reason)
+        raise MemoryMutationBlocked(reason, effect_committed=False, job_id=job_id)
     if observed is not None and observed != sealed["projection"]:
         # The effect is committed; a fabricated child answer never settles
         # the job, and the committed effect is never replayed.
         await _block(jobs, scope, "native_child_result_mismatch")
-        raise NativeServiceBlocked("native_child_result_mismatch")
+        raise MemoryMutationBlocked("native_child_result_mismatch", effect_committed=True, job_id=job_id)
     return await complete_mutation(jobs, job_id, owner, fence, method)

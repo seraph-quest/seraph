@@ -20,7 +20,7 @@ from sqlalchemy.exc import OperationalError, TimeoutError as PoolTimeoutError
 from .dispatch import (CONTEXT_TAG, READ_JOB_KIND, TASK_JOB_KIND, WITNESS_PREFIX, NativeServiceBlocked,
                        NativeServiceDispatcher, OriginalServiceInvocation, _canonical, _checked_witness, _digest,
                        _ms, _stored_witness, _writer, cas_run, checkpoint_receipt, transient_storage_error)
-from .memory_mutations import MEMORY_JOB_KIND, MUTATION_METHODS, validate_mutation_candidate
+from .memory_mutations import MEMORY_JOB_KIND, MUTATION_METHODS, is_memory_admission, validate_mutation_candidate
 from .ownership import RuntimeCompositionBinding, bind_invocation
 from .protocol import ProtocolError
 from .read_admission import validate_read_candidate, wire_inputs
@@ -77,8 +77,9 @@ async def admit_service_job(*, operator, origin_method: str, native_branch: str,
             candidate = validate_mutation_candidate(origin_method, candidate)
         except ProtocolError as exc:
             raise NativeServiceBlocked("native_memory_candidate_invalid") from exc
-        if admission_authority_check is None:
-            raise NativeServiceBlocked("native_memory_admission_check_required")
+        if not is_memory_admission(admission_authority_check, origin_method):
+            # Only the sealed token minted after the operator gate admits a mutation.
+            raise NativeServiceBlocked("native_memory_admission_required")
         job_kind = MEMORY_JOB_KIND
     else:
         raise NativeServiceBlocked("native_branch_unsupported")

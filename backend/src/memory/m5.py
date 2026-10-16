@@ -1970,7 +1970,9 @@ async def _write_source_failure_proposal(
     if existing is not None:
         if existing.request_binding_digest != binding:
             raise ValueError("proposal_source_binding_conflict")
-        return _proposal_payload(existing)
+        payload = _proposal_payload(existing)
+        payload["idempotent_replay"] = True
+        return payload
     proposal = MemoryProposal(
         schema_version=M5_SCHEMA_VERSION,
         owner_principal_id=task.owner_principal_id,
@@ -2249,7 +2251,9 @@ async def create_memory_proposal_in_session(
         )
         if existing is None:
             raise ValueError("proposal_source_binding_conflict")
-        return _proposal_payload(existing)
+        payload = _proposal_payload(existing)
+        payload["idempotent_replay"] = True
+        return payload
     if candidate_text is None or preview_digest is None:
         status = (
             MemoryProposalStatus.blocked

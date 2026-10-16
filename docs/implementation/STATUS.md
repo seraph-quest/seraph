@@ -674,19 +674,18 @@ revision. Live Telegram remains unverified; see
 
 ## Legend
 
-Optional governed OpenRouter audio and paired-channel Task capture under
-[ADR-033](./decisions/033-governed-optional-audio-route.md) are **Planned**.
-Branch-local documentary cleanup remains part of this unmerged target: only
-successfully settled exact two-source staging can release quota after verified
-physical deletion. Failed, ambiguous and older unbound inventories remain
-`audio_documentation_cleanup_unknown` and charged; this is not audio activation.
-The accepted target adds only an optional disabled setup.v3 audio purpose;
-legacy setup versions remain unchanged. Missing source-attested endpoint/codec
-or finite chat-audio pricing keeps production audio blocked. Corrected transcript
-confirmation and the separate current Goal/Task allowance do not transfer audio
-liability or grant execution. Existing bounded Telegram notice controls retain
-their Partial scope; target adoption and scripted receipts establish no live
-Telegram, provider or native macOS/Safari operation.
+Paired-channel Task capture ([#1022](https://github.com/seraph-quest/seraph/issues/1022))
+is **Partial**. A paired Telegram `/task` message creates one review-only Task
+that can be inspected, paused, resumed or cancelled from Telegram and continued in
+the cockpit; unpaired senders and replayed provider events create nothing. Live
+voice is an explicit "Voice route unavailable" state under
+[ADR-033](./decisions/033-governed-optional-audio-route.md) until a source-attested
+endpoint, codec and pricing proof exists (tracked follow-up). Transcript
+correction updates the unexecuted intent through one corrected canonical Message
+and a separate fresh Goal/Task action, tested with a scripted transcription; it
+never replays the original call or transfers audio liability. Live Telegram,
+provider and native capture operation remain unverified. See the
+[current app guide](./12-current-app-guide.md#local-cockpit-interaction-boundaries).
 
 - `[x]` shipped on `develop`
 - `[ ]` not fully shipped on `develop`

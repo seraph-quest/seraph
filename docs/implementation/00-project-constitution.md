@@ -171,8 +171,9 @@ ADR-033 extends only the versioned setup.v3 target with one optional disabled
 audio route. Existing setup.v1/v2 and text, vision and embedding contracts stay
 in force. Source-attested exact endpoint/codec and finite chat-audio pricing,
 original audio native ownership and a separately selected Goal/Task allowance
-are mandatory. Accepted audio and paired-channel Task capture are **Planned**;
-acceptance and scripted mechanics do not establish operational voice readiness.
+are mandatory. Paired-channel Task capture is **Partial**; live audio stays
+disabled as an explicit "Voice route unavailable" state, and scripted mechanics do
+not establish operational voice readiness.
 
 ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
 purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR

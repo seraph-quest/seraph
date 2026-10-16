@@ -491,9 +491,19 @@ async def dispatch_governed(dispatcher, frame, payload, scope):
 
 # ---------------------------------------------------------------- Python owners
 
+def assert_governed_echo(run, observed: dict) -> None:
+    """The child's answer must equal the governed job's sealed result.
+
+    Governed jobs seal a plain digest of their wire result; the keyed read-result
+    MAC of #1100 belongs to native read jobs only (``service_artifacts.assert_child_echo``).
+    """
+    sealed = read_context(run)["result"]
+    if type(sealed) is not dict or sealed.get("result_digest") != _digest(observed):
+        raise NativeServiceBlocked("native_child_result_mismatch")
+
+
 async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, host=None, jobs=None) -> dict:
     from .bridge import HostBlocked, cordis_host
-    from .service_artifacts import assert_child_echo
     from .service_jobs import _block, _jobs, admit_service_job, claim_service_job, open_invocation
     host = host or cordis_host
     jobs = _jobs(jobs)
@@ -516,7 +526,7 @@ async def _execute_governed(*, operator, candidate: dict, idempotency_key: str, 
             raise NativeServiceBlocked(result["reason_code"])
         async with jobs._session() as db:
             run = await jobs._fetch(db, job["job_id"])
-            assert_child_echo(run, method, result)
+            assert_governed_echo(run, result)
             sealed = read_context(run)["result"]
         completed = await jobs.transition_job(job["job_id"], "succeeded", owner=owner, fencing_token=fence,
             result={"no_learning": True, "method": method, "sealed_result_digest": sealed["result_digest"]},

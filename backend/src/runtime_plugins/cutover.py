@@ -10,16 +10,23 @@ provider is not built or not admitting stays ``blocked`` with the host's exact
 fix; a later boot with a ready host completes it. Once marked, a domain is
 never re-cut by boot: an operator rollback to legacy is sticky.
 
-Operators move a domain either way through the authenticated runtime
-composition API, at a higher epoch, with an audit event. The backend holds the
-exclusive workspace owner lease for its lifetime (``runtime_workspace_owner``),
-so transitions run under that process's lifecycle fence. In-flight legacy turns
-are not bound to the owner row, so a process-local gate tracks them: a
-transition refuses while one is active, and no new legacy turn starts while a
-transition runs.
+Operators move a domain either way, live, through the authenticated runtime
+composition API, at a higher epoch, with an audit event. Moving a domain to
+Cordis requires its prerequisites to be Cordis-owned, and a rollback to legacy
+is refused while a dependent domain is Cordis-owned. In production the backend
+lifespan holds the exclusive workspace owner lease for its whole life
+(``runtime_workspace_owner``), so no backup or restore can observe a
+transition; a production process without that lease refuses every transition.
+Dev and test processes take no lease, so a backup taken there while a
+transition runs has no such protection.
+
+In-flight legacy turns are not bound to the owner row, so a process-local gate
+tracks them: a transition refuses while one is active, and no new legacy turn
+starts while a transition runs.
 """
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -74,10 +81,11 @@ class LegacyTurnGate:
 
     def __init__(self):
         self.active: dict[str, int] = {}
-        self.closed: set[str] = set()
+        # A count, not a set: overlapping transitions keep the gate closed until the last ends.
+        self.closed: Counter[str] = Counter()
 
     def enter(self, domain: str) -> None:
-        if domain in self.closed:
+        if self.closed[domain] > 0:
             raise CompositionBindingError("composition_transition_in_progress")
         self.active[domain] = self.active.get(domain, 0) + 1
 
@@ -90,17 +98,40 @@ class LegacyTurnGate:
         # Check and close in one synchronous step: no await between them.
         if self.active.get(domain, 0) > 0:
             raise CompositionBindingError("composition_not_quiescent")
-        self.closed.add(domain)
+        self.closed[domain] += 1
         try:
             yield
         finally:
-            self.closed.discard(domain)
+            self.closed[domain] -= 1
+            if self.closed[domain] <= 0:
+                del self.closed[domain]
 
 
 legacy_turns = LegacyTurnGate()
 
 
 # ---------------------------------------------------------------- transitions
+
+def _require_owner_lease() -> None:
+    """Production transitions run only while this process holds the workspace owner lease."""
+    from config.settings import settings
+    from src.workspace.production import runtime_workspace_owner_held
+    if settings.deployment_environment.strip().lower() in {"prod", "production"} and not runtime_workspace_owner_held():
+        logger.error("Refusing a Cordis owner transition: this production process does not hold the runtime "
+                     "workspace owner lease, so a backup or restore could observe it")
+        raise CompositionBindingError("composition_owner_lease_missing")
+
+
+def _check_dependencies(rows, domain: str, target: str) -> None:
+    """Cordis needs Cordis-owned prerequisites; legacy needs no Cordis-owned dependent."""
+    entry = next(item for item in _MANIFEST if item.domain == domain)
+    if target == "cordis" and any(rows.get(item) is None or rows[item].owner_kind != "cordis"
+                                  for item in entry.prerequisites):
+        raise CompositionBindingError("composition_prerequisite_not_cordis")
+    if target == "legacy" and any(domain in item.prerequisites and rows.get(item.domain) is not None
+                                  and rows[item.domain].owner_kind == "cordis" for item in _MANIFEST):
+        raise CompositionBindingError("composition_dependent_cordis_owned")
+
 
 def _pending_digest(domain: str) -> str:
     """Owner digest of a Cordis provider that is not yet built in this boot."""
@@ -173,14 +204,17 @@ async def transition_domain(domain: str, target: str, *, host, actor: str, expec
     from src.workspace.lifecycle import lifecycle_fence_marker
     if domain not in {entry.domain for entry in _MANIFEST} or target not in TARGETS:
         raise CompositionBindingError("composition_cutover_domain_invalid")
+    _require_owner_lease()
     with legacy_turns.quiesced(domain), lifecycle_fence_marker():
         async with get_session() as db:
             async with composition_writer(db):
-                row = (await inventory(db)).get(domain)
+                rows = await inventory(db)
+                row = rows.get(domain)
                 if row is None:
                     raise CompositionBindingError("composition_dependency_missing")
                 if expected_epoch is not None and row.epoch != expected_epoch:
                     raise CompositionBindingError("composition_owner_changed")
+                _check_dependencies(rows, domain, target)
                 prior = _checked_row(row).payload() | {"state": row.state}
                 await _move(db, domain, target, host)
                 current = (await inventory(db))[domain]
@@ -191,9 +225,20 @@ async def transition_domain(domain: str, target: str, *, host, actor: str, expec
 
 
 async def run_boot_cutover(host) -> list[dict]:
-    """Forward-only default cutover for every registered domain, once per workspace."""
+    """Forward-only default cutover for every registered domain, once per workspace.
+
+    A marked Cordis domain is completed when it still awaits its boot proof, and a
+    ready one whose stored digest differs from this boot's reviewed build is moved
+    to that build's digest at a higher epoch, so status and turn bindings never
+    name a stale composition.
+    """
     from src.db.engine import get_session
     from src.workspace.lifecycle import lifecycle_fence_marker
+    try:
+        _require_owner_lease()
+    except CompositionBindingError as exc:
+        return [{"runtime_domain": entry.domain, "action": "deferred", "reason": exc.reason_code}
+                for entry in _MANIFEST]
     receipts = []
     for entry in _MANIFEST:
         try:
@@ -209,12 +254,16 @@ async def run_boot_cutover(host) -> list[dict]:
                             continue
                         marked = entry.domain in await _cut_over_domains(db)
                         if marked:
-                            # Sticky: a marked domain is only completed, never re-cut from legacy.
-                            if row.owner_kind != "cordis" or row.state == "ready":
+                            # Sticky: a marked domain is only completed or refreshed, never re-cut from legacy.
+                            if row.owner_kind != "cordis":
                                 continue
+                            built = _host_digest(host, entry.domain)
+                            if row.state == "ready" and built in (None, row.composition_digest):
+                                continue
+                            action = "completed" if row.state != "ready" else "digest_refreshed"
                             await _move(db, entry.domain, "cordis", host)
                             current = (await inventory(db))[entry.domain]
-                            receipts.append({"runtime_domain": entry.domain, "action": "completed",
+                            receipts.append({"runtime_domain": entry.domain, "action": action,
                                              "state": current.state, "epoch": current.epoch})
                             continue
                         prior = _checked_row(row).payload() | {"state": row.state}

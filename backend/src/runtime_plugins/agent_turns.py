@@ -49,6 +49,7 @@ PROFILES = frozenset({"agent", "onboarding", "direct"})
 # Grace after the chat timeout so the timeout reply itself can settle.
 SETTLEMENT_GRACE = timedelta(seconds=30)
 LOOP_NAMES = {"cordis": "cordis.agent-loop.v1", "legacy": "legacy.smolagents", "blocked": "blocked"}
+RESTART_COMMANDS = "./manage.sh -e dev local up locally, or ./manage.sh -e prod up -d --build under Docker"
 
 
 class TurnBlocked(Exception):
@@ -151,8 +152,8 @@ async def chat_runtime_status(host=None) -> dict:
                     "recovery": snapshot.get("recovery") or cordis_recovery("blocked", snapshot.get("reason"))}
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch,
                 "owner_kind": row.owner_kind, "reason": f"agent_loop_owner_{row.state}",
-                "recovery": ("Restart Seraph with ./manage.sh -e dev local up to finish the Cordis cutover, or roll "
-                             "chat back to the legacy loop from Settings.") if row.owner_kind == "cordis"
+                "recovery": (f"Restart Seraph to finish the Cordis cutover ({RESTART_COMMANDS}), or roll chat "
+                             "back to the legacy loop from Settings.") if row.owner_kind == "cordis"
                 else "Finish the agent-loop owner transition (cutover or rollback) from Settings."}
     if row.owner_kind == "legacy":
         return {"loop": LOOP_NAMES["legacy"], "route": "chat_agent", "owner_epoch": row.epoch, "reason": None,
@@ -162,6 +163,11 @@ async def chat_runtime_status(host=None) -> dict:
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
                 "reason": "cordis_" + str(snapshot.get("reason") or "host_unavailable"),
                 "recovery": snapshot.get("recovery") or cordis_recovery("blocked", snapshot.get("reason"))}
+    if (host.reviewed.plugin_digests or {}).get(AGENT_LOOP_DOMAIN) != row.composition_digest:
+        # The running build is not the one the owner row names (boot refreshes it; a failed refresh stays visible).
+        return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
+                "reason": "agent_loop_composition_drift",
+                "recovery": f"Restart Seraph so boot records the running Cordis build ({RESTART_COMMANDS})."}
     from config.settings import settings
     if settings.use_delegation:
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
@@ -176,6 +182,35 @@ def chat_route(status: dict) -> str:
     if status["loop"] == LOOP_NAMES["legacy"]:
         return "legacy"
     return "blocked"
+
+
+async def enter_chat_route() -> tuple[dict, str, bool]:
+    """Resolve the chat loop for one message; returns ``(status, loop, legacy_gate_held)``.
+
+    A legacy route takes the drain gate, then re-reads the route: a transition that
+    finished between the first read and the gate releases the gate and uses the new
+    route, so a legacy turn never starts after the owner moved. While the gate is
+    held no transition can start, so the second read is final.
+    """
+    from .cutover import legacy_turns
+    from .ownership import CompositionBindingError
+    status = await chat_runtime_status()
+    if chat_route(status) != "legacy":
+        return status, chat_route(status), False
+    try:
+        legacy_turns.enter(AGENT_LOOP_DOMAIN)
+    except CompositionBindingError:
+        return ({"reason": "composition_transition_in_progress",
+                 "recovery": "The chat loop owner is changing; send the message again in a moment."}, "blocked", False)
+    try:
+        status = await chat_runtime_status()
+    except BaseException:
+        legacy_turns.leave(AGENT_LOOP_DOMAIN)
+        raise
+    if chat_route(status) != "legacy":
+        legacy_turns.leave(AGENT_LOOP_DOMAIN)
+        return status, chat_route(status), False
+    return status, "legacy", True
 
 
 def chat_runtime_status_text(loop: str) -> str:
@@ -645,8 +680,13 @@ class CordisTurn:
         Same agent, prompts, model owner and wrapped tools as legacy. Tool calls
         run sequentially in call order (``max_tool_threads=1``); smolagents
         already records observations in call-id order, so memory and frames match.
+        Only Seraph's ``ToolCallingAgent`` is accepted: it re-raises approval and
+        clarification interrupts out of the loop instead of observing them (#1107).
         """
         from smolagents.utils import AgentExecutionError, AgentParsingError
+        from src.agent.tool_calling_agent import ToolCallingAgent, control_flow_interrupt
+        if not isinstance(agent, ToolCallingAgent):
+            raise TurnBlocked("agent_turn_agent_unsupported")
         turn = self
         agent.max_tool_threads = 1
 
@@ -708,10 +748,8 @@ class CordisTurn:
             try:
                 result = original_execute(tool_name, arguments)
             except BaseException as exc:
-                from src.agent.exceptions import ClarificationRequired
-                from src.approval.exceptions import ApprovalRequired
-                no_effect = isinstance(exc, (ApprovalRequired, ClarificationRequired)) or isinstance(
-                    getattr(exc, "__cause__", None), (ApprovalRequired, ClarificationRequired))
+                # An approval or clarification pause stops before the tool's effect.
+                no_effect = control_flow_interrupt(exc) is not None
                 turn.run_sync(turn.tool_outcome(step_index=step_index, call_index=call_index, tool_name=tool_name,
                                                 outcome="no_effect" if no_effect else "failed"))
                 raise

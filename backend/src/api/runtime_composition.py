@@ -1,9 +1,10 @@
 """Operator control of Cordis runtime domain owners (#1019).
 
-Authenticated HTTP only (the auth middleware enforces Origin, CSRF and the
-session cookie); no agent tool, scheduler or workflow can reach it. Every move
-is a fenced owner transition at a higher epoch with an audit event, and needs
-an explicit confirmation that repeats the domain name.
+Authenticated HTTP only (the global OperatorAuthMiddleware enforces the Origin
+check and the session cookie); no agent tool, scheduler or workflow can reach
+it. Every move is a live fenced owner transition at a higher epoch with an
+audit event, needs an explicit confirmation that repeats the domain name, and
+is refused while the operator's ownership continuity is under recovery.
 """
 from __future__ import annotations
 
@@ -59,6 +60,10 @@ async def transition_domain_owner(request: Request, domain: str, body: OwnerTran
     from src.runtime_plugins.cutover import cutover_manifest, transition_domain
     from src.runtime_plugins.ownership import CompositionBindingError
     operator = _operator(request)
+    if operator.ownership_continuity != "stable":
+        # A rotated or recovering Root may read the owners but not move them.
+        raise HTTPException(status_code=403, detail={"code": "operator_ownership_recovery_required",
+                                                     "recovery_action": "complete_ownership_recovery"})
     if domain not in {entry.domain for entry in cutover_manifest()}:
         raise HTTPException(status_code=404, detail={"code": "composition_cutover_domain_invalid",
                                                      "recovery_action": None})

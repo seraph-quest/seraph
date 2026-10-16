@@ -67,8 +67,7 @@ from src.tools.policy import get_current_tool_policy_mode
 from src.vault.redaction import redact_secrets_for_streaming_snapshot, redact_secrets_in_text
 from src.vlm_runtime import direct_local_chat_route_error
 from src.runtime_plugins.cutover import legacy_turns
-from src.runtime_plugins.ownership import CompositionBindingError
-from src.runtime_plugins.agent_turns import (AGENT_LOOP_DOMAIN, CordisTurn, TurnBlocked, chat_route, chat_runtime_status,
+from src.runtime_plugins.agent_turns import (AGENT_LOOP_DOMAIN, CordisTurn, TurnBlocked, enter_chat_route,
                                              chat_runtime_status_text, chat_runtime_unavailable_message,
                                              turn_blocked_message, turn_failure_reason)
 from src.work_board.repository import BoardError
@@ -796,17 +795,8 @@ async def websocket_chat(websocket: WebSocket):
             # The agent-loop owner row decides the loop; a blocked Cordis owner never falls
             # back. Readiness, the direct-route preflight and turn admission all precede the
             # user-row reservation, so a refused message is never a duplicate on retry.
-            chat_status = await chat_runtime_status()
-            chat_loop = chat_route(chat_status)
+            chat_status, chat_loop, legacy_turn_held = await enter_chat_route()
             active_cordis_turn = None
-            if chat_loop == "legacy":
-                try:
-                    legacy_turns.enter(AGENT_LOOP_DOMAIN)
-                    legacy_turn_held = True
-                except CompositionBindingError:
-                    chat_loop, chat_status = "blocked", {
-                        "reason": "composition_transition_in_progress",
-                        "recovery": "The chat loop owner is changing; send the message again in a moment."}
             if chat_loop == "blocked":
                 active_turn_completed = True
                 await websocket.send_text(

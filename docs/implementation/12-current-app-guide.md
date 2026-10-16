@@ -691,16 +691,39 @@ whose provider is not built or not admitting stays `blocked`, and chat shows the
 host's exact fix; a later boot with a ready runtime completes it. A domain with a
 cutover marker or any operator transition is never moved by boot again, so a
 rollback is sticky. A domain whose prerequisites are not yet Cordis-owned is
-skipped. Operators use `GET /api/runtime/composition/domains` and
+skipped. A marked, ready Cordis domain whose stored composition digest differs
+from this boot's reviewed build (a rebuilt package) is moved to the running
+build's digest at a higher epoch (`digest_refreshed`); until that happens chat
+status reports `agent_loop_composition_drift` with the restart fix instead of
+naming a stale build.
+
+Operators move a domain live with `GET /api/runtime/composition/domains` and
 `POST /api/runtime/composition/domains/{domain}/owner {target, expected_epoch,
-confirm_domain}` (authenticated HTTP only, audited as
-`runtime_composition_operator_transition`, the domain validated against the
-manifest), surfaced as one confirmed action in Settings → Cordis runtime host.
-The backend holds the exclusive workspace owner lease, so transitions run under
-its lifecycle fence. Cordis turns are bound and block a transition while live
+confirm_domain}` (authenticated HTTP only through the global Origin/cookie
+middleware, audited as `runtime_composition_operator_transition`, the domain
+validated against the manifest), surfaced as one confirmed action in Settings →
+Cordis runtime host. A Root whose `ownership_continuity` is not `stable` can
+list owners but is refused a move (`operator_ownership_recovery_required`).
+Moving a domain to Cordis requires its prerequisites to be Cordis-owned
+(`composition_prerequisite_not_cordis`), and a rollback to legacy is refused
+while a dependent domain is Cordis-owned (`composition_dependent_cordis_owned`).
+
+In production (`DEPLOYMENT_ENVIRONMENT=prod|production`) the backend lifespan
+holds the exclusive workspace owner lease (`runtime_workspace_owner`) for its
+whole life, so no backup or restore can observe a transition; a production
+process that does not hold the lease refuses every boot and live transition
+(`composition_owner_lease_missing`, logged as an error). Dev and test processes
+take no lease, so a workspace backup taken there while a transition runs has no
+such protection. Cordis turns are bound and block a transition while live
 (`composition_not_quiescent`); legacy turns are not bound, so a process-local
-gate tracks them: a transition refuses while one runs, and no new legacy turn
-starts during a transition (`composition_transition_in_progress`).
+gate counts them: a transition refuses while one runs, and no new legacy turn
+starts while any transition runs (overlapping transitions keep the gate closed
+until the last ends; `composition_transition_in_progress`). REST and WS chat
+re-read the route after taking the gate, so a transition that finished between
+the first read and the gate sends the message to the new owner instead of
+starting a legacy turn. Recovery text names both restarts: `./manage.sh -e dev
+local up` for the local stack and `./manage.sh -e prod up -d --build` under
+Docker.
 
 One `cordis_chat_turn_v1` job owns each ingress, keyed by the ingress message
 id. Cordis readiness, the direct-chat route preflight and the turn admission run

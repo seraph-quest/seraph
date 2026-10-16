@@ -787,7 +787,7 @@ function prepare_local_cordis() {
             reason="$(printf '%s' "$status" | sed -n 's/.*"reason": "\([a-z_]*\)".*/\1/p')"
             ;;
     esac
-    echo "Cordis research runtime unavailable (${reason:-unknown}); goal discovery is blocked and shows this in the cockpit." >&2
+    echo "Cordis runtime unavailable (${reason:-unknown}); chat and goal discovery are blocked with no legacy fallback (unless chat was rolled back to the legacy loop in Settings), and the cockpit shows this." >&2
     case "$reason" in
         node_missing|node_unavailable|node_unsupported)
             echo "  Fix: install Node 22.12+ or 24.x and set CORDIS_NODE_PATH in $ENV_FILE (or put it first on PATH), then rerun." >&2 ;;

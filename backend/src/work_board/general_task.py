@@ -522,12 +522,18 @@ class GeneralTaskService:
         if constraints is None or "source_exists" not in constraints["guards"]:
             return
         import os
-        from src.tools.filesystem_tool import _assert_not_secret_like_path, _safe_resolve, _open_workspace_file
+        from src.tools.filesystem_tool import (
+            _assert_not_secret_like_path,
+            _open_workspace_file,
+            _safe_resolve,
+            assert_agent_readable,
+        )
         if step.tool_id not in {"read_file", "write_file"} or not isinstance(inputs.get("file_path"), str):
             raise BoardError("general_task_method_guard_unsupported", "Original workspace file input required", status_code=409)
         try:
             _assert_not_secret_like_path(inputs["file_path"], "read")
             resolved = _safe_resolve(inputs["file_path"])
+            assert_agent_readable(resolved, file_path=inputs["file_path"])
             with _open_workspace_file(resolved, flags=os.O_RDONLY) as fd:
                 os.fstat(fd)  # metadata only; original adapter owns content
                 os.close(fd)

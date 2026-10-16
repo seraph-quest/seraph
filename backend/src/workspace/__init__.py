@@ -1,6 +1,8 @@
 """Workspace state inspection and bounded lifecycle contracts."""
 
 from src.workspace.state_registry import (
+    AgentAccessIndex,
+    AgentWorkspaceAccess,
     AmbiguousWorkspaceRootsError,
     ExternalReferencePolicy,
     ExternalReferenceSpec,
@@ -19,6 +21,7 @@ from src.workspace.state_registry import (
     DEFAULT_MAX_INVENTORY_DEPTH,
     DEFAULT_MAX_INVENTORY_TOTAL_BYTES,
     DEFAULT_MAX_INVENTORY_FILE_BYTES,
+    canonical_agent_workspace_access,
     canonical_workspace_config,
     canonical_workspace_database_path,
     canonical_workspace_inventory,
@@ -73,6 +76,8 @@ from src.workspace.production import (
 )
 
 __all__ = [
+    "AgentAccessIndex",
+    "AgentWorkspaceAccess",
     "AmbiguousWorkspaceRootsError",
     "ExternalReferencePolicy",
     "ExternalReferenceSpec",
@@ -91,6 +96,7 @@ __all__ = [
     "DEFAULT_MAX_INVENTORY_DEPTH",
     "DEFAULT_MAX_INVENTORY_TOTAL_BYTES",
     "DEFAULT_MAX_INVENTORY_FILE_BYTES",
+    "canonical_agent_workspace_access",
     "canonical_workspace_config",
     "canonical_workspace_database_path",
     "canonical_workspace_inventory",

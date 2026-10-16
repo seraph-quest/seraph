@@ -313,7 +313,7 @@ def _artifact_status(
     overall = "verified"
     # Importing the filesystem helpers here keeps source_watch -> inbox
     # completion hooks free of an import cycle.
-    from src.tools.filesystem_tool import _read_workspace_text_bounded, _safe_resolve
+    from src.tools.filesystem_tool import _read_workspace_text_bounded, _safe_resolve, assert_agent_readable
 
     for index, (kind, expected_path, path, artifact_id, expected_sha, max_bytes) in enumerate(paths):
         safe_artifact = _safe_id(artifact_id)
@@ -323,9 +323,9 @@ def _artifact_status(
             status = "blocked"
         else:
             try:
-                content, truncated = _read_workspace_text_bounded(
-                    _safe_resolve(expected_path), max_bytes=max_bytes
-                )
+                resolved = _safe_resolve(expected_path)
+                assert_agent_readable(resolved, file_path=expected_path, operation="inbox_artifact_readback")
+                content, truncated = _read_workspace_text_bounded(resolved, max_bytes=max_bytes)
                 content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 expected_artifact_id = artifact_id_for(
                     file_path=expected_path,
@@ -494,7 +494,7 @@ async def _evidence_previews(
 ) -> list[dict[str, Any]]:
     """Return bounded, redacted detail previews after byte/hash verification."""
 
-    from src.tools.filesystem_tool import _read_workspace_text_bounded, _safe_resolve
+    from src.tools.filesystem_tool import _read_workspace_text_bounded, _safe_resolve, assert_agent_readable
 
     previews: list[dict[str, Any]] = []
     for ref in refs:
@@ -507,9 +507,9 @@ async def _evidence_previews(
         if not file_path or artifact_id is None or expected_sha is None:
             return []
         try:
-            content, truncated = _read_workspace_text_bounded(
-                _safe_resolve(file_path), max_bytes=max_bytes
-            )
+            resolved = _safe_resolve(file_path)
+            assert_agent_readable(resolved, file_path=file_path, operation="inbox_evidence_preview")
+            content, truncated = _read_workspace_text_bounded(resolved, max_bytes=max_bytes)
         except (OSError, ValueError):
             return []
         content_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()

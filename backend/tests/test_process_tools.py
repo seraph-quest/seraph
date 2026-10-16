@@ -738,6 +738,285 @@ def test_run_command_rejects_search_of_secret_like_workspace_file(command):
     assert result == "Error: path argument cannot target secret-like workspace files."
 
 
+@pytest.fixture
+def isolated_workspace(tmp_path, monkeypatch):
+    """Keep registry-owned fixtures out of the shared test workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    return workspace
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    [".vault-key", "google_calendar_token.json", "seraph.db", "seraph.db-wal", "mcp-servers.json", "SERAPH.DB"],
+)
+@pytest.mark.parametrize("command", ["cat", "head", "grep"])
+def test_run_command_rejects_registry_owned_secret_and_database_files(command, file_name, isolated_workspace):
+    _write_workspace_file(file_name, "SERAPH_TEST_SECRET=do-not-read\n")
+    args = ["SERAPH_TEST_SECRET", file_name] if command == "grep" else [file_name]
+
+    result = run_command(command=command, args_json=json.dumps(args))
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+def test_run_command_rejects_traversal_to_registry_owned_file(isolated_workspace):
+    _write_workspace_file("notes/today.md", "ok\n")
+    _write_workspace_file("seraph.db", "SERAPH_TEST_SECRET=do-not-read\n")
+
+    result = run_command(command="cat", args_json='["notes/../seraph.db"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+def test_run_command_rejects_hard_link_alias_of_registry_owned_file(isolated_workspace):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    (isolated_workspace / "notes").mkdir()
+    (isolated_workspace / "notes" / "vault-alias.md").hardlink_to(isolated_workspace / ".vault-key")
+
+    result = run_command(command="cat", args_json='["notes/vault-alias.md"]')
+
+    assert result == "Error: path argument cannot target secret-like workspace files."
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["r .vault-key", "1R .vault-key", "w copied.txt", "W copied.txt", "e id", "s/a/b/w copied.txt", "s/a/id/e"],
+)
+def test_run_command_sandboxes_sed_file_and_exec_commands(isolated_workspace, script):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command="sed", args_json=json.dumps([script, "notes/a.md"]))
+
+    assert "SERAPH_TEST_SECRET" not in result
+    assert "disabled in sandbox mode" in result
+    assert not (isolated_workspace / "copied.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["-i", "s/a/b/", "notes/a.md"], ["-ni", "s/a/b/p", "notes/a.md"], ["-i.bak", "s/a/b/", "notes/a.md"],
+     ["--in-place", "s/a/b/", "notes/a.md"], ["--in-place=.bak", "s/a/b/", "notes/a.md"]],
+)
+def test_run_command_blocks_sed_in_place_editing(isolated_workspace, args):
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command="sed", args_json=json.dumps(args))
+
+    assert result == (
+        "Error: sed in-place editing is blocked in the process runtime; use apply_workspace_patch for workspace edits."
+    )
+    assert (isolated_workspace / "notes" / "a.md").read_text(encoding="utf-8") == "a\n"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-n", "-e", "p", "-e", "w notes/out2", "--", "notes/a.md", "--sandbox"],
+        ["--sandbox", "w notes/out2", "notes/a.md"],
+        ["-n", "--sandbox", "--sandbox", "1e echo EXEC", "notes/a.md"],
+    ],
+)
+def test_run_command_rejects_user_supplied_sed_sandbox_flag(isolated_workspace, args):
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command="sed", args_json=json.dumps(args))
+
+    assert result == "Error: sed --sandbox is applied by the process runtime; do not pass it."
+    assert not (isolated_workspace / "notes" / "out2").exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-n", "-e", "p", "-e", "w notes/out2", "--", "notes/a.md"],
+        ["-e", "r .vault-key", "--", "notes/a.md"],
+        ["-n", "-e", "1e echo EXEC", "--", "notes/a.md"],
+    ],
+)
+def test_sed_sandbox_is_always_the_first_option(isolated_workspace, args):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+
+    _executable, launched, _cwd = process_tools_module._normalize_command_invocation(
+        command="sed", args_json=json.dumps(args)
+    )
+    result = run_command(command="sed", args_json=json.dumps(args))
+
+    assert launched == ["--sandbox", *args]
+    assert "disabled in sandbox mode" in result
+    assert "SERAPH_TEST_SECRET" not in result and "EXEC" not in result
+    assert not (isolated_workspace / "notes" / "out2").exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--in", "s/a/CHANGED/", "notes/a.md"],
+        ["--in-pla", "s/a/CHANGED/", "notes/a.md"],
+        ["--i", "s/a/CHANGED/", "notes/a.md"],
+        ["--in=.bak", "s/a/CHANGED/", "notes/a.md"],
+        ["-e", "--", "--in-place", "notes/a.md"],
+        ["--expression", "--", "--in", "notes/a.md"],
+        ["--exp", "--", "--in", "notes/a.md"],
+        ["-ne", "--", "-i", "notes/a.md"],
+    ],
+)
+def test_run_command_blocks_sed_in_place_abbreviations(isolated_workspace, args):
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command="sed", args_json=json.dumps(args))
+
+    assert result.startswith("Error: sed in-place editing is blocked")
+    assert (isolated_workspace / "notes" / "a.md").read_text(encoding="utf-8") == "a\n"
+
+
+@pytest.mark.parametrize("command", ["SED", "Sed", "sEd"])
+def test_command_case_variants_get_the_canonical_validators(isolated_workspace, command):
+    _write_workspace_file("notes/a.md", "a\n")
+
+    assert process_tools_module._normalize_command(command) == "sed"
+    result = run_command(command=command, args_json='["w copied.txt","notes/a.md"]')
+
+    assert "disabled in sandbox mode" in result
+    assert not (isolated_workspace / "copied.txt").exists()
+    assert run_command(command=command, args_json='["-i","s/a/b/","notes/a.md"]').startswith(
+        "Error: sed in-place editing is blocked"
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("grep", ["-R", "SERAPH_TEST_SECRET", "notes"]),
+        ("grep", ["-d", "recurse", "SERAPH_TEST_SECRET", "notes"]),
+        ("rg", ["-L", "SERAPH_TEST_SECRET", "notes"]),
+        ("find", ["-L", "notes", "-name", "*"]),
+    ],
+)
+def test_recursive_scans_follow_directory_symlinks_to_protected_state(isolated_workspace, command, args):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+    (isolated_workspace / "notes" / "up").symlink_to("..", target_is_directory=True)
+
+    result = run_command(command=command, args_json=json.dumps(args))
+
+    assert "SERAPH_TEST_SECRET" not in result
+    assert "cannot recursively search" in result
+
+
+def test_recursive_scan_survives_symlink_cycles(isolated_workspace):
+    _write_workspace_file("notes/a.md", "ordinary\n")
+    (isolated_workspace / "notes" / "loop").symlink_to(".", target_is_directory=True)
+
+    assert process_tools_module._directory_contains_secret_like_workspace_path(isolated_workspace / "notes") is False
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        ("sed", ["--expression=p", ".vault-key"]),
+        ("sed", ["-ep", ".vault-key"]),
+        ("sed", ["-nep", ".vault-key"]),
+        ("sed", ["-s", "-ep", ".vault-key"]),
+        ("sed", ["--e=p", ".vault-key"]),
+        ("sed", ["--expr=p", ".vault-key"]),
+        ("sed", ["-nf", ".vault-key", "notes/a.md"]),
+        ("sed", ["-nf.vault-key", "notes/a.md"]),
+        ("sed", ["--fil=.vault-key", "notes/a.md"]),
+        ("sed", ["--file=seraph.db", "notes/a.md"]),
+        ("grep", ["--regexp=SERAPH", ".vault-key"]),
+        ("grep", ["-e", "SERAPH", ".vault-key"]),
+        ("grep", ["-eSERAPH", ".vault-key"]),
+        ("grep", ["-f", ".vault-key", "notes/a.md"]),
+        ("grep", ["-f.vault-key", "notes/a.md"]),
+        ("grep", ["--file=.vault-key", "notes/a.md"]),
+        ("grep", ["--file", "mcp-servers.json", "notes/a.md"]),
+        ("rg", ["-e", "SERAPH", ".vault-key"]),
+        ("rg", ["--regexp=SERAPH", ".vault-key"]),
+        ("rg", ["-f", ".vault-key", "notes"]),
+        ("rg", ["--file=.vault-key", "notes"]),
+        ("rg", ["-g", ".vault-key", "SERAPH", "."]),
+        ("rg", ["--glob=seraph.db", "SERAPH", "."]),
+        ("cat", ["--", ".vault-key"]),
+        ("wc", ["--files0-from=.vault-key"]),
+        ("head", ["-n1", "SERAPH.DB"]),
+    ],
+)
+def test_every_argv_token_and_option_value_is_path_screened(isolated_workspace, command, args):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("seraph.db", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("mcp-servers.json", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+
+    result = run_command(command=command, args_json=json.dumps(args))
+
+    assert "SERAPH_TEST_SECRET" not in result
+    assert result.startswith("Error: ") and "secret-like" in result
+
+
+def test_a_pattern_spelled_like_a_protected_file_is_refused_but_ordinary_patterns_work(isolated_workspace):
+    _write_workspace_file("notes/a.md", "token .vault-key mention\n")
+
+    # Documented false positive: write the pattern differently instead.
+    assert run_command(command="grep", args_json='[".vault-key","notes/a.md"]') == (
+        "Error: path argument cannot target secret-like workspace files."
+    )
+    assert "mention" in run_command(command="grep", args_json='["[.]vault-key","notes/a.md"]')
+    assert "mention" in run_command(command="grep", args_json='["token","notes/a.md"]')
+    assert "mention" in run_command(command="grep", args_json='["-E","-e","secret|token","notes/a.md"]')
+
+
+def test_run_command_still_runs_ordinary_sed_scripts(isolated_workspace):
+    _write_workspace_file("notes/a.md", "alpha\nbeta\n")
+
+    assert "beta" in run_command(command="sed", args_json='["-n","2p","notes/a.md"]')
+    assert "gamma" in run_command(command="sed", args_json='["-e","s/beta/gamma/","notes/a.md"]')
+
+
+def test_run_command_rejects_recursive_search_over_registry_owned_files(isolated_workspace):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-search\n")
+
+    result = run_command(command="grep", args_json='["-R","SERAPH_TEST_SECRET","."]')
+
+    assert result == "Error: path argument cannot recursively search workspace paths containing secret-like files; search a subdirectory such as notes/ instead."
+
+
+def test_grep_directories_recurse_cannot_read_a_hard_link_to_the_vault_key(isolated_workspace):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+    os.link(isolated_workspace / ".vault-key", isolated_workspace / "notes" / "copy")
+
+    result = run_command(command="grep", args_json='["-d","recurse","SERAPH_TEST_SECRET","notes"]')
+
+    assert "SERAPH_TEST_SECRET" not in result
+    assert result.startswith("Error:")
+
+
+def test_grep_directory_read_without_recursion_still_searches_ordinary_files(isolated_workspace):
+    _write_workspace_file("notes/a.md", "needle\n")
+
+    assert "needle" in run_command(command="grep", args_json='["-d","recurse","needle","notes"]')
+    assert "needle" in run_command(command="grep", args_json='["needle","notes/a.md"]')
+
+
+@pytest.mark.parametrize("args_json", ['["--pre","cat","x","notes"]', '["--pre=cat","x","notes"]', '["--pre-glob","*","x","notes"]', '["--hostname-bin=./prog","--hyperlink-format=default","x","notes"]', '["--hostname-bin","./prog","x","notes"]'])
+def test_rg_pre_preprocessor_is_blocked(isolated_workspace, args_json):
+    _write_workspace_file("notes/a.md", "x\n")
+
+    assert run_command(command="rg", args_json=args_json) == "Error: rg --pre and --hostname-bin are blocked in the process runtime."
+
+
+def test_run_command_still_reads_ordinary_and_read_only_runtime_files(isolated_workspace):
+    _write_workspace_file("notes/today.md", "ordinary note\n")
+    _write_workspace_file("model-fabric-settings.json", "{}\n")
+
+    assert "ordinary note" in run_command(command="cat", args_json='["notes/today.md"]')
+    assert "{}" in run_command(command="cat", args_json='["model-fabric-settings.json"]')
+
+
 @pytest.mark.parametrize(
     ("command", "args_json", "label"),
     [
@@ -745,6 +1024,20 @@ def test_run_command_rejects_search_of_secret_like_workspace_file(command):
         ("grep", '["-R","SERAPH_TEST_SECRET"]', "path argument"),
         ("rg", '["SERAPH_TEST_SECRET","."]', "path argument"),
         ("rg", '["SERAPH_TEST_SECRET"]', "path argument"),
+        # grep's -d/--directories recurse is recursion in every spelling.
+        ("grep", '["-d","recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["--directories=recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["--directories","recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["--dir=rec","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["-nd","recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["-d","recurse","-e","SERAPH_TEST_SECRET"]', "path argument"),
+        # GNU unique-prefix abbreviations of the recursion flags, no operand.
+        ("grep", '["--rec","SERAPH_TEST_SECRET"]', "path argument"),
+        ("grep", '["--recursiv","SERAPH_TEST_SECRET"]', "path argument"),
+        ("grep", '["--deref","SERAPH_TEST_SECRET"]', "path argument"),
+        ("grep", '["--dereference-rec","SERAPH_TEST_SECRET"]', "path argument"),
+        # A directory operand is scanned even without a recursion flag.
+        ("grep", '["SERAPH_TEST_SECRET","."]', "path argument"),
         ("find", '[".","-name",".env","-print"]', "search path"),
         ("find", '[]', "search path"),
     ],
@@ -754,7 +1047,7 @@ def test_run_command_rejects_recursive_search_paths_containing_secret_like_files
 
     result = run_command(command=command, args_json=args_json)
 
-    assert result == f"Error: {label} cannot recursively search workspace paths containing secret-like files."
+    assert result == f"Error: {label} cannot recursively search workspace paths containing secret-like files; search a subdirectory such as notes/ instead."
 
 
 def test_run_command_rejects_grep_exclude_from_outside_workspace():

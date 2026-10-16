@@ -360,3 +360,158 @@ async def test_failed_reads_leave_no_plaintext_in_memory_and_are_purged_too(acco
         assert not artifact.exists()
         # Purged once: the next sweep has nothing to do.
         assert await bound_adapters.purge_cordis_mail_results(now=datetime.now(timezone.utc) + timedelta(hours=26)) == 0
+
+
+async def _approval_status(env, job_id):
+    from src.db.models import ApprovalRequest, WorkflowRunState
+    async with env["jobs"]._session() as db:
+        reply = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalar_one()
+        preview = json.loads(reply.checkpoint_context_json).get("preview") or {}
+        approval = await db.get(ApprovalRequest, preview["approval_id"]) if preview else None
+    return approval.status if approval is not None else None
+
+
+async def test_a_reply_without_its_preview_is_refused_before_any_decision(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from src.db.models import WorkflowRunState
+    async with mail_env(accounting_db, real_auth, monkeypatch) as env:
+        client, google, preview = env["client"], env["google"], env["preview"]
+        job_id = preview["job_id"]
+        assert await _approval_status(env, job_id) == "pending"
+        # The reply-send job exists but holds no frozen preview (it never reached one).
+        async with env["jobs"]._session() as db:
+            reply = (await db.execute(select(WorkflowRunState).where(WorkflowRunState.run_identity == job_id))).scalar_one()
+            kept = reply.checkpoint_context_json
+            checkpoint = json.loads(kept)
+            checkpoint.pop("preview")
+            await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == job_id)
+                             .values(checkpoint_context_json=json.dumps(checkpoint)))
+            await db.commit()
+        response = await client.post("/api/capabilities/mail/reply-sends/" + job_id + "/cordis-execute",
+                                     json={"decision": "approved", "expected_digest": preview["preview"]["decision_digest"]})
+        assert response.status_code == 409 and response.json()["detail"]["code"] == "mail_reply_not_awaiting_send"
+        assert response.json()["detail"]["recovery_action"] == "reload_reply_send"
+        # Nothing was decided, admitted or sent.
+        async with env["jobs"]._session() as db:
+            await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == job_id)
+                             .values(checkpoint_context_json=kept))
+            await db.commit()
+        assert await _approval_status(env, job_id) == "pending"
+        assert await _governed(env["jobs"]) == [] and google.sent is None
+        assert not any(call[1].endswith("/messages/send") for call in google.calls)
+
+
+async def test_an_admission_failure_after_the_decision_is_approved_not_sent(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    from src.runtime_plugins import governed_services
+    async with mail_env(accounting_db, real_auth, monkeypatch) as env:
+        client, google, preview = env["client"], env["google"], env["preview"]
+        job_id = preview["job_id"]
+
+        async def unadmitted(**_kwargs):
+            raise NativeServiceBlocked("native_governed_host_unavailable")
+        monkeypatch.setattr(governed_services, "execute_native_connection_operation", unadmitted)
+        response = await client.post("/api/capabilities/mail/reply-sends/" + job_id + "/cordis-execute",
+                                     json={"decision": "approved", "expected_digest": preview["preview"]["decision_digest"]})
+        detail = response.json()["detail"]
+        assert response.status_code == 409 and detail["code"] == "mail_reply_approved_not_sent"
+        assert detail["reason_code"] == "native_governed_host_unavailable"
+        assert detail["recovery_action"] == "execute_reply_send" and "nothing was sent" in detail["message"]
+        # The approval stands and the reply is still unsent: the UI send can finish it.
+        assert await _approval_status(env, job_id) == "approved" and google.sent is None
+        sent = await env["post"]("reply-sends/" + job_id + "/execute", {})
+        assert sent["status"] == "succeeded"
+        assert len([call for call in google.calls if call[1].endswith("/messages/send")]) == 1
+
+
+@pytest.mark.parametrize("failure", ["unverified", "host_timeout", "owner_cancelled"])
+async def test_a_failure_after_the_send_once_intent_is_in_doubt(accounting_db, real_auth, monkeypatch, failure):  # noqa: F811
+    import asyncio
+    from src.integrations import mail_reply_runtime as runtime
+    from src.runtime_plugins import governed_services
+    async with mail_env(accounting_db, real_auth, monkeypatch) as env:
+        client, google, preview = env["client"], env["google"], env["preview"]
+        job_id = preview["job_id"]
+        if failure == "unverified":
+            # The send went out, but the readback does not carry this invocation's fence.
+            original_get_run = runtime.get_run
+
+            async def stale_fence(operator, ident, **kwargs):
+                run = await original_get_run(operator, ident, **kwargs)
+                checkpoint = json.loads(run.checkpoint_context_json)
+                if run.status == "succeeded" and checkpoint.get("intent"):
+                    checkpoint["intent"]["fencing_token"] = -1
+                    run.checkpoint_context_json = json.dumps(checkpoint)
+                return run
+            monkeypatch.setattr(runtime, "get_run", stale_fence)
+        elif failure == "host_timeout":
+            # The send is made, then the host answer is lost (a timeout to the route).
+            original = governed_services.execute_native_connection_operation
+
+            async def lost(**kwargs):
+                await original(**kwargs)
+                raise NativeServiceBlocked("native_governed_host_unavailable")
+            monkeypatch.setattr(governed_services, "execute_native_connection_operation", lost)
+        else:
+            # The owner's worker is cancelled right after the send-once intent was claimed.
+            original_execute = runtime.execute
+
+            async def cancelled_after_claim(operator, ident, *, report=None, **boundary):
+                claimed = asyncio.Event()
+
+                class Report(dict):
+                    def update(self, *args, **kwargs):
+                        super().update(*args, **kwargs)
+                        if self.get("intent_claimed"):
+                            claimed.set()
+                watched = Report()
+                worker = asyncio.create_task(original_execute(operator, ident, report=watched, **boundary))
+                await claimed.wait()
+                worker.cancel()
+                report.update(watched)
+                await worker
+            monkeypatch.setattr(runtime, "execute", cancelled_after_claim)
+        response = await client.post("/api/capabilities/mail/reply-sends/" + job_id + "/cordis-execute",
+                                     json={"decision": "approved", "expected_digest": preview["preview"]["decision_digest"]})
+        detail = response.json()["detail"]
+        assert response.status_code == 409 and detail["code"] == "mail_reply_send_in_doubt", detail
+        assert detail["recovery_action"] == "observe_reply_send" and "Verify in your Sent folder" in detail["message"]
+        # Never retried by Cordis: at most the one POST this invocation made.
+        assert len([call for call in google.calls if call[1].endswith("/messages/send")]) <= 1
+        [run] = await _governed(env["jobs"])
+        expected = {"unverified": ("blocked", "native_adapter_send_unverified"),
+                    "owner_cancelled": ("blocked", "mail_reply_send_in_doubt"),
+                    # The governed job settled; only its answer to the route was lost.
+                    "host_timeout": ("succeeded", None)}[failure]
+        assert (run.status, run.failure_reason) == expected and detail["reason_code"] in {
+            expected[1], "native_governed_host_unavailable"}
+
+
+async def test_the_retention_job_purges_aged_reads_and_expires_handoffs(accounting_db, real_auth, monkeypatch):  # noqa: F811
+    import time
+    from src.db.models import WorkflowRunState
+    from src.integrations.gmail_controls import _artifact_path
+    from src.runtime_plugins import bound_adapters
+    from src.runtime_plugins.governed_services import execute_native_connection_operation
+    # More than a page of runs: paging, not a newest-first window, reaches the old read.
+    monkeypatch.setattr(bound_adapters, "PURGE_SCAN_LIMIT", 1)
+    async with mail_env(accounting_db, real_auth, monkeypatch, until="draft") as env:
+        reads = [await execute_native_connection_operation(operator=env["operator"], operation="gmail.read_message",
+                                                           arguments=_read_arguments(env), idempotency_key=key)
+                 for key in ("retention-old", "retention-new")]
+        artifacts = [Path(env["root"]) / _artifact_path(done["inner_job_id"]) for done in reads]
+        assert all(path.exists() for path in artifacts)
+        # Only the older read is past its 24 h retention.
+        async with env["jobs"]._session() as db:
+            await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == reads[0]["job"]["job_id"])
+                             .values(started_at=datetime.now(timezone.utc) - timedelta(hours=25)))
+            await db.commit()
+        bound_adapters._handoff["stale-handoff"] = (time.monotonic() - bound_adapters.HANDOFF_TTL_SECONDS - 1, {"x": 1})
+        bound_adapters._handoff["fresh-handoff"] = (time.monotonic(), {"x": 2})
+        try:
+            await bound_adapters.run_cordis_mail_retention()
+            assert not artifacts[0].exists() and artifacts[1].exists()
+            assert "stale-handoff" not in bound_adapters._handoff and "fresh-handoff" in bound_adapters._handoff
+            # The next sweep finds the purged read already done and keeps the live one.
+            await bound_adapters.run_cordis_mail_retention()
+            assert artifacts[1].exists()
+        finally:
+            bound_adapters._handoff.pop("fresh-handoff", None)

@@ -19,6 +19,7 @@ Every item is labelled external and untrusted; nothing in it carries authority.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -33,6 +34,8 @@ OPERATIONS = {"gmail.read_message": "gmail_readonly", "calendar.read_events": "c
               "gmail.send_reviewed_reply": None}
 SEND_OPERATION = "gmail.send_reviewed_reply"
 SEND_ROUTE_SCOPE = "mail_reply_cordis_execute_route"
+# Failures after this invocation claimed the send-once intent: the message may have gone.
+SEND_IN_DOUBT = frozenset({"mail_reply_send_in_doubt", "native_adapter_send_unverified"})
 RESULT_TTL = timedelta(hours=24)
 MAX_RESULT_BYTES = 64 * 1024
 _TEXT_FIELDS = ("summary", "location", "description", "attendees")
@@ -319,6 +322,12 @@ async def _send(run, arguments, outer_check) -> tuple[dict, dict]:
     await outer_check()
     try:
         await runtime.run_owned(operator, ident, lambda: runtime.execute(operator, ident, report=report))
+    except asyncio.CancelledError as exc:
+        # The owner's own cancel (not ours) after the send-once intent is in doubt too.
+        task = asyncio.current_task()
+        if not report.get("intent_claimed") or (task is not None and task.cancelling()):
+            raise
+        raise NativeServiceBlocked("mail_reply_send_in_doubt") from exc
     except Exception as exc:
         if report.get("intent_claimed"):
             # After the send-once intent a failure is ambiguous: the message may have gone.
@@ -333,6 +342,8 @@ async def _send(run, arguments, outer_check) -> tuple[dict, dict]:
         raise NativeServiceBlocked("mail_reply_already_sent")
     if (reply.status != "succeeded" or checkpoint.get("outcome") != "verified_in_sender_sent_mailbox"
             or intent.get("fencing_token") != report.get("fencing_token")):
+        # This invocation claimed the intent, so the message may have gone: the
+        # route reports this as in doubt ("verify in Sent"), never a plain failure.
         raise NativeServiceBlocked("native_adapter_send_unverified")
     sealed = {"operation": SEND_OPERATION, "reply_send_job_id": ident, "outcome": checkpoint["outcome"],
               "intent_digest": report["intent_digest"], "fencing_token": report["fencing_token"],
@@ -443,43 +454,53 @@ async def purge_cordis_mail_results(*, owner=None, consent_id: str | None = None
 
     The inner control job id is derived from the governed run, so a read that
     failed after the owner published its artifact is purged too. Each purge is an
-    audit event; the scan is bounded and newest-first."""
-    from sqlalchemy import select, update
+    audit event. SQL selects only terminal Gmail reads with no purge audit yet, and
+    the scan pages through all of them, so no number of newer runs starves an
+    older unpurged read."""
+    from sqlalchemy import exists, func, select, update
     from src.api.mail import _cleanup_mail_artifacts
     from src.db.engine import get_session
     from src.db.models import AuditEvent, MailReadConsent, WorkflowRunState
     from src.work_board.contracts import WorkBoardOwner
     from .governed_services import GOVERNED_JOB_KIND
     observed = now or datetime.now(timezone.utc)
-    async with get_session() as db:
-        done = {json.loads(raw or "{}").get("job_id") for raw in (await db.execute(
-            select(AuditEvent.details_json).where(AuditEvent.event_type == PURGED_EVENT))).scalars()}
-        query = select(WorkflowRunState).where(
-            WorkflowRunState.job_kind == GOVERNED_JOB_KIND,
-            WorkflowRunState.status.not_in(("accepted", "queued", "running")))
-        if owner is not None:
-            query = query.where(WorkflowRunState.owner_principal_id == owner.principal_id,
-                                WorkflowRunState.operator_session_id == owner.session_id)
-        rows = (await db.execute(query.order_by(WorkflowRunState.updated_at.desc()).limit(PURGE_SCAN_LIMIT))).scalars().all()
-        due: list[tuple] = []
-        for run in rows:
-            if run.run_identity in done:
-                continue
-            try:
-                candidate = read_context(run)["candidate"]
-            except NativeServiceBlocked:
-                continue
-            if candidate.get("operation") != "gmail.read_message":
-                continue
-            arguments = candidate["arguments"]
-            consent = await db.get(MailReadConsent, arguments["mail_consent_id"])
-            started = run.started_at.replace(tzinfo=run.started_at.tzinfo or timezone.utc)
-            expired = (consent is None or consent.state != "active"
-                       or consent.expires_at.replace(tzinfo=consent.expires_at.tzinfo or timezone.utc) <= observed)
-            if consent_id == arguments["mail_consent_id"] or expired or observed - started >= RESULT_TTL:
-                due.append((run.run_identity, run.owner_principal_id, run.operator_session_id,
-                            inner_job_id(run.run_identity, run.owner_principal_id, run.operator_session_id,
-                                         arguments["connection_ref"])))
+    context_json = func.iif(func.json_valid(WorkflowRunState.checkpoint_context_json),
+                            WorkflowRunState.checkpoint_context_json, "{}")
+    purge_json = func.iif(func.json_valid(AuditEvent.details_json), AuditEvent.details_json, "{}")
+    query = select(WorkflowRunState).where(
+        WorkflowRunState.job_kind == GOVERNED_JOB_KIND,
+        WorkflowRunState.status.not_in(("accepted", "queued", "running")),
+        func.json_extract(context_json, "$.candidate.operation") == "gmail.read_message",
+        ~exists().where(AuditEvent.event_type == PURGED_EVENT,
+                        func.json_extract(purge_json, "$.job_id") == WorkflowRunState.run_identity))
+    if owner is not None:
+        query = query.where(WorkflowRunState.owner_principal_id == owner.principal_id,
+                            WorkflowRunState.operator_session_id == owner.session_id)
+    due: list[tuple] = []
+    after = ""
+    while True:
+        async with get_session() as db:
+            rows = (await db.execute(query.where(WorkflowRunState.id > after).order_by(WorkflowRunState.id)
+                                     .limit(PURGE_SCAN_LIMIT))).scalars().all()
+            for run in rows:
+                try:
+                    candidate = read_context(run)["candidate"]
+                except NativeServiceBlocked:
+                    continue
+                if candidate.get("operation") != "gmail.read_message":
+                    continue
+                arguments = candidate["arguments"]
+                consent = await db.get(MailReadConsent, arguments["mail_consent_id"])
+                started = run.started_at.replace(tzinfo=run.started_at.tzinfo or timezone.utc)
+                expired = (consent is None or consent.state != "active"
+                           or consent.expires_at.replace(tzinfo=consent.expires_at.tzinfo or timezone.utc) <= observed)
+                if consent_id == arguments["mail_consent_id"] or expired or observed - started >= RESULT_TTL:
+                    due.append((run.run_identity, run.owner_principal_id, run.operator_session_id,
+                                inner_job_id(run.run_identity, run.owner_principal_id, run.operator_session_id,
+                                             arguments["connection_ref"])))
+        if len(rows) < PURGE_SCAN_LIMIT:
+            break
+        after = rows[-1].id
     purged = 0
     for job_id, principal_id, session_id, inner in due:
         complete = await _cleanup_mail_artifacts(WorkBoardOwner(principal_id=principal_id, session_id=session_id),
@@ -513,6 +534,9 @@ async def _audit_purge(db, job_id: str, inner: str, observed: datetime) -> None:
 
 async def run_cordis_mail_retention() -> None:
     """Scheduler entry: periodic retention, so an idle server never keeps bodies past the TTL."""
+    # An untaken in-memory handoff must not outlive its TTL just because no
+    # later adapter call or caller came along to expire it.
+    _expire_handoff()
     try:
         await purge_cordis_mail_results()
     except Exception:

@@ -3091,11 +3091,14 @@ async def cordis_execute_reply_send(request: Request, job_id: str):
     The operator's approval decision and the Cordis send are one authenticated
     request; CSRF protection is the global ``OperatorAuthMiddleware`` Origin and
     session-cookie check, as for every mutating route. The route checks that the
-    Cordis host can run and the send is awaiting its decision BEFORE deciding, so
-    an approval is never left live by a send that could not start.
+    Cordis host can run, the arguments admit and the send is awaiting its decision
+    BEFORE deciding. A send that still fails to start after the decision is
+    ``mail_reply_approved_not_sent`` (nothing was sent, the approval stands); once
+    the send-once intent exists any failure is ``mail_reply_send_in_doubt``.
     """
     from src.integrations import mail_reply_runtime as runtime
     from src.integrations.mail_reply_send import state
+    from src.runtime_plugins.bound_adapters import SEND_OPERATION, validate_arguments
     from src.runtime_plugins.bridge import cordis_host
     from src.runtime_plugins.dispatch import NativeServiceBlocked
     from src.runtime_plugins.governed_services import execute_native_connection_operation
@@ -3112,6 +3115,14 @@ async def cordis_execute_reply_send(request: Request, job_id: str):
                                                          "message": "This reply is not awaiting a send decision.",
                                                          "recovery_action": "reload_reply_send"})
         try:
+            # Admission's own argument schema, before any decision is made.
+            validate_arguments(SEND_OPERATION, {"reply_send_job_id": job_id,
+                                                "expected_reply_send_revision": int(reply.revision or 0) + 1})
+        except NativeServiceBlocked as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.reason_code,
+                                                         "message": "This reply cannot be sent through Cordis; nothing was approved.",
+                                                         "recovery_action": "reload_reply_send"}) from exc
+        try:
             await runtime.decide(operator, job_id, decision=body.decision, expected_digest=body.expected_digest)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail={"code": "mail_reply_decision_rejected",
@@ -3127,19 +3138,38 @@ async def cordis_execute_reply_send(request: Request, job_id: str):
             operator=operator, operation="gmail.send_reviewed_reply",
             arguments={"reply_send_job_id": job_id, "expected_reply_send_revision": int(reply.revision)},
             idempotency_key="mail-reply-cordis:" + job_id, admitted_by="mail_reply_cordis_execute_route")
-    except NativeServiceBlocked as exc:
-        if exc.reason_code == "mail_reply_send_in_doubt":
-            raise HTTPException(status_code=409, detail={
-                "code": exc.reason_code,
-                "message": "The send outcome is in doubt: it may have been sent. Verify in your Sent folder before retrying.",
-                "recovery_action": "observe_reply_send"}) from exc
-        raise HTTPException(status_code=409, detail={
-            "code": exc.reason_code,
-            "message": "Approved, but the Cordis send did not start or did not complete; no retry was made.",
-            "recovery_action": "reload_reply_send"}) from exc
     except Exception as exc:
-        raise _error(exc) from exc
+        reason = exc.reason_code if isinstance(exc, NativeServiceBlocked) else "native_governed_failed"
+        raise await _cordis_send_failure(operator, job_id, reason) from exc
     return {"job": done["job"], "result": done.get("adapter_result"), "replayed": done["replayed"]}
+
+
+async def _cordis_send_failure(operator, job_id: str, reason: str) -> HTTPException:
+    """A Cordis send that failed after the same-request approval: in doubt, or approved and not sent."""
+    from src.integrations import mail_reply_runtime as runtime
+    from src.integrations.mail_reply_send import state
+    from src.runtime_plugins.bound_adapters import SEND_IN_DOUBT
+    if reason == "mail_reply_already_sent":
+        return HTTPException(status_code=409, detail={
+            "code": reason, "message": "This reply was already sent from the reply review; Cordis did not send it again.",
+            "recovery_action": "reload_reply_send"})
+    in_doubt = reason in SEND_IN_DOUBT
+    if not in_doubt:
+        # A host timeout or cancellation can land after the send-once intent was claimed.
+        try:
+            in_doubt = bool(state(await runtime.get_run(operator, job_id)).get("intent"))
+        except Exception:
+            in_doubt = True  # An unreadable state never claims that nothing was sent.
+    if in_doubt:
+        return HTTPException(status_code=409, detail={
+            "code": "mail_reply_send_in_doubt", "reason_code": reason,
+            "message": "The send outcome is in doubt: it may have been sent. Verify in your Sent folder before retrying.",
+            "recovery_action": "observe_reply_send"})
+    return HTTPException(status_code=409, detail={
+        "code": "mail_reply_approved_not_sent", "reason_code": reason,
+        "message": "Approved, but the Cordis send did not start, so nothing was sent. The approval stands: "
+                   "send the reply from its review, or cancel it.",
+        "recovery_action": "execute_reply_send"})
 
 
 @router.post("/capabilities/mail/reply-sends/{job_id}/cancel")

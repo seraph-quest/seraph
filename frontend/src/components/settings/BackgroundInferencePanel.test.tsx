@@ -19,6 +19,19 @@ function response(value: unknown, ok = true) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("BackgroundInferencePanel", () => {
+  it("shows a job blocked by the guardian runtime with its fix, never as a silent skip", async () => {
+    const blocked = { ...payload(true), jobs: [
+      { ...job("daily_briefing", true, 1), blocked: true,
+        last_skip: { status: "blocked", reason: "cordis_host_unavailable", at: "2026-10-16T08:00:00+00:00",
+          recovery: "Start the Cordis runtime." } },
+      job("strategist_tick", true)] };
+    vi.stubGlobal("fetch", vi.fn(async () => response(blocked)));
+    render(<BackgroundInferencePanel />);
+    expect(await screen.findByText(/blocked: cordis host unavailable · 2026-10-16T08:00:00\+00:00 · fix: Start the Cordis runtime\./)).toBeInTheDocument();
+    expect(screen.getByLabelText("Background inference: daily briefing")).toBeChecked();
+    expect(screen.queryByText(/blocked:.*strategist/)).not.toBeInTheDocument();
+  });
+
   it("shows default-on jobs with call estimates and persists a per-job switch-off", async () => {
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => response(payload(init?.method !== "PUT")));
     vi.stubGlobal("fetch", fetch);

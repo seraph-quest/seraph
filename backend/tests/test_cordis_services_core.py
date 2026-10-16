@@ -334,7 +334,7 @@ async def test_repository_cas_repeats_composition_fence(service_db):
 
 @pytest.mark.asyncio
 async def test_blocked_methods_are_typed_and_visible_never_silent(service_db):
-    assert SUPPORTED_METHODS | set(BLOCKED_METHODS) == set(METHOD_DOMAINS) and len(METHOD_DOMAINS) == 34
+    assert SUPPORTED_METHODS | set(BLOCKED_METHODS) == set(METHOD_DOMAINS) and len(METHOD_DOMAINS) == 35
     assert BLOCKED_METHODS["research.buildPlan"] == "native_research_plan_not_bound"
     dispatcher = NativeServiceDispatcher()
     for method, reason in BLOCKED_METHODS.items():
@@ -372,7 +372,7 @@ def _payload(method):
         "scheduler.disable": {"schedule_ref": "r", "expected_revision": 1}, "scheduler.dispatchDue": {"limit": 1},
         "connections.inspect": {"connection_ref": "r"}, "connections.invokeBoundAdapter": {"operation_ref": "r"},
         "agent-loop.startTurn": {"turn_ref": "r"}, "agent-loop.cancelTurn": {"turn_ref": "r", "expected_revision": 1},
-        "agent-loop.inspectTurn": {"turn_ref": "r"},
+        "agent-loop.inspectTurn": {"turn_ref": "r"}, "guardian.startTurn": {"turn_ref": "r"},
         "source-extraction.extract": {"artifact_ref": "r", "acquisition_receipt_ref": "r", "source_slot": 0,
                                       "first_line": 1, "last_line": 1},
     }

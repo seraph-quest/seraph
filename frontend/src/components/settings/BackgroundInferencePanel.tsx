@@ -9,7 +9,9 @@ export interface BackgroundInferenceJob {
   scope: "job" | "llm_only";
   approx_calls_per_day: number;
   estimate_basis: string;
-  last_skip: { status: string; reason: string; at: string } | null;
+  last_skip: { status: string; reason: string; at: string; recovery: string | null } | null;
+  /** The guardian runtime refused this job's last run (#1020); never a silent fallback. */
+  blocked: boolean;
 }
 
 export interface BackgroundInferenceStatus {
@@ -46,8 +48,10 @@ export function normalizeBackgroundInference(value: unknown): BackgroundInferenc
       approx_calls_per_day: typeof job.approx_calls_per_day === "number" && Number.isFinite(job.approx_calls_per_day) ? job.approx_calls_per_day : 0,
       estimate_basis: typeof job.estimate_basis === "string" ? job.estimate_basis : "",
       last_skip: skip && typeof skip.reason === "string" && typeof skip.at === "string"
-        ? { status: typeof skip.status === "string" ? skip.status : "skipped", reason: skip.reason, at: skip.at }
+        ? { status: typeof skip.status === "string" ? skip.status : "skipped", reason: skip.reason, at: skip.at,
+            recovery: typeof skip.recovery === "string" ? skip.recovery.slice(0, 512) : null }
         : null,
+      blocked: job.blocked === true && skip?.status === "blocked",
     }];
   });
   return {
@@ -170,7 +174,12 @@ export function BackgroundInferencePanel() {
           />
           <span className="text-retro-text">{job.label}</span>
           <span className="text-retro-text/50">{callsLabel(job.approx_calls_per_day)} · {job.estimate_basis}</span>
-          {!unreadable && !job.enabled && <span className="text-yellow-400">{job.last_skip ? `skipped: ${job.last_skip.reason.replace(/_/g, " ")} · ${job.last_skip.at}` : "off: skipped: disabled by operator"}</span>}
+          {!unreadable && !job.enabled && <span className="text-yellow-400">{job.last_skip && job.last_skip.status === "skipped" ? `skipped: ${job.last_skip.reason.replace(/_/g, " ")} · ${job.last_skip.at}` : "off: skipped: disabled by operator"}</span>}
+          {!unreadable && job.enabled && job.blocked && job.last_skip && (
+            <span role="status" className="text-yellow-400">
+              {`blocked: ${job.last_skip.reason.replace(/_/g, " ")} · ${job.last_skip.at}`}{job.last_skip.recovery ? ` · fix: ${job.last_skip.recovery}` : ""}
+            </span>
+          )}
         </label>
       ))}
       {unreadable && status && (

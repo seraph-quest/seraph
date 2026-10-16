@@ -92,6 +92,26 @@ limitations. Verified with offline local GitHub fixtures and zero
 inference/provider spend. Live GitHub usefulness remains
 **external-unverified**.
 
+**Cordis presets and unattended guardian turns: Partial (#1020, part 1).**
+- **Presets:** chat turns name a reviewed preset that both Python and the Cordis
+  sequencer check.
+- **Guardian turns:** when the guardian owner is cut over, the strategist
+  decision, the six scheduled reports and memory consolidation run as
+  unattended guardian turns. Each makes today's exact call and settles once
+  through the Cordis sequencer, with no tools and no approvals. Its output is
+  used only while the turn, its scheduler parent and the epoch are current.
+- **Blocked guardian loop:** work stops visibly in Settings, Activity and the
+  cockpit, with no fallback.
+- **Not yet migrated:** orchestrator, specialists, delegation and Board worker
+  drafts.
+- **Memory flushes:** a flush inside an operator's turn is admitted under that
+  operator's Root.
+- **Default cutover:** the boot cutover moves the presets owner first, then
+  agent-loop and guardian.
+- **Verification:** offline, with scripted completions and denied sockets. The
+  strategist call also runs through the real broker and ledger behind an
+  intercepted provider boundary.
+
 **Profiled browser interaction: Partial, bounded public-form preparation.**
 [ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
 `browser.interact.v2` HTTPBin public form preparation profile to the current

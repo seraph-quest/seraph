@@ -796,6 +796,86 @@ after legacy's. The budgets are asserted only with
 `SERAPH_CORDIS_LATENCY_BUDGET=1` on a quiet host; elsewhere the suite prints the
 numbers without gating (at load average ~35 the step p95 rose to ~245 ms).
 
+### Cordis presets and guardian turns (#1020, part 1)
+
+**Reviewed presets.** Every Cordis turn names one reviewed preset:
+`chat.agent`, `chat.direct`, `chat.onboarding`, and an unattended
+`guardian.*` preset for each scheduled guardian call.
+- **What a preset declares:** its context purpose, prompt sections, model
+  parameters, step bound, tool policy and output contract. A preset grants
+  nothing.
+- **Python's table** (`backend/src/agent/presets.py`) is the authority. The
+  reviewed Cordis copy (`runtime/cordis/src/plugins/agent_presets`) must be
+  identical, and a parity test checks every digest.
+- **Chat steps:** each projection carries the preset id and digest. The
+  agent-loop sequencer refuses a step whose preset is unknown
+  (`agent_preset_unavailable`), changed (`agent_preset_changed`), not
+  interactive, beyond its step bound, or asking for tools a tool-less preset
+  forbids.
+- **#1019's profiles** are now these presets, and onboarding is built from
+  `chat.onboarding`: temperature 0.8, the fixed onboarding tools and the
+  per-message URL-scoped `browse_webpage`.
+
+**Guardian turns.** These scheduled calls run as unattended guardian turns
+whenever the `seraph.guardian.v1` owner is Cordis:
+- the strategist decision;
+- the daily briefing, evening review, activity digest, weekly review,
+  end-of-day analysis and screenshot observation digest;
+- memory consolidation, for every trigger.
+
+How a guardian turn runs:
+1. Python makes exactly today's call: the same messages, model owner, runtime
+   path, principal, broker and ledger binding.
+2. One `cordis_guardian_turn_v1` job records the lineage. A scheduled run's
+   turn is owned by `service:guardian`. A memory flush that runs inside an
+   operator's turn is owned by that operator instead and bound to its Root.
+   This covers the post-response, compaction, session-end and
+   workflow-completion triggers. A revoked Root, or changed grants, then
+   refuses the step and the adoption.
+3. One `guardian.startTurn` step may stage only `settlement`.
+4. The output is used only after the turn settled while the turn, its
+   scheduler parent and the composition epoch were all still current. For the
+   strategist, the parent is the tick's lease and fence.
+
+Unattended presets hold no tools, so no approval row can arise from them.
+
+**Routing by the guardian owner row:**
+- **Legacy owner:** today's path runs.
+- **Cordis owner that is not ready**, or whose host or presets owner is
+  unavailable: the call is blocked with no model call and no fallback.
+  - The block is persisted in Settings → background inference and survives a
+    restart; a success clears it.
+  - Activity gets an entry at most hourly while the job stays blocked, and
+    the operator is notified once per transition into blocked.
+  - The end-of-day report still writes its deterministic report, marked
+    blocked.
+  - Memory consolidation leaves the session fingerprint uncached, so a later
+    catch-up runs once the loop is ready.
+
+`/api/runtime/status` reports `guardian_runtime` and `runtime_domains` (every
+owner row, with the reason and fix for any that is not ready). The Settings
+Cordis panel and a cockpit banner show them.
+
+**Inventory upgrade.** `seraph.agent-presets.v1` and `seraph.guardian.v1` are
+new domains.
+- An existing inventory gains them once at boot as `legacy@1`, each with a
+  `runtime_composition_domain_introduced` audit event.
+- An original domain missing from the inventory is still never repaired.
+- Every agent-loop and guardian step binds the presets owner. A presets row
+  that is still missing blocks chat as `composition_dependency_missing` with
+  "Restart Seraph to seed the runtime inventory."
+
+**Default cutover order.** #1019's boot cutover manifest moves the presets
+first. Agent-loop and guardian follow, each with presets as a prerequisite.
+- A row that is still missing at boot is introduced inside the same
+  composition writer, then cut over.
+- An operator rollback of either new domain is sticky, as for agent-loop.
+
+**Not part of this slice:** orchestrator, specialists and delegation (#1020
+part 2), and the Board worker drafts (part 3). A source inventory test maps
+every model and turn site to its owner category. It runs beside the
+transport-level dispatch inventory and does not replace it.
+
 ### Cordis guardian research (#1008)
 
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2

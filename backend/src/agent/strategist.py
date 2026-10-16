@@ -179,23 +179,9 @@ async def run_strategist_decision_completion(
         session_id=principal.session_id if principal is not None else "",
         job_id=principal.job_id if principal is not None else "",
     )
-    if durable_job_id is None:
-        response = await completion_with_fallback(
-            messages=transport_messages,
-            temperature=0.2,
-            max_tokens=512,
-            timeout=settings.agent_strategist_timeout,
-            runtime_path="strategist_agent",
-            request_context=request_context,
-        )
-    else:
-        with bind_remote_inference_receipt(
-            repository=admission_repository,
-            job_id=durable_job_id,
-            owner=str(durable_lease_owner).strip(),
-            fencing_token=int(durable_fencing_token),
-        ):
-            response = await completion_with_fallback(
+    async def decision_call():
+        if durable_job_id is None:
+            return await completion_with_fallback(
                 messages=transport_messages,
                 temperature=0.2,
                 max_tokens=512,
@@ -203,6 +189,30 @@ async def run_strategist_decision_completion(
                 runtime_path="strategist_agent",
                 request_context=request_context,
             )
+        with bind_remote_inference_receipt(
+            repository=admission_repository,
+            job_id=durable_job_id,
+            owner=str(durable_lease_owner).strip(),
+            fencing_token=int(durable_fencing_token),
+        ):
+            return await completion_with_fallback(
+                messages=transport_messages,
+                temperature=0.2,
+                max_tokens=512,
+                timeout=settings.agent_strategist_timeout,
+                runtime_path="strategist_agent",
+                request_context=request_context,
+            )
+
+    # #1020: the same decision call, on the guardian loop its owner row selects.
+    # The durable tick is the turn's parent: a lost tick lease fences adoption.
+    from src.runtime_plugins.guardian_turns import guardian_completion
+    response = await guardian_completion(
+        "guardian.strategist", decision_call, timeout_seconds=settings.agent_strategist_timeout,
+        runtime_path="strategist_agent", temperature=0.2, max_tokens=512,
+        parent=None if durable_job_id is None else {"job_id": str(durable_job_id).strip(),
+                                                    "owner": str(durable_lease_owner).strip(),
+                                                    "fence": int(durable_fencing_token)})
     return str(response.choices[0].message.content or "").strip()
 
 

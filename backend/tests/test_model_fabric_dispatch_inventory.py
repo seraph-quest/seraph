@@ -470,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "scheduler/jobs/end_of_day_goal_report.py",
-        723,
+        724,
         "_deliver_report_resend_template",
         "client.post",
         "non_model_transport",

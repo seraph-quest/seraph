@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { apiFetch } from "../../lib/api";
-import { normalizeChatRuntime, normalizeCordisRuntime } from "../../lib/cordisRuntime";
+import { normalizeChatRuntime, normalizeCordisRuntime, normalizeGuardianRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
 import { CordisRuntimePanel } from "./CordisRuntimePanel";
 vi.mock("../../lib/api", () => ({ apiFetch: vi.fn() }));
 const snapshot = { state: "blocked", reason: "node_unsupported", profile_id: "core.cpu", cordis_version: "4.0.0-rc.10", node_version: "22.11.0", composition_digest: null, package_digest: null, plugins: [{ id: "authority", state: "blocked", reason: "host_unavailable" }], cleanup: { state: "not_started", process_reaped: false, resources_remaining: null, cordis_disposal: "not_started" } };
@@ -104,4 +104,21 @@ it("offers the cutover to Cordis from the legacy loop and surfaces a refused cha
   fireEvent.click(await screen.findByRole("button", { name: "Cut chat over to Cordis" }));
   expect(await screen.findByText("Chat loop change refused: composition_not_quiescent")).toBeInTheDocument();
   confirm.mockRestore();
+});
+it("shows a blocked guardian loop and every non-ready runtime domain with its fix (#1020)", async () => {
+  const recovery = "Start the Cordis runtime (npm ci --prefix runtime/cordis --ignore-scripts, then ./manage.sh local up).";
+  const guardian_runtime = { loop: "blocked", owner_epoch: 2, reason: "cordis_host_unavailable", recovery };
+  const runtime_domains = [
+    { domain: "seraph.agent-loop.v1", owner_kind: "cordis", epoch: 2, state: "ready", reason: null, recovery: null },
+    { domain: "seraph.agent-presets.v1", owner_kind: null, epoch: null, state: "missing", reason: "composition_dependency_missing",
+      recovery: "Restart Seraph to seed the runtime inventory." }];
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, guardian_runtime, runtime_domains }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText("Scheduled guardian work blocked · cordis_host_unavailable")).toBeInTheDocument();
+  expect(screen.getByText(`Guardian fix: ${recovery}`)).toBeInTheDocument();
+  const pending = screen.getByRole("list", { name: "Runtime domains needing action" });
+  expect(pending).toHaveTextContent("seraph.agent-presets.v1: missing · composition_dependency_missing · fix: Restart Seraph to seed the runtime inventory.");
+  expect(pending).not.toHaveTextContent("seraph.agent-loop.v1");
+  expect(normalizeGuardianRuntime({ loop: "blocked", owner_epoch: 2, reason: null, recovery: null })).toBeNull();
+  expect(normalizeRuntimeDomains([{ domain: "x", owner_kind: "root", epoch: 1, state: "ready", reason: null, recovery: null }])).toEqual([]);
 });

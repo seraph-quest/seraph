@@ -256,7 +256,7 @@ async def test_actual_managed_singleton_lazily_installs_native_owner_and_reaps(m
         assert services["state"] == "partial"
         assert set(services["supported_methods"]) == NativeServiceDispatcher.supported_methods
         assert "memory.propose" in services["blocked_methods"]
-        assert len(services["supported_methods"]) + len(services["blocked_methods"]) == 34
+        assert len(services["supported_methods"]) + len(services["blocked_methods"]) == 35  # + guardian.startTurn (#1020)
     finally:
         await cordis_host.stop(preserve_blocked=cordis_host.state == "blocked")
         if cordis_host._cleanup_task is not None:

@@ -929,6 +929,51 @@ def _reject_protected_argument_tokens(args: list[str], cwd: Path) -> None:
                 raise ValueError("path argument cannot target secret-like workspace files.")
 
 
+def _grep_directories_recurse(args: list[str]) -> bool:
+    """True when grep's -d/--directories action is recurse, in any spelling."""
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            return False
+        value: str | None = None
+        if arg.startswith("--"):
+            name, sep, inline = arg[2:].partition("=")
+            if len(name) >= 2 and "directories".startswith(name):
+                if sep:
+                    value = inline
+                elif index + 1 < len(args):
+                    value = args[index + 1]
+        elif arg.startswith("-") and "d" in arg[1:]:
+            rest = arg[arg.index("d", 1) + 1 :]
+            if rest:
+                value = rest
+            elif index + 1 < len(args):
+                value = args[index + 1]
+        if value is not None and value.startswith("rec"):
+            return True
+        index += 1
+    return False
+
+
+def _grep_takes_separate_directories_value(arg: str) -> bool:
+    if arg.startswith("--"):
+        name = arg[2:]
+        return "=" not in name and len(name) >= 2 and "directories".startswith(name)
+    # A short cluster whose last flag is d (-d, -nd) takes the next token.
+    return arg.startswith("-") and len(arg) >= 2 and arg.endswith("d") and "e" not in arg[1:-1] and "f" not in arg[1:-1]
+
+
+def _is_directory_operand(raw_path: str, cwd: Path) -> bool:
+    candidate = (raw_path or "").strip()
+    if not candidate:
+        return False
+    try:
+        return (Path(candidate) if Path(candidate).is_absolute() else (cwd / candidate)).is_dir()
+    except OSError:
+        return False
+
+
 def _validate_workspace_scoped_args(executable: str, args: list[str], cwd: Path) -> None:
     _validate_command_specific_args(executable, args, cwd)
     if Path(executable).name in _TOKEN_SCREENED_COMMANDS:
@@ -1013,6 +1058,10 @@ def _validate_command_specific_args(executable: str, args: list[str], cwd: Path)
             "sed in-place editing is blocked in the process runtime; use apply_workspace_patch for workspace edits."
         )
 
+    if command_name == "rg" and any(arg.startswith("--pre") for arg in args):
+        # --pre runs an arbitrary program over every searched file.
+        raise ValueError("rg --pre is blocked in the process runtime.")
+
     if command_name in {"grep", "rg", "sed"}:
         pattern_consumed = False
         path_argument_checked = False
@@ -1020,7 +1069,7 @@ def _validate_command_specific_args(executable: str, args: list[str], cwd: Path)
             arg in {"-r", "-R", "--recursive", "--dereference-recursive"}
             or (arg.startswith("-") and not arg.startswith("--") and any(flag in arg[1:] for flag in ("r", "R")))
             for arg in args
-        )
+        ) or (command_name == "grep" and _grep_directories_recurse(args))
         index = 0
         while index < len(args):
             arg = args[index]
@@ -1054,6 +1103,11 @@ def _validate_command_specific_args(executable: str, args: list[str], cwd: Path)
                 pattern_consumed = True
                 index += 1
                 continue
+            if command_name == "grep" and _grep_takes_separate_directories_value(arg):
+                # -d/--directories ACTION: the next token is the action, not
+                # the pattern; recursion was already detected above.
+                index += 2
+                continue
             if command_name == "grep" and arg in {"--exclude-from"}:
                 if index + 1 >= len(args):
                     raise ValueError(f"{arg} requires a path argument.")
@@ -1080,7 +1134,10 @@ def _validate_command_specific_args(executable: str, args: list[str], cwd: Path)
             if not pattern_consumed and command_name in {"grep", "rg", "sed"}:
                 pattern_consumed = True
             else:
-                if recursive_search:
+                # A directory operand to grep or rg is scanned however
+                # recursion was requested, so no option spelling can reach
+                # protected files beneath it.
+                if recursive_search or (command_name in {"grep", "rg"} and _is_directory_operand(arg, cwd)):
                     _ensure_process_search_path(arg, cwd, label="path argument")
                 else:
                     _ensure_process_accessible_path(arg, cwd, label="path argument")

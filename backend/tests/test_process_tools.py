@@ -891,6 +891,7 @@ def test_command_case_variants_get_the_canonical_validators(isolated_workspace, 
     ("command", "args"),
     [
         ("grep", ["-R", "SERAPH_TEST_SECRET", "notes"]),
+        ("grep", ["-d", "recurse", "SERAPH_TEST_SECRET", "notes"]),
         ("rg", ["-L", "SERAPH_TEST_SECRET", "notes"]),
         ("find", ["-L", "notes", "-name", "*"]),
     ],
@@ -983,6 +984,31 @@ def test_run_command_rejects_recursive_search_over_registry_owned_files(isolated
     assert result == "Error: path argument cannot recursively search workspace paths containing secret-like files; search a subdirectory such as notes/ instead."
 
 
+def test_grep_directories_recurse_cannot_read_a_hard_link_to_the_vault_key(isolated_workspace):
+    _write_workspace_file(".vault-key", "SERAPH_TEST_SECRET=do-not-read\n")
+    _write_workspace_file("notes/a.md", "a\n")
+    os.link(isolated_workspace / ".vault-key", isolated_workspace / "notes" / "copy")
+
+    result = run_command(command="grep", args_json='["-d","recurse","SERAPH_TEST_SECRET","notes"]')
+
+    assert "SERAPH_TEST_SECRET" not in result
+    assert result.startswith("Error:")
+
+
+def test_grep_directory_read_without_recursion_still_searches_ordinary_files(isolated_workspace):
+    _write_workspace_file("notes/a.md", "needle\n")
+
+    assert "needle" in run_command(command="grep", args_json='["-d","recurse","needle","notes"]')
+    assert "needle" in run_command(command="grep", args_json='["needle","notes/a.md"]')
+
+
+@pytest.mark.parametrize("args_json", ['["--pre","cat","x","notes"]', '["--pre=cat","x","notes"]', '["--pre-glob","*","x","notes"]'])
+def test_rg_pre_preprocessor_is_blocked(isolated_workspace, args_json):
+    _write_workspace_file("notes/a.md", "x\n")
+
+    assert run_command(command="rg", args_json=args_json) == "Error: rg --pre is blocked in the process runtime."
+
+
 def test_run_command_still_reads_ordinary_and_read_only_runtime_files(isolated_workspace):
     _write_workspace_file("notes/today.md", "ordinary note\n")
     _write_workspace_file("model-fabric-settings.json", "{}\n")
@@ -998,6 +1024,15 @@ def test_run_command_still_reads_ordinary_and_read_only_runtime_files(isolated_w
         ("grep", '["-R","SERAPH_TEST_SECRET"]', "path argument"),
         ("rg", '["SERAPH_TEST_SECRET","."]', "path argument"),
         ("rg", '["SERAPH_TEST_SECRET"]', "path argument"),
+        # grep's -d/--directories recurse is recursion in every spelling.
+        ("grep", '["-d","recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["--directories=recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["--directories","recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["--dir=rec","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["-nd","recurse","SERAPH_TEST_SECRET","."]', "path argument"),
+        ("grep", '["-d","recurse","-e","SERAPH_TEST_SECRET"]', "path argument"),
+        # A directory operand is scanned even without a recursion flag.
+        ("grep", '["SERAPH_TEST_SECRET","."]', "path argument"),
         ("find", '[".","-name",".env","-print"]', "search path"),
         ("find", '[]', "search path"),
     ],

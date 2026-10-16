@@ -26,8 +26,8 @@ import hashlib
 import json
 import logging
 
-from .ownership import (DOMAINS, RECOVERY_EVENT, CompositionBindingError, CompositionDependency, _checked_row,
-                        composition_writer, inventory, legacy_composition_digest, transition_owner)
+from .ownership import (DOMAINS, PRESETS_DOMAIN, RECOVERY_EVENT, CompositionBindingError, CompositionDependency,
+                        _checked_row, composition_writer, inventory, legacy_composition_digest, transition_owner)
 
 logger = logging.getLogger(__name__)
 CUTOVER_EVENT = "runtime_composition_domain_cutover"
@@ -65,7 +65,9 @@ def cutover_manifest() -> tuple[CutoverDomain, ...]:
     return tuple(_MANIFEST)
 
 
-register_cutover_domain("seraph.agent-loop.v1")
+# Every turn binds the reviewed presets (#1020), so they are cut over first.
+register_cutover_domain(PRESETS_DOMAIN)
+register_cutover_domain("seraph.agent-loop.v1", prerequisites=(PRESETS_DOMAIN,))
 
 
 # ---------------------------------------------------------------- legacy turn gate

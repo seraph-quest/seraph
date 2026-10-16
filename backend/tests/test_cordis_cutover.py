@@ -17,10 +17,17 @@ from src.runtime_plugins.agent_turns import AGENT_LOOP_DOMAIN, chat_runtime_stat
 from src.runtime_plugins.bridge import CordisHost
 from src.runtime_plugins.cutover import (CUTOVER_EVENT, OPERATOR_EVENT, legacy_turns, pending_intents,
                                          record_operator_intent, run_boot_cutover)
+from src.runtime_plugins.guardian_turns import GUARDIAN_DOMAIN
+from src.runtime_plugins.ownership import PRESETS_DOMAIN
 from src.runtime_plugins.ownership import CompositionBindingError
 from src.workflows.job_runtime import DurableJobRepository
 
 pytestmark = [needs_cordis, pytest.mark.asyncio]
+
+
+def _by_domain(receipts):
+    # #1020 adds the presets (cut over first) and guardian domains to the manifest.
+    return {receipt["runtime_domain"]: receipt for receipt in receipts}
 
 
 async def _events(event_type):
@@ -35,20 +42,22 @@ async def test_fresh_workspace_cuts_chat_over_once_and_a_missing_runtime_blocks_
     await seed_composition_inventory()
     # Cordis not built or not running: the domain is cut over but blocked with the host's fix.
     stopped = CordisHost()
-    [receipt] = await run_boot_cutover(stopped)
-    assert receipt["action"] == "cut_over" and receipt["state"] == "blocked"
+    receipts = _by_domain(await run_boot_cutover(stopped))
+    assert list(receipts) == [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+    assert all(item["action"] == "cut_over" and item["state"] == "blocked" for item in receipts.values())
     status = await chat_runtime_status(stopped)
     assert status["loop"] == "blocked" and status["owner_kind"] == "cordis"
     assert status["reason"].startswith("cordis_") and status["recovery"]
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
         # A later boot with a ready runtime completes the same cutover, never a second one.
-        [completed] = await run_boot_cutover(host)
-        assert completed["action"] == "completed" and completed["state"] == "ready"
+        completed = _by_domain(await run_boot_cutover(host))
+        assert list(completed) == [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+        assert all(item["action"] == "completed" and item["state"] == "ready" for item in completed.values())
         status = await chat_runtime_status(host)
         assert (status["loop"], status["owner_kind"]) == ("cordis.agent-loop.v1", "cordis")
         assert await run_boot_cutover(host) == []
-        assert len(await _events(CUTOVER_EVENT)) == 1
+        assert len(await _events(CUTOVER_EVENT)) == 3
 
 
 async def test_operator_intents_apply_at_boot_rollback_is_sticky_and_re_cutover_takes_a_higher_epoch(accounting_db, real_auth):  # noqa: F811
@@ -61,6 +70,7 @@ async def test_operator_intents_apply_at_boot_rollback_is_sticky_and_re_cutover_
         assert (await chat_runtime_status(host))["loop"] == "cordis.agent-loop.v1"
         assert (await pending_intents())[AGENT_LOOP_DOMAIN]["target"] == "legacy"
         [applied] = await run_boot_cutover(host)
+        assert applied["runtime_domain"] == AGENT_LOOP_DOMAIN
         assert (applied["action"], applied["owner_kind"], applied["state"]) == ("intent_applied", "legacy", "ready")
         assert applied["epoch"] == cut + 1 and await pending_intents() == {}
         assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents"
@@ -83,13 +93,14 @@ async def test_a_boot_step_never_switches_under_a_live_legacy_turn_and_retries(a
     async with research_host(jobs) as host:
         legacy_turns.enter(AGENT_LOOP_DOMAIN)
         try:
-            [deferred] = await run_boot_cutover(host)
+            receipts = _by_domain(await run_boot_cutover(host))
         finally:
             legacy_turns.leave(AGENT_LOOP_DOMAIN)
-        assert deferred == {"runtime_domain": AGENT_LOOP_DOMAIN, "action": "deferred",
-                            "reason": "composition_not_quiescent"}
+        assert receipts[AGENT_LOOP_DOMAIN] == {"runtime_domain": AGENT_LOOP_DOMAIN, "action": "deferred",
+                                               "reason": "composition_not_quiescent"}
         # Nothing switched and no marker was written; the next boot retries.
-        assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents" and await _events(CUTOVER_EVENT) == []
+        assert (await chat_runtime_status(host))["loop"] == "legacy.smolagents"
+        assert AGENT_LOOP_DOMAIN not in {event["runtime_domain"] for event in await _events(CUTOVER_EVENT)}
         with legacy_turns.quiesced(AGENT_LOOP_DOMAIN):
             with pytest.raises(CompositionBindingError) as closed:
                 legacy_turns.enter(AGENT_LOOP_DOMAIN)
@@ -126,12 +137,14 @@ async def test_operator_api_requires_auth_confirmation_and_a_manifest_domain(acc
             requested = await client.post(path, json=body)
             assert requested.status_code == 200, requested.text
             assert requested.json()["restart_required"] is True
-            assert requested.json()["domains"] == [{"runtime_domain": AGENT_LOOP_DOMAIN, "prerequisites": [],
-                                                    "owner_kind": "legacy", "epoch": 1, "state": "ready",
-                                                    "pending_target": "cordis"}]
+            domains = _by_domain(requested.json()["domains"])
+            assert list(domains) == [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+            assert domains[AGENT_LOOP_DOMAIN] == {"runtime_domain": AGENT_LOOP_DOMAIN,
+                                                  "prerequisites": [PRESETS_DOMAIN], "owner_kind": "legacy",
+                                                  "epoch": 1, "state": "ready", "pending_target": "cordis"}
             # The next boot applies it.
-            [applied] = await run_boot_cutover(host)
+            applied = _by_domain(await run_boot_cutover(host))[AGENT_LOOP_DOMAIN]
             assert applied["action"] == "intent_applied" and applied["owner_kind"] == "cordis"
-            listed = await client.get("/api/runtime/composition/domains")
-            assert listed.json()["domains"][0]["owner_kind"] == "cordis"
-            assert listed.json()["domains"][0]["pending_target"] is None
+            listed = _by_domain((await client.get("/api/runtime/composition/domains")).json()["domains"])
+            assert listed[AGENT_LOOP_DOMAIN]["owner_kind"] == "cordis"
+            assert listed[AGENT_LOOP_DOMAIN]["pending_target"] is None

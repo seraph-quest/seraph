@@ -1204,7 +1204,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                 from src.memory.flush import flush_session_memory
                 from src.utils.background import track_task
                 track_task(
-                    flush_session_memory(session.id, trigger="post_response"),
+                    flush_session_memory(session.id, trigger="post_response", root_principal=chat_principal),
                     name=f"consolidate-{session.id[:8]}",
                 )
             except ImportError:

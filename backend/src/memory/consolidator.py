@@ -33,6 +33,7 @@ async def consolidate_session(
     trigger: str = "post_response",
     workflow_name: str | None = None,
     manager=None,
+    root_principal=None,
 ) -> ConsolidationResult:
     """Extract long-term memories from a conversation session.
 
@@ -75,7 +76,8 @@ async def consolidate_session(
                 history_text=history,
                 soul_context=soul,
                 # #1020: every trigger's consolidation call runs on the guardian loop.
-                completion_fn=guardian_completion_fn("guardian.memory_consolidation", completion_with_fallback),
+                completion_fn=guardian_completion_fn("guardian.memory_consolidation", completion_with_fallback,
+                                                     root=root_principal),
             )
         except GuardianBlocked as exc:
             # Never adopted: the fingerprint stays uncached, so a later catch-up

@@ -237,6 +237,29 @@ def _append_receipt(raw: str | None, receipt: dict, *, key: str) -> str:
 
 # ---------------------------------------------------------------- dispatcher
 
+async def current_operator_root(db, run, authority: dict) -> None:
+    """A user-owned job's original operator Root is live, current and holds the same grants."""
+    from src.auth.service import AuthFailure, authenticate_principal
+    from src.db.models import OperatorSession
+    now = datetime.now(timezone.utc)
+    root = await db.scalar(select(OperatorSession).where(
+        OperatorSession.id == run.operator_session_id,
+        OperatorSession.principal_id == run.owner_principal_id,
+        OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
+        OperatorSession.is_bearer_tombstone.is_(False),
+        OperatorSession.idle_expires_at > now, OperatorSession.absolute_expires_at > now)
+        .execution_options(populate_existing=True))
+    if root is None or run.operator_session_id != run.session_id:
+        raise NativeServiceBlocked("native_original_root_inactive")
+    try:
+        current = await authenticate_principal(run.owner_principal_id, db=db)
+    except AuthFailure as exc:
+        raise NativeServiceBlocked("native_original_root_inactive") from exc
+    if current.session_id != run.operator_session_id or authority.get("grants") != sorted(
+            str(getattr(grant, "value", grant)) for grant in current.principal.grants):
+        raise NativeServiceBlocked("native_original_policy_changed")
+
+
 class NativeServiceDispatcher:
     """Current Python owners remain the sole source of permission and effects."""
     supported_methods = SUPPORTED_METHODS
@@ -334,25 +357,7 @@ class NativeServiceDispatcher:
             return "guardian"
         if run.owner_kind != "user" or not isinstance(authority, dict):
             raise NativeServiceBlocked("native_authority_mode_unsupported")
-        from src.auth.service import AuthFailure, authenticate_principal
-        from src.db.models import OperatorSession
-        now = datetime.now(timezone.utc)
-        root = await db.scalar(select(OperatorSession).where(
-            OperatorSession.id == run.operator_session_id,
-            OperatorSession.principal_id == run.owner_principal_id,
-            OperatorSession.revoked_at.is_(None), OperatorSession.replaced_by_id.is_(None),
-            OperatorSession.is_bearer_tombstone.is_(False),
-            OperatorSession.idle_expires_at > now, OperatorSession.absolute_expires_at > now)
-            .execution_options(populate_existing=True))
-        if root is None or run.operator_session_id != run.session_id:
-            raise NativeServiceBlocked("native_original_root_inactive")
-        try:
-            current = await authenticate_principal(run.owner_principal_id, db=db)
-        except AuthFailure as exc:
-            raise NativeServiceBlocked("native_original_root_inactive") from exc
-        if current.session_id != run.operator_session_id or authority.get("grants") != sorted(
-                str(getattr(grant, "value", grant)) for grant in current.principal.grants):
-            raise NativeServiceBlocked("native_original_policy_changed")
+        await current_operator_root(db, run, authority)
         return "operator-root"
 
     async def dispatch(self, frame, *, called_scope):

@@ -2,8 +2,10 @@
 
 Scheduled guardian work (the strategist decision, the scheduled reports and
 memory consolidation) has no operator present. Each model call becomes one
-durable ``cordis_guardian_turn_v1`` job, owned by the guardian service under
-its reviewed unattended preset:
+durable ``cordis_guardian_turn_v1`` job under its reviewed unattended preset,
+owned by the guardian service. A memory flush that runs inside an operator's
+turn (post-response, compaction, session end, workflow completion) is the one
+other admission: the same turn, owned by that operator and bound to its Root.
 
 * Python makes exactly today's call: the same messages, model owner, runtime
   path, principal, broker and ledger binding. The turn adds lineage only.
@@ -31,6 +33,7 @@ import hmac
 import json
 import logging
 import secrets
+from types import SimpleNamespace
 import uuid
 
 from .cutover import legacy_turns, register_cutover_domain
@@ -47,9 +50,8 @@ CONTEXT_TAG = "cordis-guardian-turn.v1"
 STEP_TIMEOUT = timedelta(seconds=30)
 SETTLEMENT_GRACE = timedelta(seconds=30)
 LOOP_NAMES = {"cordis": "cordis.guardian.v1", "legacy": "legacy.guardian", "blocked": "blocked"}
-# Default cutover order (#1019 manifest): the presets every turn binds, then the
-# guardian loop that needs them. Boot moves each once to Cordis; rollback is sticky.
-register_cutover_domain(PRESETS_DOMAIN)
+# Default cutover order (#1019 manifest): after the presets every turn binds.
+# Boot moves the guardian domain once to Cordis; an operator rollback is sticky.
 register_cutover_domain(GUARDIAN_DOMAIN, prerequisites=(PRESETS_DOMAIN,))
 
 
@@ -155,9 +157,20 @@ async def runtime_domains_status(host=None) -> list[dict]:
 # ---------------------------------------------------------------- authority
 
 async def current_guardian_authority(db, run, authority: dict) -> None:
-    """The live unsettled turn (and its live scheduler parent) is an unattended turn's only authority."""
-    if (run.owner_kind != "service" or run.owner_principal_id != GUARDIAN_SERVICE
-            or run.service_id != GUARDIAN_SERVICE or run.job_kind not in {TURN_JOB_KIND, STEP_JOB_KIND}):
+    """The live unsettled turn (and its live scheduler parent) is an unattended turn's only authority.
+
+    A turn admitted under an operator Root (a memory flush inside an operator's
+    turn) also needs that Root live with unchanged grants, exactly as a chat turn.
+    """
+    if run.job_kind not in {TURN_JOB_KIND, STEP_JOB_KIND}:
+        raise NativeServiceBlocked("native_guardian_lineage_changed")
+    if run.owner_kind == "user":
+        if run.owner_principal_id != authority.get("principal") or run.service_id is not None:
+            raise NativeServiceBlocked("native_guardian_lineage_changed")
+        from .dispatch import current_operator_root
+        await current_operator_root(db, run, authority)
+    elif (run.owner_kind != "service" or run.owner_principal_id != GUARDIAN_SERVICE
+            or run.service_id != GUARDIAN_SERVICE):
         raise NativeServiceBlocked("native_guardian_lineage_changed")
     turn_id = authority.get("turn_job_id") if run.job_kind == STEP_JOB_KIND else run.run_identity
     from src.db.models import WorkflowRunState
@@ -198,8 +211,10 @@ class GuardianTurn:
     """Python owner of one unattended guardian turn."""
 
     def __init__(self, *, job_id: str, owner: str, fence: int, host, jobs, preset_id: str, preset_digest: str,
-                 deadline: datetime):
+                 deadline: datetime, job_owner: dict):
         self.job_id, self.owner, self.fence = job_id, owner, fence
+        # Who owns the turn's rows: the guardian service, or the operator Root it was admitted under.
+        self.job_owner = job_owner
         self.host, self.jobs, self.preset_id, self.preset_digest = host, jobs, preset_id, preset_digest
         self.deadline = deadline
         self.settled = False
@@ -208,7 +223,13 @@ class GuardianTurn:
 
     @classmethod
     async def admit(cls, *, preset_id: str, timeout_seconds: float, parent: dict | None = None,
-                    host=None, jobs=None) -> "GuardianTurn":
+                    root=None, host=None, jobs=None) -> "GuardianTurn":
+        """Admit one unattended turn.
+
+        ``root`` is the operator principal of a trigger that runs inside an
+        operator's turn; the turn is then owned by that operator and bound to
+        its Root. Without one (a scheduled run) the guardian service owns it.
+        """
         from src.agent.presets import PresetError, preset_digest, require_unattended
         from src.approval.runtime import get_current_trust_principal
         from src.db.engine import get_session
@@ -225,8 +246,18 @@ class GuardianTurn:
         if not host.admitting or host.reviewed is None:
             raise GuardianBlocked("guardian_host_unavailable")
         principal = get_current_trust_principal()
-        authority = {"authority_type": AUTHORITY_TYPE, "principal": GUARDIAN_SERVICE, "owner_kind": "service",
-                     "service_id": GUARDIAN_SERVICE, "preset_id": preset_id, "preset_digest": digest,
+        root = _operator_root(root)
+        if root is None:
+            owner_authority = {"principal": GUARDIAN_SERVICE, "owner_kind": "service", "service_id": GUARDIAN_SERVICE}
+            job_owner = {"owner_kind": "service", "owner_principal_id": GUARDIAN_SERVICE,
+                         "service_id": GUARDIAN_SERVICE}
+        else:
+            owner_authority = {"principal": root.principal_id, "owner_kind": "user",
+                               "session_id": root.operator_session_id, "grants": _grants(root)}
+            job_owner = {"owner_kind": "user", "owner_principal_id": root.principal_id,
+                         "session_id": root.operator_session_id, "operator_session_id": root.operator_session_id}
+        authority = {"authority_type": AUTHORITY_TYPE, **owner_authority, "preset_id": preset_id,
+                     "preset_digest": digest,
                      # Lineage only: the inference keeps today's principal and ledger owner.
                      "inference_principal_id": getattr(principal, "principal_id", None),
                      "parent_job_id": (parent or {}).get("job_id"),
@@ -234,10 +265,15 @@ class GuardianTurn:
         try:
             async with get_session() as db:
                 await _parent_live(db, authority)
+                if root is not None:
+                    # The same Root check every callback of a user-owned job repeats.
+                    from .dispatch import current_operator_root
+                    await current_operator_root(db, SimpleNamespace(**job_owner), authority)
                 binding = await bind_invocation(db, method="guardian.startTurn", native_branch="guardian",
                                                 reviewed_composition=host.reviewed)
         except NativeServiceBlocked as exc:
-            raise GuardianBlocked("guardian_parent_inactive") from exc
+            raise GuardianBlocked("guardian_parent_inactive" if exc.reason_code.startswith("native_guardian")
+                                  else exc.reason_code) from exc
         except CompositionBindingError as exc:
             raise GuardianBlocked(exc.reason_code) from exc
         if not any(item.runtime_domain == GUARDIAN_DOMAIN and item.owner_kind == "cordis"
@@ -249,11 +285,12 @@ class GuardianTurn:
         candidate = {"schema_version": 1, "preset_id": preset_id, "preset_digest": digest,
                      "timeout_seconds": float(timeout_seconds)}
         spec = DurableJobSpec(
-            identity=DurableJobIdentity(job_id=job_id, owner_kind="service", owner_principal_id=GUARDIAN_SERVICE,
+            identity=DurableJobIdentity(job_id=job_id, owner_kind=job_owner["owner_kind"],
+                                        owner_principal_id=job_owner["owner_principal_id"],
                                         job_kind=TURN_JOB_KIND, capability_version="1",
                                         idempotency_scope="cordis-guardian-turn", idempotency_key=key),
-            inputs=candidate, service_id=GUARDIAN_SERVICE, declared_authority=authority, deadline_at=deadline,
-            max_attempts=1, composition_binding=binding,
+            inputs=candidate, declared_authority=authority, deadline_at=deadline, max_attempts=1,
+            composition_binding=binding, **_spec_owner(job_owner),
             run_fingerprint=_digest({"candidate": candidate, "kind": TURN_JOB_KIND, "key": key}))
         job = await jobs.admit_job(spec)
         queued = await jobs.transition_job(job_id, "queued", expected_revision=job["revision"])
@@ -262,7 +299,8 @@ class GuardianTurn:
         claimed = await jobs.claim_job(job_id, owner=owner, lease_seconds=max(lease, 1),
                                        expected_revision=queued["revision"])
         turn = cls(job_id=job_id, owner=owner, fence=int(claimed["lease"]["fencing_token"]), host=host, jobs=jobs,
-                   preset_id=preset_id, preset_digest=digest, deadline=deadline)
+                   preset_id=preset_id, preset_digest=digest, deadline=deadline,
+                   job_owner={**job_owner, "authority": owner_authority})
         await turn._write_context(initial=True)
         return turn
 
@@ -280,10 +318,18 @@ class GuardianTurn:
             await validate_invocation(db, RuntimeCompositionBinding.from_json(run.composition_binding_json))
         except CompositionBindingError as exc:
             raise GuardianBlocked("guardian_turn_epoch_changed") from exc
+        authority = json.loads(run.declared_authority_json or "{}")
         try:
-            await _parent_live(db, json.loads(run.declared_authority_json or "{}"))
+            await _parent_live(db, authority)
         except NativeServiceBlocked as exc:
             raise GuardianBlocked("guardian_parent_inactive") from exc
+        if run.owner_kind == "user":
+            # An operator-owned turn adopts nothing once its Root is revoked or its grants changed.
+            from .dispatch import current_operator_root
+            try:
+                await current_operator_root(db, run, authority)
+            except NativeServiceBlocked as exc:
+                raise GuardianBlocked(exc.reason_code) from exc
         return run
 
     async def _write_context(self, *, initial: bool = False, settlement: dict | None = None, step: dict | None = None,
@@ -387,14 +433,15 @@ class GuardianTurn:
         key = f"guardian-step:{_sha(self.job_id)[:40]}:1"
         job_id = "cordis-svc:" + _digest({"guardian_turn": self.job_id, "kind": STEP_JOB_KIND, "key": key})
         deadline = min(datetime.now(timezone.utc) + STEP_TIMEOUT, self.deadline)
-        authority = {"authority_type": AUTHORITY_TYPE, "principal": GUARDIAN_SERVICE, "owner_kind": "service",
-                     "service_id": GUARDIAN_SERVICE, "turn_job_id": self.job_id}
+        owner = {key: value for key, value in self.job_owner.items() if key != "authority"}
+        authority = {"authority_type": AUTHORITY_TYPE, **self.job_owner["authority"], "turn_job_id": self.job_id}
         spec = DurableJobSpec(
-            identity=DurableJobIdentity(job_id=job_id, owner_kind="service", owner_principal_id=GUARDIAN_SERVICE,
+            identity=DurableJobIdentity(job_id=job_id, owner_kind=owner["owner_kind"],
+                                        owner_principal_id=owner["owner_principal_id"],
                                         job_kind=STEP_JOB_KIND, capability_version="1",
                                         idempotency_scope="cordis-service", idempotency_key=key),
-            inputs=candidate, service_id=GUARDIAN_SERVICE, declared_authority=authority, deadline_at=deadline,
-            max_attempts=1, composition_binding=binding,
+            inputs=candidate, declared_authority=authority, deadline_at=deadline, max_attempts=1,
+            composition_binding=binding, **_spec_owner(owner),
             run_fingerprint=_digest({"candidate": candidate, "turn": self.job_id, "origin": "guardian.startTurn",
                                      "deadline": deadline.isoformat()}))
         job = await self.jobs.admit_job(spec)
@@ -442,6 +489,32 @@ class GuardianTurn:
         return True
 
 
+def _operator_root(principal):
+    """The authenticated operator principal a trigger runs under, if it has a Root."""
+    from src.security.trust_contract import PrincipalType
+    if principal is None:
+        return None
+    try:
+        kind = PrincipalType(principal.principal_type)
+    except (TypeError, ValueError):
+        return None
+    if (kind is not PrincipalType.OPERATOR or not principal.authenticated or principal.revoked
+            or not principal.principal_id or not principal.operator_session_id):
+        return None
+    return principal
+
+
+def _grants(principal) -> list[str]:
+    return sorted(str(getattr(grant, "value", grant)) for grant in principal.grants)
+
+
+def _spec_owner(owner: dict) -> dict:
+    """The DurableJobSpec ownership fields of a service- or operator-owned turn."""
+    if owner["owner_kind"] == "service":
+        return {"service_id": owner["service_id"]}
+    return {"session_id": owner["session_id"], "operator_session_id": owner["operator_session_id"]}
+
+
 def _response_text(response) -> str:
     try:
         return str(response.choices[0].message.content or "")
@@ -451,7 +524,7 @@ def _response_text(response) -> str:
 
 async def guardian_completion(preset_id: str, call, *, timeout_seconds: float, runtime_path: str,
                               temperature: float, max_tokens: int, parent: dict | None = None,
-                              host=None, jobs=None):
+                              root=None, host=None, jobs=None):
     """Run one guardian model call on the path its owner row selects.
 
     ``call`` is today's exact completion coroutine factory. On the legacy owner
@@ -486,9 +559,9 @@ async def guardian_completion(preset_id: str, call, *, timeout_seconds: float, r
         # A sync caller (a workflow flush) runs its own loop in a worker thread;
         # the turn's child traffic must use the loop that owns the child's pipes.
         return await _on_loop(owner_loop, lambda: _cordis_completion(preset_id, call, timeout_seconds=timeout_seconds,
-                                                                     parent=parent, host=host, jobs=jobs))
-    return await _cordis_completion(preset_id, call, timeout_seconds=timeout_seconds, parent=parent, host=host,
-                                    jobs=jobs)
+                                                                     parent=parent, root=root, host=host, jobs=jobs))
+    return await _cordis_completion(preset_id, call, timeout_seconds=timeout_seconds, parent=parent, root=root,
+                                    host=host, jobs=jobs)
 
 
 async def _on_loop(loop, factory):
@@ -513,8 +586,8 @@ async def _on_loop(loop, factory):
     return await asyncio.wrap_future(done)
 
 
-async def _cordis_completion(preset_id, call, *, timeout_seconds, parent, host, jobs):
-    turn = await GuardianTurn.admit(preset_id=preset_id, timeout_seconds=timeout_seconds, parent=parent,
+async def _cordis_completion(preset_id, call, *, timeout_seconds, parent, root, host, jobs):
+    turn = await GuardianTurn.admit(preset_id=preset_id, timeout_seconds=timeout_seconds, parent=parent, root=root,
                                     host=host, jobs=jobs)
     try:
         response = await call()
@@ -532,10 +605,15 @@ async def _cordis_completion(preset_id, call, *, timeout_seconds, parent, host, 
     return response
 
 
-def guardian_completion_fn(preset_id: str, completion_fn):
-    """Wrap a ``completion_fn(**kwargs)`` dependency so its one call runs on the guardian loop."""
+def guardian_completion_fn(preset_id: str, completion_fn, *, root=None):
+    """Wrap a ``completion_fn(**kwargs)`` dependency so its one call runs on the guardian loop.
+
+    ``root`` is the operator principal of a trigger inside an operator's turn
+    (the user-owned admission); without one the turn is the guardian service's.
+    """
     async def guarded(**kwargs):
         return await guardian_completion(
             preset_id, lambda: completion_fn(**kwargs), timeout_seconds=float(kwargs["timeout"]),
-            runtime_path=kwargs["runtime_path"], temperature=kwargs["temperature"], max_tokens=kwargs["max_tokens"])
+            runtime_path=kwargs["runtime_path"], temperature=kwargs["temperature"], max_tokens=kwargs["max_tokens"],
+            root=root)
     return guarded

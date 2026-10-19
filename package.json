@@ -1,0 +1,12 @@
+{
+  "name": "seraph-tooling",
+  "private": true,
+  "description": "Repo-level tooling only. App code lives in frontend/, docs/ and backend/.",
+  "scripts": {
+    "format": "prettier --write \"AGENTS.md\" \"package.json\" \".claude/**/*.{json,md}\"",
+    "format:check": "prettier --check \"AGENTS.md\" \"package.json\" \".claude/**/*.{json,md}\""
+  },
+  "devDependencies": {
+    "prettier": "3.9.8"
+  }
+}

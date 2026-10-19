@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.dev)",
+      "Read(.env.prod)",
+      "Read(.env*.local)",
+      "Read(*.pem)",
+      "Read(.aws/**)",
+      "Read(docker-data/**)",
+      "Read(backend/data/mcp-servers.json)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/format-file.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

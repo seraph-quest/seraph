@@ -1,0 +1,8 @@
+# Only AGENTS.md, package.json and .claude/** are covered by `npm run format`.
+# Everything else is ignored so an accidental `prettier .` cannot reformat app code.
+*
+!AGENTS.md
+!package.json
+!.claude/
+!.claude/**
+.claude/settings.local.json

@@ -16,6 +16,9 @@ locks the integration workflow: milestone branches start from the latest epic
 branch, ready PRs target it, and only the final reviewed epic PR targets
 `develop`.
 
+Do not use older references to the retired Phaser village/editor experience as
+current Seraph product truth.
+
 ## What Seraph Is
 
 Seraph is a local-first operator cockpit and agent runtime. The repo spans a
@@ -253,7 +256,7 @@ not satisfy the proactive-agent contract.
 - Use `./manage.sh -e dev local run` for live observation in managed Codex
   sessions. Use `./manage.sh -e dev local up/down/status/logs` for normal local
   lifecycle. Do not start backend/frontend directly with `uvicorn`, `npm run
-  dev`, or Vite unless the user explicitly asks.
+dev`, or Vite unless the user explicitly asks.
 - Keep `.env.*` shell-safe. Any value containing semicolons must be quoted
   because `manage.sh` sources env files as shell.
 - Runtime status must report the effective path for the current operator
@@ -295,17 +298,17 @@ surfaces.
 
 ## Validation Matrix
 
-| Change type | Required proof |
-| --- | --- |
-| Runtime topology or lifecycle | `./manage.sh -e dev local status`, relevant `/health` checks, and logs or live URL receipt. |
-| Chat/local model routing | API or WebSocket probe proving effective provider/model path, plus transcript persistence check when turn behavior changes. |
-| Streaming chat UI | Backend frame test, frontend reducer/rendering test, and live or mocked delta/final receipt. |
-| Settings/UI truth | Endpoint payload inspection plus frontend binding or component test. |
-| Scheduler/remote inference queue | Priority/non-starvation test and proof that one-remote-inference serial semantics are preserved; GPU receipts are historical on #775. |
+| Change type                           | Required proof                                                                                                                                                |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime topology or lifecycle         | `./manage.sh -e dev local status`, relevant `/health` checks, and logs or live URL receipt.                                                                   |
+| Chat/local model routing              | API or WebSocket probe proving effective provider/model path, plus transcript persistence check when turn behavior changes.                                   |
+| Streaming chat UI                     | Backend frame test, frontend reducer/rendering test, and live or mocked delta/final receipt.                                                                  |
+| Settings/UI truth                     | Endpoint payload inspection plus frontend binding or component test.                                                                                          |
+| Scheduler/remote inference queue      | Priority/non-starvation test and proof that one-remote-inference serial semantics are preserved; GPU receipts are historical on #775.                         |
 | Screenshot/OpenRouter vision analysis | OpenRouter policy/admission/ingestion tests and operator-visible status receipt; local wrapper health is historical and must not be a readiness prerequisite. |
-| Docs-only workflow change | Link to owning doc, contradiction scan for stale guidance, and no claims of runtime change. |
-| GitHub/project mutation | Duplicate issue search, issue/PR/project item IDs, and field verification after mutation. |
-| Security/privacy/trust boundary | Focused negative tests or proof of fail-closed behavior, plus explicit residual risk. |
+| Docs-only workflow change             | Link to owning doc, contradiction scan for stale guidance, and no claims of runtime change.                                                                   |
+| GitHub/project mutation               | Duplicate issue search, issue/PR/project item IDs, and field verification after mutation.                                                                     |
+| Security/privacy/trust boundary       | Focused negative tests or proof of fail-closed behavior, plus explicit residual risk.                                                                         |
 
 Skipped checks must be named with a reason and residual risk. Do not substitute
 generic "tests pass" for the proof surface above.
@@ -362,10 +365,34 @@ feat/batch-three -> feat/batch-two
 - PR bodies carry branch-specific scope, validation, and review receipts.
 - Do not use docs as a live queue, branch tracker, or kanban mirror.
 
+## Multi-model workflow (Claude Code sessions)
+
+This section applies to Claude Code sessions only. Codex follows the Team Lead
+Operating Model below unchanged. Project subagents live in `.claude/agents/`.
+
+- Research goes to `researcher` (read-only, Haiku). Send unrelated questions in
+  parallel. Read the files it cites before relying on its answer.
+- Implementation, code, tests, and decisions stay in the main session.
+- `reviewer` (read-only, Opus, medium effort) is called before committing to an
+  approach on complex or high-risk work, when an error recurs, and on the
+  finished, committed change before declaring done. Brief it with the diff or
+  SHA plus criteria, not conclusions. It counts as the independent
+  Critic/Contrarian subagent required by the Review Rule.
+- Only the main session spawns agents. Subagents do not spawn further agents.
+  This repo defines no agent-count cap.
+- The branch check, the Required Critic / Contrarian Role (a `reviewer` pass
+  before issue or PR creation, merge, or roadmap finalization), and PR-body
+  receipts still apply to Claude Code sessions.
+- `/verify-changes` runs the fast checks and dependency-selected tests.
+- `npm run format` formats `AGENTS.md`, `package.json`, and `.claude/**`; it
+  intentionally does not cover app code.
+
 ## Team Lead Operating Model
 
 For substantial planning, roadmap, architecture, implementation, or review work,
-Codex acts as the team lead.
+Codex acts as the team lead. (Claude Code sessions follow the Multi-model
+workflow above for team composition and delegation only; the branch check,
+Required Critic / Contrarian Role, and PR-body receipts below still apply.)
 
 Substantial work includes any task that changes strategy or docs truth, touches
 two or more modules, affects security, memory, runtime, agent behavior, project

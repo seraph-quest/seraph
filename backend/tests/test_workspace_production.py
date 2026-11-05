@@ -653,6 +653,36 @@ def test_managed_restore_blocks_when_a_stored_derived_index_needs_rebuild(tmp_pa
     assert (root / "lance" / "index.bin").read_bytes() == b"derived-index"
 
 
+
+def test_managed_restore_succeeds_with_the_background_inference_status_file(tmp_path):
+    """#1020: the runtime-written status file (and a stray .tmp) never blocks a restore."""
+    root = _workspace(tmp_path)
+    (root / "background-inference-status.json").write_text('{"schema_version": 1, "jobs": {}}')
+    (root / "background-inference-status.tmp").write_text("{")
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "status.zip"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    archive = json.loads(backup.stdout)["archive_path"]
+    restore = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert restore.returncode == 0, restore.stdout + restore.stderr
+    assert json.loads(restore.stdout)["stage_receipt"]["restore_reconciliation"]["status"] == "ready"
+
 def test_manage_prod_commands_use_host_bind_and_never_start_compose(tmp_path):
     root = _workspace(tmp_path)
     env_file = ROOT / ".env.prod"

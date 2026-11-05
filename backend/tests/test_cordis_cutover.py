@@ -51,6 +51,10 @@ async def test_fresh_workspace_cuts_chat_over_once_and_a_missing_runtime_blocks_
     status = await chat_runtime_status(stopped)
     assert status["loop"] == "blocked" and status["owner_kind"] == "cordis"
     assert status["reason"].startswith("cordis_") and status["recovery"]
+    # A restart while the host is still down changes nothing, so it audits nothing and never says "completed".
+    again = _by_domain(await run_boot_cutover(stopped))
+    assert all(item["action"] == "still_blocked" for item in again.values())
+    assert await _events(BOOT_EVENT) == []
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
         # A later boot with a ready runtime completes the same cutover, never a second one.

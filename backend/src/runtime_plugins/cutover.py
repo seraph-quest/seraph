@@ -280,8 +280,15 @@ async def run_boot_cutover(host) -> list[dict]:
                                 continue
                             action = "completed" if row.state != "ready" else "digest_refreshed"
                             prior = _checked_row(row).payload() | {"state": row.state}
+                            before = (row.epoch, row.state, row.composition_digest)
                             await _move(db, entry.domain, "cordis", host)
                             current = (await inventory(db))[entry.domain]
+                            if (current.epoch, current.state, current.composition_digest) == before:
+                                # Nothing moved (e.g. the host is still down): no audit row and no
+                                # "completed" label; the receipt says the domain is still waiting.
+                                receipts.append({"runtime_domain": entry.domain, "action": "still_" + current.state,
+                                                 "state": current.state, "epoch": current.epoch})
+                                continue
                             # Audited in the same writer; not a cutover marker (the domain is already marked).
                             await _audit(db, BOOT_EVENT, {"runtime_domain": entry.domain, "prior": prior,
                                                           "target": "cordis", "reason": action,

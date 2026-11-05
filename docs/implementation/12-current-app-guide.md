@@ -739,7 +739,8 @@ build's digest at a higher epoch (`digest_refreshed`); until that happens chat
 status reports `agent_loop_composition_drift` with the restart fix instead of
 naming a stale build. A completed cutover and a digest refresh are each audited
 as `runtime_composition_domain_boot_transition` in the same writer; neither is
-a second cutover marker.
+a second cutover marker. A boot that changes nothing, for example while the host
+is still down, writes no audit row and reports `still_blocked`.
 
 Operators move a domain live with `GET /api/runtime/composition/domains` and
 `POST /api/runtime/composition/domains/{domain}/owner {target, expected_epoch,

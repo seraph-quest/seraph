@@ -181,7 +181,39 @@ async def test_a_root_that_moves_before_the_first_write_is_a_pre_contact_refusal
     assert (root.status, root.failure_reason) == ("blocked", RUNTIME_UNAVAILABLE)
     # The claimed worker turn is closed at once, not left running for stale-lease recovery.
     [turn] = await _turns(async_db)
-    assert turn.status == "blocked"
+    assert turn.status == "cancelled"
+
+
+async def test_a_turn_whose_root_really_moved_is_closed_and_the_new_root_is_untouched(accounting_db, monkeypatch):  # noqa: F811
+    """The parent fence really moves before the first write: the turn still closes, the root is not blocked by it."""
+    async_db = await _setup(accounting_db, monkeypatch)
+    from sqlalchemy import update
+    from src.runtime_plugins.board_worker_turns import WorkerTurn
+    write = WorkerTurn._write_context
+
+    async def moved(self, *, initial=False, **kwargs):
+        if initial:
+            async with async_db() as db:
+                turn = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == self.job_id))
+                # Another runner re-leased the attempt root at a newer fence.
+                await db.execute(update(WorkflowRunState).where(WorkflowRunState.run_identity == turn.parent_run_identity)
+                                 .values(fencing_token=WorkflowRunState.fencing_token + 1))
+                await db.commit()
+        return await write(self, initial=initial, **kwargs)
+    async with research_host(durable_job_repository) as host:
+        monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
+        await cutover(host, PRESETS_DOMAIN)
+        await cutover(host, BOARD_WORKERS_DOMAIN)
+        monkeypatch.setattr(WorkerTurn, "_write_context", moved)
+        io = Scripted(monkeypatch)
+        result, task, root = await _draft(async_db, "reply-really-moved")
+    assert result["blocked"] is True, result
+    assert task.status is WorkBoardStatus.blocked and task.block_reason == RUNTIME_UNAVAILABLE
+    assert (io.reads, io.model_bodies) == (0, [])
+    [turn] = await _turns(async_db)
+    assert turn.status == "cancelled"
+    # The root now belongs to its new fence; the stale worker did not block it.
+    assert root.status == "running" and root.failure_reason != SETTLEMENT_REFUSED
 
 
 async def test_a_refusal_never_blocks_a_root_held_at_a_newer_lease():

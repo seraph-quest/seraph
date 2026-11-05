@@ -271,11 +271,12 @@ class WorkerTurn:
             # The root or epoch moved between the claim and the first write: still nothing was
             # contacted, so this is a pre-contact refusal, never "inference spent". settle() cannot
             # run here (no context was written and the parent moved), so the turn is closed directly
-            # at its own still-valid lease instead of waiting for stale-lease recovery.
+            # at its own still-valid lease. "cancelled" is terminal and, unlike "blocked", is not
+            # gated on the parent and epoch fences that just failed; the turn's own lease still is.
             try:
                 await asyncio.shield(jobs.transition_job(
-                    job_id, "blocked", owner=owner, fencing_token=turn.fence, reason=exc.detail,
-                    result={"no_learning": True, "outcome": "blocked"},
+                    job_id, "cancelled", owner=owner, fencing_token=turn.fence, reason=exc.detail,
+                    result={"no_learning": True, "outcome": "cancelled"},
                     result_summary="Cordis board worker turn refused before any contact"))
                 turn.settled = True
             except DurableJobError:

@@ -276,7 +276,7 @@ class WorkerTurn:
             try:
                 await asyncio.shield(jobs.transition_job(
                     job_id, "cancelled", owner=owner, fencing_token=turn.fence, reason=exc.detail,
-                    result={"no_learning": True, "outcome": "cancelled"},
+                    result={"no_learning": True, "outcome": "cancelled", "refused_before_contact": exc.detail},
                     result_summary="Cordis board worker turn refused before any contact"))
                 turn.settled = True
             except DurableJobError:

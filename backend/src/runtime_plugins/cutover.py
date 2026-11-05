@@ -289,6 +289,9 @@ async def run_boot_cutover(host) -> list[dict]:
                                 receipts.append({"runtime_domain": entry.domain, "action": "still_" + current.state,
                                                  "state": current.state, "epoch": current.epoch})
                                 continue
+                            if current.state != "ready":
+                                # The row moved but is still not ready (e.g. re-blocked on a pending digest).
+                                action = "reblocked"
                             # Audited in the same writer; not a cutover marker (the domain is already marked).
                             await _audit(db, BOOT_EVENT, {"runtime_domain": entry.domain, "prior": prior,
                                                           "target": "cordis", "reason": action,

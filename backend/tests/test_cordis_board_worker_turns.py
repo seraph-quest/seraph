@@ -179,6 +179,9 @@ async def test_a_root_that_moves_before_the_first_write_is_a_pre_contact_refusal
     assert (io.reads, io.model_bodies) == (0, [])
     assert task.status is WorkBoardStatus.blocked and task.block_reason == RUNTIME_UNAVAILABLE
     assert (root.status, root.failure_reason) == ("blocked", RUNTIME_UNAVAILABLE)
+    # The claimed worker turn is closed at once, not left running for stale-lease recovery.
+    [turn] = await _turns(async_db)
+    assert turn.status == "blocked"
 
 
 async def test_a_refusal_never_blocks_a_root_held_at_a_newer_lease():

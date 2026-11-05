@@ -269,8 +269,18 @@ class WorkerTurn:
             await turn._write_context(initial=True)
         except BoardWorkerBlocked as exc:
             # The root or epoch moved between the claim and the first write: still nothing was
-            # contacted, so this is a pre-contact refusal, never "inference spent".
-            await asyncio.shield(turn.settle("blocked", reason=exc.detail))
+            # contacted, so this is a pre-contact refusal, never "inference spent". settle() cannot
+            # run here (no context was written and the parent moved), so the turn is closed directly
+            # at its own still-valid lease instead of waiting for stale-lease recovery.
+            try:
+                await asyncio.shield(jobs.transition_job(
+                    job_id, "blocked", owner=owner, fencing_token=turn.fence, reason=exc.detail,
+                    result={"no_learning": True, "outcome": "blocked"},
+                    result_summary="Cordis board worker turn refused before any contact"))
+                turn.settled = True
+            except DurableJobError:
+                logger.warning("Board worker turn %s could not be closed after a refused first write", job_id,
+                               exc_info=True)
             raise BoardWorkerBlocked(RUNTIME_UNAVAILABLE, exc.detail) from exc
         return turn
 

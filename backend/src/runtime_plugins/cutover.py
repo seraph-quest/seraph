@@ -76,7 +76,10 @@ def cutover_manifest() -> tuple[CutoverDomain, ...]:
 register_cutover_domain(PRESETS_DOMAIN)
 register_cutover_domain("seraph.agent-loop.v1", prerequisites=(PRESETS_DOMAIN,))
 register_cutover_domain("seraph.guardian.v1", prerequisites=(PRESETS_DOMAIN,))
-register_cutover_domain("seraph.delegation.v1", prerequisites=(PRESETS_DOMAIN,))
+# Delegated children run only under the Cordis chat loop: delegation needs agent-loop on
+# Cordis, so its owner row never reads Cordis while specialists still run in-process on the
+# legacy orchestrator, and agent-loop's legacy gate is drained before delegation moves.
+register_cutover_domain("seraph.delegation.v1", prerequisites=(PRESETS_DOMAIN, "seraph.agent-loop.v1"))
 
 
 # ---------------------------------------------------------------- legacy turn gate

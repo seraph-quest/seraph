@@ -330,7 +330,40 @@ async def test_delegation_turns_need_the_delegation_owner_on_cordis(accounting_d
         with pytest.raises(TurnBlocked) as refused:
             await _turn(host, jobs)
         assert refused.value.reason_code == "delegation_owner_not_ready"
+        assert "seraph.agent-loop.v1" in status["recovery"]  # names the legacy-specialists route
         assert timedelta(seconds=30) == SETTLEMENT_GRACE
+
+
+@needs_cordis
+@pytest.mark.asyncio
+async def test_delegation_needs_the_chat_loop_on_cordis_both_ways(accounting_db, real_auth, delegating):  # noqa: F811
+    """Delegation never reads Cordis while specialists run on the legacy orchestrator (#1020 PR2 review)."""
+    from src.runtime_plugins.cutover import transition_domain
+    from src.runtime_plugins.ownership import CompositionBindingError
+    jobs = DurableJobRepository()
+    async with delegation_host(jobs) as host:
+        # While delegation is Cordis-owned, chat cannot roll back underneath it.
+        with pytest.raises(CompositionBindingError) as refused:
+            await transition_domain("seraph.agent-loop.v1", "legacy", host=host, actor="operator:test")
+        assert refused.value.reason_code == "composition_dependent_cordis_owned"
+        # The two-step rollback works, and delegation cannot return to Cordis on a legacy chat loop.
+        await transition_domain(DELEGATION, "legacy", host=host, actor="operator:test")
+        await transition_domain("seraph.agent-loop.v1", "legacy", host=host, actor="operator:test")
+        with pytest.raises(CompositionBindingError) as refused:
+            await transition_domain(DELEGATION, "cordis", host=host, actor="operator:test")
+        assert refused.value.reason_code == "composition_prerequisite_not_cordis"
+
+
+async def test_a_drifted_delegation_build_is_refused_like_agent_loop():
+    from types import SimpleNamespace
+    from src.runtime_plugins.agent_turns import _delegation_denial
+    row = SimpleNamespace(owner_kind="cordis", state="ready", composition_digest="a" * 64)
+    rows = {DELEGATION: row}
+    host = SimpleNamespace(reviewed=SimpleNamespace(plugin_digests={DELEGATION: "a" * 64}))
+    assert _delegation_denial(rows, host) is None
+    host.reviewed.plugin_digests[DELEGATION] = "b" * 64
+    assert _delegation_denial(rows, host) == "delegation_composition_drift"
+    assert _delegation_denial(rows, SimpleNamespace(reviewed=None)) == "delegation_composition_drift"
 
 
 class Lookup(Tool):

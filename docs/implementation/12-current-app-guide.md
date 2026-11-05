@@ -943,7 +943,7 @@ step bound, route or tools differ from its preset is never admitted.
 - at most 4 children run per turn;
 - no child starts once the turn's own time has run out.
 
-A refusal before a child ran a step does not count toward the cap.
+A refusal before admission (nesting, the cap itself, or no turn time left) does not count toward the cap; every admitted child counts, even one that fails before its first step.
 
 **Receipts.** The child's tool receipts are on its own job row. The parent's
 receipt for the delegating call is derived from them:
@@ -968,9 +968,13 @@ The child's report is adopted only if all of these hold:
 
 **Blocked delegation.** A host, epoch or preset failure in a child stops the
 parent visibly: "Delegated specialist `name` stopped: `reason`". Delegation
-needs the `seraph.delegation.v1` owner on Cordis; its prerequisite is the
-presets owner. Otherwise chat reports `delegation_owner_not_ready` with the
-fix, and there is no fallback.
+needs the `seraph.delegation.v1` owner on Cordis; its prerequisites are the
+presets and agent-loop owners, so delegation never reads Cordis while
+specialists run on the legacy orchestrator. Rolling chat back to legacy
+therefore takes two steps: delegation first, then agent-loop. Otherwise chat
+reports `delegation_owner_not_ready` with the fix, or
+`delegation_composition_drift` when the running build is not the one the owner
+row names, and there is no fallback.
 
 **Legacy fixes in this slice.** Two bugs made delegation chat fail on both
 loops:

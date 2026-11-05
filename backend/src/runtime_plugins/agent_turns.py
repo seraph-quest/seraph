@@ -79,8 +79,11 @@ TURN_BLOCKED_MESSAGES = {
                             "Send it again as a new message."),
     "agent_turn_profile_changed": "Chat settings changed while this turn started. Send the message again.",
     "delegation_owner_not_ready": ("Delegation needs the seraph.delegation.v1 owner on Cordis. Cut it over in "
-                                   "Settings (it needs the agent-presets owner on Cordis first), or turn off "
-                                   "use_delegation to chat without specialists."),
+                                   "Settings (it needs the agent-presets and agent-loop owners on Cordis first), "
+                                   "turn off use_delegation to chat without specialists, or, for legacy "
+                                   "specialists, roll chat (seraph.agent-loop.v1) back to the legacy loop."),
+    "delegation_composition_drift": ("The running Cordis build is not the one the seraph.delegation.v1 owner row "
+                                     f"names. Restart Seraph so boot records it ({RESTART_COMMANDS})."),
     "agent_turn_child_blocked": ("A delegated specialist stopped on the Cordis agent loop, so this turn stopped too. "
                                  "Send the message again."),
 }
@@ -204,16 +207,16 @@ async def chat_runtime_status(host=None) -> dict:
                 "reason": "agent_loop_composition_drift",
                 "recovery": f"Restart Seraph so boot records the running Cordis build ({RESTART_COMMANDS})."}
     from config.settings import settings
-    if settings.use_delegation and _delegation_denial(rows) is not None:
+    if settings.use_delegation and _delegation_denial(rows, host) is not None:
         # Specialists run as durable child turns under their own owner row (#1020 PR2).
-        reason = _delegation_denial(rows)
+        reason = _delegation_denial(rows, host)
         return {"loop": LOOP_NAMES["blocked"], "route": "chat_agent", "owner_epoch": row.epoch, "owner_kind": "cordis",
                 "reason": reason, "recovery": turn_blocked_message(reason)}
     return {"loop": LOOP_NAMES["cordis"], "route": "chat_agent", "owner_epoch": row.epoch, "reason": None,
             "recovery": None, "owner_kind": "cordis"}
 
 
-def _delegation_denial(rows) -> str | None:
+def _delegation_denial(rows, host) -> str | None:
     """Why a delegating (orchestrator) turn cannot run on Cordis now, if it cannot."""
     from .delegation_turns import DELEGATION_DOMAIN
     row = rows.get(DELEGATION_DOMAIN)
@@ -221,6 +224,10 @@ def _delegation_denial(rows) -> str | None:
         return "composition_dependency_missing"
     if row.owner_kind != "cordis" or row.state != "ready":
         return "delegation_owner_not_ready"
+    reviewed = getattr(host, "reviewed", None)
+    if reviewed is None or (reviewed.plugin_digests or {}).get(DELEGATION_DOMAIN) != row.composition_digest:
+        # As for agent-loop: a failed boot refresh stays visible instead of running a drifted build.
+        return "delegation_composition_drift"
     return None
 
 
@@ -426,7 +433,7 @@ class CordisTurn:
                     raise TurnBlocked("agent_loop_owner_not_cordis")
                 if delegating:
                     from .ownership import inventory
-                    denial = _delegation_denial(await inventory(db))
+                    denial = _delegation_denial(await inventory(db), host)
                     if denial is not None:
                         raise TurnBlocked(denial)
                 memory_revision = await memory_revocation_revision(db)

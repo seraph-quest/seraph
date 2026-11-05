@@ -209,3 +209,15 @@ it("names the delegation cutover after a refused second step", async () => {
   expect(await screen.findByText(/delegation was refused: composition_not_quiescent .*Cut delegation over to Cordis/)).toBeInTheDocument();
   confirm.mockRestore();
 });
+it("rolls chat back alone when the delegation row is missing", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  const runtime_domains = [{ domain: "seraph.delegation.v1", owner_kind: null, epoch: null, state: "missing",
+    reason: "composition_dependency_missing", recovery: "Restart Seraph to seed the runtime inventory." }];
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  await waitFor(() => expect(posts()).toHaveLength(1));
+  expect(posts().map(([domain, body]) => [domain, body.target])).toEqual([["seraph.agent-loop.v1/owner", "legacy"]]);
+  confirm.mockRestore();
+});

@@ -48,8 +48,10 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
     // Delegation depends on the chat loop (#1020): it rolls back before chat and cuts over after it,
     // so its owner row never reads Cordis while specialists run on the legacy orchestrator.
     const delegationRow = domains.find(item => item.domain === DELEGATION_DOMAIN);
-    if (target === "legacy" && delegationRow !== undefined && delegationRow.epoch === null) {
-      // An unreadable inventory: the rollback would be refused if delegation is Cordis-owned.
+    if (target === "legacy" && delegationRow !== undefined && delegationRow.epoch === null
+        && (delegationRow.state === "unavailable" || (delegationRow.state === "blocked" && delegationRow.owner_kind === null))) {
+      // An unreadable inventory: the rollback would be refused if delegation is Cordis-owned. A missing
+      // or unseeded row is no dependent, so chat rolls back alone.
       setMoveError(`Delegation (${DELEGATION_DOMAIN}) state is unknown, so chat cannot roll back yet; refresh once the runtime inventory reads again.`);
       return;
     }

@@ -93,3 +93,17 @@ def test_every_agent_construction_is_the_sanctioned_subclass():
     # smolagents' class appears only as the sanctioned subclass's base.
     source = (SRC / "agent/tool_calling_agent.py").read_text(encoding="utf-8")
     assert "class ToolCallingAgent(_SmolagentsToolCallingAgent):" in source
+
+
+def test_board_worker_sites_run_inside_a_board_worker_turn():
+    """Each WorkBoard draft model call sits in a dispatcher method that routes through begin_board_worker."""
+    import re
+    source = (SRC / "work_board" / "dispatcher.py").read_text(encoding="utf-8")
+    sites = [key for key, value in INVENTORY["sites"].items() if value["category"] == "board_worker_turn"]
+    assert sites
+    for key in sites:
+        relative, function, _ = key.split("::")
+        assert relative == "work_board/dispatcher.py", key
+        method = function.split(".")[-2] if "." in function else function
+        body = re.search(rf"\n    async def {re.escape(method)}\(.*?(?=\n    (?:async )?def |\Z)", source, re.S)
+        assert body is not None and "_begin_board_worker(" in body.group(0), key

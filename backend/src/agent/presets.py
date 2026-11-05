@@ -84,6 +84,11 @@ PRESETS = MappingProxyType({item["preset_id"]: item for item in (
     _guardian("guardian.end_of_day_goal_report", "end_of_day_goal_report", "0.4", "900"),
     _guardian("guardian.screenshot_observation_digest", "screenshot_observation_digest", "0.2", "800"),
     _guardian("guardian.memory_consolidation", "session_consolidation", "0.3", "1024", "memory"),
+    # The WorkBoard drafts keep today's route and parameters (D5: strategist_agent).
+    _preset("worker.mail_reply_draft", "worker", "worker_draft", "strategist_agent", "0.2", "2048", 1, "none",
+            ("worker_prompt",), "json_object"),
+    _preset("worker.meeting_prep", "worker", "worker_draft", "strategist_agent", "0.2", "2048", 1, "none",
+            ("worker_prompt",), "json_object"),
 )})
 # The chat turn profiles of #1019 are these presets.
 PROFILE_PRESETS = MappingProxyType({"agent": "chat.agent", "direct": "chat.direct", "onboarding": "chat.onboarding"})
@@ -135,6 +140,14 @@ def require_unattended(preset_id: str) -> MappingProxyType:
     value = preset(preset_id)
     if value["kind"] != "unattended" or value["tools"] != "none" or value["max_steps"] != 1:
         raise PresetError("unattended_preset_tools_denied")
+    return value
+
+
+def require_worker(preset_id: str) -> MappingProxyType:
+    """A board worker draft is one tool-less JSON call; it may hold no tool."""
+    value = preset(preset_id)
+    if value["kind"] != "worker" or value["tools"] != "none" or value["max_steps"] != 1:
+        raise PresetError("worker_preset_tools_denied")
     return value
 
 

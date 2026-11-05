@@ -48,6 +48,7 @@ BUILD_FILES = (
     'src/contracts/agent_loop.ts',
     'src/contracts/guardian.ts',
     'src/contracts/delegation.ts',
+    'src/contracts/board_workers.ts',
     'src/contracts/source_extraction.ts',
     'src/plugins/index.ts',
     'src/plugins/proxy.ts',
@@ -67,6 +68,7 @@ BUILD_FILES = (
     'src/plugins/agent_loop/index.ts',
     'src/plugins/guardian/index.ts',
     'src/plugins/delegation/index.ts',
+    'src/plugins/board_workers/index.ts',
     'src/plugins/source_extraction/index.ts',
     'src/plugins/source_extraction/html.ts',
     'src/plugins/source_extraction/html-entities.ts',
@@ -96,6 +98,7 @@ BUILD_FILES = (
     'dist/src/contracts/agent_loop.js',
     'dist/src/contracts/guardian.js',
     'dist/src/contracts/delegation.js',
+    'dist/src/contracts/board_workers.js',
     'dist/src/contracts/source_extraction.js',
     'dist/src/plugins/index.js',
     'dist/src/plugins/proxy.js',
@@ -115,6 +118,7 @@ BUILD_FILES = (
     'dist/src/plugins/agent_loop/index.js',
     'dist/src/plugins/guardian/index.js',
     'dist/src/plugins/delegation/index.js',
+    'dist/src/plugins/board_workers/index.js',
     'dist/src/plugins/source_extraction/index.js',
     'dist/src/plugins/source_extraction/html.js',
     'dist/src/plugins/source_extraction/html-entities.js',
@@ -126,7 +130,7 @@ PACKAGE_FILES = (*BUILD_FILES, "dist/build-manifest.json")
 # Child gets no PATH/HOME/config or credentials. Absolute argv needs no lookup.
 CHILD_ENV = {"LANG": "C.UTF-8", "TZ": "UTC"}
 KNOWN_PLUGIN = "seraph.host-lifecycle@1.0.0"
-KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-presets.v1', 'seraph.agent-loop.v1', 'seraph.guardian.v1', 'seraph.delegation.v1', 'seraph.source-extraction.v1', 'seraph.goal-plan.v1', 'seraph.guardian-research.v1')
+KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-presets.v1', 'seraph.agent-loop.v1', 'seraph.guardian.v1', 'seraph.delegation.v1', 'seraph.board-workers.v1', 'seraph.source-extraction.v1', 'seraph.goal-plan.v1', 'seraph.guardian-research.v1')
 
 
 # Closed per-plugin configuration fields; only source extraction is configurable.

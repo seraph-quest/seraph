@@ -1589,7 +1589,7 @@ _RUNTIME_PATH_SPECS = (
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
     # Runtime-written Settings truth; agents must not forge or hide a block.
     # CACHE, not DERIVED: restore refuses stored derived files, and the next
-    # scheduler tick rebuilds this status after a restore.
+    # run of each job records its status again after a restore.
     ("background-inference-status.json", WorkspaceStateClass.CACHE),
     ("background-inference-status.tmp", WorkspaceStateClass.CACHE),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),

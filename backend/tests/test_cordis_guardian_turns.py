@@ -181,6 +181,38 @@ async def test_legacy_guardian_owner_runs_todays_call_with_no_turn(accounting_db
 
 @needs_cordis
 @pytest.mark.asyncio
+async def test_a_cutover_between_the_route_read_and_the_legacy_gate_uses_the_new_route(  # noqa: F811
+        accounting_db, monkeypatch):
+    """Like chat, a guardian call re-reads its owner under the legacy gate: no legacy call after the move."""
+    deny_sockets(monkeypatch)
+    from src.runtime_plugins import guardian_turns
+    from src.runtime_plugins.cutover import legacy_turns
+    real = guardian_turns.guardian_runtime_status
+    raced = []
+
+    async def call():
+        return _response("on Cordis")
+    async with guardian_host(cordis=False) as host:
+        async def racing(host_arg=None):
+            status = await real(host_arg)
+            if not raced:
+                # The owner moves after the first read, before the legacy gate is taken.
+                assert status["loop"] == "legacy.guardian"
+                raced.append(await cutover(host, GUARDIAN_DOMAIN))
+            return status
+        monkeypatch.setattr(guardian_turns, "guardian_runtime_status", racing)
+        async with service_principal("daily_briefing"):
+            response = await guardian_completion("guardian.daily_briefing", call, timeout_seconds=30,
+                                                 runtime_path="daily_briefing", temperature=0.6, max_tokens=512,
+                                                 host=host)
+    assert raced and response.choices[0].message.content == "on Cordis"
+    (turn,) = await _jobs_of_kind("cordis_guardian_turn_v1")
+    assert turn["status"] == "succeeded"
+    assert legacy_turns.active.get(GUARDIAN_DOMAIN, 0) == 0
+
+
+@needs_cordis
+@pytest.mark.asyncio
 async def test_cordis_guardian_turn_settles_once_and_adds_lineage_only(accounting_db, monkeypatch):  # noqa: F811
     deny_sockets(monkeypatch)
     from src.approval.runtime import get_current_trust_principal

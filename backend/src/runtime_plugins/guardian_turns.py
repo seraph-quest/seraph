@@ -550,10 +550,20 @@ async def guardian_completion(preset_id: str, call, *, timeout_seconds: float, r
             legacy_turns.enter(GUARDIAN_DOMAIN)
         except CompositionBindingError as exc:
             raise GuardianBlocked(exc.reason_code) from exc
+        # Re-read under the gate (as chat's enter_chat_route does): a transition that
+        # finished between the first read and the gate must not get one legacy call.
+        # While the gate is held no transition can start, so this read is final.
         try:
-            return await call()
-        finally:
+            status = await guardian_runtime_status(host)
+        except BaseException:
             legacy_turns.leave(GUARDIAN_DOMAIN)
+            raise
+        if status["loop"] == LOOP_NAMES["legacy"]:
+            try:
+                return await call()
+            finally:
+                legacy_turns.leave(GUARDIAN_DOMAIN)
+        legacy_turns.leave(GUARDIAN_DOMAIN)
     if status["loop"] != LOOP_NAMES["cordis"]:
         raise GuardianBlocked(status["reason"], status.get("recovery"))
     from .bridge import cordis_host

@@ -122,3 +122,15 @@ it("shows a blocked guardian loop and every non-ready runtime domain with its fi
   expect(normalizeGuardianRuntime({ loop: "blocked", owner_epoch: 2, reason: null, recovery: null })).toBeNull();
   expect(normalizeRuntimeDomains([{ domain: "x", owner_kind: "root", epoch: 1, state: "ready", reason: null, recovery: null }])).toEqual([]);
 });
+it("lists every domain when the backend reports the runtime inventory as unavailable (#1020)", async () => {
+  // The exact fallback rows /api/status emits when the inventory read raises.
+  const recovery = "Restart Seraph; the runtime inventory is unreadable.";
+  const runtime_domains = ["seraph.agent-loop.v1", "seraph.agent-presets.v1"].map(domain => (
+    { domain, owner_kind: null, epoch: null, state: "unavailable", reason: "runtime_domains_status_unavailable", recovery }));
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, runtime_domains }));
+  render(<CordisRuntimePanel />);
+  const pending = await screen.findByRole("list", { name: "Runtime domains needing action" });
+  for (const domain of ["seraph.agent-loop.v1", "seraph.agent-presets.v1"]) {
+    expect(pending).toHaveTextContent(`${domain}: unavailable · runtime_domains_status_unavailable · fix: ${recovery}`);
+  }
+});

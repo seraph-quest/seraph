@@ -12,6 +12,7 @@
  },
  "routes": {
   "activity_digest": "guardian_turn",
+  "audio_transcription": "capability_owned",
   "chat_agent": "agent_turn",
   "context_window_summary": "context_helper",
   "cordis_background_inference": "capability_owned",
@@ -153,6 +154,10 @@
   },
   "evals/harness.py::_run_governed_completion_fixture._run_completion::completion_with_fallback_sync": {
    "category": "eval_facade",
+   "count": 1
+  },
+  "guardian/audio_native_executor.py::execute::build_canonical_inference_context:audio_transcription": {
+   "category": "capability_owned",
    "count": 1
   },
   "guardian/audio_worker.py::AudioIngressWorker._process_impl::GpuAdmissionRequest": {

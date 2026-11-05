@@ -83,13 +83,13 @@ export function guardianRuntimeLabel(status: GuardianRuntimeStatus): string {
 /** One runtime domain owner row; a non-ready row carries the reason and its fix. */
 export interface RuntimeDomainStatus {
   domain: string; owner_kind: "legacy" | "cordis" | null; epoch: number | null;
-  state: "ready" | "draining" | "blocked" | "missing" | "unseeded"; reason: string | null; recovery: string | null;
+  state: "ready" | "draining" | "blocked" | "missing" | "unseeded" | "unavailable"; reason: string | null; recovery: string | null;
 }
 export function normalizeRuntimeDomains(value: unknown): RuntimeDomainStatus[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, 64).flatMap((item): RuntimeDomainStatus[] => {
     if (!record(item) || typeof item.domain !== "string" || item.domain.length > 64
-      || !["ready", "draining", "blocked", "missing", "unseeded"].includes(String(item.state))
+      || !["ready", "draining", "blocked", "missing", "unseeded", "unavailable"].includes(String(item.state))
       || !(item.owner_kind === null || item.owner_kind === "legacy" || item.owner_kind === "cordis")
       || !(item.epoch === null || (Number.isSafeInteger(item.epoch) && Number(item.epoch) >= 1))
       || !nullableText(item.reason) || !(item.recovery === null || (typeof item.recovery === "string" && item.recovery.length <= 512))) return [];

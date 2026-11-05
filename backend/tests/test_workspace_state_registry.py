@@ -305,6 +305,7 @@ def test_runtime_registry_binds_existing_persistence_roots_without_scanning(tmp_
         ("model-fabric-settings.json", AgentWorkspaceAccess.READ_ONLY),
         ("extensions/pack/manifest.yaml", AgentWorkspaceAccess.READ_ONLY),
         ("daemon-status.json", AgentWorkspaceAccess.READ_ONLY),
+        ("background-inference-status.json", AgentWorkspaceAccess.READ_ONLY),
         ("lance/memories", AgentWorkspaceAccess.READ_ONLY),
         ("cache/entry", AgentWorkspaceAccess.READ_ONLY),
         ("notes/today.md", AgentWorkspaceAccess.READ_WRITE),

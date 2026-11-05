@@ -1587,6 +1587,9 @@ _RUNTIME_PATH_SPECS = (
     ("background-inference-settings.json", WorkspaceStateClass.CANONICAL),
     ("evolution", WorkspaceStateClass.CANONICAL),
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
+    # Runtime-written Settings truth; agents must not forge or hide a block.
+    ("background-inference-status.json", WorkspaceStateClass.DERIVED),
+    ("background-inference-status.tmp", WorkspaceStateClass.DERIVED),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
     # Audio documentation source objects (ADR-033). Re-acquirable evidence, so

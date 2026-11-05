@@ -178,33 +178,127 @@ def is_whole_job_toggle(job_id: str) -> bool:
     return job is not None and job.scope == "job"
 
 
+def background_inference_status_path() -> Path:
+    return Path(settings.workspace_dir).expanduser().resolve() / "background-inference-status.json"
+
+
+# Activity entries for a job that stays blocked are written at most this often.
+BLOCKED_ACTIVITY_INTERVAL_SECONDS = 3600
+_status_loaded_from: Path | None = None
+
+
+def _load_status_locked() -> None:
+    """Restore the persisted last status once per workspace (it survives restarts)."""
+    global _status_loaded_from
+    path = background_inference_status_path()
+    if _status_loaded_from == path:
+        return
+    _status_loaded_from = path
+    _last_status.clear()
+    try:
+        if not path.exists() or path.stat().st_size > _MAX_SETTINGS_BYTES:
+            return
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.warning("Background inference status is unreadable; starting from an empty status")
+        return
+    if isinstance(payload, dict) and payload.get("schema_version") == SCHEMA_VERSION:
+        for job_id, value in (payload.get("jobs") or {}).items():
+            if job_id in _JOBS and isinstance(value, dict):
+                entry = {key: str(item) for key, item in value.items() if isinstance(item, (str, int))}
+                if "_audited_at" in entry:
+                    # The private skip-audit marker is a datetime in memory (#1112).
+                    try:
+                        entry["_audited_at"] = datetime.fromisoformat(entry["_audited_at"])
+                    except ValueError:
+                        entry.pop("_audited_at")
+                _last_status[job_id] = entry
+
+
+def _persist_status_locked() -> None:
+    path = background_inference_status_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_suffix(".tmp")
+        # Created private (0600) from the first byte, then atomically replaced.
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"schema_version": SCHEMA_VERSION, "jobs": _last_status}, indent=2,
+                                    sort_keys=True, default=lambda value: value.isoformat()))
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except OSError:
+        logger.warning("Background inference status could not be persisted", exc_info=True)
+
+
+def _record_locked(job_id: str, value: dict[str, str]) -> None:
+    """Keep the latest status; the file is rewritten only when something besides the time changed."""
+    _load_status_locked()
+    previous = _last_status.get(job_id) or {}
+    _last_status[job_id] = value
+    if {key: item for key, item in previous.items() if key != "at"} != {
+            key: item for key, item in value.items() if key != "at"}:
+        _persist_status_locked()
+
+
 def record_background_inference_skip(job_id: str, reason: str = DISABLED_BY_OPERATOR) -> bool:
-    """Record a visible skip; return whether it is due an audit event."""
+    """Record a visible skip (persisted); return whether it is due an audit event."""
     current = datetime.now(timezone.utc)
     with _lock:
+        _load_status_locked()
         previous = _last_status.get(job_id) or {}
         audited = previous.get("_audited_at") if previous.get("reason") == reason else None
         due = not isinstance(audited, datetime) or current - audited >= SKIP_AUDIT_INTERVAL
-        _last_status[job_id] = {
-            "status": "skipped",
-            "reason": reason,
-            "at": current.isoformat(),
-            "_audited_at": current if due else audited,
-        }
+        _record_locked(job_id, {"status": "skipped", "reason": reason, "at": current.isoformat(),
+                                "_audited_at": current if due else audited})
     return due
 
 
 def record_background_inference_run(job_id: str) -> None:
     """Mark that the job ran, so its next skip is a new transition."""
     with _lock:
+        _load_status_locked()
         entry = _last_status.get(job_id)
-        if entry is not None:
-            entry.pop("_audited_at", None)
+        if entry is not None and entry.pop("_audited_at", None) is not None:
+            _persist_status_locked()
+
+
+def record_background_inference_blocked(job_id: str, reason: str, recovery: str) -> dict[str, bool]:
+    """Persist a runtime block; report whether this is a transition into blocked and whether
+    an Activity entry is due (at most hourly while the job stays blocked)."""
+    now = datetime.now(timezone.utc)
+    with _lock:
+        _load_status_locked()
+        previous = _last_status.get(job_id) or {}
+        # Only entering blocked is a transition: a reason that changes while the job stays
+        # blocked updates the status without another notification.
+        transition = previous.get("status") != "blocked"
+        last_activity = previous.get("activity_at") if not transition else None
+        due = True
+        if last_activity:
+            try:
+                due = (now - datetime.fromisoformat(last_activity)).total_seconds() >= BLOCKED_ACTIVITY_INTERVAL_SECONDS
+            except ValueError:
+                due = True
+        value = {"status": "blocked", "reason": reason, "recovery": recovery, "at": now.isoformat(),
+                 "since": previous.get("since") if not transition and previous.get("since") else now.isoformat(),
+                 "activity_at": now.isoformat() if due else (last_activity or now.isoformat())}
+        _record_locked(job_id, value)
+    return {"transition": transition, "activity_due": due}
+
+
+def record_background_inference_succeeded(job_id: str) -> None:
+    """A completed run clears a persisted block."""
+    with _lock:
+        _load_status_locked()
+        if (_last_status.get(job_id) or {}).get("status") == "blocked":
+            _record_locked(job_id, {"status": "succeeded", "reason": "", "at": datetime.now(timezone.utc).isoformat()})
 
 
 def background_inference_status() -> dict[str, object]:
     enabled, error = read_background_inference_settings()
     with _lock:
+        _load_status_locked()
         last = {job_id: {key: value for key, value in entry.items() if not key.startswith("_")}
                 for job_id, entry in _last_status.items()}
     jobs = []
@@ -216,7 +310,9 @@ def background_inference_status() -> dict[str, object]:
             "scope": job.scope,
             "approx_calls_per_day": approximate_calls_per_day(job.job_id),
             "estimate_basis": job.basis,
+            # Historical key: the last skipped or blocked run (with its fix).
             "last_skip": last.get(job.job_id),
+            "blocked": (last.get(job.job_id) or {}).get("status") == "blocked",
         })
     return {
         "schema_version": SCHEMA_VERSION,

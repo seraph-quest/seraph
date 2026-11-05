@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import { chatRuntimeLabel, normalizeChatRuntime, normalizeCordisRuntime } from "../../lib/cordisRuntime";
-import type { ChatRuntimeStatus, CordisRuntimeSnapshot } from "../../lib/cordisRuntime";
+import { blockedRuntimeDomains, chatRuntimeLabel, guardianRuntimeLabel, normalizeChatRuntime, normalizeCordisRuntime,
+  normalizeGuardianRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
+import type { ChatRuntimeStatus, CordisRuntimeSnapshot, GuardianRuntimeStatus, RuntimeDomainStatus } from "../../lib/cordisRuntime";
 
 const CHAT_DOMAIN = "seraph.agent-loop.v1";
 
 export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: unknown; managed?: boolean }) {
   const [snapshot, setSnapshot] = useState<CordisRuntimeSnapshot | null>(null);
   const [chat, setChat] = useState<ChatRuntimeStatus | null>(null);
+  const [guardian, setGuardian] = useState<GuardianRuntimeStatus | null>(null);
+  const [domains, setDomains] = useState<RuntimeDomainStatus[]>([]);
   const [busy, setBusy] = useState(false), [error, setError] = useState<string | null>(null);
   const generation = useRef(0), controller = useRef<AbortController | null>(null);
   async function refresh() {
@@ -22,7 +25,9 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       const result = normalizeCordisRuntime(value && typeof value === "object" && "cordis_runtime" in value ? value.cordis_runtime : null);
       if (!result) throw Error("Cordis runtime metadata missing or invalid");
       const chatStatus = normalizeChatRuntime(value && typeof value === "object" && "chat_runtime" in value ? value.chat_runtime : null);
-      if (version === generation.current) { setSnapshot(result); setChat(chatStatus); setError(null); }
+      const guardianStatus = normalizeGuardianRuntime(value && typeof value === "object" && "guardian_runtime" in value ? value.guardian_runtime : null);
+      const domainRows = normalizeRuntimeDomains(value && typeof value === "object" && "runtime_domains" in value ? value.runtime_domains : null);
+      if (version === generation.current) { setSnapshot(result); setChat(chatStatus); setGuardian(guardianStatus); setDomains(domainRows); setError(null); }
     } catch { if (version === generation.current) setError("Cordis runtime metadata is unavailable. Last confirmed state remains visible; refresh after restoring the host. Artifact settings remain usable."); }
     finally { clearTimeout(timeout); if (version === generation.current) setBusy(false); }
   }
@@ -61,6 +66,11 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       ? <button type="button" disabled={moving} onClick={() => void moveChat("legacy")}>Roll chat back to legacy</button>
       : chat.owner_kind === "legacy" && <button type="button" disabled={moving} onClick={() => void moveChat("cordis")}>Cut chat over to Cordis</button>)}
     {moveError && <p role="status" className="text-yellow-400">{moveError}</p>}
+    {guardian && <p role="status" aria-label="Guardian loop">{guardianRuntimeLabel(guardian)}</p>}
+    {guardian?.loop === "blocked" && guardian.recovery && <p role="status">Guardian fix: {guardian.recovery}</p>}
+    {blockedRuntimeDomains(domains).length > 0 && <ul aria-label="Runtime domains needing action">
+      {blockedRuntimeDomains(domains).map(item => <li key={item.domain}>{item.domain}: {item.state}{item.reason ? ` · ${item.reason}` : ""}{item.recovery ? ` · fix: ${item.recovery}` : ""}</li>)}
+    </ul>}
     {error && <p role="status" className="text-yellow-400">{error}</p>}
     {!snapshot && <p role="status">{busy ? "Loading host state…" : "Host state unavailable"}</p>}
     {snapshot && <>

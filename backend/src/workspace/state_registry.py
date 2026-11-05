@@ -1587,6 +1587,11 @@ _RUNTIME_PATH_SPECS = (
     ("background-inference-settings.json", WorkspaceStateClass.CANONICAL),
     ("evolution", WorkspaceStateClass.CANONICAL),
     ("daemon-status.json", WorkspaceStateClass.DERIVED),
+    # Runtime-written Settings truth; agents must not forge or hide a block.
+    # CACHE, not DERIVED: restore refuses stored derived files, and the next
+    # run of each job records its status again after a restore.
+    ("background-inference-status.json", WorkspaceStateClass.CACHE),
+    ("background-inference-status.tmp", WorkspaceStateClass.CACHE),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
     # Audio documentation source objects (ADR-033). Re-acquirable evidence, so
@@ -1614,7 +1619,12 @@ _OPTIONAL_RUNTIME_SECRET_PATHS = frozenset({"google_calendar_token.json"})
 # harness runtime only after first use (its .lock sits beside the state file).
 # The extension lifecycle lock is an fcntl lock file: never archived.
 _OPTIONAL_RUNTIME_CANONICAL_PATHS = frozenset({"background-inference-settings.json", "evolution"})
-_OPTIONAL_RUNTIME_TRANSIENT_PATHS = frozenset({".seraph-extension-lifecycle.lock"})
+_OPTIONAL_RUNTIME_TRANSIENT_PATHS = frozenset({
+    ".seraph-extension-lifecycle.lock",
+    # Written on the first scheduler tick; the .tmp exists only mid-write.
+    "background-inference-status.json",
+    "background-inference-status.tmp",
+})
 # Canonical runtime state agent file tools may neither read nor write: MCP
 # server and stdio proxy settings (inline credentials are possible, and an
 # edit reconfigures tool egress outside the Settings consent flow) and private

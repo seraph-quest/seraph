@@ -8,6 +8,7 @@ from time import perf_counter
 from config.settings import settings
 from src.audit.runtime import log_background_task_event, log_scheduler_job_event
 from src.llm_runtime import completion_with_fallback
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion_fn, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.models.schemas import WSResponse
 
@@ -126,7 +127,8 @@ async def run_activity_digest() -> None:
 
         try:
             transport_messages = [{"role": "user", "content": prompt}]
-            response = await completion_with_fallback(
+            # #1020: the same call, on the guardian loop its owner row selects.
+            response = await guardian_completion_fn("guardian.activity_digest", completion_with_fallback)(
                 messages=transport_messages,
                 temperature=0.6,
                 max_tokens=768,
@@ -149,6 +151,10 @@ async def run_activity_digest() -> None:
                     "timeout_seconds": settings.agent_briefing_timeout,
                 },
             )
+            return
+        except GuardianBlocked as exc:
+            # The guardian loop refused the call or its output: nothing is delivered.
+            await report_guardian_blocked("activity_digest", exc, started_at=started_at)
             return
 
         digest_text = response.choices[0].message.content.strip()
@@ -175,6 +181,7 @@ async def run_activity_digest() -> None:
                 "degraded_inputs": degraded_inputs,
             },
         )
+        report_guardian_succeeded("activity_digest")
         logger.info("activity_digest: delivered daily digest")
 
     except Exception as exc:

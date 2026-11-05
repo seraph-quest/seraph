@@ -40,6 +40,8 @@ _READ_ONLY_PATHS = (
     "starter-packs.json",
     "extensions/pack/manifest.yaml",
     "daemon-status.json",
+    "background-inference-status.json",
+    "background-inference-status.tmp",
     "local-runtime-profile-receipts/receipt.json",
     ".seraph-extension-snapshots/pack.json",
     "cache/entry.txt",

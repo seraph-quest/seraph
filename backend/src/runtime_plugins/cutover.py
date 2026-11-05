@@ -33,8 +33,8 @@ import hashlib
 import json
 import logging
 
-from .ownership import (DOMAINS, RECOVERY_EVENT, CompositionBindingError, CompositionDependency, _checked_row,
-                        composition_writer, inventory, legacy_composition_digest, transition_owner)
+from .ownership import (DOMAINS, PRESETS_DOMAIN, RECOVERY_EVENT, CompositionBindingError, CompositionDependency,
+                        _checked_row, composition_writer, inventory, legacy_composition_digest, transition_owner)
 
 logger = logging.getLogger(__name__)
 CUTOVER_EVENT = "runtime_composition_domain_cutover"
@@ -71,7 +71,9 @@ def cutover_manifest() -> tuple[CutoverDomain, ...]:
     return tuple(_MANIFEST)
 
 
-register_cutover_domain("seraph.agent-loop.v1")
+# Every turn binds the reviewed presets (#1020), so they are cut over first.
+register_cutover_domain(PRESETS_DOMAIN)
+register_cutover_domain("seraph.agent-loop.v1", prerequisites=(PRESETS_DOMAIN,))
 
 
 # ---------------------------------------------------------------- legacy turn gate
@@ -248,7 +250,14 @@ async def run_boot_cutover(host) -> list[dict]:
                         rows = await inventory(db)
                         row = rows.get(entry.domain)
                         if row is None:
-                            continue
+                            from .ownership import DOMAIN_INTRODUCTIONS, introduce_domain
+                            if entry.domain not in DOMAIN_INTRODUCTIONS or not rows:
+                                continue
+                            # A domain introduced after this inventory existed (#1020) is seeded as
+                            # its legacy owner in this same writer, then cut over like any other.
+                            await introduce_domain(db, entry.domain)
+                            rows = await inventory(db)
+                            row = rows[entry.domain]
                         if any(rows.get(item) is None or rows[item].owner_kind != "cordis"
                                for item in entry.prerequisites):
                             continue
@@ -279,6 +288,10 @@ async def run_boot_cutover(host) -> list[dict]:
             receipts.append({"runtime_domain": entry.domain, "action": "deferred", "reason": exc.reason_code})
     return receipts
 
+
+# Domain owners register their manifest entries at import; importing them here
+# makes the manifest complete before any boot step, whatever imported first.
+from . import guardian_turns  # noqa: E402,F401
 
 __all__ = ["CUTOVER_EVENT", "OPERATOR_EVENT", "RECOVERY_EVENT", "CompositionDependency", "CutoverDomain",
            "cutover_manifest", "legacy_turns", "register_cutover_domain", "run_boot_cutover", "transition_domain"]

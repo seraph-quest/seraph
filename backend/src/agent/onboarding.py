@@ -4,7 +4,6 @@ import re
 
 from smolagents import tool
 
-from config.settings import settings
 from src.agent.tool_calling_agent import ToolCallingAgent
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.tools.browser_tool import browse_webpage as base_browse_webpage
@@ -135,20 +134,28 @@ def _build_onboarding_instructions(explicit_urls: list[str]) -> str:
 
 
 def create_onboarding_agent(user_message: str | None = None) -> ToolCallingAgent:
-    """Create a specialized agent for the onboarding conversation."""
+    """Create a specialized agent for the onboarding conversation.
+
+    Its bounds come from the reviewed ``chat.onboarding`` preset (#1020): the
+    preset's temperature, step bound and fixed tool list, plus today's
+    per-message ``browse_webpage`` scoped to the URLs the user pasted.
+    """
+    from src.agent.presets import ONBOARDING_TOOLS, preset, preset_max_steps, preset_max_tokens, preset_temperature
     explicit_urls = _extract_explicit_web_urls(user_message)
     model = LiteLLMModel(**build_model_kwargs(
-        temperature=0.8,
-        max_tokens=settings.model_max_tokens,
-        runtime_path="onboarding_agent",
+        temperature=preset_temperature("chat.onboarding"),
+        max_tokens=preset_max_tokens("chat.onboarding"),
+        runtime_path=preset("chat.onboarding")["runtime_path"],
     ))
     tools = [view_soul, update_soul, create_goal, get_goals]
+    if tuple(tool.name for tool in tools) != ONBOARDING_TOOLS:
+        raise RuntimeError("onboarding tools differ from the reviewed preset")
     if explicit_urls:
         tools.append(_build_onboarding_browse_tool(explicit_urls))
 
     return ToolCallingAgent(
         tools=wrap_tools_for_approval(wrap_tools_for_audit(tools)),
         model=model,
-        max_steps=settings.agent_max_steps,
+        max_steps=preset_max_steps("chat.onboarding"),
         instructions=_build_onboarding_instructions(explicit_urls),
     )

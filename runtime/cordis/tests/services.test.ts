@@ -22,6 +22,7 @@ const input: Record<ServiceMethod, unknown> = {
   'scheduler.register':{request_ref:'native-1'}, 'scheduler.disable':{schedule_ref:'native-1',expected_revision:1}, 'scheduler.dispatchDue':{limit:10},
   'connections.inspect':{connection_ref:'native-1'}, 'connections.invokeBoundAdapter':{operation_ref:'native-1'},
   'agent-loop.startTurn':{turn_ref:'native-1'}, 'agent-loop.cancelTurn':{turn_ref:'native-1',expected_revision:1}, 'agent-loop.inspectTurn':{turn_ref:'native-1'},
+  'guardian.startTurn':{turn_ref:'native-1'},
   'source-extraction.extract':{artifact_ref:'native-1',acquisition_receipt_ref:'receipt-1',source_slot:0,first_line:1,last_line:3},
 };
 test('canonical refs and digests reject terminal line separators and preserve exact bounds', () => {
@@ -70,8 +71,8 @@ test('real scoped proxies reject terminal reference separators before IPC and pr
     assert.deepEqual(await composition.dispose(), {resources_remaining:0, cordis_disposal:'confirmed'});
   }
 });
-// Composed in Cordis (#1008, #1019): these read their staged input first and never forward themselves.
-const COMPOSED = new Set<ServiceMethod>(['research.buildPlan', 'research.executeAccepted', 'source-extraction.extract', 'agent-loop.startTurn']);
+// Composed in Cordis (#1008, #1019, #1020): these read their staged input first and never forward themselves.
+const COMPOSED = new Set<ServiceMethod>(['research.buildPlan', 'research.executeAccepted', 'source-extraction.extract', 'agent-loop.startTurn', 'guardian.startTurn']);
 for (const method of SERVICE_METHODS) test(`real scoped Cordis provider forwards ${method} once and preserves native block`, async () => {
   const calls: unknown[] = [];
   const client: ScopedRequestClient = {isActive: () => true, request: async (name, value) => {calls.push([name,value]); return blocked;}};
@@ -119,7 +120,7 @@ test('scope disposal and expiry fence retained providers and late native respons
   await new Promise(resolve=>setImmediate(resolve));
   active = false; release?.(blocked);
   await assert.rejects(waiting,/unavailable/);
-  assert.equal(composition.resources.remaining,18); // host16 plugins + logger/lifecycle.
+  assert.equal(composition.resources.remaining,20); // host18 plugins + logger/lifecycle.
   await composition.dispose(); assert.equal(composition.resources.remaining,0);
 });
 test('concurrent scopes retain independent original request clients and register no ambient authority', async () => {

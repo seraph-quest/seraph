@@ -24,6 +24,7 @@ from src.observer.screenshot_semantic_analysis import (
 )
 from src.observer.screenshot_folder_source import resolve_screenshot_folder
 from src.llm_runtime import completion_with_fallback
+from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion_fn, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
 from src.scheduler.screen_llm_policy import screen_derived_llm_decision
 
@@ -74,7 +75,14 @@ async def run_screenshot_observation_digest() -> None:
         )
         return
     try:
-        result = await build_current_screenshot_observation_digest()
+        try:
+            result = await build_current_screenshot_observation_digest()
+        except GuardianBlocked as exc:
+            # The guardian loop refused the call or its output: no digest is stored.
+            await report_guardian_blocked("screenshot_observation_digest", exc)
+            return
+        if result.status in {"created", "updated"}:
+            report_guardian_succeeded("screenshot_observation_digest")
         await log_scheduler_job_event(
             job_name=SCREENSHOT_DIGEST_TOOL_NAME,
             outcome="succeeded",
@@ -318,7 +326,8 @@ async def _llm_digest_content(payload: dict[str, Any]) -> str:
         analysis_records=records_json[: max(settings.screenshot_observation_digest_max_chars, 500)],
     )
     transport_messages = [{"role": "user", "content": prompt}]
-    response = await completion_with_fallback(
+    # #1020: the same call, on the guardian loop its owner row selects.
+    response = await guardian_completion_fn("guardian.screenshot_observation_digest", completion_with_fallback)(
         messages=transport_messages,
         temperature=0.2,
         max_tokens=800,

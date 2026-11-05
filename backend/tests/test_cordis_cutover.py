@@ -26,7 +26,7 @@ pytestmark = [needs_cordis, pytest.mark.asyncio]
 
 
 # #1020 adds the presets (cut over first; agent-loop's prerequisite) and guardian domains.
-MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN]
+MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN, "seraph.delegation.v1"]
 
 
 def _by_domain(receipts):
@@ -68,6 +68,8 @@ async def test_rollback_is_sticky_and_re_cutover_takes_a_higher_epoch(accounting
     async with research_host(jobs) as host:
         await run_boot_cutover(host)
         cut = (await chat_runtime_status(host))["owner_epoch"]
+        # Delegation depends on the chat loop (#1020 PR2), so it rolls back first.
+        await transition_domain("seraph.delegation.v1", "legacy", host=host, actor="operator:test")
         rolled = await transition_domain(AGENT_LOOP_DOMAIN, "legacy", host=host, actor="operator:test",
                                          expected_epoch=cut)
         assert (rolled["owner_kind"], rolled["state"]) == ("legacy", "ready") and rolled["epoch"] == cut + 1
@@ -82,7 +84,7 @@ async def test_rollback_is_sticky_and_re_cutover_takes_a_higher_epoch(accounting
         with pytest.raises(CompositionBindingError) as stale:
             await transition_domain(AGENT_LOOP_DOMAIN, "legacy", host=host, actor="operator:test", expected_epoch=cut)
         assert stale.value.reason_code == "composition_owner_changed"
-        assert [event["target"] for event in await _events(OPERATOR_EVENT)] == ["legacy", "cordis"]
+        assert [event["target"] for event in await _events(OPERATOR_EVENT)] == ["legacy", "legacy", "cordis"]
 
 
 async def test_a_transition_never_switches_under_a_live_legacy_turn(accounting_db, real_auth):  # noqa: F811
@@ -205,6 +207,7 @@ async def test_production_transitions_require_the_runtime_owner_lease(accounting
             assert production.runtime_workspace_owner_held()
             cut = _by_domain(await run_boot_cutover(host))[AGENT_LOOP_DOMAIN]
             assert (cut["action"], cut["state"]) == ("cut_over", "ready")
+            await transition_domain("seraph.delegation.v1", "legacy", host=host, actor="operator:test")
             rolled = await transition_domain(AGENT_LOOP_DOMAIN, "legacy", host=host, actor="operator:test",
                                              expected_epoch=cut["epoch"])
             assert rolled["owner_kind"] == "legacy"

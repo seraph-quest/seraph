@@ -24,11 +24,12 @@ from .contracts import METHOD_DOMAINS
 DOMAINS = tuple(f"seraph.{name}.v1" for name in (
     "authority", "goals", "tasks", "capabilities", "inference", "memory",
     "artifacts", "audit", "research", "conversation", "scheduler",
-    "connections", "agent-presets", "agent-loop", "guardian", "source-extraction"))
+    "connections", "agent-presets", "agent-loop", "guardian", "delegation", "source-extraction"))
 # Domains added after an install's inventory was first seeded, with the issue
 # that introduced them. Boot inserts each missing one once as its legacy owner
 # (``introduce_domains_sync``); a missing original domain is never repaired.
-DOMAIN_INTRODUCTIONS = {"seraph.agent-presets.v1": "1020", "seraph.guardian.v1": "1020"}
+DOMAIN_INTRODUCTIONS = {"seraph.agent-presets.v1": "1020", "seraph.guardian.v1": "1020",
+                        "seraph.delegation.v1": "1020"}
 PRESETS_DOMAIN = "seraph.agent-presets.v1"
 STATES = frozenset({"ready", "draining", "blocked"})
 OWNER_KINDS = frozenset({"legacy", "cordis"})
@@ -81,7 +82,7 @@ class CompositionDependency:
 # Finite branch closures. A branch names the methods one original invocation
 # may forward; it never grants the authority those methods check.
 NATIVE_BRANCHES = frozenset({"base", "artifact", "workflow", "programme_planning", "programme_discovery", "governed",
-                             "agent_loop", "guardian"})
+                             "agent_loop", "guardian", "delegation"})
 READ_ORIGINS = frozenset({"capabilities.list", "capabilities.describe", "connections.inspect", "memory.retrieve"})
 ARTIFACT_CHILDREN = ("artifacts.stage", "artifacts.adopt", "artifacts.read", "audit.append")
 WORKFLOW_CHILDREN = ("authority.resolve", "goals.read", "tasks.inspect", "tasks.checkpoint", "tasks.cancel")
@@ -114,6 +115,9 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
         return (origin_method,)
     if native_branch == "agent_loop" and origin_method == "agent-loop.startTurn":
         return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
+    if native_branch == "delegation" and origin_method == "delegation.startChild":
+        # #1020 PR2 child admission: the same sealed-projection children as a chat step.
+        return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
     if native_branch == "guardian" and origin_method == "guardian.startTurn":
         # #1020 unattended step: the same sealed-projection children as a chat step.
         return tuple(sorted({origin_method, *AGENT_LOOP_CHILDREN}))
@@ -126,7 +130,7 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
 # writes schema 2, and an origin introduced by #1020 exists only in schema 2.
 BINDING_SCHEMA = 2
 TURN_STEP_METHODS = frozenset({"agent-loop.startTurn", "guardian.startTurn"})
-SCHEMA_2_ORIGINS = frozenset({"guardian.startTurn"})
+SCHEMA_2_ORIGINS = frozenset({"guardian.startTurn", "delegation.startChild"})
 
 
 def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool = True) -> tuple[str, ...]:
@@ -147,6 +151,9 @@ def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool 
     if method in TURN_STEP_METHODS and presets:
         # Every turn step is checked against the reviewed presets (#1020).
         names.add(PRESETS_DOMAIN)
+    if method == "delegation.startChild":
+        # A delegated child is a chat-loop turn under its reviewed child preset (#1020 PR2).
+        names.update({PRESETS_DOMAIN, "seraph.agent-loop.v1"})
     if method == "research.executeAccepted":
         # The consumer extracts through the composed source provider.
         names.add("seraph.source-extraction.v1")

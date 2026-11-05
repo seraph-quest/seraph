@@ -417,14 +417,6 @@ def test_onboarding_runs_its_per_turn_surface_through_cordis(tmp_path, monkeypat
     assert cordis[2] == [("succeeded", None)]
 
 
-def test_delegation_fails_closed_visibly_on_the_cordis_loop(tmp_path, monkeypatch, real_auth):  # noqa: F811
-    with chat_env(tmp_path, monkeypatch, [final("never")], loop="cordis") as env:
-        monkeypatch.setattr(settings, "use_delegation", True)
-        frames = ws_turn(env, "delegate this research please")
-        assert frames[-1]["type"] == "error" and frames[-1]["reason"] == "delegation_pending_1020"
-        assert env.model.calls == [] and env.turns() == []
-
-
 def test_store_secret_is_denied_and_its_value_never_enters_turn_state(tmp_path, monkeypatch, real_auth):  # noqa: F811
     from sqlalchemy import select
     from src.db import engine as db_engine

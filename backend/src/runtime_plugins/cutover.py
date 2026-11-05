@@ -71,9 +71,15 @@ def cutover_manifest() -> tuple[CutoverDomain, ...]:
     return tuple(_MANIFEST)
 
 
-# Every turn binds the reviewed presets (#1020), so they are cut over first.
+# Every turn binds the reviewed presets (#1020), so they are cut over first; the
+# chat loop, unattended guardian turns and delegated child turns each need them.
 register_cutover_domain(PRESETS_DOMAIN)
 register_cutover_domain("seraph.agent-loop.v1", prerequisites=(PRESETS_DOMAIN,))
+register_cutover_domain("seraph.guardian.v1", prerequisites=(PRESETS_DOMAIN,))
+# Delegated children run only under the Cordis chat loop: delegation needs agent-loop on
+# Cordis, so its owner row never reads Cordis while specialists still run in-process on the
+# legacy orchestrator, and agent-loop's legacy gate is drained before delegation moves.
+register_cutover_domain("seraph.delegation.v1", prerequisites=(PRESETS_DOMAIN, "seraph.agent-loop.v1"))
 
 
 # ---------------------------------------------------------------- legacy turn gate
@@ -288,10 +294,6 @@ async def run_boot_cutover(host) -> list[dict]:
             receipts.append({"runtime_domain": entry.domain, "action": "deferred", "reason": exc.reason_code})
     return receipts
 
-
-# Domain owners register their manifest entries at import; importing them here
-# makes the manifest complete before any boot step, whatever imported first.
-from . import guardian_turns  # noqa: E402,F401
 
 __all__ = ["CUTOVER_EVENT", "OPERATOR_EVENT", "RECOVERY_EVENT", "CompositionDependency", "CutoverDomain",
            "cutover_manifest", "legacy_turns", "register_cutover_domain", "run_boot_cutover", "transition_domain"]

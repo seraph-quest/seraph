@@ -248,7 +248,10 @@ def create_orchestrator(
     # Collect all tool names across specialists for skill gating
     all_tool_names = []
     for specialist in specialists:
-        all_tool_names.extend(t.name for t in specialist.tools)
+        # smolagents keeps an agent's tools as a name -> Tool mapping.
+        specialist_tools = specialist.tools
+        all_tool_names.extend(specialist_tools if isinstance(specialist_tools, dict)
+                              else (t.name for t in specialist_tools))
 
     base_instructions = (
         "You are Seraph, a proactive guardian intelligence operating a dense human workspace. "

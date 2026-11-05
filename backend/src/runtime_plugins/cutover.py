@@ -39,6 +39,8 @@ from .ownership import (DOMAINS, PRESETS_DOMAIN, RECOVERY_EVENT, CompositionBind
 logger = logging.getLogger(__name__)
 CUTOVER_EVENT = "runtime_composition_domain_cutover"
 OPERATOR_EVENT = "runtime_composition_operator_transition"
+# A boot step on an already marked domain: finishing its cutover or refreshing its digest.
+BOOT_EVENT = "runtime_composition_domain_boot_transition"
 TARGETS = frozenset({"legacy", "cordis"})
 
 
@@ -277,8 +279,24 @@ async def run_boot_cutover(host) -> list[dict]:
                             if row.state == "ready" and built in (None, row.composition_digest):
                                 continue
                             action = "completed" if row.state != "ready" else "digest_refreshed"
+                            prior = _checked_row(row).payload() | {"state": row.state}
+                            before = (row.epoch, row.state, row.composition_digest)
                             await _move(db, entry.domain, "cordis", host)
                             current = (await inventory(db))[entry.domain]
+                            if (current.epoch, current.state, current.composition_digest) == before:
+                                # Nothing moved (e.g. the host is still down): no audit row and no
+                                # "completed" label; the receipt says the domain is still waiting.
+                                receipts.append({"runtime_domain": entry.domain, "action": "still_" + current.state,
+                                                 "state": current.state, "epoch": current.epoch})
+                                continue
+                            if current.state != "ready":
+                                # The row moved but is still not ready (e.g. re-blocked on a pending digest).
+                                action = "reblocked"
+                            # Audited in the same writer; not a cutover marker (the domain is already marked).
+                            await _audit(db, BOOT_EVENT, {"runtime_domain": entry.domain, "prior": prior,
+                                                          "target": "cordis", "reason": action,
+                                                          "owner_kind": current.owner_kind, "epoch": current.epoch,
+                                                          "state": current.state}, actor="runtime")
                             receipts.append({"runtime_domain": entry.domain, "action": action,
                                              "state": current.state, "epoch": current.epoch})
                             continue
@@ -296,5 +314,5 @@ async def run_boot_cutover(host) -> list[dict]:
     return receipts
 
 
-__all__ = ["CUTOVER_EVENT", "OPERATOR_EVENT", "RECOVERY_EVENT", "CompositionDependency", "CutoverDomain",
+__all__ = ["BOOT_EVENT", "CUTOVER_EVENT", "OPERATOR_EVENT", "RECOVERY_EVENT", "CompositionDependency", "CutoverDomain",
            "cutover_manifest", "legacy_turns", "register_cutover_domain", "run_boot_cutover", "transition_domain"]

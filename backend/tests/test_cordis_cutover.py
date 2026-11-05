@@ -16,7 +16,7 @@ from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import real_auth  # noqa: F401
 from src.runtime_plugins.agent_turns import AGENT_LOOP_DOMAIN, chat_runtime_status
 from src.runtime_plugins.bridge import CordisHost
-from src.runtime_plugins.cutover import (CUTOVER_EVENT, OPERATOR_EVENT, LegacyTurnGate, legacy_turns,
+from src.runtime_plugins.cutover import (BOOT_EVENT, CUTOVER_EVENT, OPERATOR_EVENT, LegacyTurnGate, legacy_turns,
                                          run_boot_cutover, transition_domain)
 from src.runtime_plugins.guardian_turns import GUARDIAN_DOMAIN
 from src.runtime_plugins.ownership import PRESETS_DOMAIN, CompositionBindingError
@@ -51,12 +51,22 @@ async def test_fresh_workspace_cuts_chat_over_once_and_a_missing_runtime_blocks_
     status = await chat_runtime_status(stopped)
     assert status["loop"] == "blocked" and status["owner_kind"] == "cordis"
     assert status["reason"].startswith("cordis_") and status["recovery"]
+    # A restart while the host is still down changes nothing, so it audits nothing and never says "completed".
+    again = _by_domain(await run_boot_cutover(stopped))
+    assert list(again) == MANIFEST
+    assert all(item["action"] == "still_blocked" for item in again.values())
+    assert await _events(BOOT_EVENT) == []
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
         # A later boot with a ready runtime completes the same cutover, never a second one.
         completed = _by_domain(await run_boot_cutover(host))
         assert list(completed) == MANIFEST
         assert all(item["action"] == "completed" and item["state"] == "ready" for item in completed.values())
+        # Each completion is audited, but none is a second cutover marker.
+        boots = await _events(BOOT_EVENT)
+        assert sorted(item["runtime_domain"] for item in boots) == sorted(MANIFEST)
+        assert all((item["reason"], item["prior"]["state"], item["state"]) == ("completed", "blocked", "ready")
+                   for item in boots)
         status = await chat_runtime_status(host)
         assert (status["loop"], status["owner_kind"]) == ("cordis.agent-loop.v1", "cordis")
         assert await run_boot_cutover(host) == []
@@ -256,8 +266,10 @@ async def test_boot_refreshes_a_stale_cordis_digest_and_status_names_the_drift(a
                                                                                  cut["epoch"] + 1)
         assert (await chat_runtime_status(rebuilt))["loop"] == "cordis.agent-loop.v1"
         assert await run_boot_cutover(rebuilt) == []
-        # Still one default cutover marker per domain: a refresh is not a re-cut.
+        # Still one default cutover marker per domain: a refresh is not a re-cut, but it is audited.
         assert len(await _events(CUTOVER_EVENT)) == len(MANIFEST)
+        [boot] = [item for item in await _events(BOOT_EVENT) if item["runtime_domain"] == AGENT_LOOP_DOMAIN]
+        assert (boot["reason"], boot["epoch"], boot["prior"]["epoch"]) == ("digest_refreshed", cut["epoch"] + 1, cut["epoch"])
 
 
 async def test_a_blocked_cordis_owner_recovery_names_local_and_docker_restarts(accounting_db, real_auth):  # noqa: F811
@@ -266,3 +278,35 @@ async def test_a_blocked_cordis_owner_recovery_names_local_and_docker_restarts(a
     await run_boot_cutover(stopped)
     status = await chat_runtime_status(stopped)
     assert status["loop"] == "blocked" and "./manage.sh -e prod up -d --build" in status["recovery"]
+
+
+async def test_a_failed_production_startup_releases_the_owner_lease(monkeypatch, tmp_path):
+    """The lifespan takes the workspace owner lease first; a startup failure after that releases it."""
+    from config.settings import settings
+    from fastapi import FastAPI
+    from src import app as app_module
+    from src.workspace import production
+    from tests.test_workspace_production import _workspace
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "deployment_environment", "production")
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+
+    async def failing_init_db():
+        assert production.runtime_workspace_owner_held()
+        raise RuntimeError("database unavailable")
+    monkeypatch.setattr(app_module, "init_db", failing_init_db)
+    # Keep every lease object alive, so only an explicit exit (never garbage collection) can release it.
+    leases = []
+    real_owner = production.runtime_workspace_owner
+
+    def kept_owner(path):
+        leases.append(real_owner(path))
+        return leases[-1]
+    monkeypatch.setattr(production, "runtime_workspace_owner", kept_owner)
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        async with app_module.lifespan(FastAPI()):
+            pass
+    assert len(leases) == 1 and not production.runtime_workspace_owner_held()
+    # The lock itself is free again: a second owner can take it.
+    with real_owner(root):
+        assert production.runtime_workspace_owner_held()

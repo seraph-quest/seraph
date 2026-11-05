@@ -221,3 +221,15 @@ it("rolls chat back alone when the delegation row is missing", async () => {
   expect(posts().map(([domain, body]) => [domain, body.target])).toEqual([["seraph.agent-loop.v1/owner", "legacy"]]);
   confirm.mockRestore();
 });
+it("holds the chat rollback for an invalid inventory row too", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  const runtime_domains = [{ domain: "seraph.delegation.v1", owner_kind: null, epoch: null, state: "blocked",
+    reason: "composition_inventory_invalid", recovery: "Repair the runtime composition inventory." }];
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  expect(await screen.findByText(/Delegation \(seraph.delegation.v1\) state is unknown/)).toBeInTheDocument();
+  expect(posts()).toEqual([]);
+  confirm.mockRestore();
+});

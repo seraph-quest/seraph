@@ -973,7 +973,9 @@ presets and agent-loop owners, so delegation never reads Cordis while
 specialists run on the legacy orchestrator. Settings' chat rollback therefore
 moves delegation to legacy first and then agent-loop, and its cutover moves
 agent-loop first and then delegation, under one confirmation; a refusal names
-the domain that stopped and what already moved. Otherwise chat
+the domain that stopped and what already moved. When chat is on Cordis and
+delegation is legacy (a refused second step, or an API-only rollback),
+Settings offers "Cut delegation over to Cordis". Otherwise chat
 reports `delegation_owner_not_ready` with the fix, or
 `delegation_composition_drift` when the running build is not the one the owner
 row names, and there is no fallback.

@@ -47,7 +47,13 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
     if (!chat || chat.owner_epoch === null) return;
     // Delegation depends on the chat loop (#1020): it rolls back before chat and cuts over after it,
     // so its owner row never reads Cordis while specialists run on the legacy orchestrator.
-    const delegation = domains.find(item => item.domain === DELEGATION_DOMAIN && item.epoch !== null);
+    const delegationRow = domains.find(item => item.domain === DELEGATION_DOMAIN);
+    if (target === "legacy" && delegationRow !== undefined && delegationRow.epoch === null) {
+      // An unreadable inventory: the rollback would be refused if delegation is Cordis-owned.
+      setMoveError(`Delegation (${DELEGATION_DOMAIN}) state is unknown, so chat cannot roll back yet; refresh once the runtime inventory reads again.`);
+      return;
+    }
+    const delegation = delegationRow?.epoch !== null ? delegationRow : undefined;
     const moveDelegation = delegation !== undefined && delegation.owner_kind !== target;
     const label = target === "legacy" ? "roll chat back to the legacy agent loop" : "cut chat over to the Cordis agent loop";
     const domainsText = moveDelegation ? (target === "legacy" ? `${DELEGATION_DOMAIN}, then ${CHAT_DOMAIN}` : `${CHAT_DOMAIN}, then ${DELEGATION_DOMAIN}`) : CHAT_DOMAIN;
@@ -67,9 +73,22 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
       }
       if (target === "cordis" && moveDelegation) {
         const delegationRefused = await moveDomain(DELEGATION_DOMAIN, "cordis", delegation.epoch as number);
-        if (delegationRefused) setMoveError(`Chat is on Cordis, but delegation was refused: ${delegationRefused} (${DELEGATION_DOMAIN}); refresh and cut chat over again.`);
+        if (delegationRefused) setMoveError(`Chat is on Cordis, but delegation was refused: ${delegationRefused} (${DELEGATION_DOMAIN}); refresh and use "Cut delegation over to Cordis".`);
       }
     } catch { setMoveError("Chat loop change failed; refresh and try again."); }
+    finally { setMoving(false); void refresh(); }
+  }
+  const pendingDelegation = chat?.owner_kind === "cordis"
+    ? domains.find(item => item.domain === DELEGATION_DOMAIN && item.owner_kind === "legacy" && item.epoch !== null)
+    : undefined;
+  async function cutDelegationOver() {
+    if (!pendingDelegation) return;
+    if (!window.confirm(`Confirm: cut delegation over to Cordis (${DELEGATION_DOMAIN}). In-flight turns must finish first.`)) return;
+    setMoving(true); setMoveError(null);
+    try {
+      const refused = await moveDomain(DELEGATION_DOMAIN, "cordis", pendingDelegation.epoch as number);
+      if (refused) setMoveError(`Delegation change refused: ${refused} (${DELEGATION_DOMAIN})`);
+    } catch { setMoveError("Delegation change failed; refresh and try again."); }
     finally { setMoving(false); void refresh(); }
   }
   useEffect(() => {
@@ -86,6 +105,7 @@ export function CordisRuntimePanel({ metadata, managed = false }: { metadata?: u
     {chat && chat.owner_epoch !== null && (chat.owner_kind === "cordis"
       ? <button type="button" disabled={moving} onClick={() => void moveChat("legacy")}>Roll chat back to legacy</button>
       : chat.owner_kind === "legacy" && <button type="button" disabled={moving} onClick={() => void moveChat("cordis")}>Cut chat over to Cordis</button>)}
+    {pendingDelegation && <button type="button" disabled={moving} onClick={() => void cutDelegationOver()}>Cut delegation over to Cordis</button>}
     {moveError && <p role="status" className="text-yellow-400">{moveError}</p>}
     {guardian && <p role="status" aria-label="Guardian loop">{guardianRuntimeLabel(guardian)}</p>}
     {guardian?.loop === "blocked" && guardian.recovery && <p role="status">Guardian fix: {guardian.recovery}</p>}

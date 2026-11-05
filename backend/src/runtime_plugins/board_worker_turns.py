@@ -96,6 +96,7 @@ async def board_worker_runtime_status(host=None) -> dict:
     from src.db.engine import get_session
     from .bridge import cordis_host, cordis_recovery
     from .ownership import CompositionBindingError, inventory
+    from sqlalchemy.exc import OperationalError
     host = host or cordis_host
     try:
         async with get_session() as db:
@@ -103,6 +104,11 @@ async def board_worker_runtime_status(host=None) -> dict:
     except CompositionBindingError:
         return {"loop": LOOP_NAMES["blocked"], "owner_epoch": None, "reason": "board_workers_inventory_invalid",
                 "recovery": "Repair the runtime composition inventory (a malformed owner row fails closed)."}
+    except OperationalError as exc:
+        # As for guardian: a database that predates the inventory table was never cut over.
+        if "no such table: runtime_composition_states" not in str(exc):
+            raise
+        rows = {}
     if not rows:
         # An entirely unseeded inventory has never been cut over.
         return {"loop": LOOP_NAMES["legacy"], "owner_epoch": None, "reason": None, "recovery": None}
@@ -259,7 +265,13 @@ class WorkerTurn:
         turn = cls(job_id=job_id, owner=owner, fence=int(claimed["lease"]["fencing_token"]), host=host, jobs=jobs,
                    preset_id=preset_id, preset_digest=digest, deadline=deadline,
                    job_owner={**job_owner, "authority": owner_authority})
-        await turn._write_context(initial=True)
+        try:
+            await turn._write_context(initial=True)
+        except BoardWorkerBlocked as exc:
+            # The root or epoch moved between the claim and the first write: still nothing was
+            # contacted, so this is a pre-contact refusal, never "inference spent".
+            await asyncio.shield(turn.settle("blocked", reason=exc.detail))
+            raise BoardWorkerBlocked(RUNTIME_UNAVAILABLE, exc.detail) from exc
         return turn
 
     # -------------------------------------------------------- fenced state
@@ -499,7 +511,11 @@ async def begin_board_worker(preset_id: str, *, owner_principal_id: str, owner_s
             raise BoardWorkerBlocked(RUNTIME_UNAVAILABLE, exc.reason_code,
                                      "The draft runtime owner is changing; retry in a moment.") from exc
         # The owner may have moved between the read and the gate; the gate now holds it.
-        status = await board_worker_runtime_status(host)
+        try:
+            status = await board_worker_runtime_status(host)
+        except BaseException:
+            legacy_turns.leave(BOARD_WORKERS_DOMAIN)
+            raise
         if status["loop"] == LOOP_NAMES["legacy"]:
             return BoardWorkerRun(legacy_gate=True)
         legacy_turns.leave(BOARD_WORKERS_DOMAIN)

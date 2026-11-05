@@ -157,6 +157,52 @@ async def test_cordis_unavailable_before_contact_blocks_retry_safe_with_nothing_
         assert (await board_worker_runtime_status(host))["reason"].startswith("cordis_")
 
 
+
+async def test_a_root_that_moves_before_the_first_write_is_a_pre_contact_refusal(accounting_db, monkeypatch):  # noqa: F811
+    """A moved root between the claim and the first context write never reads as "inference spent" (#1020 PR3 review)."""
+    async_db = await _setup(accounting_db, monkeypatch)
+    from src.runtime_plugins.board_worker_turns import BoardWorkerBlocked, WorkerTurn
+    write = WorkerTurn._write_context
+
+    async def moved(self, *, initial=False, **kwargs):
+        if initial:
+            raise BoardWorkerBlocked(SETTLEMENT_REFUSED, "board_worker_parent_moved")
+        return await write(self, initial=initial, **kwargs)
+    async with research_host(durable_job_repository) as host:
+        monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
+        await cutover(host, PRESETS_DOMAIN)
+        await cutover(host, BOARD_WORKERS_DOMAIN)
+        monkeypatch.setattr(WorkerTurn, "_write_context", moved)
+        io = Scripted(monkeypatch)
+        result, task, root = await _draft(async_db, "reply-moved")
+    assert result["blocked"] is True, result
+    assert (io.reads, io.model_bodies) == (0, [])
+    assert task.status is WorkBoardStatus.blocked and task.block_reason == RUNTIME_UNAVAILABLE
+    assert (root.status, root.failure_reason) == ("blocked", RUNTIME_UNAVAILABLE)
+
+
+async def test_a_refusal_never_blocks_a_root_held_at_a_newer_lease():
+    """The stale worker blocks the root only at the lease it was admitted under."""
+    from src.runtime_plugins.board_worker_turns import BoardWorkerBlocked
+    calls = []
+
+    class Jobs:
+        async def get_job(self, job_id):
+            return {"status": "running", "revision": 9, "lease": {"owner": "runner-b", "fencing_token": 4}}
+
+        async def transition_job(self, *args, **kwargs):
+            calls.append(kwargs)
+    dispatcher = WorkBoardDispatcher.__new__(WorkBoardDispatcher)
+    dispatcher.jobs = Jobs()
+    admitted = {"lease": {"owner": "runner-a", "fencing_token": 3}}
+    exc = BoardWorkerBlocked(SETTLEMENT_REFUSED, "board_worker_parent_moved")
+    outcome = await dispatcher._refuse_board_worker("root-1", exc, admitted)
+    assert outcome["reason_code"] == SETTLEMENT_REFUSED and calls == []
+    # At its own lease the same refusal does block the root, fenced at the admitted token.
+    outcome = await dispatcher._refuse_board_worker("root-1", exc, {"lease": {"owner": "runner-b", "fencing_token": 4}})
+    assert calls and (calls[0]["owner"], calls[0]["fencing_token"]) == ("runner-b", 4)
+
+
 @pytest.mark.parametrize("fault", ["revoked_root", "stale_epoch"])
 async def test_a_refused_settlement_after_contact_adopts_nothing_and_is_retry_safe(accounting_db, monkeypatch, fault):  # noqa: F811
     async_db = await _setup(accounting_db, monkeypatch)

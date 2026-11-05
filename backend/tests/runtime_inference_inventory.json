@@ -2,7 +2,7 @@
  "categories": {
   "agent_turn": "Interactive chat, direct chat and onboarding: the #1019 Cordis turn (presets chat.*).",
   "delegated_turn": "Orchestrator turn and its specialists: each specialist call is a durable Cordis child turn (#1020 PR2, presets chat.orchestrator and specialist.*).",
-  "board_worker_pr3": "WorkBoard dispatcher drafts: move to worker turns in #1020 PR3.",
+  "board_worker_turn": "WorkBoard Mail reply and meeting brief drafts: one cordis_board_worker_turn_v1 (presets worker.mail_reply_draft, worker.meeting_prep) on the Cordis owner, or under the legacy drain gate.",
   "capability_owned": "A capability's own governed Python executor on the same broker (#1020 Dependencies clause).",
   "context_helper": "Context-assembly helpers of the enclosing turn, under its principal (decision D2).",
   "eval_facade": "Eval-only fixtures and compatibility facades; never a production turn.",
@@ -285,15 +285,15 @@
    "count": 1
   },
   "work_board/dispatcher.py::WorkBoardDispatcher._execute_direct_adapter.model_call::FallbackLiteLLMModel": {
-   "category": "board_worker_pr3",
+   "category": "board_worker_turn",
    "count": 2
   },
   "work_board/dispatcher.py::WorkBoardDispatcher._execute_direct_adapter.model_call::build_canonical_inference_context:strategist_agent": {
-   "category": "board_worker_pr3",
+   "category": "board_worker_turn",
    "count": 2
   },
   "work_board/dispatcher.py::WorkBoardDispatcher._execute_direct_adapter.model_call::build_model_kwargs:strategist_agent": {
-   "category": "board_worker_pr3",
+   "category": "board_worker_turn",
    "count": 2
   },
   "work_board/general_task_planner.py::GeneralTaskPlanner.propose.invoke::_governed_research_chat_completion": {

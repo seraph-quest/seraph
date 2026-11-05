@@ -6707,7 +6707,8 @@ class WorkBoardDispatcher:
                     "deadline": deadline},
             timeout_seconds=float(timeout_seconds))
 
-    async def _refuse_board_worker(self, job_id: str, exc: BaseException) -> dict[str, Any]:
+    async def _refuse_board_worker(self, job_id: str, exc: BaseException,
+                                   projection: Mapping[str, Any]) -> dict[str, Any]:
         """Close the attempt root on a retry-safe draft runtime refusal (#1020).
 
         Either nothing was contacted (``board_worker_runtime_unavailable``), or the
@@ -6717,13 +6718,20 @@ class WorkBoardDispatcher:
         """
         code = _text(getattr(exc, "reason_code", None)) or "board_worker_runtime_unavailable"
         detail = _text(getattr(exc, "detail", None))[:128] or code
+        # Block the root only at the lease this worker was admitted under: a root that moved
+        # ("parent attempt moved") belongs to its new runner or to recovery, never to this stale worker.
+        admitted = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        admitted_owner = _text(admitted.get("owner"))
+        admitted_fence = int(admitted.get("fencing_token") or projection.get("fencing_token") or 0)
         current = await self.jobs.get_job(job_id)
         lease = current.get("lease") if isinstance(current, Mapping) and isinstance(current.get("lease"), Mapping) else {}
-        if isinstance(current, Mapping) and _status(current) == "running" and _text(lease.get("owner")):
+        if (isinstance(current, Mapping) and _status(current) == "running" and admitted_owner
+                and _text(lease.get("owner")) == admitted_owner
+                and int(lease.get("fencing_token") or 0) == admitted_fence):
             try:
                 await self.jobs.transition_job(
-                    job_id, "blocked", owner=_text(lease.get("owner")),
-                    fencing_token=int(lease.get("fencing_token") or 0), expected_state="running",
+                    job_id, "blocked", owner=admitted_owner,
+                    fencing_token=admitted_fence, expected_state="running",
                     expected_revision=int(current.get("revision") or 0), reason=code,
                     result={"memory_status": "no_learning", "board_worker_detail": detail},
                     result_summary="Board draft runtime refused before any external effect")
@@ -7913,7 +7921,7 @@ class WorkBoardDispatcher:
                 worker = await self._begin_board_worker(task, job_id, projection, "worker.mail_reply_draft",
                                                         timeout_seconds=MAIL_RUNTIME_SECONDS)
             except BoardWorkerBlocked as exc:
-                return await self._refuse_board_worker(job_id, exc)
+                return await self._refuse_board_worker(job_id, exc, projection)
             try:
                 connection, consent, binding, provider_message_id, _lease = await current_context()
                 adapter = GoogleGmailReadonlyAdapter(
@@ -8051,7 +8059,7 @@ class WorkBoardDispatcher:
                 # The fenced settlement commits before the output is parsed or staged.
                 await worker.adopt(output_text(raw))
             except BoardWorkerBlocked as exc:
-                return await self._refuse_board_worker(job_id, exc)
+                return await self._refuse_board_worker(job_id, exc, projection)
             except BaseException:
                 await worker.abandon("board_worker_call_failed")
                 raise
@@ -8680,14 +8688,20 @@ class WorkBoardDispatcher:
                 worker = await self._begin_board_worker(task, job_id, projection, "worker.meeting_prep",
                                                         timeout_seconds=max(0.001, min(float(runtime_seconds), 180.0)))
             except BoardWorkerBlocked as exc:
-                return await self._refuse_board_worker(job_id, exc)
+                return await self._refuse_board_worker(job_id, exc, projection)
 
-            adapter = GoogleCalendarReadonlyAdapter(
-                connection,
-                owner_principal_id=task.owner_principal_id,
-                authority_check=assert_calendar_current,
-                contact_observer=mark_provider_contact,
-            )
+            try:
+                adapter = GoogleCalendarReadonlyAdapter(
+                    connection,
+                    owner_principal_id=task.owner_principal_id,
+                    authority_check=assert_calendar_current,
+                    contact_observer=mark_provider_contact,
+                )
+            except BaseException:
+                # Never leak the admitted turn or the legacy drain gate (#1020 PR3 review).
+                await worker.abandon("board_worker_call_failed")
+                worker.release()
+                raise
 
             effective_route: dict[str, Any] | None = None
 
@@ -8885,8 +8899,8 @@ class WorkBoardDispatcher:
                 await worker.adopt(output_text(raw))
                 return raw
 
-            service = MeetingPrepService(adapter)
             try:
+                service = MeetingPrepService(adapter)
                 result = await service.prepare(
                     calendar_id,
                     provider_event_id,
@@ -8897,7 +8911,7 @@ class WorkBoardDispatcher:
                     model_call=settled_model_call,
                 )
             except BoardWorkerBlocked as exc:
-                return await self._refuse_board_worker(job_id, exc)
+                return await self._refuse_board_worker(job_id, exc, projection)
             except BaseException:
                 await worker.abandon("board_worker_call_failed")
                 raise

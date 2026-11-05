@@ -970,8 +970,10 @@ The child's report is adopted only if all of these hold:
 parent visibly: "Delegated specialist `name` stopped: `reason`". Delegation
 needs the `seraph.delegation.v1` owner on Cordis; its prerequisites are the
 presets and agent-loop owners, so delegation never reads Cordis while
-specialists run on the legacy orchestrator. Rolling chat back to legacy
-therefore takes two steps: delegation first, then agent-loop. Otherwise chat
+specialists run on the legacy orchestrator. Settings' chat rollback therefore
+moves delegation to legacy first and then agent-loop, and its cutover moves
+agent-loop first and then delegation, under one confirmation; a refusal names
+the domain that stopped and what already moved. Otherwise chat
 reports `delegation_owner_not_ready` with the fix, or
 `delegation_composition_drift` when the running build is not the one the owner
 row names, and there is no fallback.

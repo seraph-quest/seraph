@@ -134,3 +134,44 @@ it("lists every domain when the backend reports the runtime inventory as unavail
     expect(pending).toHaveTextContent(`${domain}: unavailable · runtime_domains_status_unavailable · fix: ${recovery}`);
   }
 });
+const posts = () => vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).includes("/runtime/composition/"))
+  .map(([url, init]) => [String(url).split("/domains/")[1], JSON.parse(String((init as RequestInit).body))]);
+const delegationRow = (owner_kind: string, epoch: number) => ({ domain: "seraph.delegation.v1", owner_kind, epoch, state: "ready", reason: null, recovery: null });
+it("rolls delegation back before chat, and cuts it over after chat, under one confirmation (#1020)", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("cordis", 5)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  await waitFor(() => expect(posts()).toHaveLength(2));
+  expect(posts()).toEqual([
+    ["seraph.delegation.v1/owner", { target: "legacy", expected_epoch: 5, confirm_domain: "seraph.delegation.v1" }],
+    ["seraph.agent-loop.v1/owner", { target: "legacy", expected_epoch: 2, confirm_domain: "seraph.agent-loop.v1" }]]);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm.mock.calls[0][0]).toContain("seraph.delegation.v1, then seraph.agent-loop.v1");
+  confirm.mockRestore();
+});
+it("cuts chat over first and then delegation", async () => {
+  const chat_runtime = { loop: "legacy.smolagents", route: "chat_agent", owner_epoch: 3, reason: null, recovery: null, owner_kind: "legacy" };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("legacy", 6)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cut chat over to Cordis" }));
+  await waitFor(() => expect(posts()).toHaveLength(2));
+  expect(posts().map(([domain, body]) => [domain, body.target])).toEqual([
+    ["seraph.agent-loop.v1/owner", "cordis"], ["seraph.delegation.v1/owner", "cordis"]]);
+  confirm.mockRestore();
+});
+it("leaves chat unchanged when the delegation rollback is refused", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  vi.mocked(apiFetch).mockImplementation(async (url: unknown) => String(url).includes("/runtime/composition/")
+    ? response({ detail: { code: "composition_not_quiescent" } }, 409)
+    : response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("cordis", 5)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  expect(await screen.findByText("Chat loop change refused: composition_not_quiescent (seraph.delegation.v1); chat was not changed."))
+    .toBeInTheDocument();
+  expect(posts().map(([domain]) => domain)).toEqual(["seraph.delegation.v1/owner"]);
+  confirm.mockRestore();
+});

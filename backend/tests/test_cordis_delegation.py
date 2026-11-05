@@ -542,3 +542,18 @@ async def test_measured_child_admission_overhead_p95_over_100_samples(accounting
         statistics.median(settlements) * 1000, p95(settlements) * 1000))
     if os.environ.get("SERAPH_CORDIS_LATENCY_BUDGET") == "1":
         assert p95(admissions) <= 0.250 and p95(settlements) <= 0.250
+
+
+async def test_a_drifted_delegation_build_blocks_status_and_admission(accounting_db, real_auth, delegating, monkeypatch):  # noqa: F811
+    """The running delegation plugin must be the build its owner row names, at status and at admission."""
+    from src.runtime_plugins.agent_turns import chat_runtime_status
+    jobs = DurableJobRepository()
+    async with delegation_host(jobs) as host:
+        assert (await chat_runtime_status(host))["loop"] == "cordis.agent-loop.v1"
+        monkeypatch.setitem(host.reviewed.plugin_digests, DELEGATION, "0" * 64)
+        status = await chat_runtime_status(host)
+        assert (status["loop"], status["reason"]) == ("blocked", "delegation_composition_drift")
+        assert "Restart Seraph" in status["recovery"]
+        with pytest.raises(TurnBlocked) as refused:
+            await _turn(host, jobs)
+        assert refused.value.reason_code == "delegation_composition_drift"

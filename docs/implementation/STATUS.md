@@ -116,7 +116,7 @@ inference/provider spend. Live GitHub usefulness remains
 - **Memory flushes:** a flush inside an operator's turn is admitted under that
   operator's Root.
 - **Default cutover:** the boot cutover moves the presets owner first, then
-  agent-loop and guardian.
+  agent-loop and guardian, then delegation, which needs agent-loop on Cordis.
 - **Verification:** offline, with scripted completions and denied sockets. The
   strategist call also runs through the real broker and ledger behind an
   intercepted provider boundary.

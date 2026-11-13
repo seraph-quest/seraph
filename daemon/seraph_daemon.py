@@ -660,7 +660,7 @@ async def upload_capture(
     *,
     app_name: str,
     window_title: str,
-    ocr_text: str | None,
+    local_analysis: dict | None,
     observation: dict,
 ) -> CaptureUploadResult | None:
     """Hand an allowed capture to the local backend (ADR-035); never the cloud.
@@ -678,7 +678,7 @@ async def upload_capture(
             app_name=app_name,
             window_title=window_title,
             blocklist=screen_runtime.blocklist,
-            ocr_text=ocr_text,
+            local_analysis=local_analysis,
         )
     except Exception:
         logger.debug("Capture upload error", exc_info=True)
@@ -689,9 +689,35 @@ async def upload_capture(
         "capture_id": result.capture_id or None,
     }
     _write_daemon_status(capture_upload=uploader.status())
-    if not result.stored:
+    if result.reason == "origin_forbidden":
+        # Older backends require Origin on every POST; say exactly what to fix.
+        logger.warning(
+            "Capture upload refused (origin_forbidden): the backend at %s does not accept "
+            "Origin-less native capture uploads or its host is not in OPERATOR_AUTH_ALLOWED_HOSTS.",
+            uploader.origin,
+        )
+    elif result.status == "failed" and result.http_status in {401, 403}:
+        logger.warning("Capture upload refused: %s (check the paired edge credential)", result.reason)
+    elif not result.stored:
         logger.debug("Capture upload not stored: %s (%s)", result.status, result.reason)
     return result
+
+
+def _local_analysis_payload(provider_name: str, result) -> dict | None:
+    """Carry the local provider's result (Apple Vision text and/or the
+    codex-local structured output) with the upload, so storing the capture
+    never discards it."""
+    if result is None or not getattr(result, "success", False):
+        return None
+    data = result.data if isinstance(getattr(result, "data", None), dict) else {}
+    return {
+        "provider": provider_name,
+        "activity": data.get("activity"),
+        "project": data.get("project"),
+        "summary": data.get("summary"),
+        "details": data.get("details") if isinstance(data.get("details"), list) else [],
+        "text": getattr(result, "text", None),
+    }
 
 
 def _context_observation_payload(observation: dict | None, upload: CaptureUploadResult | None) -> dict | None:
@@ -913,7 +939,7 @@ async def poll_loop(
                                         png_bytes,
                                         app_name=app_name,
                                         window_title=window_title or "",
-                                        ocr_text=result.text if screen_runtime.provider.name == "apple-vision" else None,
+                                        local_analysis=_local_analysis_payload(screen_runtime.provider.name, result),
                                         observation=observation,
                                     )
                                     if result.success:
@@ -1190,7 +1216,7 @@ async def periodic_capture_loop(
                             png_bytes,
                             app_name=app_name,
                             window_title=window_title,
-                            ocr_text=result.text if screen_runtime.provider.name == "apple-vision" else None,
+                            local_analysis=_local_analysis_payload(screen_runtime.provider.name, result),
                             observation=observation,
                         )
                         if result.success:

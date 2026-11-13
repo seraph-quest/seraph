@@ -185,19 +185,26 @@ async def test_upload_sends_authenticated_local_request_with_metadata():
             app_name="Code",
             window_title="main.py",
             blocklist=set(),
-            ocr_text="hello",
+            local_analysis={"provider": "apple-vision", "summary": "hello", "text": "hello world" + "x" * 9000,
+                            "details": ["a", 3, "b"], "unexpected": "dropped"},
         )
     assert result.status == "accepted" and result.stored
     [request] = backend.uploads()
     assert str(request.url) == "http://localhost:8004/api/observer/captures"
     assert request.headers["authorization"] == "Bearer synthetic-edge-credential"
-    assert request.headers["origin"] == "http://localhost:8004"
+    # Native ingress: no Origin and no cookie (bearer credential only).
+    assert "origin" not in request.headers
+    assert "cookie" not in request.headers
     assert request.headers["x-seraph-node-device"] == "mac-local-1"
     assert request.headers["x-seraph-node-pairing"] == "pair-local-1"
     body = json.loads(request.content)
     assert body["app_name"] == "Code"
     assert body["window_title"] == "main.py"
-    assert body["ocr_text"] == "hello"
+    analysis = body["local_analysis"]
+    assert analysis["provider"] == "apple-vision" and analysis["summary"] == "hello"
+    assert len(analysis["text"]) == 8 * 1024
+    assert analysis["details"] == ["a", "b"]
+    assert "unexpected" not in analysis
     assert body["capture_id"].startswith("cap-")
     assert base64.b64decode(body["content_base64"]) == b"\x89PNG\r\n\x1a\nbytes"
     assert "captured_at" in body
@@ -265,7 +272,9 @@ async def test_poll_loop_uploads_locally_and_never_calls_the_cloud(tmp_path):
     [upload] = backend.uploads()
     body = json.loads(upload.content)
     assert body["app_name"] == "Code" and body["window_title"] == "main.py"
-    assert body["ocr_text"] == "def main():\n    pass"
+    assert body["local_analysis"]["provider"] == "apple-vision"
+    assert body["local_analysis"]["text"] == "def main():\n    pass"
+    assert body["local_analysis"]["summary"] == "def main"
     context = [r for r in backend.requests if r.url.path == "/api/observer/context"][-1]
     context_body = json.loads(context.content)
     # The stored upload is the observation; the context post does not duplicate it.
@@ -329,3 +338,43 @@ async def test_periodic_capture_uploads_and_skips_blocked_apps(tmp_path):
                                         screen_runtime=blocked_runtime)
     assert blocked_backend.uploads() == []
     blocked_capture.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_local_structured_result_travels_with_the_upload(tmp_path):
+    backend = _GuardedBackend()
+
+    class _FakeCodex(_FakeAppleVision):
+        name = "codex-local"
+
+        async def analyze_screen(self, png_bytes, app_name):
+            return AnalysisResult(
+                success=True,
+                data={"activity": "coding", "project": "seraph", "summary": "Editing upload", "details": ["file: x.py"]},
+                duration_ms=5,
+            )
+
+    runtime = ScreenAnalysisRuntime(
+        enabled=True, provider="codex-local", model=None, preserve_captures=False,
+        archive_dir=str(tmp_path), blocklist_file=None, uploader=_uploader(),
+    )
+    with patch("httpx.AsyncClient", side_effect=backend.client_factory()), \
+         patch("ocr.create_provider", return_value=_FakeCodex()), \
+         patch("blocklist.load_blocklist", return_value=set()), \
+         patch("seraph_daemon._write_daemon_status"), \
+         patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+         patch("seraph_daemon.get_frontmost_app_name", return_value="Code"), \
+         patch("seraph_daemon.get_window_title", return_value="x.py"), \
+         patch("ocr.screenshot.capture_screen_png", return_value=b"\x89PNG\r\n\x1a\nscreen"):
+        with pytest.raises(asyncio.CancelledError):
+            await poll_loop("http://localhost:8004", interval=0.01, idle_timeout=300, verbose=False,
+                            screen_runtime=runtime, worker_id="test-worker")
+    [upload] = backend.uploads()
+    analysis = json.loads(upload.content)["local_analysis"]
+    assert analysis == {
+        "provider": "codex-local",
+        "activity": "coding",
+        "project": "seraph",
+        "summary": "Editing upload",
+        "details": ["file: x.py"],
+    }

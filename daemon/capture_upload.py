@@ -32,7 +32,8 @@ except ImportError:  # pragma: no cover - package import fallback
 
 CAPTURE_UPLOAD_PATH = "/api/observer/captures"
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
-MAX_OCR_TEXT_CHARS = 16_000
+MAX_LOCAL_TEXT_CHARS = 8 * 1024
+_LOCAL_PROVIDERS = frozenset({"apple-vision", "codex-local"})
 DEFAULT_EXTENSION_ID = "seraph.openclaw-device-bridge"
 DEFAULT_REFERENCE = "connectors/nodes/device.yaml"
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -70,6 +71,36 @@ def _read_credential(credential: str | None, credential_file: str | None) -> str
             return None
         return value or None
     return None
+
+
+def _bounded_text(value: object, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text[:limit] if text else None
+
+
+def bounded_local_analysis(analysis: dict[str, object] | None) -> dict[str, object] | None:
+    """Shape on-device analysis to the backend's bounded upload schema."""
+    if not isinstance(analysis, dict):
+        return None
+    provider = analysis.get("provider")
+    if provider not in _LOCAL_PROVIDERS:
+        return None
+    result: dict[str, object] = {"provider": provider}
+    for key, limit in (("activity", 64), ("project", 256), ("summary", 512)):
+        text = _bounded_text(analysis.get(key), limit)
+        if text:
+            result[key] = text
+    text = _bounded_text(analysis.get("text"), MAX_LOCAL_TEXT_CHARS)
+    if text:
+        result["text"] = text
+    details = analysis.get("details")
+    if isinstance(details, list):
+        items = [item.strip()[:256] for item in details if isinstance(item, str) and item.strip()][:16]
+        if items:
+            result["details"] = items
+    return result if len(result) > 1 else None
 
 
 @dataclass(frozen=True)
@@ -141,8 +172,9 @@ class LocalCaptureUploader:
         )
 
     def _headers(self) -> dict[str, str]:
+        # No Origin and no cookie: the backend accepts this native ingress on
+        # the bearer credential alone (a browser always sends Origin).
         return {
-            "Origin": self.origin,
             "Authorization": f"Bearer {self._credential}",
             "X-Seraph-Node-Device": self.device_id,
             "X-Seraph-Node-Pairing": self.pairing_id,
@@ -174,7 +206,7 @@ class LocalCaptureUploader:
         window_title: str,
         blocklist: set[str],
         captured_at: datetime | None = None,
-        ocr_text: str | None = None,
+        local_analysis: dict[str, object] | None = None,
     ) -> CaptureUploadResult:
         if is_blocked(app_name, blocklist):
             result = CaptureUploadResult(status="blocked", reason="sensitive_app_blocked_before_upload")
@@ -198,8 +230,9 @@ class LocalCaptureUploader:
             "captured_at": when.isoformat(),
             "content_base64": base64.b64encode(png_bytes).decode("ascii"),
         }
-        if ocr_text:
-            payload["ocr_text"] = ocr_text[:MAX_OCR_TEXT_CHARS]
+        bounded = bounded_local_analysis(local_analysis)
+        if bounded:
+            payload["local_analysis"] = bounded
 
         last: CaptureUploadResult | None = None
         retry_after: float | None = None
@@ -268,5 +301,6 @@ __all__ = [
     "CAPTURE_UPLOAD_PATH",
     "CaptureUploadResult",
     "LocalCaptureUploader",
+    "bounded_local_analysis",
     "validate_local_backend_origin",
 ]

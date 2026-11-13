@@ -16,16 +16,16 @@ Seraph has three components: **backend + frontend** (Docker) and the **screen da
 
 - Docker Desktop
 - [uv](https://docs.astral.sh/uv/) package manager
-- An [OpenRouter](https://openrouter.ai/) API key (set in `.env.dev`)
+
+The daemon needs no provider key and makes no cloud model call. Screenshot
+analysis runs in the backend on the governed NEAR TEE vision slot (ADR-035),
+configured in the cockpit's model settings with its own API key, purpose
+consent, catalog check and capability check. OpenRouter is retired.
 
 ### 1. Configure environment
 
-Copy and edit the env file — at minimum set your `OPENROUTER_API_KEY`:
-
-```bash
-# .env.dev already exists with defaults — edit the API key
-vim .env.dev
-```
+Copy the env file if it does not exist yet (`cp env.dev.example .env.dev`).
+Core startup needs no provider key.
 
 ### 2. Start backend + frontend (Docker)
 
@@ -141,7 +141,7 @@ SERAPH_EDGE_DEVICE_ID=<device_id> SERAPH_EDGE_PAIRING_ID=<pairing_id> \
 
 ### Local capture upload
 
-When screen analysis is enabled and the upload is configured, each allowed capture is sent to `POST /api/observer/captures` on the **loopback** backend (`--url` must be `localhost`, `127.0.0.1` or `::1`; any other host is refused). The request carries the PNG, app name, window title, capture time, a unique `capture_id` and the bounded local analysis (Apple Vision text up to 8 KiB, or the explicitly selected `codex-local` structured result). The backend stores that analysis on the observation (summary, activity, project) so digests and reports use it until governed vision analysis exists.
+When screen analysis is enabled and the upload is configured, each allowed capture is sent to `POST /api/observer/captures` on the **loopback** backend (`--url` must be `localhost`, `127.0.0.1` or `::1`; any other host is refused). The request carries the PNG, app name, window title, capture time, a unique `capture_id` and the bounded local analysis (Apple Vision text up to 8 KiB, or the explicitly selected `codex-local` structured result). The backend stores that analysis on the observation (summary, activity, project) so digests and reports use it until the governed NEAR TEE vision analysis of that capture succeeds; the screen-analysis settings the daemon reads report `daemon_cloud_provider: null`, and a backend `provider` such as `near_tee` names the backend's route, never a daemon provider.
 
 - **Authentication:** the scoped paired-edge credential returned once by node pairing (`POST /api/nodes/pairings/pair`; the same credential the paired edge transport uses), sent as `Authorization: Bearer` with `X-Seraph-Node-Device` / `X-Seraph-Node-Pairing`. The daemon sends no `Origin` and no cookie; for this one path the backend then checks only the host allow-list, and the credential stays mandatory. A request that carries a cookie or an `Origin` must still pass the normal origin check, and a browser session cookie is never upload authority. The pairing's stored policy must allow capability `media.ingest`, purpose `screen_capture`, the image type and its size.
 - **Backend checks:** screen analysis must be enabled; built-in blocklisted apps are rejected (a local `allowed_apps` override does not apply to uploads); only real PNG/JPEG bytes up to 8 MiB and 50 megapixels (read from the header before decoding); at most 30 uploads per minute per pairing; a repeated `capture_id` is idempotent.

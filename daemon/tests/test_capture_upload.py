@@ -249,8 +249,11 @@ async def test_retries_are_bounded_and_cool_down_prevents_hammering():
 
 
 @pytest.mark.asyncio
-async def test_poll_loop_uploads_locally_and_never_calls_the_cloud(tmp_path):
-    backend = _GuardedBackend(settings_provider="openrouter")
+@pytest.mark.parametrize("backend_provider", ["openrouter", "near_tee"])
+async def test_poll_loop_uploads_locally_and_never_calls_the_cloud(tmp_path, backend_provider):
+    # ADR-035 PR4: the backend reports its governed route ("near_tee"); the
+    # daemon still makes no cloud call and only uploads locally.
+    backend = _GuardedBackend(settings_provider=backend_provider)
     provider = _FakeAppleVision()
     runtime = _runtime(tmp_path, _uploader())
     with patch("httpx.AsyncClient", side_effect=backend.client_factory()), \

@@ -1275,18 +1275,19 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > Cordis `inference.request`, screenshot vision, embeddings, capability checks
 > and screen-analysis provider selection all fail closed with the stable reason
 > `openrouter_retired`, with no fallback. Non-streaming text routes run on the
-> NEAR TEE text slot once the operator configures it (see below); routes
-> without a ready slot, and streaming, tool, vision and embedding routes
-> (PR3c–PR4), report **blocked** (`no_active_provider` or the slot reason) in
+> NEAR TEE text slot and screenshot vision on the NEAR TEE vision slot once the
+> operator configures them (see below); routes without a ready slot, and
+> streaming, tool and embedding routes (PR3c–PR3d), report **blocked** (`no_active_provider` or the slot reason) in
 > `/api/runtime/status` and Settings; this is expected and not a crash. The optional NEAR text Work
 > capability (ADR-025) is unchanged. Retained OpenRouter configuration,
 > credential, receipts, ledger rows and Unknown liabilities stay readable and
 > settleable through Inference accounting. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.
 > Chat reports the block as `route_reason: openrouter_retired`; Cordis
-> `inference.request` reports `openrouter_retired`. Screen analysis reports no
-> cloud provider (`provider: ""`, `provider_blocked_reason: openrouter_retired`)
-> and refuses `openrouter`; the next screen-analysis settings save rewrites a
+> `inference.request` reports `openrouter_retired`. Without a NEAR TEE vision
+> slot, screen analysis reports no cloud provider (`provider: ""`,
+> `provider_blocked_reason: openrouter_retired`); with one it reports
+> `provider: near_tee` (#1147 PR4). It always refuses `openrouter`; the next screen-analysis settings save rewrites a
 > stored `openrouter` provider and model to empty.
 
 This is the short operator-facing description of the current application. For
@@ -1398,8 +1399,40 @@ end-to-end encryption". Seraph does not verify attestation and there is no
 end-to-end encryption. A missing NEAR billing record becomes an Unknown
 liability that blocks the whole lane, chat included, until it is settled under
 **Inference accounting**; a model echo mismatch or empty answer is settled and
-not adopted. Streaming chat, tools, vision and embeddings stay blocked until
-their slices land.
+not adopted. Streaming chat, tools and embeddings stay blocked until their
+slices land.
+
+### Configure the NEAR TEE vision slot (ADR-035, #1147 PR4)
+
+Status: **Partial** until live operator use; disabled by default. In
+**Settings → NEAR TEE · vision slot · screenshots** (same panel and key):
+
+1. Pick a vision model (`z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`,
+   `Qwen/Qwen3-VL-30B-A3B-Instruct`, `deepseek-ai/DeepSeek-V4.1-Flash-1017`;
+   DeepSeek fails the catalog check while NEAR omits its readiness), set
+   limits and the per-request reserve, tick **both** the plaintext
+   acknowledgement and the separate screenshot consent ("screenshots are sent
+   to the NEAR gateway in plaintext"), and press **Save NEAR TEE vision slot**.
+   Saving one slot keeps the other.
+2. Press **Run catalog check**: the vision slot passes only with image input,
+   and the receipt records whether NEAR lists structured outputs (JSON schema
+   requests) or not (strict prompt-JSON).
+3. Press **Run vision capability check**: four billed, mechanics-only requests
+   (vision, structured output, health, latency).
+
+Screen analysis must stay enabled under the screen settings. Daemon uploads and
+screenshot-folder images then queue as **pending**, the existing background
+analysis job sends one screenshot at a time (at most 8 MiB, image counted
+conservatively against the input limit) below chat priority, and the validated
+analysis feeds the screenshot digest and the end-of-day report. Until it
+succeeds, a daemon upload's on-device text is the digest content. An invalid
+answer, echo mismatch or empty output is recorded as **failed** (cost
+settled); a missing consent, stale receipt, missing proof or oversized input is
+**blocked** with its reason and makes no NEAR contact; a missing billing record
+is an Unknown liability that blocks the whole lane until settled. The daemon
+makes no cloud call; it reads `daemon_cloud_provider: null` from the screen
+settings and only uploads. Screenshots are plaintext to the NEAR gateway; the
+TEE label is NEAR's dated catalog claim, not Seraph-verified confidentiality.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 

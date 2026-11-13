@@ -8,7 +8,7 @@ import { fetchHomeContinuation, homeSections, HomeContinuationError, type HomeCo
 export interface CockpitHomeProps {
   active?: boolean;
   authenticated?: boolean;
-  onOpenSection: (section: "inbox" | "work" | "goals" | "library" | "connections") => void;
+  onOpenSection: (section: "inbox" | "work" | "goals" | "library" | "connections" | "reports") => void;
   onOpenApprovals?: (approvalId?: string) => void;
   onOpenTask?: (taskId: string) => void;
   onOpenAttention?: (item: AttentionItem) => void;
@@ -102,7 +102,7 @@ function OwnedHome({ onOpenSection, onOpenApprovals, onOpenTask, onOpenAttention
       <button type="button" disabled={loading || !authenticated} onClick={() => void load()}>{loading ? "Refreshing…" : restartRequired ? "Restart Home snapshot" : "Refresh Home"}</button></div>
     <p>Snapshot · {snapshot?.as_of ?? "unavailable"}{stale ? " · last confirmed, refresh failed" : ""}. Inspectors recheck current ownership and permissions.</p>
     {error ? <p role="status">{snapshot ? "Showing last confirmed metadata" : "Home metadata unavailable"} · {error}{restartRequired ? " · Restart to obtain a new snapshot. The original continuation was not renewed." : ""}</p> : null}
-    <nav aria-label="Available cockpit controls"><button onClick={() => onOpenSection("inbox")}>Open Inbox</button><button onClick={() => onOpenSection("work")}>Open Work</button><button onClick={() => onOpenSection("goals")}>Open Goals</button><button onClick={() => onOpenSection("library")}>Open Library</button><button onClick={() => onOpenSection("connections")}>Open Connections</button></nav>
+    <nav aria-label="Available cockpit controls"><button onClick={() => onOpenSection("inbox")}>Open Inbox</button><button onClick={() => onOpenSection("work")}>Open Work</button><button onClick={() => onOpenSection("goals")}>Open Goals</button><button onClick={() => onOpenSection("library")}>Open Library</button><button onClick={() => onOpenSection("connections")}>Open Connections</button><button onClick={() => onOpenSection("reports")}>Open Reports</button></nav>
     {summaryMatches ? <article aria-label="Selected Goal context"><h3>{displaySummary(goalSummary.title)}</h3><p>Status · {displaySummary(goalSummary.status)}</p><p>Criterion · {displaySummary(goalSummary.criterion)}</p><p>Current Goal context; inspect the Goal before execution.</p></article> : goalSummary ? <p>Selected Goal context unavailable for this page or current revision.</p> : null}
     <div className="cockpit-home-grid">{(["task_next_actions", "approvals", "blocked_items", "active_goals", "programme_status", "prepared_outputs"] as const).map(key => {
       const section = snapshot?.[key];

@@ -1540,7 +1540,29 @@ async def _near_tee_setup_status(configured, accounting):
             else "configuration_required" if reason in {"near_tee_credential_required", "near_tee_catalog_receipt_missing"}
             or (reason or "").startswith("proof_missing") else "blocked")
         passed = isinstance(receipt, dict) and receipt.get("outcome") == "passed" and catalog_reason is None
+        # PR3c: chat streaming and agent tool turns each need their own fresh
+        # capability check (and tools in the catalog receipt) on this profile.
+        chat_capabilities = {}
+        if catalog_reason is None:
+            from src.model_fabric.near_tee_catalog import catalog_receipt_feature_block_reason
+            candidate = candidate_from_profile(profile)
+            for capability in ("streaming", "tool_use"):
+                if capability == "tool_use" and (feature_reason := catalog_receipt_feature_block_reason(
+                        name, "tools", receipts=receipts)):
+                    chat_capabilities[capability] = feature_reason
+                    continue
+                try:
+                    proof = await model_fabric_repository.latest_capability_proof(
+                        profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
+                        profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
+                        endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
+                except Exception:
+                    chat_capabilities[capability] = "proof_metadata_unavailable"
+                    continue
+                chat_capabilities[capability] = ("ready" if proof is not None and proof_is_fresh(proof)
+                    else f"proof_missing:{capability}")
         slots[name] = {**slot.__dict__, "profile_id": profile.id, "profile_hash": profile.contract_hash,
+            "chat_capabilities": chat_capabilities,
             "consent_current": slot.enabled and not configured.egress_revoked
                 and slot.purpose_consent_revision == configured.egress_revision,
             "status": status, "reason_code": None if status == "ready" else reason,
@@ -1612,12 +1634,17 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
         from src.model_fabric.near_tee_embeddings import NEAR_TEE_EMBEDDING_CHECK_CAPABILITIES
         allowed_checks = NEAR_TEE_EMBEDDING_CHECK_CAPABILITIES if slot_name == "embedding" else NEAR_TEE_CHECK_CAPABILITIES
         if body.capability not in allowed_checks:
-            # Streaming and tool-use checks arrive with PR3c.
             raise HTTPException(status_code=422, detail="near_tee_capability_check_unsupported")
         if reason := near_tee_slot_block_reason(configured, slot_name):
             raise HTTPException(status_code=409, detail=reason)
         if reason := catalog_receipt_block_reason(slot_name, profile, revision=configured.egress_revision):
             raise HTTPException(status_code=409, detail=reason)
+        if body.capability == ModelCapability.TOOL_USE.value:
+            # Only a model whose catalog supportedFeatures include tools may
+            # serve (or be checked for) tool requests.
+            from src.model_fabric.near_tee_catalog import catalog_receipt_feature_block_reason
+            if reason := catalog_receipt_feature_block_reason(slot_name, "tools"):
+                raise HTTPException(status_code=409, detail=reason)
         try:
             near_tee_key = await capture_near_tee_credential(expected_revision=configured.egress_revision,
                 expected_fingerprint=configured.near_tee.credential_fingerprint)
@@ -2142,6 +2169,11 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         inference_readiness = {**inference_readiness, "status": "blocked",
             "reasons": list(dict.fromkeys([*inference_readiness["reasons"], accounting_reason]))}
     _apply_openrouter_retirement(openrouter_setup_status)
+    try:
+        near_tee_status = await _near_tee_setup_status(configured, accounting)
+    except Exception:
+        near_tee_status = None
+        degraded = True
     return {
         "status": (
             "degraded"
@@ -2160,6 +2192,7 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         "excluded_profiles": [item for item in all_profiles if not item["model_fabric_eligible"]],
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
         "openrouter_setup": openrouter_setup_status,
+        "near_tee": near_tee_status,
         "inference_lane": _inference_lane_status(configured),
         "provider_retirement": _provider_retirement_status(),
         "proofs": proof_statuses,

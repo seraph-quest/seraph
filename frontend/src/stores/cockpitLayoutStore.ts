@@ -29,7 +29,7 @@ interface CockpitLayoutStore {
   setActiveSection: (section: CockpitSection) => void;
 }
 
-export type CockpitSection = "home" | "inbox" | "work" | "goals" | "library" | "connections";
+export type CockpitSection = "home" | "inbox" | "work" | "goals" | "library" | "connections" | "reports";
 
 interface PersistedCockpitLayoutStoreState {
   activeSection?: CockpitSection;
@@ -78,7 +78,7 @@ function isCockpitLayoutId(value: unknown): value is CockpitLayoutId {
 }
 
 function isCockpitSection(value: unknown): value is CockpitSection {
-  return ["home", "inbox", "work", "goals", "library", "connections"].includes(String(value));
+  return ["home", "inbox", "work", "goals", "library", "connections", "reports"].includes(String(value));
 }
 
 function normalizePaneVisibility(

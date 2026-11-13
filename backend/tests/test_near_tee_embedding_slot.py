@@ -52,12 +52,12 @@ def embedding_catalog(**metadata_changes):
     metadata = {"contextLength": 32768, "maxOutputLength": _ABSENT, "supportedFeatures": [], **metadata_changes}
     record = catalog_record(EMBED_MODEL, input_modalities=("text",), output_modalities=("embedding",), **metadata)
     record["inputCostPerToken"] = {"amount": 10, "scale": 9, "currency": "USD"}  # $0.01/M (ADR-035 row)
-    record["outputCostPerToken"] = {"amount": 10, "scale": 9, "currency": "USD"}  # lead's read 2026-11-14
+    record["outputCostPerToken"] = {"amount": 10, "scale": 9, "currency": "USD"}  # lead's read 2026-11-13
     return record
 
 
 def real_embedding_record():
-    """The lead's read of NEAR ``/v1/model/Qwen%2FQwen3-Embedding-0.6B`` on 2026-11-14:
+    """The lead's read of NEAR ``/v1/model/Qwen%2FQwen3-Embedding-0.6B`` on 2026-11-13:
     no ``isReady`` and no dimension field."""
     return {"modelId": EMBED_MODEL,
         "inputCostPerToken": {"amount": 10, "scale": 9, "currency": "USD"},

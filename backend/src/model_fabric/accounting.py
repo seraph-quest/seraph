@@ -674,6 +674,11 @@ class DurableInferenceBrokerMixin:
             if handle.request.owner_id.startswith("operator:"):
                 from src.auth.service import authenticate_session
                 root_id = handle.request.session_id
+                if handle.request.operator_session_id and handle.request.runtime_path != "audio_transcription":
+                    # A conversation-scoped chat principal (REST/WebSocket turn):
+                    # the operator root session captured immutably at admission
+                    # must still authenticate as the same owner to adopt.
+                    root_id = handle.request.operator_session_id
                 if handle.request.runtime_path == "audio_transcription":
                     from src.workflows.audio_native import AudioNativeAdmissionBindingV1
                     from .remote_inference_admission import RemoteInferenceReceiptBinding
@@ -837,9 +842,6 @@ class DurableInferenceBrokerMixin:
             raise InferenceAccountingError("audio_async_nonstreaming_required")
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
-        if near_tee_profile_slot(request.runtime_path, _profile_bindings.get().get(request.operation_id)) is not None:
-            # NEAR TEE streaming is PR3c; refuse before any reservation.
-            raise InferenceAccountingError("near_tee_streaming_unavailable")
         if not self.durable_accounting:
             async for item in super().stream(request, operation, **kwargs):
                 yield item
@@ -848,6 +850,12 @@ class DurableInferenceBrokerMixin:
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
+        # ADR-035: a NEAR TEE stream settles from the billing readback its
+        # transport captures after the stream ends, inside this lease.
+        runtime_token = _current_runtime.set(handle.request.runtime_path)
+        profile_token = _current_profile.set(handle.profile_id)
+        billing_token = _near_billing.set({"operation_id": handle.request.operation_id}
+            if is_near_operation(handle.request.runtime_path, handle.profile_id) else None)
         completed = False
         settlement_context = _SettlementContext(handle, usage)
         settlement_token = _current_settlement.set(settlement_context)
@@ -876,3 +884,6 @@ class DurableInferenceBrokerMixin:
                 _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
+                _current_runtime.reset(runtime_token)
+                _current_profile.reset(profile_token)
+                _near_billing.reset(billing_token)

@@ -4,7 +4,7 @@ import json
 import uuid
 import logging
 from threading import Event
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from time import perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -17,6 +17,7 @@ from src.approval.runtime import get_current_approval_mode, reset_runtime_contex
 from src.auth.cancellation import reset_revocation_guard, set_revocation_guard
 from src.agent.exceptions import ClarificationRequired
 from src.agent.direct_chat import (
+    direct_chat_turn_timeout,
     openrouter_route_blocked_message,
     route_block_overrun_minimum,
     route_error_from,
@@ -1073,34 +1074,38 @@ async def websocket_chat(websocket: WebSocket):
 
                     async def _stream_direct_reply() -> str:
                         nonlocal emitted_safe_chars
-                        async for delta in stream_direct_local_chat(
+                        # aclosing: a cancelled or disconnected turn closes the
+                        # provider stream in this task, so a NEAR TEE stream
+                        # still reads its billing back inside the lease.
+                        async with aclosing(stream_direct_local_chat(
                             ws_msg.message,
                             runtime_path=direct_runtime_path,
                             is_onboarding=direct_is_onboarding,
                             session_id=session.id,
-                        ):
-                            streamed_parts.append(delta)
-                            safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
-                                "".join(streamed_parts),
-                                emitted_safe_chars,
-                            )
-                            if safe_delta:
-                                await websocket.send_text(
-                                    WSResponse(
-                                        type="delta",
-                                        content=safe_delta,
-                                        session_id=session.id,
-                                        **_ws_lineage_kwargs(session.id, operator, ingress),
-                                        seq=_next_seq(),
-                                    ).model_dump_json()
+                        )) as direct_stream:
+                            async for delta in direct_stream:
+                                streamed_parts.append(delta)
+                                safe_delta, emitted_safe_chars = await redact_secrets_for_streaming_snapshot(
+                                    "".join(streamed_parts),
+                                    emitted_safe_chars,
                                 )
+                                if safe_delta:
+                                    await websocket.send_text(
+                                        WSResponse(
+                                            type="delta",
+                                            content=safe_delta,
+                                            session_id=session.id,
+                                            **_ws_lineage_kwargs(session.id, operator, ingress),
+                                            seq=_next_seq(),
+                                        ).model_dump_json()
+                                    )
                         return "".join(streamed_parts).strip()
 
                     try:
                         final_result = await _authorized_with_timeout(
                             _stream_direct_reply(),
                             auth_revoked,
-                            timeout=min(settings.agent_chat_timeout, 60),
+                            timeout=direct_chat_turn_timeout(),
                         )
                     except asyncio.TimeoutError:
                         raise
@@ -1132,7 +1137,7 @@ async def websocket_chat(websocket: WebSocket):
                         details={
                             "duration_ms": int((perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
-                            "timeout_seconds": min(settings.agent_chat_timeout, 60),
+                            "timeout_seconds": direct_chat_turn_timeout(),
                             "request_id": llm_request_id,
                             "runtime": "direct-openrouter-chat",
                         },

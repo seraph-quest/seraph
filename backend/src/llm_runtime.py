@@ -3304,8 +3304,17 @@ def _near_tee_completion_sync(
     request_context: Any,
     request_id: str | None,
     runtime_path: str,
-) -> SimpleNamespace:
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
+    stop: list[str] | None = None,
+    response_format: dict[str, Any] | None = None,
+    agent: bool = False,
+) -> Any:
     """ADR-035 NEAR TEE text slot through the existing governed sync path.
+
+    ``agent=True`` (the chat agent's tool turn, PR3c) returns one
+    ``ChatMessage`` that may carry OpenAI-compatible tool calls with
+    strictly parsed arguments; otherwise a completion response.
 
     Precontact gates (slot policy, consent, catalog receipt, credential,
     selector and capability proofs) run before admission; the transport runs
@@ -3322,7 +3331,8 @@ def _near_tee_completion_sync(
     receipt_session = _new_route_receipt_session(request_context)
     try:
         call = _run_receipt_hook_sync(prepare_near_tee_call(
-            context=request_context, messages=messages, temperature=temperature, max_tokens=max_tokens))
+            context=request_context, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            tools=tools, tool_choice=tool_choice, stop=stop, response_format=response_format))
     except NearTeeDenied as denied:
         _persist_denied_route_sync(request_context, denied.decision, (denied.code,))
         if _can_log_request(request_id):
@@ -3356,7 +3366,7 @@ def _near_tee_completion_sync(
             _finalize_route_receipt_sync(receipt_session, outcome="failed", request_id=request_id,
                 degradation_codes=("near_tee_transport_failed",))
         raise
-    if outcome.failure_code is not None or outcome.text is None:
+    if outcome.failure_code is not None or (outcome.text is None and outcome.message is None):
         code = outcome.failure_code or "near_tee_empty_output"
         receipt_session.attempt_finished(outcome="failed", error_code=code, decision=call.decision,
             degradation_code="near_tee_output_not_adopted")
@@ -3372,8 +3382,163 @@ def _near_tee_completion_sync(
             details={"runtime_path": runtime_path, "runtime_profile": call.decision.selected.profile.id,
                 "primary_model": str(call.body["model"]), "used_fallback": False, "provider": "near_tee"},
             request_id=request_id)
+    if agent:
+        payload = dict(outcome.message or {"role": "assistant", "content": outcome.text})
+        if isinstance(payload.get("content"), str):
+            payload["content"] = _trim_after_stop_sequences(payload["content"], stop)
+        # No raw provider payload is retained: reasoning never leaves the adapter.
+        return ChatMessage.from_dict(payload)
     message = ChatMessage.from_dict({"role": "assistant", "content": outcome.text})
     return SimpleNamespace(choices=[SimpleNamespace(message=message)], model=str(call.body["model"]))
+
+
+def _near_tee_runtime_controls(runtime_path: str) -> dict[str, Any] | None:
+    """The usable NEAR TEE slot's output/timeout bounds for a canonical route."""
+    try:
+        from src.model_fabric.caller_context import canonical_route_spec
+        from src.model_fabric.configuration import (
+            near_tee_policy_for_runtime, near_tee_slot, read_model_fabric_configuration, route_slot_for_task_class,
+        )
+
+        configured = read_model_fabric_configuration()
+        if configured.egress_revoked or near_tee_policy_for_runtime(configured, runtime_path) is None:
+            return None
+        slot = near_tee_slot(configured, route_slot_for_task_class(canonical_route_spec(runtime_path).task_class))
+    except Exception:
+        return None
+    if slot is None:
+        return None
+    return {"output_limit": int(slot.max_output_tokens), "timeout_seconds": float(slot.timeout_seconds)}
+
+
+async def _near_tee_stream(
+    *,
+    messages: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int,
+    request_context: Any,
+    request_id: str | None,
+    runtime_path: str,
+):
+    """ADR-035 NEAR TEE text-slot streaming through the one shared broker.
+
+    The same precontact gates as the non-streaming slot run before admission
+    (a denial is durable and never contacted). The stream runs inside the
+    admitted lease with its accounting reservation; it is ended no later
+    than the billing reserve before the original deadline and NEAR billing
+    is read back in that lease. Deltas already yielded are never retracted.
+    A known-cost failure settles the charge and releases the lease, then
+    fails the operation; a missing cost is an Unknown liability that keeps
+    the lease blocked. Caller cancellation follows the existing streaming
+    semantics (an uncertain provider outcome). No fallback exists.
+    """
+    from src.model_fabric import persist_denied_route
+    from src.model_fabric.accounting import bind_precontact_guard
+    from src.model_fabric.execution import _persist_bound_admission_receipt
+    from src.model_fabric.hooks import RouteReceiptSession
+    from src.model_fabric.near_tee import (
+        NearTeeDenied, NearTeeError, NearTeeStreamState, near_tee_precontact_reason, near_tee_stream_transport,
+        prepare_near_tee_call,
+    )
+
+    assert_runtime_not_revoked()
+    try:
+        call = await prepare_near_tee_call(context=request_context, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, stream=True)
+    except NearTeeDenied as denied:
+        await persist_denied_route(context=request_context, decision=denied.decision, reason_codes=(denied.code,))
+        if _can_log_request(request_id):
+            await _log_llm_runtime_event(event_type="llm_target_policy_denied",
+                summary="NEAR TEE streaming route denied before contact",
+                details={"runtime_path": runtime_path, "provider": "near_tee", "reason": denied.code},
+                request_id=request_id)
+        raise
+    session = RouteReceiptSession(context=call.context)
+    profile_id = call.decision.selected.profile.id
+    request = GpuAdmissionRequest.from_inference_context(
+        call.context,
+        operation_id=stable_remote_inference_operation_id(call.context, profile_id=profile_id,
+            fallback=str(call.decision.attempt_id or f"{call.context.request_id}:near_tee")),
+        uncertain_on_error=provider_uncertain_on_error(call.decision.selected.profile.provider_kind),
+    )
+    bind_accounting_profile(request.operation_id, profile_id)
+    await prepare_bound_remote_inference(request, profile_id=profile_id)
+    state = NearTeeStreamState()
+    started = False
+
+    async def admitted():
+        nonlocal started
+        session.attempt_started(call.decision, capability_proof_hashes=call.proof_hashes)
+        started = True
+        _note_provider_contact()
+        async for delta in near_tee_stream_transport(call, state):
+            yield delta
+
+    error_receipt = None
+    broker_stream = gpu_admission_broker.stream(request, admitted)
+    try:
+        with bind_precontact_guard(lambda: near_tee_precontact_reason(call)):
+            try:
+                async for delta in broker_stream:
+                    yield delta
+            except GeneratorExit:
+                if not started:
+                    raise
+                # The consumer stopped reading (closed stream, WebSocket gone,
+                # Cordis output cut). Ask the transport to end the provider
+                # stream and drain it in this task so billing is read back and
+                # the known cost settles inside the same lease.
+                state.stop_requested = True
+                try:
+                    async for _delta in broker_stream:
+                        pass
+                except Exception as drained:
+                    error_receipt = getattr(drained, "receipt", None)
+                outcome_code = state.failure_code or "near_tee_stream_cancelled"
+                session.attempt_finished(outcome="failed", error_code=outcome_code, decision=call.decision,
+                    degradation_code="near_tee_output_not_adopted")
+                await session.finalize(outcome="failed", degradation_codes=(outcome_code,))
+                raise
+    except GeneratorExit:
+        raise
+    except BaseException as error:
+        if state.caller_cancelled and not isinstance(error, asyncio.CancelledError):
+            # The broker settled the known cost and released the lease as a
+            # caller cancellation; preserve the task's cancellation semantics.
+            error_receipt = getattr(error, "receipt", None)
+            session.attempt_finished(outcome="failed", error_code="near_tee_stream_cancelled",
+                decision=call.decision, degradation_code="near_tee_output_not_adopted")
+            await session.finalize(outcome="failed", degradation_codes=("near_tee_stream_cancelled",))
+            raise asyncio.CancelledError() from error
+        error_receipt = getattr(error, "receipt", None)
+        if started:
+            code = getattr(error, "code", None) if isinstance(error, NearTeeError) else "transport_failed"
+            session.attempt_finished(outcome="failed", error_code=code or "transport_failed",
+                decision=call.decision, degradation_code="transport_failed")
+            await session.finalize(outcome="failed", degradation_codes=("near_tee_transport_failed",))
+        elif isinstance(error, Exception):
+            await session.finalize_denied(decision=call.decision,
+                reason_codes=("gpu_admission_rejected", f"gpu_admission_{getattr(error, 'code', 'failed')}"),
+                fallback_reason_code="gpu_admission_rejected")
+        raise
+    finally:
+        await _persist_bound_admission_receipt(request.operation_id, receipt=error_receipt, readback=True)
+    if state.failure_code is not None:
+        session.attempt_finished(outcome="failed", error_code=state.failure_code, decision=call.decision,
+            degradation_code="near_tee_output_not_adopted")
+        await session.finalize(outcome="failed", degradation_codes=(state.failure_code,))
+        # Contact happened and its cost was settled; already-delivered
+        # deltas stand, but the answer is not adopted as complete.
+        raise NearTeeError(state.failure_code)
+    session.attempt_finished(outcome="succeeded", error_code=None, decision=call.decision)
+    await session.finalize(outcome="succeeded")
+    if _can_log_request(request_id):
+        await _log_llm_runtime_event(event_type="llm_primary_success",
+            summary=f"NEAR TEE stream succeeded via {call.body['model']}",
+            details={"runtime_path": runtime_path, "runtime_profile": profile_id,
+                "primary_model": str(call.body["model"]), "used_fallback": False, "provider": "near_tee",
+                "streaming": True},
+            request_id=request_id)
 
 
 def _governed_preflight_target(
@@ -3949,7 +4114,12 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         primary_model = self.model_id
         reject_legacy_external_agent_model(primary_model)
         runtime_path = self._runtime_path or "agent_generate"
-        runtime_controls = _openrouter_runtime_controls(self._runtime_profile)
+        # A usable NEAR TEE slot shapes the call whether or not the caller
+        # supplied its context; retired OpenRouter controls never do.
+        near_controls = (_near_tee_runtime_controls(runtime_path)
+            if request_context is None or _near_tee_context(request_context) else None)
+        # A usable NEAR TEE slot owns the route; retired OpenRouter controls never apply.
+        runtime_controls = {} if near_controls else _openrouter_runtime_controls(self._runtime_profile)
         if runtime_controls:
             kwargs["temperature"] = float(runtime_controls["temperature"])
             kwargs["max_tokens"] = min(
@@ -3962,6 +4132,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             kwargs=kwargs,
             fallback=getattr(self, "_seraph_max_tokens", None),
         )
+        if near_controls:
+            # ADR-035: the NEAR TEE slot's own output bound caps the agent turn.
+            reserved_output_tokens = min(reserved_output_tokens, near_controls["output_limit"])
         if request_context is None:
             from src.model_fabric.caller_context import (
                 build_canonical_inference_context,
@@ -3992,6 +4165,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     timeout_seconds=(
                         float(runtime_controls["timeout_seconds"])
                         if runtime_controls
+                        # The slot timeout plus the reserved NEAR billing window.
+                        else near_controls["timeout_seconds"] + 16.0
+                        if near_controls
                         else float(settings.agent_chat_timeout)
                     ),
                     principal=principal,
@@ -4008,6 +4184,26 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         "active OpenRouter-only inference requires a registered canonical runtime path"
                     )
         request_id = _current_llm_request_id()
+        if _near_tee_context(request_context):
+            # ADR-035 PR3c: the chat agent's tool turns use the NEAR TEE text
+            # slot only; no OpenRouter target and no fallback is consulted.
+            temperature = kwargs.get("temperature", dict(getattr(self, "kwargs", {}) or {}).get("temperature"))
+            tools = _transport_json_value(tools_to_call_from) if tools_to_call_from else None
+            return _near_tee_completion_sync(
+                messages=self._provider_messages(messages),
+                temperature=float(settings.model_temperature if temperature is None else temperature),
+                max_tokens=reserved_output_tokens,
+                request_context=request_context,
+                request_id=request_id,
+                runtime_path=runtime_path,
+                tools=tools,
+                # As the governed OpenRouter path: a tool-calling turn must
+                # answer with a tool call (``final_answer`` included).
+                tool_choice="required" if tools else None,
+                stop=list(stop_sequences) if stop_sequences else None,
+                response_format=_transport_json_value(response_format) if response_format is not None else None,
+                agent=True,
+            )
         primary_target = {
             "model_id": primary_model,
             "api_base": self.api_base,
@@ -5097,12 +5293,17 @@ async def stream_completion_with_fallback(
     if request_id is not None and request_id != request_context.request_id:
         raise ProviderProfileConfigurationError("request id does not match inference context")
     if _near_tee_context(request_context):
-        # ADR-035 PR3b is non-streaming; NEAR TEE streaming lands in PR3c.
-        from src.model_fabric import persist_denied_route
+        # ADR-035 PR3c: the NEAR TEE text slot streams through the same broker.
+        from contextlib import aclosing
 
-        await persist_denied_route(context=request_context, decision=None,
-            reason_codes=("near_tee_streaming_unavailable",))
-        raise NoCompliantModelRouteError(("near_tee_streaming_unavailable",))
+        # aclosing: a consumer that stops early closes the NEAR stream in this
+        # task, so its billing readback runs before the lease is released.
+        async with aclosing(_near_tee_stream(messages=messages, temperature=float(temperature),
+                max_tokens=int(max_tokens), request_context=request_context, request_id=request_id,
+                runtime_path=runtime_path)) as stream:
+            async for delta in stream:
+                yield delta
+        return
 
     profile_ids = (
         [request_context.requested_profile_id]

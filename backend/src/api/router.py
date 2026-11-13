@@ -28,6 +28,7 @@ from src.api.model_fabric_settings import router as model_fabric_settings_router
 from src.api.nodes import router as nodes_router
 from src.api.operator import router as operator_router
 from src.api.profile import router as profile_router
+from src.api.reports import router as reports_router
 from src.api.sessions import router as sessions_router
 from src.api.selected_context import router as selected_context_router
 from src.api.observer import router as observer_router
@@ -65,6 +66,7 @@ api_router.include_router(selected_context_router, prefix="/api", tags=["selecte
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
 api_router.include_router(guardian_inbox_router, prefix="/api", tags=["guardian-inbox"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])
+api_router.include_router(reports_router, prefix="/api", tags=["reports"])
 api_router.include_router(tools_router, prefix="/api", tags=["tools"])
 api_router.include_router(telegram_router, prefix="/api", tags=["telegram"])
 api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])

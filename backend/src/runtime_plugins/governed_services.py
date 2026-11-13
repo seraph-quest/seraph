@@ -343,18 +343,32 @@ async def _request_inference(jobs, run, candidate) -> dict:
         _cordis_inflight[owner] = _cordis_inflight.get(owner, 0) + 1
         tokens = set_runtime_context(run.session_id, mode, trust_principal=principal)
         from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
-        if openrouter_retired():
-            # ADR-035: name the stable cause instead of a generic block.
+        from src.llm_runtime import _near_tee_runtime_controls
+        # ADR-035: a usable NEAR TEE text slot serves both purposes through the
+        # same broker and ledger; provider identity is not part of the contract.
+        near_controls = _near_tee_runtime_controls(route)
+        if near_controls is None and openrouter_retired():
+            # No NEAR TEE route: name the stable cause instead of a generic block.
             raise NativeServiceBlocked(OPENROUTER_RETIRED_REASON)
+        if near_controls is not None and candidate["max_tokens"] > near_controls["output_limit"]:
+            # Named, not a generic route block: the request asks for more
+            # output than the operator's NEAR TEE slot allows.
+            raise NativeServiceBlocked("inference_max_tokens_exceeds_route")
         try:
             from dataclasses import replace
             from src.model_fabric.configuration import read_model_fabric_configuration
-            setup = read_model_fabric_configuration().openrouter_setup
-            if setup is None:
-                raise PermissionError("no operator inference route")
+            if near_controls is not None:
+                from src.model_fabric.near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS
+                # The slot timeout plus its reserved billing window.
+                timeout_seconds = near_controls["timeout_seconds"] + NEAR_TEE_BILLING_RESERVE_SECONDS
+            else:
+                setup = read_model_fabric_configuration().openrouter_setup
+                if setup is None:
+                    raise PermissionError("no operator inference route")
+                timeout_seconds = setup.timeout_seconds
             # The route's latency bound is the operator setup's; the job's original deadline still cuts it.
             context = build_canonical_inference_context(route, payload=messages, output_tokens=candidate["max_tokens"],
-                timeout_seconds=setup.timeout_seconds, principal=principal, session_id=run.session_id,
+                timeout_seconds=timeout_seconds, principal=principal, session_id=run.session_id,
                 job_id=run.run_identity, request_id=operation_id, streaming=True, redaction_applied=True)
             context = replace(context, deadline_at=min(context.deadline_at, time.time() + remaining))
         except (PermissionError, ValueError) as exc:

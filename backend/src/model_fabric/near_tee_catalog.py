@@ -343,6 +343,21 @@ def catalog_receipt_block_reason(slot_name: str, profile, *, now: float | None =
     return None
 
 
+FEATURE_BLOCK_REASONS = {"tools": "near_tee_model_tools_unsupported"}
+
+
+def catalog_receipt_feature_block_reason(slot_name: str, feature: str, *,
+                                         receipts: dict[str, dict[str, object]] | None = None) -> str | None:
+    """A caller needing ``feature`` (e.g. ``tools``) requires it in the receipt's
+    catalog ``supportedFeatures``; run after ``catalog_receipt_block_reason``
+    has accepted the receipt. Fails closed with a stable reason."""
+    receipt = (read_catalog_receipts() if receipts is None else receipts).get(slot_name) or {}
+    features = receipt.get("features")
+    if receipt.get("outcome") != "passed" or not isinstance(features, list) or feature not in features:
+        return FEATURE_BLOCK_REASONS.get(feature, "near_tee_model_feature_unsupported")
+    return None
+
+
 def tee_hosting_label(slot_name: str, profile, *, revision: int | None = None,
                       now: float | None = None) -> str | None:
     """The only TEE statement: present only while the receipt is current."""

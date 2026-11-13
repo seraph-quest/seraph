@@ -97,6 +97,16 @@ limitations. Verified with offline local GitHub fixtures and zero
 inference/provider spend. Live GitHub usefulness remains
 **external-unverified**.
 
+**Cockpit end-of-day report reader: Partial.** The cockpit **Reports**
+section and `GET /api/reports/end-of-day[/{episode_id}]` read stored
+end-of-day goal reports only; they cannot generate a report and make no model
+or external call. A report whose `analysis_provider` is `blocked:<reason>` is
+shown as blocked, not as a report. The mix breakdown is shown only when the
+report's archive verifies by path and SHA-256. Missing boundaries: no
+cockpit generation, no pagination past 100 reports, and the blocked-run
+scheduler receipt remains [#1140](https://github.com/seraph-quest/seraph/issues/1140).
+Verified with offline backend route tests and frontend component tests.
+
 **Cordis presets and unattended guardian turns: Partial (#1020, part 1).**
 - **Presets:** chat turns name a reviewed preset that both Python and the Cordis
   sequencer check.
@@ -632,9 +642,10 @@ Readiness remains specific to the selected profile. The CPU core, canonical
 workspace and operator controls work without a local model, GPU, VLM service or
 optional companion. OpenRouter is retired by policy (ADR-035, #1147 PR3a): no
 route makes new OpenRouter contact. Text routes (report, memory and agent
-reasoning synthesis without tools or streaming) resolve to the NEAR TEE text
-slot when the operator configures it (#1147 PR3b, **Partial**); every other
-route, and every text route without a ready slot, reports blocked
+reasoning synthesis, streaming chat, chat-agent tool turns and Cordis
+`inference.request`) resolve to the NEAR TEE text slot when the operator
+configures it (#1147 PR3b/PR3c, **Partial**); every other route (vision,
+embeddings), and every text route without a ready slot, reports blocked
 (`no_active_provider` or the slot's reason); the optional NEAR text Work
 capability (ADR-025) is unchanged apart from the shared NEAR client. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
@@ -699,7 +710,7 @@ text request, inference and billing readback, also sends
 `x-no-aliasing: true`; the response model echo check is unchanged. The ADR-035
 catalog-receipt gate for `near.text` is not implemented yet.
 
-## NEAR TEE text slot (ADR-035, #1147 PR3b)
+## NEAR TEE text slot (ADR-035, #1147 PR3b/PR3c)
 
 **Partial** until live operator use. The `near_tee` provider adapter serves the
 text slot of the model fabric, non-streaming, disabled by default. The operator
@@ -735,7 +746,40 @@ Checks that must hold when bytes would leave (the `x-no-aliasing` header,
 current policy, and a deadline that still leaves the billing window) run under
 the contact writer: a lease granted too late is a durable never-contacted
 denial, not an Unknown.
-Streaming, tools and vision are not served (PR3c/PR4); embeddings: see below.
+Streaming chat and tools (#1147 PR3c, **Partial**): streaming text routes
+(WebSocket direct chat, Cordis `inference.request` interactive and background
+purposes) stream through the same broker lease. Server-sent events are read
+with byte and line caps, identity encoding, no redirects and strict JSON; the
+model echo is checked on the first chunk carrying `model` (a mismatch stops the
+stream); reasoning deltas are never emitted. The stream is ended no later than
+16s before the original deadline and billing is read back after it in the same
+lease; deltas already delivered are never retracted, and a known-cost failure
+(echo mismatch, deadline cut, protocol error) settles and fails the turn. A
+caller that stops reading or is cancelled once NEAR has answered (closed
+stream, WebSocket timeout, Cordis output cap) closes the provider stream, still
+reads billing back and settles with `near_tee_stream_cancelled`; the lane is
+released (tested). A missing cost is an Unknown liability that keeps the lane
+blocked. Lightweight REST/WebSocket chat turns on the slot set their inference
+deadline 2s inside the 60s (or lower) outer turn timeout, so the stream and
+its billing finish before the outer cut; `/api/runtime/status` reports this as
+`chat_turn_cap`, and a slot timeout above the turn deadline is reported and
+refused. Chat-agent
+tool turns send OpenAI-compatible `tools` with the existing forced
+`tool_choice: "required"`, non-streaming; only a model whose catalog receipt
+lists `tools` may serve them (`near_tee_model_tools_unsupported` otherwise),
+tool arguments are parsed as strict JSON objects (duplicate keys and invalid
+JSON rejected) and calls to tools that were not offered fail closed. Streaming
+and tool turns each need their own fresh `streaming` / `tool_use` capability
+check. `/api/runtime/status` `chat_agent` reports the NEAR TEE route, model and
+dated catalog label when the slot is the active provider, otherwise the slot's
+blocked reason with no provider. Chat-turn result adoption authenticates the
+operator root session captured at admission behind a conversation-scoped chat
+principal (a revoked root or a different owner is not adopted; the cost still
+settles). Cordis requests above the slot's output limit are refused with
+`inference_max_tokens_exceeds_route`. PR3c adds `streaming` and `tool_use` to
+the slot profile, which changes its hash: after upgrading, re-run the catalog
+check and every capability check. Vision is not served
+(PR4); embeddings: see below.
 Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
 plaintext; attestation not verified by Seraph; no end-to-end encryption".
 Evidence is intercepted-transport tests only: no live NEAR call, provider
@@ -751,12 +795,12 @@ none (the 2026-10-05 trust-boundary research and ADR-025's billing sources
 cover chat completions only). The gate is a code constant that only a reviewed
 ADR-035 amendment with dated source evidence may set; no setting, catalog
 receipt or capability check clears it. NEAR's specialized-endpoints guide
-(read by the lead 2026-11-14) documents OpenAI-format `/v1/embeddings` for this
+(read by the lead 2026-11-13) documents OpenAI-format `/v1/embeddings` for this
 model but says nothing about aliasing or embedding billing. Until then memory
 recall stays lexical and NEAR receives no memory text.
 
 A second blocker remains even after an evidence amendment: the real catalog
-record for `Qwen/Qwen3-Embedding-0.6B` (lead's read 2026-11-14) has no
+record for `Qwen/Qwen3-Embedding-0.6B` (lead's read 2026-11-13) has no
 `isReady` field and no dimension field, so under ADR-035's readiness rule the
 catalog check reports `near_tee_catalog_not_ready` (fixture-tested). The
 amendment must also decide how readiness is handled for this model.

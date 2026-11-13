@@ -10,17 +10,25 @@ not a confidentiality claim: "TEE-hosted per NEAR catalog as of <time>; NEAR
 gateway receives plaintext; attestation not verified by Seraph; no end-to-end
 encryption".
 
-Parsed catalog shape (source: the lead's 2026-11-13 read and the 2026-10-05
-trust-boundary research; re-confirm against the live record before first
-operator use). A record that does not match it fails closed:
+Parsed catalog shape: the real record the lead read unauthenticated on
+2026-11-13 (e.g. ``/v1/model/z-ai%2Fglm-5.3-flash``). Anything else fails
+closed; metadata fields are read only from ``metadata`` (no top-level
+fallback):
 
-* top level ``modelId`` (string, must equal the canonical id),
+* top level: ``modelId`` (must equal the canonical id) and
   ``inputCostPerToken`` / ``outputCostPerToken`` as
-  ``{"amount": int, "scale": int, "currency": "USD"}`` (USD = amount x 10^-scale);
-* ``metadata`` with ``providerType``, ``attestationSupported``, ``verifiable``,
-  ``isReady``, ``contextLength``, optional ``maxOutputTokens``,
-  ``inputModalities``, ``outputModalities`` and optional ``supportedFeatures``
-  (``features`` accepted as the same list). Readiness absent means not ready.
+  ``{"amount": int, "scale": int, "currency": "USD"}`` (USD per token =
+  amount x 10^-scale; e.g. glm-5.3-flash input ``{80, 9}`` = $0.08/M);
+* ``metadata``: ``providerType``, ``attestationSupported``, ``verifiable``,
+  ``contextLength``, ``architecture.inputModalities`` /
+  ``architecture.outputModalities``, ``supportedFeatures``, optional
+  ``maxOutputLength`` and optional ``isReady``.
+
+Readiness absent (as for ``deepseek-ai/DeepSeek-V4.1-Flash-1017``) is not
+ready. An absent ``maxOutputLength`` is an unknown output limit: the slot then
+passes only with ``max_output_tokens`` at most
+``UNKNOWN_OUTPUT_LIMIT_CAP`` (8192), otherwise
+``near_tee_catalog_output_limit_unknown``.
 """
 
 from __future__ import annotations
@@ -50,6 +58,8 @@ TEE_LABEL_TEMPLATE = ("TEE-hosted per NEAR catalog as of {as_of}; NEAR gateway r
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 # The modalities each implemented slot needs from the catalog record.
 _SLOT_MODALITIES = {"text": ({"text"}, {"text"})}
+# Conservative output bound when the catalog omits maxOutputLength.
+UNKNOWN_OUTPUT_LIMIT_CAP = 8192
 
 
 class NearTeeCatalogError(ValueError):
@@ -130,27 +140,21 @@ def parse_catalog_record(raw: bytes, *, model_id: str) -> CatalogFacts:
     metadata = payload.get("metadata")
     if not isinstance(metadata, dict):
         raise NearTeeCatalogError("near_tee_catalog_response_invalid")
-
-    def field(name):
-        inner, outer = metadata.get(name), payload.get(name)
-        if inner is not None and outer is not None and inner != outer:
-            raise NearTeeCatalogError("near_tee_catalog_response_invalid")
-        return inner if inner is not None else outer
-
-    provider_type = field("providerType")
+    architecture = metadata.get("architecture")
+    if not isinstance(architecture, dict):
+        # The older flat modality layout is not the catalog's shape: fail closed.
+        raise NearTeeCatalogError("near_tee_catalog_response_invalid")
+    provider_type = metadata.get("providerType")
     if provider_type is not None and (not isinstance(provider_type, str) or _SAFE_TOKEN.fullmatch(provider_type) is None):
         raise NearTeeCatalogError("near_tee_catalog_response_invalid")
-    features = field("supportedFeatures")
-    if features is None:
-        features = field("features")
     return CatalogFacts(model_id=model_id, provider_type=provider_type,
-        attestation_supported=_optional_bool(field("attestationSupported")),
-        verifiable=_optional_bool(field("verifiable")), is_ready=_optional_bool(field("isReady")),
-        context_length=_optional_int(field("contextLength")),
-        max_output_tokens=_optional_int(field("maxOutputTokens")),
-        input_modalities=_safe_list(field("inputModalities")),
-        output_modalities=_safe_list(field("outputModalities")),
-        features=_safe_list(features),
+        attestation_supported=_optional_bool(metadata.get("attestationSupported")),
+        verifiable=_optional_bool(metadata.get("verifiable")), is_ready=_optional_bool(metadata.get("isReady")),
+        context_length=_optional_int(metadata.get("contextLength")),
+        max_output_tokens=_optional_int(metadata.get("maxOutputLength")),
+        input_modalities=_safe_list(architecture.get("inputModalities")),
+        output_modalities=_safe_list(architecture.get("outputModalities")),
+        features=_safe_list(metadata.get("supportedFeatures")),
         input_price=_price(payload.get("inputCostPerToken")),
         output_price=_price(payload.get("outputCostPerToken")))
 
@@ -183,7 +187,10 @@ def evaluate_catalog(facts: CatalogFacts, *, slot_name: str, slot) -> tuple[str 
         return "near_tee_catalog_modality_missing", required
     if facts.context_length is None or facts.context_length < slot.max_input_tokens:
         return "near_tee_catalog_context_too_small", required
-    if facts.max_output_tokens is not None and facts.max_output_tokens < slot.max_output_tokens:
+    if facts.max_output_tokens is None:
+        if slot.max_output_tokens > UNKNOWN_OUTPUT_LIMIT_CAP:
+            return "near_tee_catalog_output_limit_unknown", required
+    elif facts.max_output_tokens < slot.max_output_tokens:
         return "near_tee_catalog_output_too_small", required
     if required is None:
         return "near_tee_catalog_price_missing", required
@@ -260,14 +267,22 @@ def write_catalog_receipts(receipts: dict[str, dict[str, object]]) -> None:
 
 
 def catalog_receipt_block_reason(slot_name: str, profile, *, now: float | None = None,
-                                 receipts: dict[str, dict[str, object]] | None = None) -> str | None:
-    """Local precontact re-validation; never refreshes the catalog."""
+                                 receipts: dict[str, dict[str, object]] | None = None,
+                                 revision: int | None = None) -> str | None:
+    """Local precontact re-validation; never refreshes the catalog.
+
+    A receipt is current only for the same canonical model, complete profile
+    hash and configuration (egress) revision, and before its expiry.
+    """
     checked = time.time() if now is None else now
+    if revision is None:
+        from .configuration import read_model_fabric_configuration
+        revision = read_model_fabric_configuration().egress_revision
     receipt = (read_catalog_receipts() if receipts is None else receipts).get(slot_name)
     if receipt is None:
         return RECEIPT_MISSING
     if receipt.get("model_id") != profile.model or receipt.get("profile_hash") != profile.contract_hash \
-            or receipt.get("profile_id") != profile.id:
+            or receipt.get("profile_id") != profile.id or receipt.get("configuration_revision") != revision:
         return RECEIPT_STALE
     expires = receipt.get("expires_at")
     checked_at = receipt.get("checked_at")
@@ -279,11 +294,13 @@ def catalog_receipt_block_reason(slot_name: str, profile, *, now: float | None =
     return None
 
 
-def tee_hosting_label(slot_name: str) -> str | None:
-    receipt = read_catalog_receipts().get(slot_name)
-    if not receipt or receipt.get("outcome") != "passed":
+def tee_hosting_label(slot_name: str, profile, *, revision: int | None = None,
+                      now: float | None = None) -> str | None:
+    """The only TEE statement: present only while the receipt is current."""
+    receipts = read_catalog_receipts()
+    if catalog_receipt_block_reason(slot_name, profile, now=now, receipts=receipts, revision=revision) is not None:
         return None
-    return TEE_LABEL_TEMPLATE.format(as_of=receipt.get("checked_at_iso"))
+    return TEE_LABEL_TEMPLATE.format(as_of=receipts[slot_name].get("checked_at_iso"))
 
 
 async def fetch_catalog_record(model_id: str) -> bytes:

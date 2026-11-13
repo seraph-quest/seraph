@@ -760,7 +760,7 @@ def _report_llm_label(runtime_profile: str) -> str:
         effective = provider_profiles().get(runtime_profile)
         model = effective.model if effective is not None else "unavailable"
         slot = near_tee_slot_for_profile(runtime_profile)
-        hosting = tee_hosting_label(slot) if slot else None
+        hosting = tee_hosting_label(slot, effective) if slot and effective is not None else None
         return f"{runtime_profile}:{model} ({hosting or 'NEAR catalog receipt unavailable'})"
     profile = provider_profiles().get("openrouter")
     model = (profile.model if profile is not None else settings.default_model).strip()

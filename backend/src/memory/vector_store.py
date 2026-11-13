@@ -202,12 +202,13 @@ def add_memory(
     source_session_id: str = "",
 ) -> str:
     """Embed text and store as a memory. Returns the memory ID or empty string on failure."""
+    near_metadata = None
     try:
         if _near_tee_mode():
             # Only a proven, fully re-indexed NEAR namespace accepts new
             # vectors; otherwise the canonical memory is picked up by the
             # next operator-started re-index (no contact here).
-            _near_tee_index_metadata()
+            near_metadata = _near_tee_index_metadata()
         vector = embed(text)
         metadata = _active_embedding_metadata()
         table = _get_or_create_table(metadata=metadata)
@@ -270,6 +271,14 @@ def add_memory(
         )
         return memory_id
     except Exception as exc:
+        if near_metadata is not None:
+            # A canonical memory now lacks its vector: the namespace is no
+            # longer complete and recall degrades to lexical until a re-index.
+            try:
+                from src.memory.near_embedding_reindex import mark_namespace_incomplete
+                mark_namespace_incomplete(near_metadata, "near_tee_index_vector_missing")
+            except Exception:
+                logger.warning("could not mark the NEAR namespace incomplete", exc_info=True)
         logger.exception("Failed to add memory")
         _log_vector_store_event(
             "failed",

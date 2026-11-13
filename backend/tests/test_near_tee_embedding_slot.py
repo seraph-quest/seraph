@@ -52,8 +52,21 @@ def embedding_catalog(**metadata_changes):
     metadata = {"contextLength": 32768, "maxOutputLength": _ABSENT, "supportedFeatures": [], **metadata_changes}
     record = catalog_record(EMBED_MODEL, input_modalities=("text",), output_modalities=("embedding",), **metadata)
     record["inputCostPerToken"] = {"amount": 10, "scale": 9, "currency": "USD"}  # $0.01/M (ADR-035 row)
-    record["outputCostPerToken"] = {"amount": 0, "scale": 9, "currency": "USD"}
+    record["outputCostPerToken"] = {"amount": 10, "scale": 9, "currency": "USD"}  # lead's read 2026-11-14
     return record
+
+
+def real_embedding_record():
+    """The lead's read of NEAR ``/v1/model/Qwen%2FQwen3-Embedding-0.6B`` on 2026-11-14:
+    no ``isReady`` and no dimension field."""
+    return {"modelId": EMBED_MODEL,
+        "inputCostPerToken": {"amount": 10, "scale": 9, "currency": "USD"},
+        "outputCostPerToken": {"amount": 10, "scale": 9, "currency": "USD"},
+        "metadata": {"verifiable": True, "contextLength": 32768, "providerType": "vllm",
+            "attestationSupported": True,
+            "architecture": {"inputModalities": ["text"], "outputModalities": ["embedding"]},
+            "maxOutputLength": 1024, "quantization": "bf16", "huggingFaceId": "Qwen/Qwen3-Embedding-0.6B",
+            "datacenters": [{"country_code": "US"}]}}
 
 
 def embedding_slot_payload(**changes):
@@ -86,8 +99,10 @@ class EmbeddingFixture(NearFixture):
         inputs = body["input"] if isinstance(body["input"], list) else [body["input"]]
         self.counter += 1
         self.body_id = f"embd-fixture-{self.counter}"
+        # Deterministic, text-dependent vectors (distinct texts are not near-duplicates).
         data = [{"object": "embedding", "index": index,
-            "embedding": [float(index + 1)] + [0.5] * (self.dimension - 1)} for index in range(len(inputs))]
+            "embedding": [float(sum(text.encode()) % 17 + 1), float(len(text) % 5 + 1)] + [0.5] * (self.dimension - 2)}
+            for index, text in enumerate(inputs)]
         payload = {"object": "list", "model": self.echo_model or body["model"], "data": data}
         if not self.omit_id:
             payload["id"] = self.body_id
@@ -160,6 +175,10 @@ def test_catalog_check_embedding_modality_cost_and_dimension():
     assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True, request_cost_bound_microusd=81))[0] \
         == "near_tee_catalog_cost_bound_too_small"
     assert facts.embedding_dimension is None
+    no_output_price = embedding_catalog()
+    del no_output_price["outputCostPerToken"]
+    facts_missing = parse_catalog_record(json.dumps(no_output_price).encode(), model_id=EMBED_MODEL)
+    assert evaluate_catalog(facts_missing, slot_name="embedding", slot=_slot(enabled=True))[0] == "near_tee_catalog_price_missing"
     texty = parse_catalog_record(json.dumps(catalog_record(EMBED_MODEL, input_modalities=("text",),
         output_modalities=("text",))).encode(), model_id=EMBED_MODEL)
     assert evaluate_catalog(texty, slot_name="embedding", slot=_slot(enabled=True))[0] == "near_tee_catalog_modality_missing"
@@ -175,6 +194,15 @@ def test_catalog_check_embedding_modality_cost_and_dimension():
     with pytest.raises(NearTeeCatalogError):
         parse_catalog_record(json.dumps(embedding_catalog(embeddingDimension=1024, dimensions=768)).encode(),
             model_id=EMBED_MODEL)
+
+
+def test_real_catalog_record_parses_but_is_not_ready():
+    # ADR-035's isReady rule keeps the real record failing even after an
+    # evidence amendment; that amendment must decide isReady handling.
+    facts = parse_catalog_record(json.dumps(real_embedding_record()).encode(), model_id=EMBED_MODEL)
+    assert facts.is_ready is None and facts.embedding_dimension is None
+    assert facts.output_modalities == ("embedding",) and facts.context_length == 32768
+    assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True)) == ("near_tee_catalog_not_ready", 82)
 
 
 def test_vector_parser_checks_echo_count_dimension_and_normalizes():
@@ -551,3 +579,98 @@ async def test_reindex_cancel_and_unknown_stop_the_run(client, model_fabric_work
     assert stopped["job"]["reason_code"] == "near_tee_cost_liability"
     assert stopped["recall_mode"] == "lexical"
     assert isolated_broker._active_operation_id is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_reindex_over_cap_never_completes(client, model_fabric_workspace, keyless_openrouter,
+        monkeypatch, isolated_broker, evidence_recorded):
+    from src.memory import near_embedding_reindex as reindex
+    await _ready(client, monkeypatch)
+    await _seed_memories(5)
+    monkeypatch.setattr(reindex, "MAX_REINDEX_ITEMS", 3)
+    for _ in range(2):
+        status = await _run_to_end(client, budget=20000)
+        assert status["job"]["status"] == "succeeded", status["job"]
+        assert status["index_complete"] is False and status["recall_mode"] == "lexical"
+        assert status["index_reason_code"] == "near_tee_reindex_over_cap"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_add_memory_vectors_count_and_completeness_decays(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch, isolated_broker, evidence_recorded):
+    from src.approval.runtime import reset_runtime_context, set_runtime_context
+    from src.db.engine import get_session
+    from src.db.models import Memory
+    from src.memory.embedder import embedding_metadata
+    from src.memory.vector_store import add_memory, namespace_row_texts, search_with_status
+
+    near, operator = await _ready(client, monkeypatch)
+    ids = await _seed_memories(3)
+    assert (await _run_to_end(client, budget=20000))["recall_mode"] == "semantic"
+    tokens = set_runtime_context(operator.session_id, "high_risk", trust_principal=operator.principal)
+    try:
+        # A consolidator-style write: canonical row plus an add_memory vector
+        # keyed by Memory.embedding_id.
+        text = "Synthetic fixture memory about the orchard plan."
+        vector_id = await asyncio.to_thread(add_memory, text)
+        assert vector_id
+        async with get_session() as db:
+            memory = Memory(content=text, embedding_id=vector_id)
+            db.add(memory)
+            await db.commit()
+            new_id = memory.id
+        status = (await client.get("/api/settings/model-fabric/near-tee/embedding-reindex")).json()
+        assert status["recall_mode"] == "semantic", status
+        # The add_memory row counts as covered: no re-embedding, no pruning.
+        before = len(near.requests)
+        again = await _run_to_end(client, budget=20000)
+        assert again["job"]["indexed_items"] == 0 and again["index_complete"] is True
+        assert len(near.requests) == before
+        metadata = await asyncio.to_thread(embedding_metadata)
+        stored = await asyncio.to_thread(namespace_row_texts, metadata)
+        assert vector_id in stored and new_id not in stored and set(ids) <= set(stored)
+
+        # Editing a canonical memory without a vector decays completeness.
+        async with get_session() as db:
+            memory = await db.get(Memory, ids[0])
+            memory.content = "Edited synthetic fixture memory with new wording."
+            await db.commit()
+        stale = (await client.get("/api/settings/model-fabric/near-tee/embedding-reindex")).json()
+        assert stale["recall_mode"] == "lexical" and stale["index_reason_code"] == "near_tee_index_stale"
+        before = len(near.requests)
+        assert await asyncio.to_thread(search_with_status, "orchard") == ([], True)
+        assert len(near.requests) == before  # lexical, no contact
+        assert (await _run_to_end(client, budget=20000))["recall_mode"] == "semantic"
+
+        # A failed NEAR-mode add_memory write decays completeness too.
+        near.echo_model = "Qwen/Qwen3-Embedding-8B"
+        assert await asyncio.to_thread(add_memory, "Another synthetic fixture memory.") == ""
+        near.echo_model = None
+        failed = (await client.get("/api/settings/model-fabric/near-tee/embedding-reindex")).json()
+        assert failed["recall_mode"] == "lexical" and failed["index_reason_code"] == "near_tee_index_vector_missing"
+    finally:
+        reset_runtime_context(tokens)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_omitted_slot_without_current_consent_never_blocks_another_save(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch, evidence_recorded):
+    from src.model_fabric.configuration import write_model_fabric_configuration
+    from tests.test_near_tee_text_slot import slot_payload
+    EmbeddingFixture().install(monkeypatch)
+    await _login(client, monkeypatch)
+    await _configure(client)
+    current = read_model_fabric_configuration()
+    stale_slot = replace(current.near_tee.slots["embedding"], purpose_consent_revision=None)
+    write_model_fabric_configuration(replace(current, egress_revision=6,
+        near_tee=replace(current.near_tee, slots={**current.near_tee.slots, "embedding": stale_slot})), expected_revision=5)
+    saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 6,
+        "near_tee": {"slots": {"text": slot_payload()}}})
+    assert saved.status_code == 200, saved.text
+    embedding = saved.json()["near_tee"]["slots"]["embedding"]
+    assert embedding["enabled"] is True and embedding["consent_current"] is False
+    assert embedding["status"] == "blocked" and embedding["reason_code"] == "near_tee_purpose_consent_required"
+    assert saved.json()["near_tee"]["slots"]["text"]["consent_current"] is True

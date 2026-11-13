@@ -671,8 +671,10 @@ async def _put_near_tee(body, persisted):
     slot_inputs = {name: getattr(incoming.slots, name) for name in ("text", "embedding")}
     slots: dict[str, NearTeeSlot | None] = {}
     acknowledged: dict[str, bool] = {}
+    omitted: set[str] = set()
     for name, slot_input in slot_inputs.items():
         if name not in sent:
+            omitted.add(name)
             # Additive slot mutations: an omitted slot keeps its stored value.
             prior_slot = (prior.slots or {}).get(name) if prior is not None else None
             if prior_slot is not None:
@@ -701,6 +703,12 @@ async def _put_near_tee(body, persisted):
     consented = {}
     for name, slot in (setup.slots or {}).items():
         if slot is not None and slot.enabled and slot.purpose_consent_revision is None:
+            if name in omitted:
+                # An omitted slot whose consent cannot be carried stays as
+                # stored but blocked (near_tee_purpose_consent_required); it
+                # never blocks saving another slot.
+                consented[name] = slot
+                continue
             if not acknowledged.get(name):
                 raise HTTPException(status_code=403, detail="near_tee_plaintext_acknowledgement_required")
             slot = replace(slot, purpose_consent_revision=final_revision)

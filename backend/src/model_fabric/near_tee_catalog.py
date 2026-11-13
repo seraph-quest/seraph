@@ -175,28 +175,28 @@ def parse_catalog_record(raw: bytes, *, model_id: str) -> CatalogFacts:
         output_price=_price(payload.get("outputCostPerToken")))
 
 
-def required_cost_microusd(facts: CatalogFacts, *, max_input_tokens: int, max_output_tokens: int,
-                           input_only: bool = False) -> int | None:
-    """Exact ceiling of max_in x input price + max_out x output price, in microUSD.
-
-    ``input_only`` (embedding slot): the endpoint generates no tokens, so only
-    the input price applies and an absent output price is not required.
-    """
-    if facts.input_price is None or (facts.output_price is None and not input_only):
+def required_cost_microusd(facts: CatalogFacts, *, max_input_tokens: int, max_output_tokens: int) -> int | None:
+    """Exact ceiling of max_in x input price + max_out x output price, in microUSD."""
+    if facts.input_price is None or facts.output_price is None:
         return None
     total = 0
     from fractions import Fraction
-    terms = [(max_input_tokens, facts.input_price)]
-    if not input_only:
-        terms.append((max_output_tokens, facts.output_price))
-    for tokens, (amount, scale) in terms:
+    for tokens, (amount, scale) in ((max_input_tokens, facts.input_price), (max_output_tokens, facts.output_price)):
         total += Fraction(tokens * amount * 1_000_000, 10 ** scale)
     return math.ceil(total)
 
 
 def _evaluate_embedding(facts: CatalogFacts, *, slot) -> tuple[str | None, int | None]:
+    """Embedding slot catalog rules.
+
+    The catalog lists an output price for the embedding model, but no source
+    states how NEAR bills embedding output (per vector, per dimension or not
+    at all). The bound therefore includes ``max_output_tokens`` (fixed at 1)
+    x the output price as well as the input; the reserve is a local admission
+    hold and an over-bound genuine charge still goes to overrun review.
+    """
     required = required_cost_microusd(facts, max_input_tokens=slot.max_input_tokens,
-        max_output_tokens=slot.max_output_tokens, input_only=True)
+        max_output_tokens=slot.max_output_tokens)
     if facts.provider_type != "vllm":
         return "near_tee_catalog_provider_not_vllm", required
     if facts.attestation_supported is not True:

@@ -126,6 +126,13 @@ def _write_index_state(state: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def mark_namespace_incomplete(metadata, reason_code: str) -> None:
+    """Completeness decays: recall degrades to lexical until another run."""
+    entry = read_index_state()["namespaces"].get(metadata.namespace)
+    if isinstance(entry, dict) and entry.get("status") == "complete":
+        _update_namespace(metadata, status="incomplete", reason_code=reason_code)
+
+
 def namespace_complete(namespace: str) -> bool:
     entry = read_index_state()["namespaces"].get(namespace)
     return isinstance(entry, dict) and entry.get("status") == "complete"
@@ -149,8 +156,17 @@ def _remember_job(job_id: str) -> None:
 # ── Canonical source ────────────────────────────────────────────────────
 
 
-async def canonical_memory_items() -> list[tuple[str, str, str]]:
-    """(memory id, recall text, category) for every active canonical memory."""
+def _normalize(value) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+async def canonical_memory_items() -> list[tuple]:
+    """(memory id, recall text, category, embedding id, allowed texts) for every
+    active canonical memory, at most ``MAX_REINDEX_ITEMS + 1`` (over-cap probe).
+
+    A vector written by ``add_memory`` is keyed by ``Memory.embedding_id``;
+    hybrid recall accepts it when its text is the memory's summary or content.
+    """
     from sqlmodel import col, select
     from src.db.engine import get_session
     from src.db.models import Memory, MemoryStatus
@@ -169,8 +185,26 @@ async def canonical_memory_items() -> list[tuple[str, str, str]]:
             continue
         text = _memory_hit_text(memory)
         if text:
-            items.append((str(memory.id), text, str(getattr(memory.kind, "value", memory.kind) or "fact")))
+            allowed = frozenset(item for item in (_normalize(memory.summary), _normalize(memory.content)) if item)
+            items.append((str(memory.id), text, str(getattr(memory.kind, "value", memory.kind) or "fact"),
+                str(memory.embedding_id or "") or None, allowed))
     return items
+
+
+def is_covered(item, stored: dict[str, str]) -> bool:
+    """A canonical memory has a current vector under its id or its embedding id."""
+    if item[0] in stored and _normalize(stored[item[0]]) == item[1]:
+        return True
+    return bool(item[3]) and item[3] in stored and _normalize(stored[item[3]]) in item[4]
+
+
+def index_gaps(items, stored, *, max_input_tokens: int) -> tuple[bool, int]:
+    """(over cap, uncovered non-oversize count) of the canonical set vs the index."""
+    from src.model_fabric.near_tee_embeddings import estimate_input_tokens
+    over_cap = len(items) > MAX_REINDEX_ITEMS
+    missing = sum(1 for item in items[:MAX_REINDEX_ITEMS] if not is_covered(item, stored)
+        and estimate_input_tokens([item[1]]) <= max_input_tokens)
+    return over_cap, missing
 
 
 def _batches(items, *, max_batch: int, max_tokens: int):
@@ -234,6 +268,21 @@ async def reindex_status() -> dict[str, Any]:
         except Exception:
             job = None
     complete = metadata is not None and namespace_complete(metadata.namespace)
+    if complete and slot is not None:
+        # Completeness decays when canonical memory changed without a vector
+        # (created, edited, or an add_memory write that failed): compare the
+        # canonical set with the stored index locally (no contact).
+        try:
+            from src.memory import vector_store
+            items = await canonical_memory_items()
+            stored = await asyncio.to_thread(vector_store.namespace_row_texts, metadata)
+            over_cap, missing = index_gaps(items, stored, max_input_tokens=slot.max_input_tokens)
+            if over_cap or missing:
+                mark_namespace_incomplete(metadata, "near_tee_reindex_over_cap" if over_cap else "near_tee_index_stale")
+                complete = False
+        except Exception:
+            complete = False
+    entry = read_index_state()["namespaces"].get(metadata.namespace) if metadata else None
     semantic = complete and reason is None
     return {"schema_version": "seraph.near.tee.embedding.reindex.status.v1",
         "slot_configured": slot is not None, "slot_reason_code": reason,
@@ -241,6 +290,7 @@ async def reindex_status() -> dict[str, Any]:
         "provider": "near_tee", "model": metadata.model if metadata else (slot.model_id if slot else None),
         "measured_dimension": metadata.dimension if metadata else None,
         "index_complete": complete, "recall_mode": "semantic" if semantic else "lexical",
+        "index_reason_code": None if complete else (entry or {}).get("reason_code") if isinstance(entry, dict) else None,
         "notice": None if semantic else LEXICAL_NOTICE, "job": job, "max_items": MAX_REINDEX_ITEMS,
         "automatic": False}
 
@@ -352,6 +402,13 @@ async def wait_for_reindex(job_id: str) -> None:
 # ── Runner ──────────────────────────────────────────────────────────────
 
 
+async def _unknown_embedding_operations() -> set[str]:
+    from src.workflows.job_runtime import durable_job_repository
+    snapshot = await durable_job_repository.inference_accounting_snapshot()
+    return {str(row.get("operation_id")) for row in snapshot.get("operations", [])
+        if row.get("runtime_path") == "memory_embedding" and row.get("state") == "unknown"}
+
+
 async def _finish(job_id, owner, fence, status, *, reason=None, summary, result):
     from src.workflows.job_runtime import durable_job_repository
     current = await durable_job_repository.get_job(job_id)
@@ -375,9 +432,12 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
         "indexed_items": 0, "skipped_existing": 0, "oversize_items": 0, "batches": 0, "spent_microusd": 0}
     result = {"memory_status": "derived_index_only", "namespace": plan["namespace"]}
     try:
-        items = await canonical_memory_items()
+        probe = await canonical_memory_items()
+        over_cap = len(probe) > MAX_REINDEX_ITEMS
+        items = probe[:MAX_REINDEX_ITEMS]
+        progress["over_cap"] = over_cap
         existing = await asyncio.to_thread(vector_store.namespace_row_texts, metadata)
-        pending = [item for item in items if existing.get(item[0]) != item[1]]
+        pending = [item for item in items if not is_covered(item, existing)]
         progress["skipped_existing"] = len(items) - len(pending)
         planned = pending[:plan["max_items"]]
         progress["planned_items"] = len(planned)
@@ -399,14 +459,21 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
                 await _finish(job_id, owner, fence, "blocked", reason="near_tee_reindex_budget_exhausted",
                     summary="Budget reached; start another run to resume", result={**result, **progress})
                 return
-            # Yield to the event loop so queued chat is admitted first by the broker.
+            # Keep the lease live before each (possibly long) broker call and
+            # yield so queued chat is admitted first by the broker.
+            await durable_job_repository.heartbeat_job(job_id, owner=owner, fencing_token=fence,
+                lease_seconds=LEASE_SECONDS)
             await asyncio.sleep(0)
+            unknown_before = await _unknown_embedding_operations()
             try:
                 vectors, cost, used = await asyncio.to_thread(embed_batch_near_tee, [item[1] for item in batch],
                     principal=principal)
             except EmbeddingError as exc:
                 progress["spent_microusd"] += int(getattr(exc, "cost_microusd", None) or 0)
-                status = "cost_liability" if exc.reason_code in UNKNOWN_REASONS else "blocked"
+                # The accounting ledger, not the error text, decides: a new
+                # Unknown memory_embedding operation is a cost liability.
+                new_unknown = (await _unknown_embedding_operations()) - unknown_before
+                status = "cost_liability" if new_unknown or exc.reason_code in UNKNOWN_REASONS else "blocked"
                 await _finish(job_id, owner, fence, status, reason=exc.reason_code,
                     summary="Re-index stopped: " + exc.reason_code, result={**result, **progress})
                 return
@@ -424,19 +491,18 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
             await durable_job_repository.record_checkpoint(job_id, checkpoint_id=f"near-reindex:{progress['batches']}",
                 state=dict(progress), checkpoint_payload=dict(progress), owner=owner, fencing_token=fence,
                 expected_revision=current["revision"])
-            await durable_job_repository.heartbeat_job(job_id, owner=owner, fencing_token=fence,
-                lease_seconds=LEASE_SECONDS)
         # Verified local readback of the derived index before success: every
         # canonical memory not excluded as oversize is present with its text.
-        if len(items) <= MAX_REINDEX_ITEMS:
+        if not over_cap:
             # Derived rows of memories that are no longer active canonical
-            # memory (deleted, tombstoned, archived) are removed.
-            canonical_ids = {item[0] for item in items}
+            # memory (deleted, tombstoned, archived) are removed. A memory's
+            # own id and its add_memory embedding id both count as canonical.
+            canonical_ids = {item[0] for item in items} | {item[3] for item in items if item[3]}
             stale = [row_id for row_id in existing if row_id not in canonical_ids]
             if stale:
                 await asyncio.to_thread(vector_store.delete_namespace_rows, metadata, stale)
         stored = await asyncio.to_thread(vector_store.namespace_row_texts, metadata)
-        covered = [item for item in items if item[0] in stored and stored[item[0]] == item[1]]
+        covered = [item for item in items if is_covered(item, stored)]
         digest = hashlib.sha256(json.dumps(sorted((item[0], hashlib.sha256(item[1].encode()).hexdigest())
             for item in covered)).encode()).hexdigest()
         current = await durable_job_repository.get_job(job_id)
@@ -451,15 +517,19 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
         covered_ids = {item[0] for item in covered}
         remaining = sum(1 for item in items if item[0] not in covered_ids and item[0] not in oversize)
         progress["covered_items"] = len(covered)
-        if remaining == 0:
+        if over_cap:
+            # More canonical memories than one run may cover: never complete.
+            _update_namespace(metadata, status="incomplete", job_id=job_id, reason_code="near_tee_reindex_over_cap",
+                remaining_items=max(remaining, 0))
+        elif remaining == 0:
             # Oversize memories (over the slot's input bound) are never
             # truncated; they stay reachable through lexical recall only.
-            _update_namespace(metadata, status="complete", job_id=job_id, item_count=len(items),
+            _update_namespace(metadata, status="complete", job_id=job_id, item_count=len(items), reason_code=None,
                 excluded_oversize_items=progress["oversize_items"],
                 completed_at=datetime.now(timezone.utc).isoformat())
         else:
             _update_namespace(metadata, status="incomplete", job_id=job_id, remaining_items=max(remaining, 0),
-                oversize_items=progress["oversize_items"])
+                reason_code="near_tee_reindex_items_remaining", oversize_items=progress["oversize_items"])
         await _finish(job_id, owner, fence, "succeeded", summary=f"Indexed {progress['indexed_items']} memories",
             result={**result, **progress, "remaining_items": max(remaining, 0)})
     except Exception:

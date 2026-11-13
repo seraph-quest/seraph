@@ -16,6 +16,11 @@ from src.vault.repository import vault_repository
 from src.workspace.production import ProductionWorkspace,prepare_lifecycle_directory
 from tests.test_audio_model_fabric_v3 import configured_audio
 
+# ADR-035 retired OpenRouter by policy: audio documentation metadata reads are
+# refused (tests/test_openrouter_retirement.py). This module pins the historical
+# documentary mechanics behind the explicit legacy fixture.
+pytestmark = pytest.mark.openrouter_legacy
+
 @pytest.fixture
 async def documentary(async_db,tmp_path,monkeypatch):
     root=tmp_path/'workspace';root.mkdir()

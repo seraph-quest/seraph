@@ -48,8 +48,11 @@ def _no_provider_contact():
     """Intercept every provider transport; any call fails the test."""
     calls: list[str] = []
 
-    def forbidden(name):
-        def spy(*_args, **_kwargs):
+    def forbidden(name, original=None):
+        def spy(self=None, *args, **kwargs):
+            # The in-process ASGI test client is not a provider transport.
+            if original is not None and isinstance(getattr(self, "_transport", None), httpx.ASGITransport):
+                return original(self, *args, **kwargs)
             calls.append(name)
             raise AssertionError(f"provider transport contacted: {name}")
         return spy
@@ -57,8 +60,8 @@ def _no_provider_contact():
     with (
         patch.object(httpx.Client, "post", forbidden("httpx.Client.post")),
         patch.object(httpx.Client, "stream", forbidden("httpx.Client.stream")),
-        patch.object(httpx.AsyncClient, "post", forbidden("httpx.AsyncClient.post")),
-        patch.object(httpx.AsyncClient, "stream", forbidden("httpx.AsyncClient.stream")),
+        patch.object(httpx.AsyncClient, "post", forbidden("httpx.AsyncClient.post", httpx.AsyncClient.post)),
+        patch.object(httpx.AsyncClient, "stream", forbidden("httpx.AsyncClient.stream", httpx.AsyncClient.stream)),
         patch("litellm.completion", forbidden("litellm.completion")),
         patch("litellm.acompletion", forbidden("litellm.acompletion")),
     ):
@@ -415,3 +418,165 @@ async def test_screen_analysis_refuses_openrouter_and_tells_daemon_no_cloud_prov
 
 def test_legacy_fixture_is_explicit_opt_in(openrouter_legacy_reenabled):
     assert retirement.openrouter_retired() is False
+
+
+# ── Critic follow-ups ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_audio_documentation_metadata_reads_never_contact_openrouter(client):
+    from src.model_fabric.audio_documentation import DocumentationError, metadata_get, stage
+    with _no_provider_contact():
+        with pytest.raises(DocumentationError) as raised:
+            await metadata_get("https://openrouter.ai/api/v1/key", "sk-management-fixture", 16384)
+        assert raised.value.code == OPENROUTER_RETIRED_REASON and raised.value.status == 409
+        with pytest.raises(DocumentationError, match=OPENROUTER_RETIRED_REASON):
+            await stage(None, None, None)
+        response = await client.post("/api/settings/model-fabric/audio-documentation", json={
+            "action": "acquire_selected_profile_metadata", "expected_egress_revision": 1,
+            "expected_audio_profile_hash": "a" * 64, "metadata_selection_ref": "selection-fixture",
+            "expected_metadata_selection_digest": "b" * 64,
+            "official_supplement_catalog_id": "openrouter-audio-guide.v1"})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == OPENROUTER_RETIRED_REASON
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_boot_publishes_route_revoke_once_without_touching_ledger(client, model_fabric_workspace, keyless_openrouter):
+    from src.model_fabric.configuration import openrouter_route_revoke_status, run_openrouter_route_revoke_at_boot
+    from src.model_fabric.effective_policy import current_near_text_policy
+    from src.workflows.job_runtime import durable_job_repository
+    from tests.test_near_text_setup_api import save
+    with patch.object(retirement, "_OPENROUTER_RETIRED", False):
+        saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
+            "openrouter_setup": _v2_setup_payload(api_key="sk-or-retained")})
+        assert saved.status_code == 200, saved.text
+        assert (await save(client, 3, api_key="sk-near-kept")).status_code == 200
+    stored = read_model_fabric_configuration()
+    assert stored.openrouter_setup.cloud_egress_acknowledged is True
+    assert stored.openrouter_setup.purpose_consents and stored.openrouter_setup.routes["text"].enabled
+    before = await durable_job_repository.inference_accounting_snapshot()
+
+    with _no_provider_contact():
+        first = run_openrouter_route_revoke_at_boot()
+    assert first["status"] == "published", first
+    revoked = read_model_fabric_configuration()
+    assert revoked.status == "ready" and revoked.egress_revision == stored.egress_revision + 2
+    assert revoked.egress_revoked is False
+    assert revoked.openrouter_setup.cloud_egress_acknowledged is False
+    assert revoked.openrouter_setup.purpose_consents == {}
+    assert all(route.enabled is False for route in revoked.openrouter_setup.routes.values() if route is not None)
+    assert all(not profile.enabled for profile in revoked.profiles if profile.provider_kind == "openrouter")
+    assert revoked.inference_lane == effective_inference_lane(stored)
+    # NEAR is not fenced: its consent moves to the new revision.
+    near, _digest = current_near_text_policy()
+    assert near.near_text.plaintext_egress_consent_revision == revoked.egress_revision
+    after = await durable_job_repository.inference_accounting_snapshot()
+    for field in ("ceiling_microusd", "deployment_id", "ledger_digest", "revision", "operations"):
+        assert after.get(field) == before.get(field), field
+
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    published = path.read_bytes()
+    second = run_openrouter_route_revoke_at_boot()
+    assert second["status"] == "noop" and path.read_bytes() == published
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert status["provider_retirement"]["openrouter"]["route_revoke"]["status"] == "noop"
+    assert openrouter_route_revoke_status()["status"] == "noop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_boot_revoke_failure_is_visible_and_never_crashes(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.model_fabric import configuration
+    with patch.object(retirement, "_OPENROUTER_RETIRED", False):
+        assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
+            "openrouter_setup": _v2_setup_payload()})).status_code == 200
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    stored = path.read_bytes()
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("witness unavailable")
+    monkeypatch.setattr(configuration, "write_model_fabric_configuration", broken)
+    result = configuration.run_openrouter_route_revoke_at_boot()
+    assert result == {"status": "degraded", "reason_code": "openrouter_route_revoke_unavailable"}
+    assert path.read_bytes() == stored
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert status["provider_retirement"]["openrouter"]["route_revoke"]["status"] == "degraded"
+    # Retirement still holds at every route without the stored revoke.
+    assert effective_workload_policy("chat_agent").allowed_provider_kinds == ()
+
+
+@pytest.mark.asyncio
+async def test_lane_reserve_review_unblocks_openrouter_only_overrun(accounting_db):
+    from fastapi import HTTPException
+    from src.api.model_fabric_settings import ModelFabricConfigurationRequest, _put_inference_lane
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_inference_accounting import request, setup_configuration
+    repository = DurableJobRepository()
+    with patch.object(retirement, "_OPENROUTER_RETIRED", False):
+        setup_configuration(ceiling=1000, bound=1)
+        await repository.configure_inference_accounting(1000)
+
+        async def charged():
+            return {"usage": {"cost": "0.0000051"}}
+        await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("over-bound"), charged)
+    assert (await repository.inference_accounting_snapshot())["overrun_max_cost_microusd"] == 6
+    persisted = read_model_fabric_configuration()
+
+    def body(**lane):
+        return ModelFabricConfigurationRequest(expected_policy_revision=persisted.egress_revision,
+            inference_lane={"spend_ceiling_microusd": 1000, **lane})
+    with pytest.raises(HTTPException) as refused:
+        await _put_inference_lane(body(), persisted)
+    assert refused.value.status_code == 409 and refused.value.detail["code"] == "request_bound_below_overrun"
+    with pytest.raises(HTTPException):
+        await _put_inference_lane(body(request_reserve_review_microusd=5), persisted)
+    assert read_model_fabric_configuration().inference_lane is None
+    payload = await _put_inference_lane(body(request_reserve_review_microusd=6), persisted)
+    active = read_model_fabric_configuration()
+    assert active.inference_lane.request_reserve_review_microusd == 6
+    assert payload["inference_lane"]["published"] is True
+    snapshot = await repository.inference_accounting_snapshot()
+    assert snapshot["overrun_max_cost_microusd"] == 0 and snapshot["status"] == "ready"
+    assert snapshot["committed_microusd"] == 6
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_reports_openrouter_retired_reason(client):
+    from src.agent.direct_chat import openrouter_route_block_recovery, stream_direct_local_chat
+    with _no_provider_contact():
+        with patch("src.api.chat.should_use_direct_local_chat", return_value=True), \
+                patch("src.api.chat.direct_local_chat_route_error", return_value=None):
+            response = await client.post("/api/chat", json={"message": "Hello"})
+        with pytest.raises(NoCompliantModelRouteError) as raised:
+            async for _delta in stream_direct_local_chat("Hello", runtime_path="chat_agent", is_onboarding=False,
+                    session_id="session-retirement"):
+                pytest.fail("a retired route must not stream")
+    assert raised.value.reason_codes == (OPENROUTER_RETIRED_REASON,)
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert detail["route_reason"] == OPENROUTER_RETIRED_REASON
+    assert detail["recovery_action"] == OPENROUTER_RETIRED_REASON
+    assert detail["remote_outcome"] == "not_contacted"
+    message, _action = openrouter_route_block_recovery(OPENROUTER_RETIRED_REASON)
+    assert "OpenRouter is retired (ADR-035)" in message and "No model call was made" in message
+
+
+@pytest.mark.asyncio
+async def test_settings_api_retired_counterparts_for_profiles_canary_and_status(client):
+    profile = {"id": "persisted-openrouter", "provider_kind": "openrouter", "model": "anthropic/claude-sonnet-4",
+        "api_base": "https://openrouter.ai/api/v1", "secret_env": "OPENROUTER_API_KEY",
+        "capabilities": ["text"], "task_class": "interactive_chat"}
+    refused = await client.put("/api/settings/model-fabric", json={"profiles": [profile]})
+    assert refused.status_code == 409 and refused.json()["detail"]["code"] == OPENROUTER_RETIRED_REASON
+    for profile_id in ("openrouter", "openrouter-screenshot-vision", "openrouter.embedding"):
+        canary = await client.post("/api/settings/model-fabric/canary", json={"profile_id": profile_id, "capability": "text"})
+        assert canary.status_code == 409 and canary.json()["detail"]["code"] == OPENROUTER_RETIRED_REASON
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert status["status"] == "blocked" and status["status_scope"] == "canonical_inference_routes"
+    assert status["near_text_ready"] is False
+    runtime = (await client.get("/api/runtime/status")).json()
+    assert runtime["effective_runtime"]["inference_readiness"]["status"] == "blocked"
+    assert OPENROUTER_RETIRED_REASON in runtime["effective_runtime"]["inference_readiness"]["reasons"]

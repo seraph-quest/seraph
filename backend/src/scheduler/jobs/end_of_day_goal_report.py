@@ -753,6 +753,15 @@ def _unique_values(values: list[str]) -> list[str]:
 
 
 def _report_llm_label(runtime_profile: str) -> str:
+    if runtime_profile.startswith("near_tee."):
+        # ADR-035: label from the effective route and its catalog receipt time.
+        from src.model_fabric.configuration import near_tee_slot_for_profile
+        from src.model_fabric.near_tee_catalog import tee_hosting_label
+        effective = provider_profiles().get(runtime_profile)
+        model = effective.model if effective is not None else "unavailable"
+        slot = near_tee_slot_for_profile(runtime_profile)
+        hosting = tee_hosting_label(slot, effective) if slot and effective is not None else None
+        return f"{runtime_profile}:{model} ({hosting or 'NEAR catalog receipt unavailable'})"
     profile = provider_profiles().get("openrouter")
     model = (profile.model if profile is not None else settings.default_model).strip()
     if runtime_profile:
@@ -776,8 +785,8 @@ async def build_end_of_day_goal_report(report_day: date | None = None) -> dict[s
             "(background inference). No model call was made."
             if decision.reason == "disabled_by_operator"
             else "End-of-day report LLM generation was blocked by Seraph's screen-data privacy policy. "
-            f"Reason: {decision.reason}. Configure the governed OpenRouter model, cloud consent, "
-            "approved upstreams, and budget."
+            f"Reason: {decision.reason}. Configure the NEAR TEE text slot (model, purpose consent, "
+            "catalog check and capability check) and the shared inference lane budget."
         )
         return {
             "date": target_day.isoformat(),

@@ -17,6 +17,7 @@ from .contracts import (
     RouteRejection,
     bind_final_inference_payload,
     finalized_openai_compatible_body,
+    provider_uncertain_on_error,
 )
 from .hooks import persist_denied_route
 from .remote_inference_admission import (
@@ -201,7 +202,7 @@ async def execute_streaming(
                 profile_id=candidate.profile.id,
                 fallback=decision.attempt_id or f"{attempt_context.request_id}:{candidate.profile.id}",
             ),
-            uncertain_on_error=(candidate.profile.provider_kind == "openrouter"),
+            uncertain_on_error=provider_uncertain_on_error(candidate.profile.provider_kind),
         )
         await prepare_bound_remote_inference(
             admission_request,
@@ -383,7 +384,7 @@ async def run_preflighted_adapter(
             profile_id=decision.selected.profile.id,
             fallback=decision.attempt_id or f"{context.request_id}:{decision.selected.profile.id}",
         ),
-        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"
+        uncertain_on_error=(provider_uncertain_on_error(decision.selected.profile.provider_kind)
             or context.runtime_path == "near_text_native" and decision.selected.profile.id == "near.text"),
     )
     await prepare_bound_remote_inference(
@@ -495,7 +496,7 @@ def execute_sync_adapter(
             fallback=decision.attempt_id
             or f"{context.request_id}:{decision.selected.profile.id}",
         ),
-        uncertain_on_error=(decision.selected.profile.provider_kind == "openrouter"),
+        uncertain_on_error=provider_uncertain_on_error(decision.selected.profile.provider_kind),
     )
     callback_started = False
     attempt_completed = False

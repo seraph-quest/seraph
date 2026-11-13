@@ -303,17 +303,17 @@ def _review(
 
 _CANONICAL_ADAPTERS = (
     _review(
-        "model_fabric/near_text.py",
-        87,
-        "_read_response",
+        "model_fabric/near_client.py",
+        98,
+        "read_near_response",
         "client.stream",
         "canonical_adapter",
-        "ADR-025 fixed HTTPS nonstreaming NEAR leaf, called through run_preflighted_adapter after current native authority, plaintext policy, final-payload preflight and durable accounting ownership; transfer has deadline/byte bounds with TLS verification and redirects disabled.",
-        "Retain as the dedicated near_text_native/near.text admitted leaf; preserve shared serial admission, policy rechecks and accounting ownership before extending callers.",
+        "Shared ADR-025/ADR-035 NEAR HTTPS leaf for the pinned cloud-api.near.ai/v1 base: near_text (run_preflighted_adapter after native authority, plaintext policy, final-payload preflight and durable accounting) and the NEAR TEE text slot (completion_with_fallback precontact gates, then the shared serial broker lease with accounting; also the authenticated catalog-check GET, which carries no operator content or credential). Deadline/byte bounds, identity encoding, x-no-aliasing, TLS verification, trust_env=False and redirects disabled.",
+        "Retain as the one NEAR transfer leaf; new NEAR slots (streaming, vision, embedding) must keep shared serial admission, policy rechecks and accounting ownership before reusing it.",
     ),
     _review(
         "llm_runtime.py",
-        1746,
+        1747,
         "_governed_bounded_chat_transfer",
         "client.stream",
         "canonical_adapter",
@@ -322,7 +322,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1678,
+        1679,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -331,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        5055,
+        5163,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -416,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4114,
+        4201,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -425,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4194,
+        4281,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -434,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4662,
+        4763,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -443,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4741,
+        4842,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -452,7 +452,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1782,
+        2158,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -461,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1795,
+        2171,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -470,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        1810,
+        2186,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

@@ -20,9 +20,29 @@ _current_usage: ContextVar[dict[str, object] | None] = ContextVar("inference_acc
 _current_policy_digest: ContextVar[str | None] = ContextVar("inference_contact_policy_digest", default=None)
 _profile_bindings: ContextVar[dict[str, str]] = ContextVar("inference_accounting_profiles", default={})
 _current_runtime: ContextVar[str | None] = ContextVar("inference_accounting_runtime", default=None)
+_current_profile: ContextVar[str | None] = ContextVar("inference_accounting_profile", default=None)
 _near_billing: ContextVar[dict[str, object] | None] = ContextVar("near_billing_evidence", default=None)
 _near_contact: ContextVar[object | None] = ContextVar("near_contact_authority", default=None)
 _task_group: ContextVar[object | None] = ContextVar("general_task_accounting_group", default=None)
+_precontact_guard: ContextVar[object | None] = ContextVar("inference_precontact_guard", default=None)
+
+
+@contextmanager
+def bind_precontact_guard(guard):
+    """Run ``guard()`` under the contact writer before contact is recorded.
+
+    A non-None reason code becomes a durable, sealed provider-contact denial
+    (never contacted): the reservation is released and the serial lease is
+    not blocked. Used for checks that must hold when bytes would leave, such
+    as the deadline still leaving the NEAR billing window (ADR-035).
+    """
+    if not callable(guard):
+        raise InferenceAccountingError("precontact_guard_invalid")
+    token = _precontact_guard.set(guard)
+    try:
+        yield
+    finally:
+        _precontact_guard.reset(token)
 
 
 @contextmanager
@@ -106,16 +126,32 @@ def bind_near_contact_authority(witness):
         _near_contact.reset(token)
 
 
-def _policy_for_runtime(runtime_path):
+def near_tee_profile_slot(runtime_path, profile_id):
+    """The NEAR TEE slot of an accounting operation, or None (ADR-035)."""
+    if runtime_path == "near_text_native":
+        return None
+    from .configuration import near_tee_slot_for_profile
+    return near_tee_slot_for_profile(profile_id)
+
+
+def is_near_operation(runtime_path, profile_id) -> bool:
+    """NEAR operations settle only from NEAR billing evidence."""
+    return runtime_path == "near_text_native" or near_tee_profile_slot(runtime_path, profile_id) is not None
+
+
+def _policy_for_runtime(runtime_path, profile_id=None):
     if runtime_path == "near_text_native":
         from .effective_policy import current_near_text_policy
         return current_near_text_policy()
+    if (slot := near_tee_profile_slot(runtime_path, profile_id)) is not None:
+        from .effective_policy import current_near_tee_policy
+        return current_near_tee_policy(slot)
     return current_inference_policy()
 
 
 def current_near_accounting_operation_id() -> str:
     collector = _near_billing.get()
-    if _current_runtime.get() != "near_text_native" or collector is None:
+    if not is_near_operation(_current_runtime.get(), _current_profile.get()) or collector is None:
         raise InferenceAccountingError("near_accounting_context_required")
     return collector["operation_id"]
 
@@ -169,9 +205,11 @@ def assert_current_inference_policy() -> None:
         from src.auth.cancellation import assert_runtime_not_revoked
         assert_runtime_not_revoked()
         from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
-        if _current_runtime.get() != "near_text_native" and openrouter_retired():
+        # ADR-035: the retirement fence covers OpenRouter (every non-NEAR
+        # broker path); NEAR text and NEAR TEE operations are not fenced.
+        if not is_near_operation(_current_runtime.get(), _current_profile.get()) and openrouter_retired():
             raise InferenceAccountingError(OPENROUTER_RETIRED_REASON)
-        _configured, actual = _policy_for_runtime(_current_runtime.get())
+        _configured, actual = _policy_for_runtime(_current_runtime.get(), _current_profile.get())
         if expected != actual:
             raise InferenceAccountingError("provider_policy_revision_changed")
 
@@ -189,6 +227,7 @@ class _AccountingHandle:
     contacted: bool = False
     committed_denial: object | None = None
     audio_native: object | None = None
+    profile_id: str | None = None
 
 
 @dataclass
@@ -340,8 +379,10 @@ class DurableInferenceBrokerMixin:
             if len(rows) != 1:
                 return deferred("settled_operation_unavailable")
             row = rows[0]
+            near_text_row = row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text"
+            near_tee_row = near_tee_profile_slot(row.get("runtime_path"), row.get("profile_id")) is not None
             if (row.get("job_id") != job_id or row.get("revision") != expected_revision
-                or row.get("runtime_path") != "near_text_native" or row.get("profile_id") != "near.text"):
+                or not (near_text_row or near_tee_row)):
                 return deferred("settled_operation_changed")
             actual = row.get("actual_cost_microusd")
             if (row.get("state") != "settled" or row.get("contact_started_at") is None
@@ -356,7 +397,7 @@ class DurableInferenceBrokerMixin:
             except KeyError:
                 return {"status": "absent", "reason_code": "no_local_operation"}
             if (receipt.operation_id != operation_id or receipt.job_id != job_id
-                or receipt.owner_id != row["owner_id"] or receipt.runtime_path != "near_text_native"):
+                or receipt.owner_id != row["owner_id"] or receipt.runtime_path != row.get("runtime_path")):
                 return deferred("broker_identity_changed")
             if (receipt.status == "failed" and not receipt.reconciliation_required
                 and receipt.callback_completed and receipt.cost_settled_microusd == actual):
@@ -406,7 +447,9 @@ class DurableInferenceBrokerMixin:
             if not isinstance(request.owner_id, str) or not request.owner_id.startswith(("operator:", "service:")) or len(request.owner_id) > 256:
                 raise InferenceAccountingError("accounting_job_authority_invalid")
             from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
-            if request.runtime_path != "near_text_native" and openrouter_retired():
+            bound_profile = _profile_bindings.get().get(request.operation_id)
+            tee_slot = near_tee_profile_slot(request.runtime_path, bound_profile)
+            if request.runtime_path != "near_text_native" and tee_slot is None and openrouter_retired():
                 # ADR-035: every non-NEAR broker path is an OpenRouter route.
                 # Deny before any reservation, so no Unknown liability arises.
                 raise InferenceAccountingError(OPENROUTER_RETIRED_REASON)
@@ -414,14 +457,37 @@ class DurableInferenceBrokerMixin:
             persisted = read_model_fabric_configuration()
             if persisted.status == "degraded":
                 raise InferenceAccountingError(persisted.error_code or "provider_policy_continuity_unavailable")
-            configured, policy_digest = _policy_for_runtime(request.runtime_path)
+            try:
+                configured, policy_digest = _policy_for_runtime(request.runtime_path, bound_profile)
+            except PermissionError as exc:
+                if tee_slot is None:
+                    raise
+                raise InferenceAccountingError(str(exc) or "near_tee_policy_unavailable") from None
             near = request.runtime_path == "near_text_native"
-            setup = configured.near_text if near else configured.openrouter_setup
-            bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
+            if tee_slot is not None:
+                # Exact NEAR TEE slot binding: the canonical route's slot (or
+                # the capability check's exact profile) and its own reserve.
+                from .configuration import near_tee_slot, route_slot_for_task_class
+                from .caller_context import canonical_route_spec
+                if request.runtime_path != "capability_probe":
+                    try:
+                        route_slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class)
+                    except ValueError:
+                        route_slot = None
+                    if route_slot != tee_slot:
+                        raise InferenceAccountingError("accounting_profile_binding_invalid")
+                setup = configured.near_tee
+                tee_config = near_tee_slot(configured, tee_slot)
+                bound = tee_config.request_cost_bound_microusd
+            else:
+                setup = configured.near_text if near else configured.openrouter_setup
+                bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
             from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION, route_slot_for_task_class
-            if request.runtime_path == "audio_transcription" and setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+            if request.runtime_path == "audio_transcription" and (tee_slot is not None or setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION):
                 raise InferenceAccountingError("audio_setup_v3_required")
-            if near:
+            if tee_slot is not None:
+                pass
+            elif near:
                 if _profile_bindings.get().get(request.operation_id) != "near.text":
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
                 bound = setup.request_cost_bound_microusd
@@ -491,11 +557,11 @@ class DurableInferenceBrokerMixin:
                     reservation = await rebind_funded_child(repository, request=request,
                         owner=binding.owner, fencing_token=binding.fencing_token,
                         policy_digest=policy_digest,
-                        profile_id=_profile_bindings.get().get(request.operation_id, setup.profile_id),
+                        profile_id=_profile_bindings.get().get(request.operation_id, getattr(setup, "profile_id", None)),
                         bound=bound)
                     return _AccountingHandle(request, repository, binding.job_id,
                         binding.owner, binding.fencing_token, policy_digest,
-                        reservation["sequence"], False)
+                        reservation["sequence"], False, profile_id=bound_profile)
             snapshot = await repository.inference_accounting_snapshot()
             if snapshot["status"] != "ready":
                 raise InferenceAccountingError(str(snapshot.get("reason_code") or "accounting_continuity_unavailable"))
@@ -541,14 +607,15 @@ class DurableInferenceBrokerMixin:
                 operation_id=request.operation_id, job_id=job_id, owner_id=request.owner_id,
                 payload_digest=request.data_digest, policy_digest=policy_digest,
                 runtime_path=request.runtime_path,
-                profile_id=_profile_bindings.get().get(request.operation_id, setup.profile_id),
+                profile_id=_profile_bindings.get().get(request.operation_id, getattr(setup, "profile_id", None)),
                 bound_microusd=bound, owner_ceiling_microusd=request.owner_budget_microusd,
                 priority=request.priority.rank, deadline_at=request.deadline_at,
                 owner=owner, fencing_token=fence,
                 general_task_binding=task_binding,
             )
             return _AccountingHandle(request, repository, job_id, owner, fence, policy_digest,
-                reservation["sequence"], ephemeral, audio_native=native_audio if request.runtime_path == "audio_transcription" else None)
+                reservation["sequence"], ephemeral, audio_native=native_audio if request.runtime_path == "audio_transcription" else None,
+                profile_id=bound_profile)
         except Exception as exc:
             from .remote_inference_admission import RemoteInferenceBindingError
             if created_job is not None:
@@ -567,6 +634,14 @@ class DurableInferenceBrokerMixin:
             contact_kwargs = {"near_contact_witness": _near_contact.get()} if handle.request.runtime_path == "near_text_native" else {}
             if _task_group.get() is not None:
                 contact_kwargs["general_task_binding"] = _task_group.get()
+            guard = _precontact_guard.get()
+            if guard is not None:
+                try:
+                    reason = guard()
+                except Exception as exc:
+                    reason = getattr(exc, "code", None) or "precontact_guard_failed"
+                if reason is not None:
+                    contact_kwargs["precontact_denial"] = str(reason)[:128]
             await handle.repository.contact_inference_provider(handle.request.operation_id,
                 owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest, **contact_kwargs)
         except InferenceProviderContactDenied as error:
@@ -587,7 +662,7 @@ class DurableInferenceBrokerMixin:
 
     async def _finish_accounting(self, handle, *, payload=None, reason=None):
         await self._record_denial_quiescence(handle)
-        near = handle.request.runtime_path == "near_text_native"
+        near = is_near_operation(handle.request.runtime_path, handle.profile_id)
         billing = (_near_billing.get() or {}).get("evidence") if near else None
         billing_kwargs = {"near_billing_evidence": billing} if near else {}
         row = await handle.repository.settle_inference_cost(handle.request.operation_id,
@@ -595,7 +670,7 @@ class DurableInferenceBrokerMixin:
             reason=reason or ("provider_account_usage" if handle.contacted else "blocked_before_contact"))
         adoption_allowed = True
         try:
-            adoption_allowed = _policy_for_runtime(handle.request.runtime_path)[1] == handle.policy_digest
+            adoption_allowed = _policy_for_runtime(handle.request.runtime_path, handle.profile_id)[1] == handle.policy_digest
             if handle.request.owner_id.startswith("operator:"):
                 from src.auth.service import authenticate_session
                 root_id = handle.request.session_id
@@ -667,7 +742,9 @@ class DurableInferenceBrokerMixin:
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
         runtime_token = _current_runtime.set(handle.request.runtime_path)
-        billing_token = _near_billing.set({"operation_id": handle.request.operation_id} if handle.request.runtime_path == "near_text_native" else None)
+        profile_token = _current_profile.set(handle.profile_id)
+        billing_token = _near_billing.set({"operation_id": handle.request.operation_id}
+            if is_near_operation(handle.request.runtime_path, handle.profile_id) else None)
         completed = False
         settlement_context = _SettlementContext(handle, usage)
         settlement_token = _current_settlement.set(settlement_context)
@@ -699,6 +776,7 @@ class DurableInferenceBrokerMixin:
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
                 _current_runtime.reset(runtime_token)
+                _current_profile.reset(profile_token)
                 _near_billing.reset(billing_token)
 
     def execute_sync(self, request, operation, **kwargs):
@@ -714,6 +792,12 @@ class DurableInferenceBrokerMixin:
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
+        # ADR-035: NEAR TEE settles from its own billing readback, which the
+        # transport captures inside this lease.
+        runtime_token = _current_runtime.set(handle.request.runtime_path)
+        profile_token = _current_profile.set(handle.profile_id)
+        billing_token = _near_billing.set({"operation_id": handle.request.operation_id}
+            if is_near_operation(handle.request.runtime_path, handle.profile_id) else None)
         completed = False
         settlement_context = _SettlementContext(handle, usage)
         settlement_token = _current_settlement.set(settlement_context)
@@ -744,12 +828,18 @@ class DurableInferenceBrokerMixin:
                 _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
+                _current_runtime.reset(runtime_token)
+                _current_profile.reset(profile_token)
+                _near_billing.reset(billing_token)
 
     async def stream(self, request, operation, **kwargs):
         if request.runtime_path == "audio_transcription":
             raise InferenceAccountingError("audio_async_nonstreaming_required")
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
+        if near_tee_profile_slot(request.runtime_path, _profile_bindings.get().get(request.operation_id)) is not None:
+            # NEAR TEE streaming is PR3c; refuse before any reservation.
+            raise InferenceAccountingError("near_tee_streaming_unavailable")
         if not self.durable_accounting:
             async for item in super().stream(request, operation, **kwargs):
                 yield item

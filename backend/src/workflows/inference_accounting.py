@@ -768,7 +768,8 @@ class InferenceAccountingRepositoryMixin:
     async def contact_inference_provider(self, operation_id: str, *, owner: str,
                                          fencing_token: int, policy_digest: str,
                                          near_contact_witness: object = None,
-                                         general_task_binding: object = None) -> dict[str, object]:
+                                         general_task_binding: object = None,
+                                         precontact_denial: str | None = None) -> dict[str, object]:
         from src.workflows.research_accounting import discovery_accounting_scope
         async with discovery_accounting_scope(self, operation_id=operation_id):
             denial = None
@@ -870,10 +871,14 @@ class InferenceAccountingRepositoryMixin:
                                 )
                             except (BoardError, ValueError, PermissionError) as exc:
                                 opportunity_denial = getattr(exc, "code", "near_contact_authority_changed")
+                    from src.model_fabric.accounting import is_near_operation, near_tee_profile_slot
                     try:
                         if row.runtime_path == "near_text_native":
                             from src.model_fabric.effective_policy import current_near_text_policy
                             configured, current_digest = current_near_text_policy()
+                        elif (tee_slot := near_tee_profile_slot(row.runtime_path, row.profile_id)) is not None:
+                            from src.model_fabric.effective_policy import current_near_tee_policy
+                            configured, current_digest = current_near_tee_policy(tee_slot)
                         else:
                             configured, current_digest = current_inference_policy()
                     except PermissionError:
@@ -885,9 +890,15 @@ class InferenceAccountingRepositoryMixin:
                     await shadow_compare_decisions(db, account, ledger.totals, period, row.owner_id)
                     period_status = period_state(owner_data, totals_period_rows(ledger.totals), period)
                     from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+                    # ADR-035: narrowed to OpenRouter (every non-NEAR) rows.
                     retired_denial = (OPENROUTER_RETIRED_REASON
-                        if row.runtime_path != "near_text_native" and openrouter_retired() else None)
-                    denial = (opportunity_denial or retired_denial or ("provider_contact_denied" if _provider_contact_denied(row)
+                        if not is_near_operation(row.runtime_path, row.profile_id) and openrouter_retired() else None)
+                    # A caller precontact guard (e.g. the NEAR TEE billing
+                    # window) denies here, durably, before contact is recorded.
+                    guard_denial = (precontact_denial if isinstance(precontact_denial, str)
+                        and re.fullmatch(r"[a-z0-9_:.-]{1,128}", precontact_denial) else
+                        "precontact_guard_invalid" if precontact_denial is not None else None)
+                    denial = (guard_denial or opportunity_denial or retired_denial or ("provider_contact_denied" if _provider_contact_denied(row)
                         else "provider_policy_revision_changed" if current_digest != policy_digest
                         else "accounting_settings_revision_unavailable" if (
                             account.ceiling_microusd != deployment_spend_ceiling(configured)
@@ -956,7 +967,9 @@ class InferenceAccountingRepositoryMixin:
                 row = await self._ledger_row(db, ledger, operation_id)
                 if row is None:
                     raise InferenceAccountingError("accounting_operation_not_found")
-                near = row.runtime_path == "near_text_native"
+                from src.model_fabric.accounting import near_tee_profile_slot
+                near_tee_row = near_tee_profile_slot(row.runtime_path, row.profile_id) is not None
+                near = row.runtime_path == "near_text_native" or near_tee_row
                 billing = None
                 if near_billing_evidence is not None:
                     from src.model_fabric.near_text_billing import validate_near_billing_evidence
@@ -964,7 +977,7 @@ class InferenceAccountingRepositoryMixin:
                         billing = validate_near_billing_evidence(near_billing_evidence, original_operation_id=operation_id)
                     except (ValueError, TypeError) as exc:
                         raise InferenceAccountingError("near_billing_evidence_invalid") from exc
-                    if not near or row.profile_id != "near.text" or actual_cost_microusd is not None or operator_id is not None or payload is not None:
+                    if not near or (row.profile_id != "near.text" and not near_tee_row) or actual_cost_microusd is not None or operator_id is not None or payload is not None:
                         raise InferenceAccountingError("near_billing_operation_invalid")
                     if row.state not in {"contact_started", "unknown", "settled"}:
                         raise InferenceAccountingError("near_billing_contact_required")

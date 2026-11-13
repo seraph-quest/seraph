@@ -641,9 +641,12 @@ the Constitution and ADRs remain the target authority.
 Readiness remains specific to the selected profile. The CPU core, canonical
 workspace and operator controls work without a local model, GPU, VLM service or
 optional companion. OpenRouter is retired by policy (ADR-035, #1147 PR3a): no
-route makes new OpenRouter contact, and ordinary remote inference routes report
-blocked (`openrouter_retired` / `no_active_provider`) until the NEAR TEE slots
-land; the optional NEAR text Work capability (ADR-025) is unchanged. Linux optional isolation proof does not
+route makes new OpenRouter contact. Text routes (report, memory and agent
+reasoning synthesis without tools or streaming) resolve to the NEAR TEE text
+slot when the operator configures it (#1147 PR3b, **Partial**); every other
+route, and every text route without a ready slot, reports blocked
+(`no_active_provider` or the slot's reason); the optional NEAR text Work
+capability (ADR-025) is unchanged apart from the shared NEAR client. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
 native/companion boundaries named by each adapter. No paid model, real Google
 account or Mac host is a prerequisite for local implementation acceptance.
@@ -701,6 +704,52 @@ Private output requires current authority and settled-cost readback. The task
 requires human Review; successful execution supplies no automatic approval.
 Unknown cost discards the withheld answer, and debt reconciliation cannot recover
 it or resend inference. Every outcome records `no_learning`.
+Since #1147 PR3b (ADR-035) the route uses the shared NEAR client: every NEAR
+text request, inference and billing readback, also sends
+`x-no-aliasing: true`; the response model echo check is unchanged. The ADR-035
+catalog-receipt gate for `near.text` is not implemented yet.
+
+## NEAR TEE text slot (ADR-035, #1147 PR3b)
+
+**Partial** until live operator use. The `near_tee` provider adapter serves the
+text slot of the model fabric, non-streaming, disabled by default. The operator
+picks one canonical model from the closed ADR-035 text allowlist, stores a
+separate write-only `vault:near_api_key` (fingerprint readback only), sets
+input/output/timeout limits and a per-request reserve within the shared
+`inference_lane` ceiling, and grants a revision-bound purpose consent with an
+explicit plaintext-to-NEAR acknowledgement. Saves use the witnessed revoke→
+accounting→activate publication with revision CAS; global revoke blocks the
+slot and no save resurrects revoked consent.
+
+An explicit, authenticated **catalog check** reads only NEAR's
+`/v1/model/{id}` record (no inference, no operator content, no credential) and
+stores a content-safe receipt bound to the slot's complete profile hash and the
+current configuration revision, with an operator TTL (1–24 h); any later
+settings save requires a new check. It parses NEAR's catalog record shape
+(`metadata.architecture` modalities, `maxOutputLength`; absent readiness is
+not ready, an absent output limit allows at most 8192 output tokens). Dispatch re-validates the receipt locally and never
+refreshes it; a missing, failed, changed or expired receipt blocks the slot.
+Dispatch also needs fresh capability-check proofs (operator-triggered,
+cost-bounded mechanics only, through the broker and ledger).
+
+Text routes (`completion_with_fallback`, guardian/report synthesis such as
+`end_of_day_goal_report`, `screenshot_observation_digest`, `daily_briefing`)
+reach the NEAR transport through the one shared broker, with chat priority,
+the serial bound of one and durable reservations. Requests carry the canonical
+id with `x-no-aliasing: true`; a different response model fails the call
+after its cost settles; reasoning fields are never answer text. NEAR
+`/v1/billing/costs` readback runs inside the lease; a missing cost becomes an
+Unknown liability and keeps the lane blocked until fenced manual settlement,
+which also releases the lane (tested, including after the slot is disabled).
+Checks that must hold when bytes would leave (the `x-no-aliasing` header,
+current policy, and a deadline that still leaves the billing window) run under
+the contact writer: a lease granted too late is a durable never-contacted
+denial, not an Unknown.
+Streaming, tools, vision and embeddings are not served (PR3c/PR3d/PR4).
+Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
+plaintext; attestation not verified by Seraph; no end-to-end encryption".
+Evidence is intercepted-transport tests only: no live NEAR call, provider
+availability, price or model quality is established.
 
 ## Epic #736/#775 OpenRouter inference phase
 
@@ -713,8 +762,8 @@ receipts, ledger rows, billing readback and manual settlement stay readable so
 contacted liabilities reconcile. Lane limits and the deployment ceiling moved to
 a provider-neutral, versioned `inference_lane` (pure migration of retained
 values; explicit witnessed publication that preserves the ledger and publishes a
-route-scoped revoke of stored OpenRouter routes). Until NEAR TEE slots ship,
-inference routes are blocked and say so in runtime status and Settings.
+route-scoped revoke of stored OpenRouter routes). Routes without a ready NEAR
+TEE slot are blocked and say so in runtime status and Settings.
 Provider-intercepted tests assert zero OpenRouter contact on representative
 routes; this is **Partial** pending the NEAR slices. The text below records the
 historical phase.

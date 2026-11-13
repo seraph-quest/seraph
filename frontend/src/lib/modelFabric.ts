@@ -229,6 +229,69 @@ export interface NearTextSetupStatus extends Omit<NearTextSetupInput, "api_key" 
   provider_plaintext_disclosure: typeof NEAR_TEXT_DISCLOSURE;
 }
 
+export const NEAR_TEE_API_BASE = "https://cloud-api.near.ai/v1";
+/** ADR-035 closed text-slot allowlist (catalog read 2026-11-13). */
+export const NEAR_TEE_TEXT_MODELS = [
+  "z-ai/glm-5.3-flash",
+  "Qwen/Qwen3.8-27B",
+  "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "Qwen/Qwen3.6-35B-A3B-FP8",
+] as const;
+export const NEAR_TEE_DISCLOSURE = "TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in plaintext; no end-to-end encryption.";
+
+export interface NearTeeSlotInput {
+  model_id: string;
+  enabled: boolean;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  timeout_seconds: number;
+  temperature?: number | null;
+  request_cost_bound_microusd: number;
+  catalog_ttl_hours: number;
+  plaintext_provider_egress_acknowledged: boolean;
+}
+
+export interface NearTeeSetupInput {
+  schema_version: "seraph.near.tee.setup.v1";
+  api_base: typeof NEAR_TEE_API_BASE;
+  slots: { text: NearTeeSlotInput | null };
+  api_key?: string;
+}
+
+export interface NearTeeCatalogReceipt {
+  model_id: string | null;
+  checked_at_iso: string | null;
+  expires_at: string | null;
+  outcome: "passed" | "failed" | string;
+  reason_code: string | null;
+  required_cost_microusd: number | null;
+}
+
+export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_provider_egress_acknowledged"> {
+  profile_id: string;
+  consent_current: boolean;
+  status: "disabled" | "configuration_required" | "blocked" | "ready";
+  reason_code: string | null;
+  catalog_receipt: NearTeeCatalogReceipt | null;
+  catalog_receipt_current: boolean;
+  tee_hosted_per_catalog: boolean;
+  tee_hosting_label: string | null;
+  capability_check_timeout_seconds: number;
+}
+
+export interface NearTeeSetupStatus {
+  configured: boolean;
+  status: string;
+  reason_code: string | null;
+  key_present: boolean;
+  credential_fingerprint: string | null;
+  allowlist: Record<string, string[]>;
+  disclosure: string;
+  tee_verified: false;
+  e2ee: false;
+  slots: { text: NearTeeSlotStatus | null };
+}
+
 export interface ModelFabricSettingsStatus {
   schema_version: string;
   status: string;
@@ -254,6 +317,9 @@ export interface ModelFabricSettingsStatus {
   near_text?: NearTextSetupStatus | null;
   /** Local metadata failure marker; unrelated settings remain usable. */
   near_text_metadata_unavailable?: boolean;
+  near_tee?: NearTeeSetupStatus | null;
+  near_tee_metadata_unavailable?: boolean;
+  active_inference_provider?: string | null;
   inference_accounting?: InferenceAccountingStatus | null;
   egress_revision?: number;
   egress_revoked?: boolean;
@@ -438,6 +504,55 @@ export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | nu
     key_present: row.key_present, consent_current: row.consent_current,
     status: row.status as NearTextSetupStatus["status"], reason_code: row.reason_code as string | null,
     tls_transport: true, tee_verified: false, e2ee: false, provider_plaintext_disclosure: NEAR_TEXT_DISCLOSURE,
+  };
+}
+
+function normalizeNearTeeSlot(value: unknown): NearTeeSlotStatus | null {
+  const row = recordOf(value);
+  const integer = (field: string, min: number, max: number) => typeof row?.[field] === "number"
+    && Number.isSafeInteger(row[field]) && (row[field] as number) >= min && (row[field] as number) <= max;
+  if (!row || typeof row.model_id !== "string" || typeof row.enabled !== "boolean"
+    || !integer("max_input_tokens", 1, 1_048_576) || !integer("max_output_tokens", 1, 65_536)
+    || typeof row.timeout_seconds !== "number" || !integer("request_cost_bound_microusd", 1, 1_000_000_000)
+    || !integer("catalog_ttl_hours", 1, 24) || typeof row.consent_current !== "boolean"
+    || !["disabled", "configuration_required", "blocked", "ready"].includes(String(row.status))) return null;
+  const receipt = recordOf(row.catalog_receipt);
+  const text = (field: unknown) => (typeof field === "string" ? field : null);
+  return {
+    model_id: row.model_id, enabled: row.enabled, max_input_tokens: row.max_input_tokens as number,
+    max_output_tokens: row.max_output_tokens as number, timeout_seconds: row.timeout_seconds,
+    temperature: typeof row.temperature === "number" ? row.temperature : null,
+    request_cost_bound_microusd: row.request_cost_bound_microusd as number,
+    catalog_ttl_hours: row.catalog_ttl_hours as number, profile_id: text(row.profile_id) ?? "near_tee.text",
+    consent_current: row.consent_current, status: row.status as NearTeeSlotStatus["status"],
+    reason_code: text(row.reason_code),
+    catalog_receipt: receipt ? { model_id: text(receipt.model_id), checked_at_iso: text(receipt.checked_at_iso),
+      expires_at: text(receipt.expires_at), outcome: String(receipt.outcome ?? "unknown"),
+      reason_code: text(receipt.reason_code),
+      required_cost_microusd: typeof receipt.required_cost_microusd === "number" ? receipt.required_cost_microusd : null } : null,
+    catalog_receipt_current: row.catalog_receipt_current === true,
+    tee_hosted_per_catalog: row.tee_hosted_per_catalog === true,
+    tee_hosting_label: text(row.tee_hosting_label),
+    capability_check_timeout_seconds: integer("capability_check_timeout_seconds", 1, 180)
+      ? row.capability_check_timeout_seconds as number : 46,
+  };
+}
+
+export function normalizeNearTeeSetup(value: unknown): NearTeeSetupStatus | null {
+  const row = recordOf(value);
+  if (!row || row.tee_verified !== false || row.e2ee !== false || typeof row.key_present !== "boolean"
+    || typeof row.status !== "string") return null;
+  const slots = recordOf(row.slots);
+  const allowlist = recordOf(row.allowlist);
+  // Whitelist read-only metadata; credential values never enter the cache.
+  return {
+    configured: row.configured === true, status: row.status,
+    reason_code: typeof row.reason_code === "string" ? row.reason_code : null,
+    key_present: row.key_present,
+    credential_fingerprint: typeof row.credential_fingerprint === "string" ? row.credential_fingerprint : null,
+    allowlist: { text: stringArray(allowlist?.text).filter(model => (NEAR_TEE_TEXT_MODELS as readonly string[]).includes(model)) },
+    disclosure: NEAR_TEE_DISCLOSURE, tee_verified: false, e2ee: false,
+    slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text) },
   };
 }
 
@@ -646,6 +761,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
   const defaults = recordOf(record.defaults);
   const policies = Array.isArray(record.workload_policies) ? record.workload_policies : [];
   const nearText = normalizeNearTextSetup(record.near_text);
+  const nearTee = normalizeNearTeeSetup(record.near_tee);
   return {
     schema_version: record.schema_version,
     status: record.status,
@@ -682,6 +798,9 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
     near_text: nearText,
     near_text_metadata_unavailable: record.near_text_metadata_unavailable === true || (record.near_text != null && !nearText),
+    near_tee: nearTee,
+    near_tee_metadata_unavailable: record.near_tee != null && !nearTee,
+    active_inference_provider: typeof record.active_inference_provider === "string" ? record.active_inference_provider : null,
     inference_accounting: normalizeInferenceAccounting(record.inference_accounting),
     egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
     egress_revoked: record.egress_revoked === true,

@@ -158,6 +158,9 @@ async def prepare_near_tee_call(
         raise NearTeeDenied(str(exc)) from None
     if slot_name not in NEAR_TEE_IMPLEMENTED_SLOTS:
         raise NearTeeDenied("near_tee_slot_not_implemented")
+    if slot_name != "text":
+        # Chat completions serve the text slot only; embeddings use their own adapter.
+        raise NearTeeDenied("near_tee_slot_adapter_mismatch")
     capabilities = set(context.requirements.capabilities)
     if ModelCapability.STREAMING.value in capabilities:
         raise NearTeeDenied("near_tee_streaming_unavailable")

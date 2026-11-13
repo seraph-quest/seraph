@@ -141,6 +141,55 @@ def test_openrouter_ocr_provider_is_removed():
         importlib.import_module("ocr.openrouter")
 
 
+def test_codex_local_ocr_provider_is_removed_and_never_spawns_a_subprocess():
+    # ADR-035: codex-local drove a cloud-backed Codex CLI; the operator
+    # acknowledged its removal on 2026-11-14. Selecting it is refused and
+    # never starts a process.
+    with patch("asyncio.create_subprocess_exec") as async_spawn, \
+         patch("subprocess.Popen") as popen:
+        with pytest.raises(ValueError, match="removed"):
+            create_provider(name="codex-local", model="gpt-5.5")
+    async_spawn.assert_not_called()
+    popen.assert_not_called()
+    with pytest.raises(ImportError):
+        importlib.import_module("ocr.codex_local")
+
+
+@pytest.mark.asyncio
+async def test_cli_refuses_codex_local_ocr_provider(capsys):
+    import seraph_daemon
+
+    with patch.object(sys, "argv", ["seraph_daemon.py", "--ocr", "--ocr-provider", "codex-local"]), \
+         patch("asyncio.create_subprocess_exec") as async_spawn, \
+         patch("subprocess.Popen") as popen, \
+         patch("httpx.AsyncClient") as client:
+        with pytest.raises(SystemExit) as exit_info:
+            await seraph_daemon.main()
+    assert exit_info.value.code == 2
+    assert "invalid choice: 'codex-local'" in capsys.readouterr().err
+    async_spawn.assert_not_called()
+    popen.assert_not_called()
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_settings_codex_local_falls_back_to_apple_vision_without_subprocess(tmp_path):
+    backend = _GuardedBackend(settings_provider="codex-local")
+    provider = _FakeAppleVision()
+    runtime = _runtime(tmp_path, _uploader())
+    with patch("httpx.AsyncClient", side_effect=backend.client_factory()), \
+         patch("ocr.create_provider", return_value=provider) as create, \
+         patch("asyncio.create_subprocess_exec") as async_spawn, \
+         patch("subprocess.Popen") as popen:
+        async with httpx.AsyncClient() as client:
+            await runtime.refresh(client, "http://localhost:8004", force=True)
+    assert [call.kwargs["name"] for call in create.call_args_list] == ["apple-vision"]
+    assert runtime.provider is provider
+    assert all(request.url.host in _LOOPBACK for request in backend.requests)
+    async_spawn.assert_not_called()
+    popen.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "url",
     ["https://openrouter.ai", "http://example.com:8004", "http://10.0.0.5:8004", "http://user:pw@localhost:8004"],
@@ -249,7 +298,7 @@ async def test_retries_are_bounded_and_cool_down_prevents_hammering():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_provider", ["openrouter", "near_tee"])
+@pytest.mark.parametrize("backend_provider", ["openrouter", "near_tee", "codex-local"])
 async def test_poll_loop_uploads_locally_and_never_calls_the_cloud(tmp_path, backend_provider):
     # ADR-035 PR4: the backend reports its governed route ("near_tee"); the
     # daemon still makes no cloud call and only uploads locally.
@@ -268,7 +317,8 @@ async def test_poll_loop_uploads_locally_and_never_calls_the_cloud(tmp_path, bac
             await poll_loop("http://localhost:8004", interval=0.01, idle_timeout=300, verbose=False,
                             screen_runtime=runtime, worker_id="test-worker")
 
-    # Backend "openrouter" names its governed route; the daemon stays local.
+    # Backend "openrouter" names its governed route and "codex-local" was
+    # removed (operator decision, 2026-11-14); either way the daemon stays local.
     assert create.call_args.kwargs["name"] == "apple-vision"
     assert "api_key" not in create.call_args.kwargs
     assert provider.calls == 1
@@ -341,43 +391,3 @@ async def test_periodic_capture_uploads_and_skips_blocked_apps(tmp_path):
                                         screen_runtime=blocked_runtime)
     assert blocked_backend.uploads() == []
     blocked_capture.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_codex_local_structured_result_travels_with_the_upload(tmp_path):
-    backend = _GuardedBackend()
-
-    class _FakeCodex(_FakeAppleVision):
-        name = "codex-local"
-
-        async def analyze_screen(self, png_bytes, app_name):
-            return AnalysisResult(
-                success=True,
-                data={"activity": "coding", "project": "seraph", "summary": "Editing upload", "details": ["file: x.py"]},
-                duration_ms=5,
-            )
-
-    runtime = ScreenAnalysisRuntime(
-        enabled=True, provider="codex-local", model=None, preserve_captures=False,
-        archive_dir=str(tmp_path), blocklist_file=None, uploader=_uploader(),
-    )
-    with patch("httpx.AsyncClient", side_effect=backend.client_factory()), \
-         patch("ocr.create_provider", return_value=_FakeCodex()), \
-         patch("blocklist.load_blocklist", return_value=set()), \
-         patch("seraph_daemon._write_daemon_status"), \
-         patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
-         patch("seraph_daemon.get_frontmost_app_name", return_value="Code"), \
-         patch("seraph_daemon.get_window_title", return_value="x.py"), \
-         patch("ocr.screenshot.capture_screen_png", return_value=b"\x89PNG\r\n\x1a\nscreen"):
-        with pytest.raises(asyncio.CancelledError):
-            await poll_loop("http://localhost:8004", interval=0.01, idle_timeout=300, verbose=False,
-                            screen_runtime=runtime, worker_id="test-worker")
-    [upload] = backend.uploads()
-    analysis = json.loads(upload.content)["local_analysis"]
-    assert analysis == {
-        "provider": "codex-local",
-        "activity": "coding",
-        "project": "seraph",
-        "summary": "Editing upload",
-        "details": ["file: x.py"],
-    }

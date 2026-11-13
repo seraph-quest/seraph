@@ -310,6 +310,21 @@ async def test_size_and_type_caps(capture_env, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex-local", "openrouter"])
+async def test_removed_or_remote_local_analysis_provider_is_rejected(capture_env, provider):
+    # ADR-035: codex-local (a cloud-backed Codex CLI) was removed on
+    # 2026-11-14; only on-device apple-vision analysis may ride an upload.
+    response = await capture_env["client"].post(
+        "/api/observer/captures",
+        headers=_headers(capture_env["credential"]),
+        json=_body(_png((12, 34, 56)), local_analysis={"provider": provider, "summary": "x"}),
+    )
+    assert response.status_code == 422
+    assert await _observations(capture_env["db"]) == []
+    assert not list((capture_env["shots"]).rglob("*.png"))
+
+
+@pytest.mark.asyncio
 async def test_blocklisted_app_rejected_without_storing(capture_env):
     response = await capture_env["client"].post(
         "/api/observer/captures",
@@ -562,7 +577,7 @@ async def test_uploaded_local_analysis_feeds_digest_report_and_status(capture_en
             _png((50, 60, 70)),
             captured_at=captured_at,
             local_analysis={
-                "provider": "codex-local",
+                "provider": "apple-vision",
                 "activity": "coding",
                 "project": "seraph",
                 "summary": "Reviewing the capture upload diff",

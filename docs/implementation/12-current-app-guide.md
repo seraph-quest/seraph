@@ -3667,8 +3667,9 @@ stages and expose separate failures.
 
 **Daemon capture handoff (ADR-035, #1147, Partial):** the native daemon makes
 no cloud model call; its OpenRouter OCR provider is removed and Apple Vision
-OCR stays on-device (`codex-local` remains only behind explicit selection
-pending operator acknowledgement). When screen analysis is enabled and this
+OCR stays on-device as the daemon's only OCR provider (the cloud-backed
+`codex-local` provider was removed by operator decision on 2026-11-14; a
+`codex-local` setting falls back to Apple Vision and the CLI refuses it). When screen analysis is enabled and this
 Mac is paired, the daemon uploads each allowed capture to the loopback backend
 at `POST /api/observer/captures`, authenticated with the scoped paired-edge
 credential and its stored pairing policy (not a browser cookie; the daemon
@@ -3678,7 +3679,8 @@ stores the image privately (0700/0600, atomic rename) under the screenshot
 folder's `.seraph-daemon-captures/`, and creates the observation through the
 folder ingest/dedupe path with the real app name, window title and capture
 time, queued for the governed vision job. The daemon's bounded local
-analysis (Apple Vision text or the explicit `codex-local` result) becomes the
+analysis (Apple Vision text; any other `local_analysis.provider` is rejected
+with 422) becomes the
 observation's summary/activity/project and digest content until governed
 analysis exists. A repeated `capture_id` is idempotent. `screen_cleanup` removes uploaded files after the observation
 retention; these files are not backed up

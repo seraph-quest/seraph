@@ -555,11 +555,15 @@ async def post_screen_context(body: ScreenContextRequest):
 
 
 class LocalCaptureAnalysis(BaseModel):
-    """Bounded on-device analysis the daemon produced (never image bytes)."""
+    """Bounded on-device analysis the daemon produced (never image bytes).
+
+    Only on-device Apple Vision is accepted: the cloud-backed ``codex-local``
+    daemon provider was removed by operator decision (ADR-035, 2026-11-14).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["apple-vision", "codex-local"]
+    provider: Literal["apple-vision"]
     activity: str | None = Field(default=None, max_length=64)
     project: str | None = Field(default=None, max_length=256)
     summary: str | None = Field(default=None, max_length=512)

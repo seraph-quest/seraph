@@ -2,10 +2,14 @@
 
 ADR-035 (#1147): the daemon makes no cloud model call. The remote OpenRouter
 provider was removed; Apple Vision stays as on-device OCR and captures reach
-the backend over the authenticated local upload endpoint instead.
+the backend over the authenticated local upload endpoint instead. The
+cloud-backed `codex-local` provider was removed by operator decision on
+2026-11-14.
 """
 
 from ocr.base import OCRProvider
+
+REMOVED_PROVIDERS = frozenset({"openrouter", "codex-local"})
 
 
 def create_provider(
@@ -17,28 +21,23 @@ def create_provider(
     """Create an OCR provider by name.
 
     Args:
-        name: "apple-vision" (on-device) or "codex-local" (explicit opt-in)
-        model: Model name for codex-local (has a provider default)
+        name: "apple-vision" (on-device) — the only daemon OCR provider.
+        model: Ignored; kept for call-site compatibility.
 
     Raises:
-        ValueError: Unknown or removed provider
+        ValueError: Unknown or removed provider. ``codex-local`` (a
+        cloud-backed Codex CLI) was removed by operator decision on
+        2026-11-14 (ADR-035) and is refused here, never spawned.
     """
     if name == "apple-vision":
         from ocr.apple_vision import AppleVisionProvider
 
         return AppleVisionProvider()
 
-    if name == "codex-local":
-        # TODO(ADR-035, #1147): codex-local drives a cloud-backed Codex CLI and
-        # is slated for removal. Its removal drops the no-API-price Codex path,
-        # so it stays behind explicit selection until the operator acknowledges
-        # that loss. Do not widen how it can be selected.
-        from ocr.codex_local import CodexLocalProvider
-
-        return CodexLocalProvider(
-            model=model,
-            preserve_captures=preserve_captures,
-            archive_dir=archive_dir,
+    if name in REMOVED_PROVIDERS:
+        raise ValueError(
+            f"OCR provider {name!r} was removed (ADR-035): the daemon makes no cloud model call; "
+            "use 'apple-vision'"
         )
 
-    raise ValueError(f"Unknown OCR provider: {name!r} (choose 'apple-vision' or 'codex-local')")
+    raise ValueError(f"Unknown OCR provider: {name!r} (the only provider is 'apple-vision')")

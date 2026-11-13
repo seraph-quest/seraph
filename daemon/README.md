@@ -117,8 +117,8 @@ Screen analysis is opt-in and runs **on context switch** (not a timer). The daem
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--ocr` | off | Enable screen capture on context switch |
-| `--ocr-provider` | `apple-vision` | Local OCR provider: `apple-vision` (on-device). `codex-local` (local Codex CLI, which is cloud-backed) stays available only when selected explicitly and is slated for removal under ADR-035/#1147 |
-| `--ocr-model` | provider default | Model for the `codex-local` provider |
+| `--ocr-provider` | `apple-vision` | Local OCR provider: `apple-vision` (on-device) is the only choice. The cloud-backed `codex-local` provider was removed by operator decision on 2026-11-14 (ADR-035); the CLI refuses it, and a `codex-local` value from backend settings falls back to `apple-vision` |
+| `--ocr-model` | — | Deprecated and ignored (`apple-vision` takes no model) |
 | `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted provider output, and normalized JSON artifacts for future re-analysis |
 | `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local directory for preserved artifacts |
 | `--edge-device-id` | `$SERAPH_EDGE_DEVICE_ID` | Paired edge device id used to authenticate capture uploads |
@@ -141,7 +141,7 @@ SERAPH_EDGE_DEVICE_ID=<device_id> SERAPH_EDGE_PAIRING_ID=<pairing_id> \
 
 ### Local capture upload
 
-When screen analysis is enabled and the upload is configured, each allowed capture is sent to `POST /api/observer/captures` on the **loopback** backend (`--url` must be `localhost`, `127.0.0.1` or `::1`; any other host is refused). The request carries the PNG, app name, window title, capture time, a unique `capture_id` and the bounded local analysis (Apple Vision text up to 8 KiB, or the explicitly selected `codex-local` structured result). The backend stores that analysis on the observation (summary, activity, project) so digests and reports use it until the governed NEAR TEE vision analysis of that capture succeeds; the screen-analysis settings the daemon reads report `daemon_cloud_provider: null`, and a backend `provider` such as `near_tee` names the backend's route, never a daemon provider.
+When screen analysis is enabled and the upload is configured, each allowed capture is sent to `POST /api/observer/captures` on the **loopback** backend (`--url` must be `localhost`, `127.0.0.1` or `::1`; any other host is refused). The request carries the PNG, app name, window title, capture time, a unique `capture_id` and the bounded local analysis (Apple Vision text up to 8 KiB; the backend rejects any other `local_analysis.provider`). The backend stores that analysis on the observation (summary, activity, project) so digests and reports use it until the governed NEAR TEE vision analysis of that capture succeeds; the screen-analysis settings the daemon reads report `daemon_cloud_provider: null`, and a backend `provider` such as `near_tee` names the backend's route, never a daemon provider.
 
 - **Authentication:** the scoped paired-edge credential returned once by node pairing (`POST /api/nodes/pairings/pair`; the same credential the paired edge transport uses), sent as `Authorization: Bearer` with `X-Seraph-Node-Device` / `X-Seraph-Node-Pairing`. The daemon sends no `Origin` and no cookie; for this one path the backend then checks only the host allow-list, and the credential stays mandatory. A request that carries a cookie or an `Origin` must still pass the normal origin check, and a browser session cookie is never upload authority. The pairing's stored policy must allow capability `media.ingest`, purpose `screen_capture`, the image type and its size.
 - **Backend checks:** screen analysis must be enabled; built-in blocklisted apps are rejected (a local `allowed_apps` override does not apply to uploads); only real PNG/JPEG bytes up to 8 MiB and 50 megapixels (read from the header before decoding); at most 30 uploads per minute per pairing; a repeated `capture_id` is idempotent.
@@ -215,13 +215,13 @@ OCR mode captures screenshots to extract visible text. This requires the Screen 
 | Window title | `main.py — seraph` | AppleScript (Accessibility) |
 | Idle duration | `312.5` seconds | `CGEventSource` (no permission) |
 
-**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots of allowed apps are captured only on context switch (or the periodic capture mode). `apple-vision` OCR runs on this Mac. Captures are uploaded only to the loopback backend described above; the daemon contacts no model provider. `codex-local` invokes the local `codex exec` command and writes a temporary PNG for that command, then deletes it after analysis or failure unless capture preservation is enabled. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir`. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured.
+**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots of allowed apps are captured only on context switch (or the periodic capture mode). `apple-vision` OCR runs on this Mac. Captures are uploaded only to the loopback backend described above; the daemon contacts no model provider. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir`. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured.
 
-Preserved local Codex artifacts can be inspected through the backend from localhost only:
+Preserved capture artifacts can be inspected through the backend from localhost only:
 
 ```bash
 curl http://localhost:8004/api/observer/screen-artifacts
-curl http://localhost:8004/api/observer/screen-artifacts/{observation_id}/codex-output
+curl http://localhost:8004/api/observer/screen-artifacts/{observation_id}/provider-output
 open http://localhost:8004/api/observer/screen-artifacts/{observation_id}/image
 ```
 
@@ -239,7 +239,7 @@ The daemon posts context to `POST /api/observer/context` (the `observation` is o
     "capture_artifacts": {
       "id": "artifact-digest",
       "image_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.png",
-      "codex_output_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.codex.txt",
+      "provider_output_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.apple-vision.json",
       "analysis_path": "~/Library/Application Support/Seraph/artifacts/screen-captures/2026-06-20/120000-vs-code-artifact.analysis.json"
     }
   },

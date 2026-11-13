@@ -126,7 +126,7 @@ def _analysis_usage(provider_name: str, *, duration_ms: int | None, success: boo
         "provider": provider_name,
         "duration_ms": duration_ms,
         "success": success,
-        "cost_posture": "local_no_api_price" if provider_name == "codex-local" else "provider_api_usage",
+        "cost_posture": "local_on_device",
     }
 
 
@@ -476,10 +476,16 @@ class ScreenAnalysisRuntime:
         enabled = bool(payload.get("enabled", self._fallback["enabled"]))
         provider_name = str(payload.get("provider") or self._fallback["provider"])
         # ADR-035: the backend's provider names its governed vision route, not
-        # a daemon OCR provider. Only local providers are selectable here; any
-        # remote value (e.g. "openrouter") falls back to the local CLI choice.
-        if provider_name not in {"apple-vision", "codex-local"}:
-            provider_name = str(self._fallback["provider"])
+        # a daemon OCR provider. Only on-device Apple Vision is selectable
+        # here; any other value (a remote route such as "openrouter", or the
+        # removed "codex-local") falls back to apple-vision, never a cloud call.
+        if provider_name != "apple-vision":
+            if provider_name != str(self._fallback["provider"]):
+                logger.info(
+                    "Screen analysis provider %r is not a daemon OCR provider; using apple-vision",
+                    provider_name,
+                )
+            provider_name = "apple-vision"
         model = str(payload.get("model") or self._fallback["model"] or "")
         preserve = bool(payload.get("preserve_captures", self._fallback["preserve_captures"]))
         archive_dir = str(payload.get("archive_dir") or self._fallback["archive_dir"])
@@ -704,9 +710,8 @@ async def upload_capture(
 
 
 def _local_analysis_payload(provider_name: str, result) -> dict | None:
-    """Carry the local provider's result (Apple Vision text and/or the
-    codex-local structured output) with the upload, so storing the capture
-    never discards it."""
+    """Carry the local provider's result (Apple Vision text) with the upload,
+    so storing the capture never discards it."""
     if result is None or not getattr(result, "success", False):
         return None
     data = result.data if isinstance(getattr(result, "data", None), dict) else {}
@@ -1359,9 +1364,9 @@ async def main() -> None:
     )
     parser.add_argument(
         "--ocr-provider",
-        # TODO(ADR-035, #1147): codex-local is slated for removal once the
-        # operator acknowledges losing its no-API-price Codex path.
-        choices=["apple-vision", "codex-local"],
+        # ADR-035: codex-local was removed by operator decision (2026-11-14);
+        # argparse refuses any other value.
+        choices=["apple-vision"],
         default="apple-vision",
         help="Local OCR provider (default: apple-vision, on-device)",
     )
@@ -1374,14 +1379,14 @@ async def main() -> None:
     parser.add_argument(
         "--ocr-model",
         default=None,
-        help="Model for the codex-local provider (default: gpt-5.5)",
+        help="Deprecated — apple-vision takes no model. This flag is ignored.",
     )
     parser.add_argument(
         "--preserve-captures",
         action="store_true",
         default=os.environ.get("SERAPH_PRESERVE_SCREEN_CAPTURES", "").strip().lower()
         in {"1", "true", "yes", "on"},
-        help="Preserve allowed screenshots, local Codex output, and normalized analysis artifacts",
+        help="Preserve allowed screenshots, provider output, and normalized analysis artifacts",
     )
     parser.add_argument(
         "--capture-archive-dir",
@@ -1455,7 +1460,7 @@ async def main() -> None:
     screen_runtime = ScreenAnalysisRuntime(
         enabled=args.ocr,
         provider=args.ocr_provider,
-        model=args.ocr_model,
+        model=None,
         preserve_captures=args.preserve_captures,
         archive_dir=args.capture_archive_dir,
         blocklist_file=args.blocklist_file,

@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover - package import fallback
 CAPTURE_UPLOAD_PATH = "/api/observer/captures"
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_LOCAL_TEXT_CHARS = 8 * 1024
-_LOCAL_PROVIDERS = frozenset({"apple-vision", "codex-local"})
+_LOCAL_PROVIDERS = frozenset({"apple-vision"})
 DEFAULT_EXTENSION_ID = "seraph.openclaw-device-bridge"
 DEFAULT_REFERENCE = "connectors/nodes/device.yaml"
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})

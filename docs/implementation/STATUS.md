@@ -795,9 +795,11 @@ receipt. Background analysis starts only when the operator chooses provider
 stays configured; `near_tee_vision_available` says whether it can be chosen).
 Screen-analysis settings then report `provider: near_tee` with the slot
 model, `daemon_cloud_provider: null` and `daemon_capture_handoff:
-local_upload`; the daemon makes no cloud call. The explicitly selected
-`codex-local` daemon OCR stays until the operator acknowledges its removal
-(ADR-035). Evidence is intercepted-transport tests only: no live NEAR call,
+local_upload`; the daemon makes no cloud call. The cloud-backed `codex-local`
+daemon OCR provider is removed (operator acknowledged on 2026-11-14, ADR-035):
+Apple Vision is the daemon's only OCR provider, a `codex-local` setting falls
+back to it, the CLI refuses the value and uploads reject it as
+`local_analysis.provider` (422). Evidence is intercepted-transport tests only: no live NEAR call,
 provider availability, price or analysis quality is established.
 
 ## Epic #736/#775 OpenRouter inference phase

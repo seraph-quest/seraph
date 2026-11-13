@@ -3,6 +3,7 @@ import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { NEAR_TEE_API_BASE, NEAR_TEE_DISCLOSURE, NEAR_TEE_TEXT_MODELS, normalizeModelFabricSettings } from "../../lib/modelFabric";
 import type { ModelFabricSettingsStatus, NearTeeSetupInput, NearTeeSetupStatus, NearTeeSlotStatus } from "../../lib/modelFabric";
+import { NearTeeEmbeddingSection } from "./NearTeeEmbeddingSection";
 
 interface Props {
   setup?: NearTeeSetupStatus | null;
@@ -117,7 +118,7 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
       const next = normalizeModelFabricSettings(await response.json());
       if (!mounted.current) return;
       if (next) { onRefreshed?.(next); setRevision(next.egress_revision); }
-      const receipt = next?.near_tee?.slots.text?.catalog_receipt;
+      const receipt = next?.near_tee?.slots.text?.catalog_receipt ?? next?.near_tee?.slots.embedding?.catalog_receipt;
       setMessage(receipt?.outcome === "passed" ? "Catalog check passed. This reads NEAR's catalog only; it is not a capability check."
         : "Catalog check failed: " + readable(receipt?.reason_code ?? "unknown") + ". The slot stays blocked.");
     } catch (reason) { if (mounted.current) setError(safeError(reason, "Catalog check failed.")); }
@@ -168,8 +169,10 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
     {message && <div role="status" className="mt-2 text-[10px]">{message}</div>}
     <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
       <button type="button" disabled={busy !== null} onClick={() => void save()}>{busy === "save" ? "Saving…" : "Save NEAR TEE settings"}</button>
-      <button type="button" disabled={busy !== null || !slot?.enabled} onClick={() => void catalogCheck()}>{busy === "catalog" ? "Checking catalog…" : "Run catalog check"}</button>
+      <button type="button" disabled={busy !== null || !(slot?.enabled || setup?.slots.embedding?.enabled)} onClick={() => void catalogCheck()}>{busy === "catalog" ? "Checking catalog…" : "Run catalog check"}</button>
       <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void capabilityCheck()}>{busy === "capability" ? "Running capability check…" : "Run capability check"}</button>
     </div>
+    <NearTeeEmbeddingSection setup={setup} stale={stale} revision={revision} policyRevoked={policyRevoked}
+      laneCeilingMicrousd={laneCeilingMicrousd} onSave={onSave} onRefreshed={onRefreshed} />
   </section>;
 }

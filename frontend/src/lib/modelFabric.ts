@@ -237,6 +237,8 @@ export const NEAR_TEE_TEXT_MODELS = [
   "deepseek-ai/DeepSeek-V4.1-Flash-1017",
   "Qwen/Qwen3.6-35B-A3B-FP8",
 ] as const;
+/** ADR-035 closed embedding-slot allowlist (catalog list read 2026-11-13). */
+export const NEAR_TEE_EMBEDDING_MODELS = ["Qwen/Qwen3-Embedding-0.6B"] as const;
 export const NEAR_TEE_DISCLOSURE = "TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in plaintext; no end-to-end encryption.";
 
 export interface NearTeeSlotInput {
@@ -248,13 +250,16 @@ export interface NearTeeSlotInput {
   temperature?: number | null;
   request_cost_bound_microusd: number;
   catalog_ttl_hours: number;
+  /** Embedding slot only: inputs per request (1-64). */
+  max_batch_size?: number | null;
   plaintext_provider_egress_acknowledged: boolean;
 }
 
 export interface NearTeeSetupInput {
   schema_version: "seraph.near.tee.setup.v1";
   api_base: typeof NEAR_TEE_API_BASE;
-  slots: { text: NearTeeSlotInput | null };
+  /** An omitted slot keeps its stored value; null removes it. */
+  slots: { text?: NearTeeSlotInput | null; embedding?: NearTeeSlotInput | null };
   api_key?: string;
 }
 
@@ -277,6 +282,36 @@ export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_pro
   tee_hosted_per_catalog: boolean;
   tee_hosting_label: string | null;
   capability_check_timeout_seconds: number;
+  /** Mechanics checks the slot's capability check runs. */
+  check_capabilities?: string[];
+  /** Embedding slot: the ADR-035 source-evidence gate is still closed. */
+  evidence_required?: boolean;
+}
+
+export interface NearTeeEmbeddingReindexJob {
+  job_id: string;
+  status: string;
+  reason_code: string | null;
+  live: boolean;
+  planned_items: number | null;
+  indexed_items: number;
+  skipped_existing: number;
+  oversize_items: number;
+  batches: number;
+  spent_microusd: number;
+  budget_microusd: number | null;
+}
+
+export interface NearTeeEmbeddingIndexStatus {
+  slot_reason_code: string | null;
+  namespace: string | null;
+  model: string | null;
+  measured_dimension: number | null;
+  index_complete: boolean;
+  recall_mode: "semantic" | "lexical";
+  notice: string | null;
+  max_items: number;
+  job: NearTeeEmbeddingReindexJob | null;
 }
 
 export interface NearTeeSetupStatus {
@@ -289,7 +324,8 @@ export interface NearTeeSetupStatus {
   disclosure: string;
   tee_verified: false;
   e2ee: false;
-  slots: { text: NearTeeSlotStatus | null };
+  slots: { text: NearTeeSlotStatus | null; embedding?: NearTeeSlotStatus | null };
+  embedding_index?: NearTeeEmbeddingIndexStatus | null;
 }
 
 export interface ModelFabricSettingsStatus {
@@ -535,6 +571,32 @@ function normalizeNearTeeSlot(value: unknown): NearTeeSlotStatus | null {
     tee_hosting_label: text(row.tee_hosting_label),
     capability_check_timeout_seconds: integer("capability_check_timeout_seconds", 1, 180)
       ? row.capability_check_timeout_seconds as number : 46,
+    max_batch_size: integer("max_batch_size", 1, 64) ? row.max_batch_size as number : null,
+    check_capabilities: stringArray(row.check_capabilities).filter(item => ["text", "embedding", "health", "latency_ms"].includes(item)),
+    evidence_required: row.evidence_required === true,
+  };
+}
+
+function normalizeEmbeddingIndex(value: unknown): NearTeeEmbeddingIndexStatus | null {
+  const row = recordOf(value);
+  if (!row) return null;
+  const text = (field: unknown) => (typeof field === "string" ? field : null);
+  const count = (field: unknown) => (typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : 0);
+  const job = recordOf(row.job);
+  return {
+    slot_reason_code: text(row.slot_reason_code), namespace: text(row.namespace), model: text(row.model),
+    measured_dimension: typeof row.measured_dimension === "number" ? row.measured_dimension : null,
+    index_complete: row.index_complete === true,
+    // Anything but an explicit, complete semantic projection is lexical.
+    recall_mode: row.recall_mode === "semantic" && row.index_complete === true ? "semantic" : "lexical",
+    notice: text(row.notice), max_items: count(row.max_items) || 10_000,
+    job: job && typeof job.job_id === "string" ? {
+      job_id: job.job_id, status: String(job.status ?? "unknown"), reason_code: text(job.reason_code),
+      live: job.live === true, planned_items: typeof job.planned_items === "number" ? job.planned_items : null,
+      indexed_items: count(job.indexed_items), skipped_existing: count(job.skipped_existing),
+      oversize_items: count(job.oversize_items), batches: count(job.batches), spent_microusd: count(job.spent_microusd),
+      budget_microusd: typeof job.budget_microusd === "number" ? job.budget_microusd : null,
+    } : null,
   };
 }
 
@@ -550,9 +612,12 @@ export function normalizeNearTeeSetup(value: unknown): NearTeeSetupStatus | null
     reason_code: typeof row.reason_code === "string" ? row.reason_code : null,
     key_present: row.key_present,
     credential_fingerprint: typeof row.credential_fingerprint === "string" ? row.credential_fingerprint : null,
-    allowlist: { text: stringArray(allowlist?.text).filter(model => (NEAR_TEE_TEXT_MODELS as readonly string[]).includes(model)) },
+    allowlist: { text: stringArray(allowlist?.text).filter(model => (NEAR_TEE_TEXT_MODELS as readonly string[]).includes(model)),
+      embedding: stringArray(allowlist?.embedding).filter(model => (NEAR_TEE_EMBEDDING_MODELS as readonly string[]).includes(model)) },
     disclosure: NEAR_TEE_DISCLOSURE, tee_verified: false, e2ee: false,
-    slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text) },
+    slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text),
+      embedding: slots?.embedding == null ? null : normalizeNearTeeSlot(slots.embedding) },
+    embedding_index: normalizeEmbeddingIndex(row.embedding_index),
   };
 }
 

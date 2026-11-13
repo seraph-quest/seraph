@@ -2970,10 +2970,11 @@ class WorkBoardDispatcher:
                 # change between passes.  Close that gate before claim so no
                 # execution attempt is counted for a pre-admission denial.
                 if task.status is WorkBoardStatus.ready:
-                    # ADR-035 inactive-route causes keep their operator text
-                    # (which carries the stable code), like GoalSnapshot gates.
-                    keep_reason = readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS or readiness_error in {
-                        "openrouter_retired", "no_active_provider"}
+                    # ADR-035 route blocks keep their stable code (rendered by
+                    # the cockpit), like GoalSnapshot gates keep their text.
+                    from src.model_fabric.retirement import ROUTE_BLOCK_REASONS
+                    keep_reason = (readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        or readiness_error in ROUTE_BLOCK_REASONS)
                     block_kind = (
                         "capability"
                         if keep_reason
@@ -4471,11 +4472,12 @@ class WorkBoardDispatcher:
             capability = _text(task.capability_id)
             model_route = _CAPABILITY_MODEL_ROUTES.get(capability)
             if model_route is not None:
-                from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
-                if retired_reason := inactive_route_reason(model_route):
-                    # ADR-035: a capability whose model step has no active
-                    # provider stays blocked with the stable cause, before claim.
-                    return retired_reason, inactive_route_label(retired_reason)
+                from src.model_fabric.retirement import openrouter_only_route_block
+                if route_block := openrouter_only_route_block(model_route):
+                    # ADR-035: a capability whose model step has no usable
+                    # route stays blocked before claim. The stable code is the
+                    # operator-visible reason; the cockpit renders its text.
+                    return route_block, route_block
             try:
                 if capability == "agent.task.v1":
                     from src.work_board.contracts import GeneralTaskEnvelope
@@ -5934,6 +5936,12 @@ class WorkBoardDispatcher:
                     return {"admitted": True, "completed": True, "blocked": False}
                 return {"admitted": True, "completed": False, "blocked": True}
         else:
+            from src.model_fabric.retirement import openrouter_only_route_block
+            if route_block := openrouter_only_route_block("readonly_research_child"):
+                # ADR-035 claim-time gate (the route can change after
+                # preflight): no native root, source read or contact.
+                await self._close_unadmitted_or_block(claim, route_block, retryable_input=True)
+                return {"admitted": False, "completed": False, "blocked": True}
             from src.work_board.research_parent import stage_native_projection
             strategy = await self._research_strategy(task)
             if runtime_seconds is None:
@@ -6104,11 +6112,10 @@ class WorkBoardDispatcher:
             job_id = _text(expected.get("job_id"))
             projection = admitted_projection
         except BoardError as exc:
-            from src.model_fabric.retirement import INACTIVE_ROUTE_REASONS, inactive_route_label
-            if exc.code in INACTIVE_ROUTE_REASONS:
-                # ADR-035: no active provider; nothing was admitted. Close the
-                # claim with the stable, operator-visible cause.
-                await self._close_unadmitted_or_block(claim, inactive_route_label(exc.code), retryable_input=True)
+            if exc.extra.get("route_block"):
+                # ADR-035: no usable model route; nothing was admitted. Close
+                # the claim with the stable code as the operator-visible reason.
+                await self._close_unadmitted_or_block(claim, exc.code, retryable_input=True)
                 result["blocked"] = True
                 return result
             if _text(task.capability_id) == "calendar.meeting-prep.v1" and exc.code in {
@@ -7779,16 +7786,17 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
-            from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
+            from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
 
-            if retired_reason := inactive_route_reason("strategist_agent"):
+            if route_block := openrouter_only_route_block("strategist_agent"):
                 # ADR-035: name the cause before any durable admission.
                 raise BoardError(
-                    retired_reason,
-                    inactive_route_label(retired_reason),
+                    route_block,
+                    inactive_route_label(route_block),
                     status_code=409,
-                    reason_code=retired_reason,
+                    reason_code=route_block,
                     recovery_action="restore_prerequisite",
+                    route_block=True,
                 )
             policy = effective_workload_policy("strategist_agent")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
@@ -8205,16 +8213,17 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
-            from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
+            from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
 
-            if retired_reason := inactive_route_reason("strategist_agent"):
+            if route_block := openrouter_only_route_block("strategist_agent"):
                 # ADR-035: name the cause before any durable admission.
                 raise BoardError(
-                    retired_reason,
-                    inactive_route_label(retired_reason),
+                    route_block,
+                    inactive_route_label(route_block),
                     status_code=409,
-                    reason_code=retired_reason,
+                    reason_code=route_block,
                     recovery_action="restore_prerequisite",
+                    route_block=True,
                 )
             policy = effective_workload_policy("strategist_agent")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())

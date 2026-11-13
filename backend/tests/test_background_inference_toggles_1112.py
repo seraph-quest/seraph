@@ -16,6 +16,15 @@ from src.db.models import GuardianOpportunity
 from src.guardian import opportunity_runtime as runtime
 from src.scheduler import background_inference
 from src.scheduler.engine import _async_job_wrapper
+from tests.near_tee_support import assume_assessment_route_available
+
+
+@pytest.fixture(autouse=True)
+def assessment_route_available(monkeypatch):
+    # These pin tick/recovery mechanics given a usable assessment route; the
+    # retired-world queued hold is covered in test_vertical_no_provider_journeys.
+    assume_assessment_route_available(monkeypatch)
+
 
 
 @pytest.fixture

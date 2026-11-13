@@ -35,8 +35,15 @@ from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime  # noqa: F401
 from tests.test_general_task_persistence import task_runtime  # noqa: F401
 from tests.general_task_method_lifecycle import native_admission_lifecycle  # noqa: F401
+from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
-RETIRED_REASONS = {True: OPENROUTER_RETIRED_REASON, False: NO_ACTIVE_PROVIDER_REASON}
+# Retired worlds: retained OpenRouter config, fresh install, a NEAR TEE text
+# slot with its credential missing (the NEAR reason wins, as in Settings), and
+# a NEAR TEE slot that serves the route while the vertical has no NEAR adapter.
+WORLDS = ["retained_openrouter", "fresh_install", "near_credential_missing", "near_serves_route"]
+EXPECTED = {"retained_openrouter": OPENROUTER_RETIRED_REASON, "fresh_install": NO_ACTIVE_PROVIDER_REASON,
+    "near_credential_missing": "near_tee_credential_required",
+    "near_serves_route": retirement.NEAR_TEE_ROUTE_UNSUPPORTED_REASON}
 _ACTIVE_RUN_STATES = {"accepted", "queued", "running"}
 
 
@@ -96,14 +103,26 @@ async def assert_no_orphans_or_accounting(sessions, jobs=None):
     return runs
 
 
-def _assert_retired_world(retained):
+def write_world(world):
+    """Write the NEAR TEE part of a world (the OpenRouter part is historical)."""
+    from tests.near_tee_support import write_near_tee_text_configuration
+    if world == "near_credential_missing":
+        write_near_tee_text_configuration(credential_fingerprint=None)
+    elif world == "near_serves_route":
+        write_near_tee_text_configuration()
+
+
+def _assert_world(world):
     from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration
+    configured = read_model_fabric_configuration()
     assert retirement.openrouter_retired() is True
-    assert (read_model_fabric_configuration().openrouter_setup is not None) is retained
-    assert read_model_fabric_configuration().near_tee is None
+    assert (configured.openrouter_setup is not None) is (world == "retained_openrouter")
+    assert (configured.near_tee is not None) is world.startswith("near_")
+    near_serves = world == "near_serves_route"
     for route in ("strategist_agent", "general_task_planner", "readonly_research_child"):
-        assert effective_workload_policy(route).allowed_provider_kinds == ()
-        assert retirement.inactive_route_reason(route) == RETIRED_REASONS[retained]
+        assert effective_workload_policy(route).allowed_provider_kinds == (("near_tee",) if near_serves else ())
+        assert retirement.inactive_route_reason(route) == (None if near_serves else EXPECTED[world])
+        assert retirement.openrouter_only_route_block(route) == EXPECTED[world]
 
 
 async def _operator_session(monkeypatch, secret="vertical-no-provider-auth"):
@@ -119,8 +138,8 @@ async def _operator_session(monkeypatch, secret="vertical-no-provider-auth"):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retained", [True, False], ids=["retained_openrouter", "fresh_install"])
-async def test_work_board_card_proposal_blocks_with_retired_reason(accounting_db, monkeypatch, retained):
+@pytest.mark.parametrize("world", WORLDS)
+async def test_work_board_card_proposal_blocks_with_retired_reason(accounting_db, monkeypatch, world):
     from src.db.models import WorkBoardProposal, WorkBoardStatus, WorkBoardTask
     from src.work_board.contracts import WorkBoardOwner, WorkBoardProposalRequest, WorkBoardTaskCreate
     from src.work_board.repository import WorkBoardRepository
@@ -131,14 +150,15 @@ async def test_work_board_card_proposal_blocks_with_retired_reason(accounting_db
     _root, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     monkeypatch.setattr("src.work_board.triage.get_session", sessions)
-    if retained:
+    if world == "retained_openrouter":
         with historical_openrouter():
             _jobs, owner = await prepare(accounting_db, monkeypatch)
         operator = await _authenticated(owner)
     else:
         operator = await _operator_session(monkeypatch)
         owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
-    _assert_retired_world(retained)
+    write_world(world)
+    _assert_world(world)
     goal = _goal("goal-card-no-provider", "Specify a card without a provider")
     goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
     async with sessions() as db:
@@ -155,7 +175,7 @@ async def test_work_board_card_proposal_blocks_with_retired_reason(accounting_db
         replay = await triage_service.create_proposal(owner, task.task_id, kind="specify",
             request=WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="no-provider"),
             operator=operator)
-    reason = RETIRED_REASONS[retained]
+    reason = EXPECTED[world]
     assert result["status"] == "blocked" and result["blocked_reason"] == reason, result
     assert result["provider_contact_state"] == "not_started"
     assert replay["status"] == "blocked" and replay["blocked_reason"] == reason
@@ -210,26 +230,27 @@ async def _general_task_client(accounting_db, monkeypatch, owner):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retained", [True, False], ids=["retained_openrouter", "fresh_install"])
-async def test_general_task_planning_blocks_with_retired_reason(accounting_db, monkeypatch, retained):
+@pytest.mark.parametrize("world", WORLDS)
+async def test_general_task_planning_blocks_with_retired_reason(accounting_db, monkeypatch, world):
     from src.db.models import WorkBoardTask
     from src.work_board.contracts import WorkBoardOwner
     from tests.test_general_task_planner import prepare
     from tests.test_work_board_m6_provider_free_journey import _goal
 
     sessions = accounting_db[2].accounting_sessions
-    if retained:
+    if world == "retained_openrouter":
         with historical_openrouter():
             jobs, owner = await prepare(accounting_db, monkeypatch)
     else:
         operator = await _operator_session(monkeypatch)
         jobs, owner = None, WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
-    _assert_retired_world(retained)
+    write_world(world)
+    _assert_world(world)
     goal = _goal("goal-general-no-provider", "Read local notes through one governed plan")
     goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
     async with sessions() as db:
         db.add(goal)
-    reason = RETIRED_REASONS[retained]
+    reason = EXPECTED[world]
     async with _general_task_client(accounting_db, monkeypatch, owner) as (client, registry, dispatcher):
         descriptor = next(item for item in registry.descriptors() if item.tool_id == "read_file")
         body = {"goal_revision": 1, "idempotency_key": "general-no-provider",
@@ -262,7 +283,7 @@ async def test_repository_work_intent_blocks_with_retired_reason(accounting_db, 
     sessions = accounting_db[2].accounting_sessions
     with historical_openrouter():
         jobs, owner = await prepare(accounting_db, monkeypatch)
-    _assert_retired_world(True)
+    _assert_world("retained_openrouter")
     goal = _goal("goal-repository-no-provider", "Fix the failing parser test")
     goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
     async with sessions() as db:
@@ -300,8 +321,8 @@ async def test_repository_work_intent_blocks_with_retired_reason(accounting_db, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retained", [True, False], ids=["retained_openrouter", "fresh_install"])
-async def test_mail_reply_blocks_with_retired_reason(accounting_db, monkeypatch, retained):
+@pytest.mark.parametrize("world", WORLDS)
+async def test_mail_reply_blocks_with_retired_reason(accounting_db, monkeypatch, world):
     from src.db.models import WorkBoardStatus, WorkBoardTask
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.repository import WorkBoardRepository
@@ -312,10 +333,11 @@ async def test_mail_reply_blocks_with_retired_reason(accounting_db, monkeypatch,
     tmp_path, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     await mail._seed(sessions, monkeypatch)
-    if retained:
+    if world == "retained_openrouter":
         with historical_openrouter():
             await mail._configure_model_route(sessions, monkeypatch, tmp_path)
-    _assert_retired_world(retained)
+    write_world(world)
+    _assert_world(world)
     created = await mail.mail_api.create_reply_task(mail._request(mail._reply_body("reply-no-provider")))
     assert created.status_code == 201, created.body
     task_id = json.loads(created.body)["task_id"]
@@ -333,7 +355,7 @@ async def test_mail_reply_blocks_with_retired_reason(accounting_db, monkeypatch,
     monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", SourceAdapter)
     dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=DurableJobRepository(),
         session_provider=sessions, runner_id="service:work-board")
-    reason = RETIRED_REASONS[retained]
+    reason = EXPECTED[world]
     with no_provider_contact():
         receipts = [await dispatcher.run_pass() for _ in range(2)]
     assert all(receipt.get("admitted", 0) == 0 and receipt.get("completed", 0) == 0 for receipt in receipts), receipts
@@ -342,8 +364,8 @@ async def test_mail_reply_blocks_with_retired_reason(accounting_db, monkeypatch,
         task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
     assert task.status is WorkBoardStatus.blocked, task.status
     assert task.block_kind == "capability"
-    assert task.block_reason == retirement.inactive_route_label(reason)
-    assert f"({reason})" in task.block_reason
+    # The stable code is the card's block reason; the cockpit renders its text.
+    assert task.block_reason == reason
     assert await assert_no_orphans_or_accounting(sessions) == []
 
 
@@ -360,7 +382,7 @@ async def test_mail_reply_claimed_execution_names_retired_reason(accounting_db, 
     _tmp, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     await mail._seed(sessions, monkeypatch)
-    _assert_retired_world(False)
+    _assert_world("fresh_install")
     repository, owner, claim, inputs, created = await mail._create_claim(sessions, monkeypatch, "reply-claimed-no-provider")
     dispatcher = WorkBoardDispatcher(repository=repository, jobs=DurableJobRepository(), session_provider=sessions)
     with no_provider_contact():
@@ -369,7 +391,7 @@ async def test_mail_reply_claimed_execution_names_retired_reason(accounting_db, 
     async with sessions() as db:
         task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == created["task_id"]))).scalar_one()
     assert task.status is WorkBoardStatus.blocked and task.block_kind == "capability"
-    assert task.block_reason == retirement.inactive_route_label(NO_ACTIVE_PROVIDER_REASON)
+    assert task.block_reason == NO_ACTIVE_PROVIDER_REASON
     assert await assert_no_orphans_or_accounting(sessions) == []
 
 
@@ -377,33 +399,42 @@ async def test_mail_reply_claimed_execution_names_retired_reason(accounting_db, 
 
 
 @pytest.mark.asyncio
-async def test_guardian_opportunity_assessment_blocks_with_retired_reason(isolated_runtime):
-    """A published opportunity reaches its assessment model step and stops
-    with the stable cause: row and native job blocked, nothing contacted."""
+@pytest.mark.parametrize("world", WORLDS)
+async def test_guardian_opportunity_assessment_held_queued_with_route_reason(isolated_runtime, world,
+        monkeypatch, tmp_path):
+    """A published opportunity with no usable assessment route is held queued
+    with the visible reason before any durable job: recoverable once a route
+    exists (its deadline still closes it), never a terminal block or contact."""
     from src.db.models import GuardianOpportunity, WorkflowRunState
     from src.guardian import opportunity_runtime
-    from src.workflows.job_runtime import durable_job_repository
     from tests.test_guardian_opportunity_policy import publish_source
+    from tests.test_inference_accounting import setup_configuration
 
     sessions, _goal, _watch, _request, row, _packet = await publish_source(isolated_runtime)
-    _assert_retired_world(False)
+    # Configuration writes need the workspace's accounting lifecycle binding.
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    from pathlib import Path
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "guardian-lifecycle"))
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(settings.workspace_dir)))
+    if world == "retained_openrouter":
+        with historical_openrouter():
+            setup_configuration(ceiling=25_000, bound=1000)
+    write_world(world)
+    _assert_world(world)
     assert row.status == "queued" and row.job_id is None
+    reason = EXPECTED[world]
     with no_provider_contact():
         await opportunity_runtime.execute_assessment(row.id)
-        # A blocked assessment is terminal: re-execution is refused, never replayed.
-        from src.guardian.opportunity_contracts import OpportunityError
-        with pytest.raises(OpportunityError, match="opportunity_not_pending"):
-            await opportunity_runtime.execute_assessment(row.id)
-        assert (await opportunity_runtime.run_opportunity_tick())["started"] == 0
+        tick = await opportunity_runtime.run_opportunity_tick()
+        again = await opportunity_runtime.run_opportunity_tick()
+    assert tick["started"] == 0 and again["started"] == 0
     async with sessions() as db:
         final = await db.get(GuardianOpportunity, row.id)
         runs = list((await db.execute(select(WorkflowRunState))).scalars())
-    assert final.status == "blocked" and final.reason_code == NO_ACTIVE_PROVIDER_REASON, (final.status, final.reason_code)
-    native = await durable_job_repository.get_job(final.job_id)
-    assert native["status"] == "blocked" and native["failure_reason"] == NO_ACTIVE_PROVIDER_REASON
-    assert native["lease"]["owner"] is None
-    # Exactly one assessment job (the source-watch runs are the publication setup).
-    assert [run.run_identity for run in runs if run.run_identity.startswith("opportunity:")] == [final.job_id]
+    assert final.status == "queued" and final.reason_code == reason, (final.status, final.reason_code)
+    assert final.job_id is None
+    # No assessment job (the source-watch runs are the publication setup).
+    assert [run.run_identity for run in runs if run.run_identity.startswith("opportunity:")] == []
     await assert_no_orphans_or_accounting(sessions)
 
 
@@ -486,8 +517,8 @@ async def _seed_research(sessions, owner):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("capability", ["calendar.meeting-prep.v1", "work.research-dossier.v1"])
-@pytest.mark.parametrize("retained", [True, False], ids=["retained_openrouter", "fresh_install"])
-async def test_calendar_and_research_block_with_retired_reason(accounting_db, monkeypatch, capability, retained):
+@pytest.mark.parametrize("world", WORLDS)
+async def test_calendar_and_research_block_with_retired_reason(accounting_db, monkeypatch, capability, world):
     from src.db.models import WorkBoardStatus, WorkBoardTask
     from src.work_board.contracts import WorkBoardOwner
     from src.work_board.dispatcher import WorkBoardDispatcher
@@ -499,10 +530,11 @@ async def test_calendar_and_research_block_with_retired_reason(accounting_db, mo
     sessions = factory.accounting_sessions
     operator = await _operator_session(monkeypatch)
     owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
-    if retained:
+    if world == "retained_openrouter":
         with historical_openrouter():
             setup_configuration(ceiling=25_000, bound=1000)
-    _assert_retired_world(retained)
+    write_world(world)
+    _assert_world(world)
     seed = _seed_calendar if capability.startswith("calendar") else _seed_research
     goal_id, typed_input = await seed(sessions, owner)
     task_id = await _todo_capability_task(sessions, owner, capability=capability, goal_id=goal_id,
@@ -514,7 +546,7 @@ async def test_calendar_and_research_block_with_retired_reason(accounting_db, mo
     monkeypatch.setattr("src.security.http_transport.fetch_pinned_https", forbidden_source)
     dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=DurableJobRepository(),
         session_provider=sessions, runner_id="service:work-board")
-    reason = RETIRED_REASONS[retained]
+    reason = EXPECTED[world]
     with no_provider_contact():
         receipts = [await dispatcher.run_pass() for _ in range(2)]
     assert all(receipt.get("admitted", 0) == 0 and receipt.get("completed", 0) == 0 for receipt in receipts), receipts
@@ -522,7 +554,7 @@ async def test_calendar_and_research_block_with_retired_reason(accounting_db, mo
         task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
     assert task.status is WorkBoardStatus.blocked, task.status
     assert task.block_kind == "capability"
-    assert task.block_reason == retirement.inactive_route_label(reason)
+    assert task.block_reason == reason
     assert await assert_no_orphans_or_accounting(sessions) == []
 
 
@@ -546,7 +578,7 @@ async def test_specialist_delegation_planning_blocks_with_retired_reason(task_ru
     with historical_openrouter():
         (sessions, dispatcher, planner, transport, owner, _group, accounting, _inputs, _descriptors,
             _provenance) = await specialist_fixture(task_runtime, monkeypatch)
-    _assert_retired_world(True)
+    _assert_world("retained_openrouter")
     service = dispatcher.general_tasks
     service.planner, service.delegation_jobs = planner, dispatcher.jobs
     operator = await authenticate_session(owner.session_id, touch=False)
@@ -572,3 +604,30 @@ async def test_specialist_delegation_planning_blocks_with_retired_reason(task_ru
     assert await state() == before
     assert len(before[0]) == 1
     assert (await dispatcher.jobs.inference_accounting_snapshot())["operations"] == []
+
+
+# ── One precedence for Settings and verticals ────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("world,expected", [
+    ("fresh_install", NO_ACTIVE_PROVIDER_REASON),
+    ("near_credential_missing", "near_tee_credential_required"),
+    ("near_revoked", retirement.PROVIDER_POLICY_REVOKED_REASON),
+])
+async def test_settings_and_verticals_share_inference_block_precedence(client, model_fabric_workspace, world,
+        expected):
+    """Settings' inference_block_reason and a vertical's route block agree:
+    egress revoked first, then the NEAR TEE slot reason, then the fallback."""
+    from tests.near_tee_support import write_near_tee_text_configuration
+    if world == "near_credential_missing":
+        write_near_tee_text_configuration(credential_fingerprint=None)
+    elif world == "near_revoked":
+        write_near_tee_text_configuration(egress_revoked=True)
+    with no_provider_contact():
+        status = await client.get("/api/settings/model-fabric")
+    assert status.status_code == 200, status.text
+    assert status.json()["inference_block_reason"] == expected
+    for route in ("strategist_agent", "general_task_planner", "readonly_research_child"):
+        assert retirement.inactive_route_reason(route) == expected
+        assert retirement.openrouter_only_route_block(route) == expected

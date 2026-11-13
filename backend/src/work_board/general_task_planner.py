@@ -161,12 +161,13 @@ class GeneralTaskPlanner:
             raise BoardError("general_task_planning_budget_required", "Planning requires one call and a nonzero monetary ceiling", status_code=422)
         if not descriptors:
             raise BoardError("general_task_tools_unavailable", "No typed registered tools are available", status_code=409)
-        from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
-        if reason := inactive_route_reason("general_task_planner"):
-            # ADR-035: no active provider serves planning; name the cause
-            # (``openrouter_retired`` / ``no_active_provider``) before any
-            # group, job, reservation or contact exists.
-            raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason)
+        from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
+        if reason := openrouter_only_route_block("general_task_planner"):
+            # ADR-035: planning has no usable route (no active provider, a
+            # NEAR TEE slot reason, or NEAR TEE serves it but planning has no
+            # NEAR adapter yet); name it before any group, job or contact.
+            raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
+                route_block=True)
         try:
             configured, _policy_digest = current_inference_policy()
         except PermissionError as exc:

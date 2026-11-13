@@ -530,11 +530,11 @@ async def _completion(row, goal, evidence, *, fence):
     from src.model_fabric.gpu_admission import GpuPriority
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
-    from src.model_fabric.retirement import inactive_route_reason
-    if retired_reason := inactive_route_reason("strategist_agent"):
-        # ADR-035: no active provider; block with the stable cause before
-        # any route context, reservation or contact.
-        raise OpportunityError(retired_reason)
+    from src.model_fabric.retirement import openrouter_only_route_block
+    if route_block := openrouter_only_route_block("strategist_agent"):
+        # ADR-035: defense in depth for an already claimed job (the route went
+        # away after admission); a precontact block with the stable cause.
+        raise OpportunityError(route_block)
     messages, context = assessment_context(row, goal, evidence)
     await assert_known_vault_values_absent(json.loads(messages[1]["content"]))
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
@@ -621,6 +621,19 @@ async def request_optional_notification(opportunity_id):
             db.add(intervention)
 
 
+async def hold_queued_for_route(opportunity_id, reason):
+    """Keep a queued candidate queued with a route-block reason, never a job."""
+    from sqlalchemy import or_, text, update
+    from src.db import engine as db_engine
+    from src.db.models import GuardianOpportunity
+    async with db_engine.get_session() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        await db.execute(update(GuardianOpportunity).where(GuardianOpportunity.id == opportunity_id,
+            GuardianOpportunity.status == "queued", GuardianOpportunity.job_id.is_(None),
+            or_(GuardianOpportunity.reason_code.is_(None), GuardianOpportunity.reason_code != reason))
+            .values(reason_code=reason, revision=GuardianOpportunity.revision + 1))
+
+
 async def execute_assessment(opportunity_id):
     """Native lease owns execution; terminal adoption shares its SQL fence."""
     from sqlalchemy import select, update, text
@@ -630,6 +643,13 @@ async def execute_assessment(opportunity_id):
     from src.guardian.opportunity_contracts import validate_assessment
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workflows.job_runtime import durable_job_repository
+    from src.model_fabric.retirement import openrouter_only_route_block
+    if route_block := openrouter_only_route_block("strategist_agent"):
+        # ADR-035 (#1156): no durable job without a usable model route. The
+        # candidate stays queued with the visible reason (recoverable once a
+        # route exists); its deadline still closes it.
+        await hold_queued_for_route(opportunity_id, route_block)
+        return
     admitted = await admit_assessment(opportunity_id)
     if admitted["status"] != "queued":
         return
@@ -729,6 +749,13 @@ async def run_opportunity_tick():
     paused = background_inference_skip_reason("guardian_opportunity_assessment")
     if paused:
         record_background_inference_skip("guardian_opportunity_assessment", paused)
+    else:
+        # ADR-035 (#1156): with no usable route for the assessment model step,
+        # hold queued candidates exactly like the toggle above (visible reason,
+        # no job, blocked only at their deadline), so they resume once a route
+        # exists instead of ending as a terminal block.
+        from src.model_fabric.retirement import openrouter_only_route_block
+        paused = openrouter_only_route_block("strategist_agent")
     cursor = None
     started = 0
     examined = 0

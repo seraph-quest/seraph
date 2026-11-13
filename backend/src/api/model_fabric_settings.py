@@ -102,6 +102,7 @@ from src.model_fabric.retirement import (
     OPENROUTER_RETIRED_LABEL,
     OPENROUTER_RETIRED_REASON,
     NO_ACTIVE_PROVIDER_REASON,
+    inference_block_reason,
     openrouter_retired,
 )
 from src.model_fabric.selector import (
@@ -2038,9 +2039,9 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "inference_lane": _inference_lane_status(configured),
         "provider_retirement": _provider_retirement_status(),
         "active_inference_provider": "near_tee" if tee_active else None if openrouter_retired() else OPENROUTER_PROVIDER_KIND,
-        "inference_block_reason": None if tee_active else (near_tee_status.get("reason_code")
-            or (OPENROUTER_RETIRED_REASON if configured.openrouter_setup is not None else NO_ACTIVE_PROVIDER_REASON)
-            ) if openrouter_retired() else None,
+        # One precedence shared with the Work verticals (#1156).
+        "inference_block_reason": inference_block_reason(configured, near_tee_ready=tee_active,
+            near_tee_reason=near_tee_status.get("reason_code")),
         # "blocked" above is scoped to the canonical inference routes; the
         # separate NEAR text Work capability reports its own readiness here.
         "status_scope": "canonical_inference_routes",

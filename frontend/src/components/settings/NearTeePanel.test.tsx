@@ -93,3 +93,50 @@ it("normalizes NEAR TEE status fail-closed and never keeps credential values", (
   expect(verifiedClaim?.near_tee).toBeNull();
   expect(verifiedClaim?.near_tee_metadata_unavailable).toBe(true);
 });
+
+it("saves only the vision slot after both plaintext and separate screenshot consent", async () => {
+  const onSave = vi.fn(async (_payload: Record<string, unknown>) => saved(7));
+  render(<NearTeePanel setup={setup()} stale={false} policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={onSave} />);
+  expect(screen.getByText(/Screenshots are sent to the NEAR gateway in plaintext/)).toBeInTheDocument();
+  const options = Array.from((screen.getByLabelText("NEAR TEE vision model") as HTMLSelectElement).options).map(option => option.value);
+  expect(options).toEqual(["", "z-ai/glm-5.3-flash", "Qwen/Qwen3.8-27B", "Qwen/Qwen3-VL-30B-A3B-Instruct", "deepseek-ai/DeepSeek-V4.1-Flash-1017"]);
+  expect(options).not.toContain("Qwen/Qwen3.6-35B-A3B-FP8");
+  fireEvent.click(screen.getByLabelText("Enable NEAR TEE vision slot"));
+  fireEvent.change(screen.getByLabelText("NEAR TEE vision model"), { target: { value: "Qwen/Qwen3-VL-30B-A3B-Instruct" } });
+  const saveVision = () => fireEvent.click(screen.getByRole("button", { name: "Save NEAR TEE vision slot" }));
+  saveVision(); expect(await screen.findByRole("alert")).toHaveTextContent("plaintext");
+  fireEvent.click(screen.getByLabelText("Acknowledge NEAR TEE vision plaintext access"));
+  saveVision(); expect(await screen.findByRole("alert")).toHaveTextContent("screenshots are sent to NEAR");
+  expect(onSave).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByLabelText("Acknowledge screenshots sent to NEAR in plaintext"));
+  saveVision();
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  expect(onSave.mock.calls[0][0]).toEqual({ expected_policy_revision: 5, near_tee: {
+    schema_version: "seraph.near.tee.setup.v1", api_base: "https://cloud-api.near.ai/v1",
+    slots: { vision: { model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct", enabled: true, max_input_tokens: 16384,
+      max_output_tokens: 2048, timeout_seconds: 30, request_cost_bound_microusd: 20_000, catalog_ttl_hours: 24,
+      plaintext_provider_egress_acknowledged: true, screenshot_plaintext_egress_acknowledged: true } },
+  } });
+});
+
+it("runs the vision capability check for vision mechanics and stays usable without metadata", async () => {
+  const visionSlot: NearTeeSlotStatus = { ...slot, model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct", profile_id: "near_tee.vision",
+    catalog_receipt_current: true, reason_code: "proof_missing:health",
+    catalog_receipt: { model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct", checked_at_iso: "2026-11-13T00:00:00+00:00", expires_at: null,
+      outcome: "passed", reason_code: null, required_cost_microusd: 3584, structured_outputs: true } };
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ outcome: "passed" }), { status: 200 }));
+  vi.stubGlobal("fetch", fetch);
+  const { unmount } = render(<NearTeePanel setup={{ ...setup(), slots: { text: slot, vision: visionSlot } }} stale={false}
+    policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  expect(screen.getByText(/JSON schema requests/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Run vision capability check" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+  const bodies = (fetch.mock.calls as unknown as [string, RequestInit][]).map(([, init]) => JSON.parse(String(init.body)));
+  expect(bodies.map(body => body.capability)).toEqual(["vision", "structured_output", "health", "latency_ms"]);
+  expect(bodies.every(body => body.profile_id === "near_tee.vision")).toBe(true);
+  unmount();
+  // Metadata failure: the panel still renders both editable slots.
+  render(<NearTeePanel setup={null} stale={false} policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  expect(screen.getByLabelText("Enable NEAR TEE vision slot")).not.toBeChecked();
+  expect(screen.getByLabelText("NEAR TEE vision model")).toBeEnabled();
+});

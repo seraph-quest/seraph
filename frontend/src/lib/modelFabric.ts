@@ -237,6 +237,14 @@ export const NEAR_TEE_TEXT_MODELS = [
   "deepseek-ai/DeepSeek-V4.1-Flash-1017",
   "Qwen/Qwen3.6-35B-A3B-FP8",
 ] as const;
+/** ADR-035 closed vision-slot allowlist (text+image input, catalog read 2026-11-13). */
+export const NEAR_TEE_VISION_MODELS = [
+  "z-ai/glm-5.3-flash",
+  "Qwen/Qwen3.8-27B",
+  "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+] as const;
+export const NEAR_TEE_SCREENSHOT_DISCLOSURE = "Screenshots are sent to the NEAR gateway in plaintext for analysis. TEE-hosted per NEAR catalog, not verified by Seraph; no end-to-end encryption.";
 export const NEAR_TEE_DISCLOSURE = "TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in plaintext; no end-to-end encryption.";
 
 export interface NearTeeSlotInput {
@@ -249,12 +257,17 @@ export interface NearTeeSlotInput {
   request_cost_bound_microusd: number;
   catalog_ttl_hours: number;
   plaintext_provider_egress_acknowledged: boolean;
+  /** Vision slot only: the separate screenshot purpose consent. */
+  screenshot_plaintext_egress_acknowledged?: boolean;
 }
+
+export type NearTeeSlotName = "text" | "vision";
 
 export interface NearTeeSetupInput {
   schema_version: "seraph.near.tee.setup.v1";
   api_base: typeof NEAR_TEE_API_BASE;
-  slots: { text: NearTeeSlotInput | null };
+  /** An omitted slot keeps its stored value. */
+  slots: { text?: NearTeeSlotInput | null; vision?: NearTeeSlotInput | null };
   api_key?: string;
 }
 
@@ -265,9 +278,10 @@ export interface NearTeeCatalogReceipt {
   outcome: "passed" | "failed" | string;
   reason_code: string | null;
   required_cost_microusd: number | null;
+  structured_outputs?: boolean;
 }
 
-export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_provider_egress_acknowledged"> {
+export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_provider_egress_acknowledged" | "screenshot_plaintext_egress_acknowledged"> {
   profile_id: string;
   consent_current: boolean;
   status: "disabled" | "configuration_required" | "blocked" | "ready";
@@ -289,7 +303,7 @@ export interface NearTeeSetupStatus {
   disclosure: string;
   tee_verified: false;
   e2ee: false;
-  slots: { text: NearTeeSlotStatus | null };
+  slots: { text: NearTeeSlotStatus | null; vision?: NearTeeSlotStatus | null };
 }
 
 export interface ModelFabricSettingsStatus {
@@ -507,7 +521,7 @@ export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | nu
   };
 }
 
-function normalizeNearTeeSlot(value: unknown): NearTeeSlotStatus | null {
+function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"): NearTeeSlotStatus | null {
   const row = recordOf(value);
   const integer = (field: string, min: number, max: number) => typeof row?.[field] === "number"
     && Number.isSafeInteger(row[field]) && (row[field] as number) >= min && (row[field] as number) <= max;
@@ -523,13 +537,14 @@ function normalizeNearTeeSlot(value: unknown): NearTeeSlotStatus | null {
     max_output_tokens: row.max_output_tokens as number, timeout_seconds: row.timeout_seconds,
     temperature: typeof row.temperature === "number" ? row.temperature : null,
     request_cost_bound_microusd: row.request_cost_bound_microusd as number,
-    catalog_ttl_hours: row.catalog_ttl_hours as number, profile_id: text(row.profile_id) ?? "near_tee.text",
+    catalog_ttl_hours: row.catalog_ttl_hours as number, profile_id: "near_tee." + slotName,
     consent_current: row.consent_current, status: row.status as NearTeeSlotStatus["status"],
     reason_code: text(row.reason_code),
     catalog_receipt: receipt ? { model_id: text(receipt.model_id), checked_at_iso: text(receipt.checked_at_iso),
       expires_at: text(receipt.expires_at), outcome: String(receipt.outcome ?? "unknown"),
       reason_code: text(receipt.reason_code),
-      required_cost_microusd: typeof receipt.required_cost_microusd === "number" ? receipt.required_cost_microusd : null } : null,
+      required_cost_microusd: typeof receipt.required_cost_microusd === "number" ? receipt.required_cost_microusd : null,
+      structured_outputs: receipt.structured_outputs === true } : null,
     catalog_receipt_current: row.catalog_receipt_current === true,
     tee_hosted_per_catalog: row.tee_hosted_per_catalog === true,
     tee_hosting_label: text(row.tee_hosting_label),
@@ -550,9 +565,11 @@ export function normalizeNearTeeSetup(value: unknown): NearTeeSetupStatus | null
     reason_code: typeof row.reason_code === "string" ? row.reason_code : null,
     key_present: row.key_present,
     credential_fingerprint: typeof row.credential_fingerprint === "string" ? row.credential_fingerprint : null,
-    allowlist: { text: stringArray(allowlist?.text).filter(model => (NEAR_TEE_TEXT_MODELS as readonly string[]).includes(model)) },
+    allowlist: { text: stringArray(allowlist?.text).filter(model => (NEAR_TEE_TEXT_MODELS as readonly string[]).includes(model)),
+      vision: stringArray(allowlist?.vision).filter(model => (NEAR_TEE_VISION_MODELS as readonly string[]).includes(model)) },
     disclosure: NEAR_TEE_DISCLOSURE, tee_verified: false, e2ee: false,
-    slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text) },
+    slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text, "text"),
+      vision: slots?.vision == null ? null : normalizeNearTeeSlot(slots.vision, "vision") },
   };
 }
 

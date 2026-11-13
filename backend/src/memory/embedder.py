@@ -1,8 +1,15 @@
-"""OpenRouter-backed embeddings for canonical local memory.
+"""Governed embeddings for canonical local memory.
 
 The source records remain local and canonical. This module only sends the
 text required to derive a vector after the model-fabric cloud-egress policy
 has explicitly allowed the memory-embedding workload.
+
+ADR-035: OpenRouter is retired. With a configured NEAR TEE ``embedding`` slot
+the route is NEAR's ``/v1/embeddings`` through the shared broker
+(``model_fabric.near_tee_embeddings``); its vector space is the namespace
+``near_tee`` + canonical model + measured dimension, never mixed with older
+OpenRouter vectors. Without a usable slot, proof or completed index, recall
+stays lexical; nothing re-embeds automatically.
 """
 
 from __future__ import annotations
@@ -757,9 +764,12 @@ def _embed_texts(
         return []
     from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
     if openrouter_retired():
-        # ADR-035: the OpenRouter embedding route is retired; no NEAR
-        # embedding slot exists yet (PR3d). Fail closed with no contact.
-        _raise_configuration(OPENROUTER_RETIRED_REASON, batch_size=len(texts))
+        # ADR-035: the OpenRouter embedding route is retired. Only a
+        # configured NEAR TEE embedding slot may serve; otherwise fail closed
+        # with no contact.
+        if not near_tee_embedding_configured():
+            _raise_configuration(OPENROUTER_RETIRED_REASON, batch_size=len(texts))
+        return embed_batch_near_tee(texts, principal=principal)[0]
     model = _configured_model(batch_size=len(texts))
     _validate_route_policy(batch_size=len(texts), model=model)
     effective_principal = principal or get_current_trust_principal()
@@ -958,9 +968,113 @@ def embed_batch(
     return _embed_texts(texts, principal=principal)
 
 
+def near_tee_embedding_configured() -> bool:
+    """True when a NEAR TEE embedding slot exists in the stored configuration."""
+    from src.model_fabric.configuration import near_tee_slot
+    configured = read_model_fabric_configuration()
+    return configured.status == "ready" and near_tee_slot(configured, "embedding") is not None
+
+
+def near_tee_embedding_metadata() -> EmbeddingMetadata | None:
+    """The NEAR TEE vector-space identity, projected locally (no contact).
+
+    Present only while the slot is usable (evidence gate, consent,
+    credential reference, lane), its catalog receipt is current and fresh
+    ``embedding``/``health``/``latency_ms`` proofs exist on the exact profile;
+    the dimension is the one the capability check measured.
+    """
+    from src.model_fabric.configuration import near_tee_profile_for_slot, near_tee_slot, near_tee_slot_block_reason
+    from src.model_fabric.near_tee_catalog import catalog_receipt_block_reason
+    from src.model_fabric.near_tee_embeddings import catalog_dimension_conflict, load_slot_proofs, measured_dimension
+    configured = read_model_fabric_configuration()
+    slot = near_tee_slot(configured, "embedding")
+    if slot is None or near_tee_slot_block_reason(configured, "embedding") is not None:
+        return None
+    profile = near_tee_profile_for_slot("embedding", slot)
+    if catalog_receipt_block_reason("embedding", profile, revision=configured.egress_revision) is not None:
+        return None
+    try:
+        proofs = _run_awaitable_sync(load_slot_proofs(profile))
+    except Exception:
+        return None
+    if {proof.capability for proof in proofs if proof_is_fresh(proof)} != {"embedding", "health", "latency_ms"}:
+        return None
+    dimension = measured_dimension(proofs)
+    if dimension is None or catalog_dimension_conflict(profile, dimension):
+        return None
+    return EmbeddingMetadata(EMBEDDING_SCHEMA_VERSION, "near_tee", slot.model_id, dimension)
+
+
+def embed_batch_near_tee(
+    texts: list[str],
+    *,
+    principal: TrustPrincipal | None = None,
+) -> tuple[list[list[float]], int | None, EmbeddingMetadata]:
+    """One bounded batch on the NEAR TEE embedding slot: (vectors, cost, space).
+
+    Precontact denials raise ``EmbeddingConfigurationError`` with the stable
+    slot reason; a settled failure (echo or dimension mismatch, overrun)
+    raises ``EmbeddingResponseError`` and adopts nothing; a contact without
+    authoritative cost raises ``near_tee_cost_liability`` (Unknown, lease
+    blocked until fenced settlement).
+    """
+    from src.model_fabric.gpu_admission import GpuAdmissionError, GpuAdmissionUncertainError
+    from src.model_fabric.near_tee import NearTeeDenied, NearTeeError
+    from src.model_fabric.near_tee_embeddings import embed_texts_near_tee_sync
+
+    _validate_inputs(texts)
+    if not texts:
+        raise EmbeddingUnavailableError("input_required", stage="validation")
+    effective_principal = principal or get_current_trust_principal()
+    if effective_principal is None:
+        _raise_configuration("authenticated_principal_required", batch_size=len(texts))
+    request_id = f"embedding:{uuid4().hex}"
+    model = None
+    try:
+        outcome = embed_texts_near_tee_sync(texts, principal=effective_principal, request_id=request_id)
+    except NearTeeDenied as exc:
+        _log_embedding_event("failed", details=_safe_details(stage="route", reason_code=exc.code,
+            batch_size=len(texts), request_id=request_id))
+        raise EmbeddingConfigurationError(exc.code, stage="route", request_id=request_id) from None
+    except GpuAdmissionUncertainError as exc:
+        cause = exc.__cause__
+        code = cause.code if isinstance(cause, NearTeeError) else "remote_inference_uncertain"
+        if code != "near_tee_cost_liability":
+            code = "remote_inference_uncertain"
+        _log_embedding_event("failed", details=_safe_details(stage="admission", reason_code=code,
+            batch_size=len(texts), request_id=request_id))
+        raise EmbeddingUnavailableError(code, stage="admission", request_id=request_id) from None
+    except NearTeeError as exc:
+        _log_embedding_event("failed", details=_safe_details(stage="response", reason_code=exc.code,
+            batch_size=len(texts), request_id=request_id))
+        error = EmbeddingResponseError(exc.code, stage="response", request_id=request_id)
+        error.cost_microusd = getattr(exc, "cost_microusd", None)
+        raise error from None
+    except (GpuAdmissionError, RemoteInferenceAdmissionError, NoCompliantModelRouteError) as exc:
+        code = str(getattr(exc, "code", None) or "remote_inference_admission_failed")
+        _log_embedding_event("failed", details=_safe_details(stage="admission", reason_code=code,
+            batch_size=len(texts), request_id=request_id))
+        raise EmbeddingUnavailableError(code, stage="admission", request_id=request_id) from None
+    except PermissionError:
+        _raise_configuration("model_inference_authority_required", batch_size=len(texts))
+    model = read_model_fabric_configuration().near_tee.slots["embedding"].model_id
+    metadata = EmbeddingMetadata(EMBEDDING_SCHEMA_VERSION, "near_tee", model, int(outcome.dimension))
+    if any(len(vector) != metadata.dimension for vector in outcome.vectors):
+        raise EmbeddingResponseError("near_tee_embedding_dimension_mismatch", stage="response", request_id=request_id)
+    return outcome.vectors, outcome.cost_microusd, metadata
+
+
 def embedding_metadata() -> EmbeddingMetadata | None:
     """Project current measured proof geometry without contacting a provider."""
     global _metadata, _metadata_profile_hash
+    from src.model_fabric.retirement import openrouter_retired
+    if openrouter_retired():
+        # ADR-035: only the NEAR TEE namespace is active; never the retired
+        # OpenRouter space cached by this process.
+        try:
+            return near_tee_embedding_metadata() if near_tee_embedding_configured() else None
+        except Exception:
+            return None
     with _metadata_lock:
         metadata, bound_hash = _metadata, _metadata_profile_hash
     setup = read_model_fabric_configuration().openrouter_setup

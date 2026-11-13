@@ -115,7 +115,8 @@ def near_tee_contract_exclusion_reason(profile: ProviderProfile) -> str | None:
         return "near_tee_endpoint_not_canonical"
     if profile.follow_redirects:
         return "redirects_forbidden"
-    if profile.transport_adapter != "openai_compatible_chat":
+    expected_adapter = "openai_compatible_embeddings" if slot == "embedding" else "openai_compatible_chat"
+    if profile.transport_adapter != expected_adapter:
         return "near_tee_transport_adapter_not_allowed"
     if profile.secret_env != "NEAR_API_KEY" or profile.keyless:
         return "near_tee_credential_required"

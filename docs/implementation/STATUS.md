@@ -778,12 +778,78 @@ principal (a revoked root or a different owner is not adopted; the cost still
 settles). Cordis requests above the slot's output limit are refused with
 `inference_max_tokens_exceeds_route`. PR3c adds `streaming` and `tool_use` to
 the slot profile, which changes its hash: after upgrading, re-run the catalog
-check and every capability check. Vision and
-embeddings are not served (PR3d/PR4).
+check and every capability check. Vision is not served
+(PR4); embeddings: see below.
 Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
 plaintext; attestation not verified by Seraph; no end-to-end encryption".
 Evidence is intercepted-transport tests only: no live NEAR call, provider
 availability, price or model quality is established.
+
+## NEAR TEE embedding slot and memory re-index (ADR-035, #1147 PR3d)
+
+**Partial, blocked by default.** The `embedding` slot is implemented but
+**fails closed** with `near_tee_embedding_evidence_required`: ADR-035 requires
+source evidence that NEAR's `/v1/embeddings` endpoint and `/v1/billing/costs`
+honour `x-no-aliasing` before the slot may dispatch, and the repository holds
+none (the 2026-10-05 trust-boundary research and ADR-025's billing sources
+cover chat completions only). The gate is a code constant that only a reviewed
+ADR-035 amendment with dated source evidence may set; no setting, catalog
+receipt or capability check clears it. NEAR's specialized-endpoints guide
+(read by the lead 2026-11-13) documents OpenAI-format `/v1/embeddings` for this
+model but says nothing about aliasing or embedding billing. Until then memory
+recall stays lexical and NEAR receives no memory text.
+
+A second blocker remains even after an evidence amendment: the real catalog
+record for `Qwen/Qwen3-Embedding-0.6B` (lead's read 2026-11-13) has no
+`isReady` field and no dimension field, so under ADR-035's readiness rule the
+catalog check reports `near_tee_catalog_not_ready` (fixture-tested). The
+amendment must also decide how readiness is handled for this model.
+
+Implemented mechanics (proven with intercepted transport and the gate lifted
+in tests only): the slot takes `Qwen/Qwen3-Embedding-0.6B` from the closed
+allowlist, a per-request input-token bound (conservatively one token per UTF-8
+byte plus overhead) and batch size (1–64), a per-request reserve, and its own
+purpose consent acknowledging that memory text reaches NEAR in plaintext. The
+catalog check requires vllm, attested, verifiable, ready, text input and an
+embedding output modality, enough context and a reserve covering maximum input
+x input price plus the one-token output bound x output price (the catalog lists
+an output price; how NEAR bills embedding output, per vector or per dimension,
+is unsourced); a stated dimension is recorded. The
+`embedding` capability check measures the vector dimension. Dispatch posts
+`/v1/embeddings` with the canonical id and `x-no-aliasing: true` on the
+`memory_embedding` route (background priority below chat) through the one
+broker with billing readback inside the lease; a response model or dimension
+that differs from the proof is settled and not adopted; a missing cost, or a
+response without a billing identity, is an Unknown liability that blocks the
+lane until fenced settlement.
+
+Vectors live in a namespace keyed by provider `near_tee`, model, measured
+dimension and schema, never mixed with older OpenRouter vectors. Recall uses it
+only with current proofs and a completed index; otherwise search returns the
+labelled lexical/degraded result without contact and new memories are not
+embedded. After indexing, new memories and recall queries are sent to NEAR.
+Completeness decays at write time: a failed NEAR-mode memory write, or a
+committed canonical memory inserted without a vector, whose summary/content
+is set, or that is reactivated, marks the namespace incomplete and recall
+returns to lexical without anyone opening settings. Unit-of-work writes and
+ORM `update(Memory)`/`insert(Memory)` statements are both observed (session
+hooks, applied after commit; a rolled-back write never decays); SQL executed
+directly on a connection is not. A Core update that sets `summary` decays even
+if the value is unchanged (the prior value is not visible), so merges return
+recall to lexical until the next re-index. A run that started before such a change never marks the namespace
+complete (`near_tee_index_changed_during_run`). The index state file is
+updated under a process lock and an exclusive file lock; the status
+projection only reads it. A vector written for a new memory counts under its
+`embedding_id`. Re-indexing is never automatic: an authenticated settings action with
+a per-run consent and spend cap starts one durable job (existing workflow job
+ledger) that embeds canonical memory in bounded batches, checkpoints each
+batch, stops at the budget, can be cancelled, resumes idempotently from the
+namespace contents, removes rows of memories that are no longer active, and
+records a verified local readback before success. More than 10,000 canonical
+memories leaves the index incomplete (`near_tee_reindex_over_cap`); it never
+completes. A new Unknown accounting operation during a run ends it as a cost
+liability. No live NEAR call, price,
+availability or embedding quality is established.
 
 ## Epic #736/#775 OpenRouter inference phase
 

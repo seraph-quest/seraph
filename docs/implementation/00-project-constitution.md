@@ -105,7 +105,7 @@ Public entry points: [docs](https://docs.seraph.quest),
 | --- | --- | --- |
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
 | **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
-| **Model fabric** | NEAR AI TEE-hosted inference under ADR-035 with explicit routing, consent, budgets and receipts (ADR-025's NEAR text capability retained) | Agent identity, durable state, shell orchestration, or product policy |
+| **Model fabric** | NEAR AI TEE-hosted inference (per NEAR catalog, not verified by Seraph) under ADR-035 with explicit routing, consent, budgets and receipts (ADR-025's NEAR text capability retained) | Agent identity, durable state, shell orchestration, or product policy |
 | **Interfaces and edges** | Browser cockpit, API, consented local or paired desktop context, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
@@ -172,7 +172,8 @@ The following architecture decisions are normative:
 35. [ADR-035: NEAR TEE-hosted inference only](./decisions/035-near-tee-hosted-inference-only.md) (supersedes ADR-006's provider choice and ADR-024's OpenRouter slots)
 
 ADR-033 extends only the versioned setup.v3 target with one optional disabled
-audio route. Existing setup.v1/v2 and text, vision and embedding contracts stay
+audio route; under ADR-035 that OpenRouter route is never activated and a NEAR
+TEE audio slot needs a separate amendment. Existing setup.v1/v2 and text, vision and embedding contracts stay
 in force. Source-attested exact endpoint/codec and finite chat-audio pricing,
 original audio native ownership and a separately selected Goal/Task allowance
 are mandatory. Paired-channel Task capture is **Partial**; live audio stays

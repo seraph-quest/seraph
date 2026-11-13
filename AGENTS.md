@@ -190,8 +190,8 @@ HTTP `local` stack is development-only.
   transaction, lifecycle-lock and artifact-adoption seams; preserve their lock
   ordering and current-authority checks. A storage/plugin adapter does not
   authorize a second canonical store or migration framework.
-- All inference targets NEAR AI TEE-hosted models from a closed per-slot
-  allowlist under
+- All inference targets NEAR AI TEE-hosted models (per NEAR catalog, not
+  verified by Seraph) from a closed per-slot allowlist under
   [ADR-035](docs/implementation/decisions/035-near-tee-hosted-inference-only.md)
   (runtime Planned; Development Status owns the effective route). OpenRouter is
   retired by policy: no new contact, liabilities stay reconcilable. No fallback.

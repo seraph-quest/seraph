@@ -26,9 +26,10 @@ On 2026-11-13 the operator decided in chat with the lead:
 4. Delivery is stacked PRs that respect ADR-026.
 
 ADR-025 (#959) chose standard NEAR HTTPS with **no** TEE claim because client
-attestation needed an SDK and native crypto. This decision keeps that
-non-verification: it adds a model *selection* constraint and a dated,
-catalog-sourced hosting label, never a verified-confidentiality claim.
+attestation needed an SDK and native crypto. The shift recorded here is the
+operator's 2026-11-13 decision. It buys a model-selection constraint and a
+dated, catalog-sourced hosting label, not new assurance: Seraph still verifies
+no attestation and makes no confidentiality claim.
 
 ## Decision
 
@@ -36,7 +37,9 @@ catalog-sourced hosting label, never a verified-confidentiality claim.
 
 Fields read from the NEAR catalog records
 `https://cloud-api.near.ai/v1/model/{id}` by the lead on 2026-11-13. Every entry
-reported `providerType=vllm`, `attestationSupported=true` and `verifiable=true`.
+except the embedding row reported `providerType=vllm`, `attestationSupported=true`
+and `verifiable=true`; the embedding row comes from the catalog list (vllm,
+attested) and its per-model fields are re-read by the catalog check.
 Prices are USD per million input/output tokens.
 
 | Canonical model id | Slots | Catalog facts | Conditions |
@@ -46,7 +49,7 @@ Prices are USD per million input/output tokens.
 | `Qwen/Qwen3-VL-30B-A3B-Instruct` | vision | text+image; structured_outputs, logprobs; ready; $0.15/$0.55; ctx 16,384; max out 8,192 | No tools: never text |
 | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | text, vision | text+image; tools, reasoning; $0.30/$1.20; ctx 1,048,576; alias `deepseek-ai/DeepSeek-V4-Flash` | Metadata incomplete (`isReady` absent, sampling list empty, no structured outputs): the catalog check fails closed while `isReady` is absent; never for callers needing structured output |
 | `Qwen/Qwen3.6-35B-A3B-FP8` | text | text only; tools, json_mode, structured_outputs, reasoning; ready; $0.17/$1.10; ctx 262K | Aliases include `Qwen3-30B-A3B-Instruct-2507` |
-| `Qwen/Qwen3-Embedding-0.6B` | embedding | embedding; $0.01/M (catalog list read) | Per-model fields re-read by the catalog check |
+| `Qwen/Qwen3-Embedding-0.6B` | embedding | embedding; $0.01/M (catalog list read) | Per-model fields re-read by the catalog check; before PR3d, source evidence must show that the embeddings endpoint and `/v1/billing/costs` honour `x-no-aliasing`, or the slot stays blocked |
 | `openai/whisper-large-v3` | none (reserved audio) | audio | Not selectable under this ADR; see Audio |
 
 Excluded: every proxied model (`anthropic/*`, `openai/gpt*`, `google/*`,
@@ -61,8 +64,10 @@ design basis, not live availability; the catalog check below decides dispatch.
 model by default. Task classes map exactly as ADR-024's
 `route_slot_for_task_class`; unknown classes stay `route_slot_unmapped`, and
 `audio_transcription` returns `audio_route_unavailable`. Each slot carries one
-allowlisted canonical model id, temperature, max output tokens, timeout and a
-request cost bound. Callers needing tools, streaming or structured output still
+allowlisted canonical model id, temperature, required `max_input_tokens` (at
+most the catalog context window), max output tokens, timeout and a request cost
+bound. A request whose conservatively estimated input (images counted per the
+provider's pricing) exceeds `max_input_tokens` is rejected before contact. Callers needing tools, streaming or structured output still
 require that capability on the slot's proof. The base is fixed to
 `https://cloud-api.near.ai/v1`; verified TLS, `trust_env=False`, no redirects,
 identity encoding, byte caps and duplicate-key JSON rejection follow ADR-025.
@@ -107,8 +112,9 @@ canonical id, complete profile hash, `checked_at`, the fields above (provider
 type, attestation/verifiable flags, readiness, modalities, features, prices,
 context), response SHA-256 and pass/fail reason. A pass requires `vllm`,
 attestation and verifiable true, readiness true, the slot's modality and
-features, and a request cost bound that covers the slot's maximum request at the
-receipt prices. TTL is operator-set 1–24 hours, default 24. Precontact dispatch
+features, and `request_cost_bound_microusd >= max_input_tokens x input price +
+max_output_tokens x output price` at the receipt prices (reasoning tokens count
+within `max_output_tokens`). TTL is operator-set 1–24 hours, default 24. Precontact dispatch
 re-validates locally (receipt passing, same id and profile hash, unexpired);
 otherwise the slot blocks with `near_tee_catalog_receipt_stale` or the failure
 reason. Dispatch never refreshes the catalog. The receipt is an additional
@@ -116,12 +122,14 @@ hosting gate, not a capability proof. Tests intercept this transport.
 
 ### Capability proofs kept
 
-The existing manual capability proof (`POST /api/settings/model-fabric/canary`,
-complete-profile-hash key, expiry) extends to NEAR TEE slot profiles. After
-merge, the operator may run separately consented, cost-bounded per-slot
-**mechanics** checks for `text`, `streaming`, `tool_use`, `structured_output`,
-`vision`, `embedding`, `health` and `latency_ms`. They check request/response
-mechanics only: no quality score, corpus, judge or comparison. They are not
+The existing manual capability proof endpoint (`POST /api/settings/model-fabric/canary`,
+complete-profile-hash key, expiry) extends to NEAR TEE slot profiles; new
+operator-facing labels call it a "capability check". After merge, the operator
+may run separately consented, cost-bounded per-slot **mechanics** checks for
+`text`, `streaming`, `tool_use`, `structured_output`, `vision`, `embedding`,
+`health` and `latency_ms`. They check request/response mechanics only: no
+quality score, corpus, judge or comparison. `latency_ms` is checked only against
+the slot's own timeout and is never ranked across models. They are not
 evals, are never a merge, release or code-activation gate, and run only through
 the broker and ledger. As under ADR-006/024, a missing or stale proof blocks
 only the dependent workload at dispatch. Implementation tests use intercepted
@@ -129,15 +137,25 @@ transport only.
 
 ### Billing
 
-Reserve before contact at the slot's request cost bound. The broker releases the
-in-flight slot when the inference response ends; NEAR `/v1/billing/costs`
-readback (ADR-025 identity, parsing and bounds) runs after admission through the
-deferred settlement seam ADR-025 introduced (`reconcile_settled_near_operation`),
-generalized to NEAR TEE runtime paths, and never holds the serial lane. Streamed
-output already shown is never retracted. A missing, invalid or unread cost
-becomes an Unknown liability that reduces capacity until settled; there is no
-token-price estimate and no inference replay. Non-streaming routes follow their
-existing adoption rule; near_text keeps ADR-025's withhold-on-Unknown rule.
+Existing broker semantics are kept; there is no broker redesign and no new
+async settler. Reserve before contact at the slot's request cost bound. NEAR
+`/v1/billing/costs` readback runs inside the original admitted lease with
+ADR-025's identity, parsing and bounds (at most two attempts, 1s apart, total
+15s or less, within the original deadline), for non-streaming and streaming
+requests alike; for streaming it runs after the stream ends, and deltas already
+delivered are never retracted. There is no token-price estimate and no
+inference replay.
+
+If no authoritative cost arrives, the operation becomes an Unknown liability
+and, exactly as today for uncertain outcomes (`uncertain_on_error`), the serial
+lease stays blocked until the operator settles it through the existing fenced
+reconcile or manual-settlement path. Operator impact: one Unknown NEAR cost
+blocks all inference, chat included, until settled; the UI must surface the
+blocked lane, the liability and the recovery action. `reconcile_settled_near_operation`
+is not a billing settler: it is operator-triggered lane recovery after an
+already-settled row, today bound to `near_text_native`, and is generalized to
+NEAR TEE runtime paths for that recovery role only. Non-streaming routes follow
+their existing adoption rule; near_text keeps ADR-025's withhold-on-Unknown rule.
 
 ### Lane configuration
 
@@ -156,7 +174,9 @@ NEAR text and NEAR TEE mirror the lane ceiling, never fund their own.
   stays a separate native Work capability with its fixed `z-ai/glm-5.3-flash`
   model, `vault:near_text_api_key`, receipts and ADR-025 output rules. PR3b
   rebases it on the shared NEAR client, which adds `x-no-aliasing`, the echo
-  check and the catalog receipt gate for its model. Folding it into the text slot
+  check and a catalog receipt gate bound to profile `near.text` and its profile
+  hash. near_text stays excluded from the generic capability-check endpoint
+  (ADR-025) and keeps reading billing inside its own lease. Folding it into the text slot
   happens only by explicit operator action under a tracked ticket. Rationale: it
   is a shipped Work-review surface with stricter adoption rules than the
   general text slot; folding now would remove behavior without operator request.
@@ -170,8 +190,9 @@ NEAR text and NEAR TEE mirror the lane ceiling, never fund their own.
 
 From PR3a, no route makes new OpenRouter contact: selector, caller context,
 effective policy, admission, the capability-proof endpoint, research and
-planner callers, and the daemon. PR3a also publishes the stored OpenRouter
-routes disabled and revoked, so an older binary cannot resume contact. Settings
+planner callers, and the daemon. PR3a also publishes a route-scoped revoke
+of the stored OpenRouter routes, so an older binary cannot resume contact; it
+does not fence NEAR and does not block OpenRouter liability settlement. Settings
 shows OpenRouter as "retired". Its configuration, credential, receipts, ledger
 rows, billing readback and settlement stay readable so contacted liabilities
 reconcile. Code removal is a later tracked ticket once OpenRouter liabilities
@@ -189,7 +210,9 @@ automatic. Until it completes, recall degrades to clearly labeled lexical search
 ### Screenshots and the daemon
 
 Daemon OCR providers that call a remote model (`openrouter`, and `codex-local`,
-which drives a cloud-backed Codex CLI) are removed. Apple Vision on-device OCR
+which drives a cloud-backed Codex CLI) are removed. Removing `codex-local`
+drops its no-API-price Codex path; the operator must acknowledge that loss
+before PR4 lands. Apple Vision on-device OCR
 stays. Captures reach the backend over an authenticated local upload endpoint
 that keeps app name, window title, capture time and content hash, with atomic
 writes, existing dedupe and retention; there is no folder handoff and the
@@ -229,7 +252,9 @@ HTTP, including the catalog check, and make no live or paid calls. Negative
 tests: stale or failed catalog receipt blocks the slot; model echo mismatch;
 missing `x-no-aliasing`; non-allowlisted model; zero OpenRouter contact on all
 routes; daemon makes no cloud call; global revoke blocks NEAR; missing billing
-becomes Unknown; billing readback does not hold the lane; serial bound 1 with
+becomes Unknown and keeps the lease blocked until fenced settlement, with the
+blocked state visible; billing readback stays within the original lease and
+deadline; input over `max_input_tokens` is rejected before contact; serial bound 1 with
 chat priority; reasoning content never reaches answer text. A keyless managed
 run shows NEAR disabled. Live NEAR use comes only after merge with explicit
 operator approval.

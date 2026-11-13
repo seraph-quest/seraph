@@ -15,8 +15,8 @@ stored-data migration is established by this decision.
 
 **Relationship:** Refines the Constitution's four logical responsibilities into
 plugin composition. It does not supersede their authority boundaries, ADR-001/003
-provider/state ownership, ADR-006/024 ordinary inference, ADR-025's narrow NEAR
-exception, ADR-008 portability, or ADR-013/020 package protections.
+provider/state ownership, ADR-035 inference (superseding ADR-006/024 and
+absorbing ADR-025), ADR-008 portability, or ADR-013/020 package protections.
 
 ## Context
 
@@ -110,9 +110,10 @@ verify any isolation boundary it needs; unsupported profiles remain blocked.
   Persistence plugins implement the existing logical ownership and durable
   contracts, not one database or ledger per plugin. Retain identity, provenance,
   backup/restore, encryption/private readback, revocation fences and recovery.
-- Ordinary inference remains governed OpenRouter with explicit upstream/purpose,
-  consent, capabilities and budget. ADR-025 permits only its separately governed
-  optional NEAR HTTPS text capability, including its provider-plaintext disclosure.
+- Inference uses governed NEAR AI TEE-hosted models under ADR-035 (amending this
+  bullet), with explicit slot/purpose, consent, capabilities, budget and its
+  provider-plaintext disclosure, as a typed model-fabric provider adapter behind
+  `seraph.inference.v1`. OpenRouter is retired by policy.
   No local/direct-vendor fallback or provider-owned agent runtime is introduced.
 - Preserve the shared remote-inference admission bound of one, priority,
   deadlines, cancellation, idempotency, reservations, authoritative cost evidence

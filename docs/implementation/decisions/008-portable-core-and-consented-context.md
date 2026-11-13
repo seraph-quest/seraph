@@ -26,7 +26,7 @@ example must not prevent an operator from choosing either supported host OS.
 
 macOS and Linux are peer core-host targets. The operator chooses one canonical
 workspace host. The browser cockpit, backend, storage, durable jobs, approvals,
-memory and governed OpenRouter route use the same authority and recovery
+memory and governed inference route (NEAR TEE-hosted under ADR-035) use the same authority and recovery
 contracts on either host. `jupyter` is a historical deployment example, not a
 required machine or OS. An optional paired device never gains canonical
 authority; the core host may also supply explicitly permitted local context.

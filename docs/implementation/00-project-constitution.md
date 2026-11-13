@@ -105,7 +105,7 @@ Public entry points: [docs](https://docs.seraph.quest),
 | --- | --- | --- |
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
 | **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
-| **Model fabric** | OpenRouter ordinary inference with explicit routing, consent, budgets and receipts; one dedicated optional NEAR HTTPS text capability under ADR-025 | Agent identity, durable state, shell orchestration, or product policy |
+| **Model fabric** | NEAR AI TEE-hosted inference (per NEAR catalog, not verified by Seraph) under ADR-035 with explicit routing, consent, budgets and receipts (ADR-025's NEAR text capability retained) | Agent identity, durable state, shell orchestration, or product policy |
 | **Interfaces and edges** | Browser cockpit, API, consented local or paired desktop context, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
@@ -140,7 +140,7 @@ The following architecture decisions are normative:
 3. [ADR-003: Canonical memory boundary](./decisions/003-canonical-memory-boundary.md)
 4. [ADR-004: GPU core and paired Mac edge](./decisions/004-gpu-core-mac-edge-topology.md) (fixed placement superseded by ADR-008)
 5. [ADR-005: Epic integration branch workflow](./decisions/005-epic-integration-branch-workflow.md)
-6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
+6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md) (provider choice superseded by ADR-035)
 7. [ADR-007: Bounded Node repair and Linux process supervision](./decisions/007-bounded-node-repair-supervision.md)
 8. [ADR-008: Portable core and consented context](./decisions/008-portable-core-and-consented-context.md)
 9. [ADR-009: Tested repository publication](./decisions/009-tested-repository-publication.md)
@@ -158,8 +158,8 @@ The following architecture decisions are normative:
 20. [ADR-020: Reviewed authored capability packages](./decisions/020-reviewed-authored-capability-packages.md)
 21. [ADR-021: Exact Forgejo issue title transaction](./decisions/021-exact-forgejo-issue-title.md)
 23. [ADR-023: Evidence-bound guardian opportunities](./decisions/023-evidence-bound-guardian-opportunities.md)
-24. [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md)
-25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md)
+24. [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md) (OpenRouter slots superseded by ADR-035)
+25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md) (absorbed by ADR-035)
 26. [ADR-026: All-plugin Cordis agent architecture](./decisions/026-all-plugin-cordis-architecture.md)
 27. [ADR-027: Finite standing public goal programmes](./decisions/027-standing-public-goal-programmes.md)
 28. [ADR-028: Reviewed typed task methods and reusable procedures](./decisions/028-reviewed-task-methods.md)
@@ -167,21 +167,24 @@ The following architecture decisions are normative:
 30. [ADR-030: Bounded iterative repository work and original-producer recovery](./decisions/030-bounded-iterative-repository-work.md)
 31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
 32. [ADR-032: Repository crash recovery evidence](./decisions/032-repository-crash-recovery-evidence.md) (supersedes selected ADR-030 recovery clauses)
-33. [ADR-033: Optional governed OpenRouter audio transcription](./decisions/033-governed-optional-audio-route.md)
+33. [ADR-033: Optional governed OpenRouter audio transcription](./decisions/033-governed-optional-audio-route.md) (OpenRouter audio never activated under ADR-035)
 34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
+35. [ADR-035: NEAR TEE-hosted inference only](./decisions/035-near-tee-hosted-inference-only.md) (supersedes ADR-006's provider choice and ADR-024's OpenRouter slots)
 
 ADR-033 extends only the versioned setup.v3 target with one optional disabled
-audio route. Existing setup.v1/v2 and text, vision and embedding contracts stay
+audio route; under ADR-035 that OpenRouter route is never activated and a NEAR
+TEE audio slot needs a separate amendment. Existing setup.v1/v2 and text, vision and embedding contracts stay
 in force. Source-attested exact endpoint/codec and finite chat-audio pricing,
 original audio native ownership and a separately selected Goal/Task allowance
 are mandatory. Paired-channel Task capture is **Partial**; live audio stays
 disabled as an explicit "Voice route unavailable" state, and scripted mechanics do
 not establish operational voice readiness.
 
-ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
-purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR
-HTTPS text capability with explicit provider plaintext access. These accepted
-decisions retain the existing authority, serial admission and accounting
+ADR-023 defines evidence-bound Guardian opportunities. ADR-035 makes NEAR AI
+TEE-hosted models (per NEAR's dated catalog, not Seraph-verified, plaintext to
+the NEAR gateway) the only inference target, reusing ADR-024's slot mechanics,
+absorbing ADR-025's NEAR text capability and retiring OpenRouter by policy.
+These accepted decisions retain the existing authority, serial admission and accounting
 boundaries. [Development Status](./STATUS.md) owns the implemented capability
 scope and its limits; acceptance alone does not establish live provider quality
 or availability.
@@ -238,9 +241,9 @@ Open branches describe intended post-merge truth and must be identified as such.
 
 - Model providers are inference-only. Seraph does not depend on Codex CLI,
   Claude Code, or another coding-agent runtime to operate.
-- Ordinary model inference uses the governed OpenRouter HTTPS route; ADR-025
-  permits only the separate fixed optional NEAR HTTPS text capability. Exact
-  model/modalities and upstream policy must be verified before dispatch;
+- Model inference targets NEAR AI TEE-hosted models from ADR-035's closed
+  allowlist; OpenRouter makes no new contact. Exact canonical model, catalog
+  receipt, modalities and policy must be checked before dispatch;
   unsupported capabilities remain blocked or degraded rather than falling back
   silently.
 - Remote inference uses one shared bounded admission contract with owner,
@@ -259,8 +262,8 @@ Open branches describe intended post-merge truth and must be identified as such.
   the canonical workspace host; `jupyter` is a historical deployment example.
   Consented context may originate locally or from a paired, revocable edge,
   without transferring authority. GPU hardware, local model
-  weights, and a VLM wrapper are not active product prerequisites during the
-  OpenRouter-only phase.
+  weights, and a VLM wrapper are not active product prerequisites under
+  remote inference (ADR-006, ADR-035).
 - Effective model, queue, edge, and degraded state must be operator-visible.
   Silent fallback that makes the UI lie is a contract violation.
 

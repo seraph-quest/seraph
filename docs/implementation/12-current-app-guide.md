@@ -1266,7 +1266,7 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > topology below remains documented as pre-#775 `develop` evidence and rollback
 > diagnostics, not a startup dependency. Named missing platform/provider receipts
 > remain unverified; integration does not establish them.
-> The target contract is defined by [ADR-006](./decisions/006-openrouter-only-inference-phase.md).
+> Shipped route: OpenRouter (#775). Accepted target: [ADR-035](./decisions/035-near-tee-hosted-inference-only.md) (Planned).
 > [ADR-025](./decisions/025-near-https-text-inference.md) permits only the separate
 > optional NEAR HTTPS text capability described above.
 

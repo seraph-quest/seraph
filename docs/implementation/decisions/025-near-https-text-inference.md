@@ -7,6 +7,8 @@ title: "ADR-025: Optional NEAR HTTPS text inference"
 
 **Status:** Accepted under [#959](https://github.com/seraph-quest/seraph/issues/959), effective on the independently reviewed milestone merge to `develop`. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits. Provider access remains disabled by default and requires current explicit authority.
 
+**Superseded/absorbed:** [ADR-035](./035-near-tee-hosted-inference-only.md) absorbs this capability: it stays a separate native Work capability, rebased on the shared NEAR client with `x-no-aliasing`, the response model echo and the catalog receipt gate, until folded into the NEAR TEE text slot by explicit operator action. Statements below that ordinary routing stays OpenRouter-only are historical.
+
 **Decision class:** Narrow exception to ADR-006 for one optional native capability. ADR-024's three OpenRouter slots and ordinary model routing remain unchanged.
 
 ## Context
@@ -85,7 +87,8 @@ Generic capability canaries exclude NEAR. Configured readiness is not availabili
 The configuration owner exposes `validate_near_text_setup`, `near_text_profile_for_setup`,
 `current_near_text_policy() -> (configuration,digest)`,
 `capture_near_text_credential(*, expected_revision, expected_fingerprint)` and
-settings/configuration publication. Default/general selectors stay OpenRouter-only.
+settings/configuration publication. Default/general selectors stay OpenRouter-only
+(superseded: under [ADR-035](./035-near-tee-hosted-inference-only.md) general selectors resolve only to NEAR TEE slots).
 Accounting uses the dedicated runtime discriminator consistently at reserve/contact/finish
 and current-policy recheck; no impersonation of an OpenRouter route is permitted.
 

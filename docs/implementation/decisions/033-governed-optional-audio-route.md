@@ -9,6 +9,8 @@ title: "ADR-033: Optional governed OpenRouter audio transcription"
 
 **Operator decision (2026-10-16):** #1022 ships against its Acceptance with the live route disabled and shown to operators as "Voice route unavailable". The transcript-correction path is verified with a scripted transcription at the owned transport. Enabling the live route remains tracked follow-up work and needs the source-attested endpoint, codec and pricing evidence this ADR requires. Numbered 033 because ADR-032 belongs to #1009.
 
+**ADR-035 status note (2026-11-13):** Under [ADR-035](./035-near-tee-hosted-inference-only.md) the OpenRouter audio route is never activated and audio stays "Voice route unavailable". A later NEAR TEE audio slot (`openai/whisper-large-v3`) needs its own ticket amending ADR-035 with source-attested endpoint, codec and pricing evidence; this ADR's quarantine, transcript-correction, consent and Task-allowance invariants carry over.
+
 **Decision class:** Narrowly superseding ADR-024's exactly-three-slot restriction in a new setup version. ADR-006 provider boundary, ADR-024's three existing route contracts/invariants, ADR-026 current Python ownership and original authority/accounting remain.
 
 **Source basis:** The inspected preimplementation revision was ae8566d88bc77c6996754105d807755ce2e43d39. Source line references below record that dated design basis; they do not claim those owners already implement the target.

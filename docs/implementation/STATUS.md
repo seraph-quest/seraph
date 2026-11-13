@@ -785,10 +785,14 @@ only with current proofs and a completed index; otherwise search returns the
 labelled lexical/degraded result without contact and new memories are not
 embedded. After indexing, new memories and recall queries are sent to NEAR.
 Completeness decays at write time: a failed NEAR-mode memory write, or a
-canonical memory inserted without a vector or whose summary/content changes
-(an ORM hook on every `Memory` write path; raw SQL bypasses it), marks the
-namespace incomplete and recall returns to lexical without anyone opening
-settings. A run that started before such a change never marks the namespace
+committed canonical memory inserted without a vector, whose summary/content
+is set, or that is reactivated, marks the namespace incomplete and recall
+returns to lexical without anyone opening settings. Unit-of-work writes and
+ORM `update(Memory)`/`insert(Memory)` statements are both observed (session
+hooks, applied after commit; a rolled-back write never decays); SQL executed
+directly on a connection is not. A Core update that sets `summary` decays even
+if the value is unchanged (the prior value is not visible), so merges return
+recall to lexical until the next re-index. A run that started before such a change never marks the namespace
 complete (`near_tee_index_changed_during_run`). The index state file is
 updated under a process lock and an exclusive file lock; the status
 projection only reads it. A vector written for a new memory counts under its

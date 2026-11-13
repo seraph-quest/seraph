@@ -117,27 +117,61 @@ def read_index_state() -> dict[str, Any]:
 # an exclusive advisory file lock (other worker processes), so concurrent
 # writers (re-index runs, add_memory, canonical memory hooks) never lose an
 # update.
-_STATE_LOCK = threading.RLock()
+_STATE_LOCK = threading.Lock()
+_STATE_LOCAL = threading.local()
+_NO_WRITE = "_no_write"
+_LIVE_STATUSES = frozenset({"complete", "indexing"})
+
+
+def _active_marker_path() -> Path:
+    path = _state_path()
+    return path.with_name(f".{path.name}.active")
 
 
 @contextmanager
 def _state_transaction():
-    """Yield the current state; it is written back only if the body succeeds."""
-    with _STATE_LOCK:
-        path = _state_path()
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(path.with_name(f".{path.name}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    """Yield the current state; it is written back only if the body succeeds.
+
+    Not reentrant: a nested transaction in the same thread would let the
+    inner write be overwritten by the outer one, so it is refused. The body
+    may set ``state["_no_write"]`` to skip the write. The ``.active`` marker
+    exists exactly while some namespace is complete or indexing, so the
+    memory-write hook's hot path is a single stat otherwise.
+    """
+    if getattr(_STATE_LOCAL, "depth", 0):
+        raise RuntimeError("nested NEAR index state transaction")
+    _STATE_LOCAL.depth = 1
+    try:
+        with _STATE_LOCK:
+            yield from _locked_transaction()
+    finally:
+        _STATE_LOCAL.depth = 0
+
+
+def _locked_transaction():
+    """Hold the exclusive file lock across read, body and write."""
+    path = _state_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path.with_name(f".{path.name}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
         try:
-            try:
-                import fcntl
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
-            except ImportError:  # pragma: no cover - non-POSIX hosts keep the process lock
-                pass
-            state = read_index_state()
-            yield state
-            _write_index_state(state)
-        finally:
-            os.close(descriptor)  # closing releases the advisory lock
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except ImportError:  # pragma: no cover - non-POSIX hosts keep the process lock
+            pass
+        state = read_index_state()
+        yield state
+        if state.pop(_NO_WRITE, False):
+            return
+        _write_index_state(state)
+        marker = _active_marker_path()
+        if any(isinstance(entry, dict) and entry.get("status") in _LIVE_STATUSES
+                for entry in state["namespaces"].values()):
+            marker.touch(mode=0o600, exist_ok=True)
+        else:
+            marker.unlink(missing_ok=True)
+    finally:
+        os.close(descriptor)  # closing releases the advisory lock
 
 
 def _write_index_state(state: dict[str, Any]) -> None:
@@ -181,36 +215,104 @@ def note_canonical_memory_change(reason_code: str = "near_tee_index_stale") -> N
     known namespace. Cheap when no index state exists; never raises.
     """
     try:
-        if not _state_path().exists():
-            return
+        if not _active_marker_path().exists():
+            return  # hot path: one stat when no namespace is complete or indexing
         with _state_transaction() as state:
-            for entry in state["namespaces"].values():
-                if isinstance(entry, dict):
-                    _decay(entry, reason_code)
+            live = [entry for entry in state["namespaces"].values()
+                if isinstance(entry, dict) and entry.get("status") in _LIVE_STATUSES]
+            if not live:
+                state[_NO_WRITE] = True
+            for entry in live:
+                _decay(entry, reason_code)
     except Exception:
         logger.warning("could not record a canonical memory change for the NEAR index", exc_info=True)
 
 
+_PENDING_KEY = "near_tee_index_decay_after_commit"
+
+
+def _defer_decay(session) -> None:
+    """Decay after the write commits (never for a rolled-back write)."""
+    if session is None:
+        note_canonical_memory_change()
+    else:
+        session.info[_PENDING_KEY] = True
+
+
 def canonical_memory_written(kind: str, memory) -> None:
-    """``Memory`` ORM hook: an active memory inserted without a vector, or an
-    active memory whose summary/content changed or that became active again,
-    decays every completed namespace. Attaching a vector (``embedding_id``) or
-    archiving does not (archived rows are filtered by recall and pruned by the
-    next run). Conservative: a flush that later rolls back still decays."""
+    """``Memory`` ORM unit-of-work hook: an active memory inserted without a
+    vector, or an active memory whose summary/content changed or that became
+    active again, decays every complete or indexing namespace after commit.
+    Attaching a vector (``embedding_id``) or archiving does not (archived rows
+    are filtered by recall and pruned by the next run)."""
     try:
         status = getattr(getattr(memory, "status", None), "value", getattr(memory, "status", None))
         if status != "active":
             return
+        from sqlalchemy import inspect
+        from sqlalchemy.orm import object_session
         if kind == "insert":
             if not getattr(memory, "embedding_id", None):
-                note_canonical_memory_change()
+                _defer_decay(object_session(memory))
             return
-        from sqlalchemy import inspect
         attrs = inspect(memory).attrs
         if any(attrs[name].history.has_changes() for name in ("content", "summary", "status")):
-            note_canonical_memory_change()
+            _defer_decay(object_session(memory))
     except Exception:
         logger.warning("NEAR index memory hook failed", exc_info=True)
+
+
+def _bind_value(value):
+    return getattr(value, "value", value)
+
+
+def canonical_memory_statement(orm_execute_state) -> None:
+    """Session ``do_orm_execute`` hook for Core ``update(Memory)`` /
+    ``insert(Memory)`` statements, which bypass the unit-of-work hook.
+
+    It inspects the SET columns: ``summary``/``content``, or ``status`` set
+    to active, decays (conservatively: the prior value is not visible); an
+    insert without an ``embedding_id`` decays.
+    """
+    try:
+        if not (orm_execute_state.is_update or orm_execute_state.is_insert):
+            return
+        statement = orm_execute_state.statement
+        table = getattr(statement, "table", None)
+        if getattr(table, "name", None) != "memories":
+            return
+        rows: list[dict[str, Any]] = []
+        values = getattr(statement, "_values", None) or {}
+        if values:
+            rows.append({getattr(key, "key", key): _bind_value(value) for key, value in values.items()})
+        for multi in getattr(statement, "_multi_values", ()) or ():
+            for row in multi:
+                if isinstance(row, dict):
+                    rows.append({getattr(key, "key", key): _bind_value(value) for key, value in row.items()})
+        parameters = orm_execute_state.parameters
+        if isinstance(parameters, dict):
+            parameters = [parameters]
+        rows.extend(dict(row) for row in (parameters or []) if isinstance(row, dict))
+        if not rows:
+            return
+        for row in rows:
+            status = _bind_value(getattr(row.get("status"), "value", row.get("status")))
+            if orm_execute_state.is_insert:
+                if status in (None, "active") and not row.get("embedding_id"):
+                    return _defer_decay(orm_execute_state.session)
+            elif {"summary", "content"} & set(row) or ("status" in row and status == "active"):
+                return _defer_decay(orm_execute_state.session)
+    except Exception:
+        logger.warning("NEAR index statement hook failed", exc_info=True)
+
+
+def canonical_memory_commit(session) -> None:
+    if session.info.pop(_PENDING_KEY, False):
+        note_canonical_memory_change()
+
+
+def canonical_memory_rollback(session) -> None:
+    session.info.pop(_PENDING_KEY, None)
 
 
 def _decay_generation(namespace: str) -> int:
@@ -511,8 +613,13 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
         "indexed_items": 0, "skipped_existing": 0, "oversize_items": 0, "batches": 0, "spent_microusd": 0}
     result = {"memory_status": "derived_index_only", "namespace": plan["namespace"]}
     try:
+        # The namespace entry exists (indexing, or complete) before the
+        # generation is captured, so no decay can fall in an unfenced window.
         # Captured before the canonical source is read: any decay after this
         # point prevents this run from marking the namespace complete.
+        if not namespace_complete(metadata.namespace):
+            # A completed namespace is never downgraded by an incremental run.
+            _update_namespace(metadata, status="indexing", job_id=job_id)
         generation = _decay_generation(metadata.namespace)
         probe = await canonical_memory_items()
         over_cap = len(probe) > MAX_REINDEX_ITEMS
@@ -525,9 +632,6 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
         progress["planned_items"] = len(planned)
         from src.model_fabric.near_tee_embeddings import estimate_input_tokens
         progress["oversize_items"] = sum(1 for item in planned if estimate_input_tokens([item[1]]) > plan["max_input_tokens"])
-        if not namespace_complete(metadata.namespace):
-            # A completed namespace is never downgraded by an incremental run.
-            _update_namespace(metadata, status="indexing", job_id=job_id)
         bound = plan["budget_microusd"]
         for batch in _batches(planned, max_batch=plan["max_batch_size"], max_tokens=plan["max_input_tokens"]):
             if runner.cancel.is_set():

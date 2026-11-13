@@ -684,7 +684,8 @@ def test_state_file_writers_never_lose_updates(model_fabric_workspace):
     from src.memory.embedder import EMBEDDING_SCHEMA_VERSION, EmbeddingMetadata
     spaces = [EmbeddingMetadata(EMBEDDING_SCHEMA_VERSION, "near_tee", f"fixture/model-{index}", 8) for index in range(4)]
     for metadata in spaces:
-        reindex._update_namespace(metadata, status="complete")
+        # "indexing" stays live after a decay, so every mark must bump it.
+        reindex._update_namespace(metadata, status="indexing")
     marks_per_thread = 25
 
     def writer(metadata):
@@ -706,7 +707,7 @@ def test_state_file_writers_never_lose_updates(model_fabric_workspace):
     assert state["last_job_id"] == "fixture-job"
     for metadata in spaces:
         entry = state["namespaces"][metadata.namespace]
-        assert entry["decay_generation"] == 2 * marks_per_thread and entry["status"] == "incomplete"
+        assert entry["decay_generation"] == 2 * marks_per_thread and entry["status"] == "indexing"
     leftovers = [path.name for path in reindex._state_path().parent.iterdir() if path.name.endswith(".tmp")]
     assert leftovers == []
 
@@ -743,3 +744,128 @@ async def test_decay_during_a_run_prevents_completion(client, model_fabric_works
     monkeypatch.setattr(vector_store, "write_namespace_rows", original)
     resumed = await _run_to_end(client, budget=20000)
     assert resumed["index_complete"] is True and resumed["job"]["indexed_items"] == 1
+
+
+def test_state_transactions_refuse_nesting_and_skip_writes_when_nothing_is_live(model_fabric_workspace):
+    from src.memory import near_embedding_reindex as reindex
+    # Hot path: nothing complete or indexing -> one stat, no file written.
+    reindex.note_canonical_memory_change()
+    assert not reindex._state_path().exists() and not reindex._active_marker_path().exists()
+    with reindex._state_transaction() as outer:
+        with pytest.raises(RuntimeError, match="nested"):
+            with reindex._state_transaction():
+                pass
+        outer["last_job_id"] = "outer-only"
+    assert reindex.read_index_state()["last_job_id"] == "outer-only"
+    from src.memory.embedder import EMBEDDING_SCHEMA_VERSION, EmbeddingMetadata
+    metadata = EmbeddingMetadata(EMBEDDING_SCHEMA_VERSION, "near_tee", EMBED_MODEL, 8)
+    reindex._update_namespace(metadata, status="incomplete")
+    assert not reindex._active_marker_path().exists()
+    before = reindex._state_path().stat().st_mtime_ns
+    reindex.note_canonical_memory_change()
+    assert reindex._state_path().stat().st_mtime_ns == before
+    reindex._update_namespace(metadata, status="complete")
+    assert reindex._active_marker_path().exists()
+
+
+def _complete_fixture_namespace():
+    from src.memory import near_embedding_reindex as reindex
+    from src.memory.embedder import EMBEDDING_SCHEMA_VERSION, EmbeddingMetadata
+    metadata = EmbeddingMetadata(EMBEDDING_SCHEMA_VERSION, "near_tee", EMBED_MODEL, 8)
+    reindex._update_namespace(metadata, status="complete", reason_code=None)
+    assert reindex.namespace_complete(metadata.namespace)
+    return metadata
+
+
+def _assert_decayed(metadata):
+    from src.memory import near_embedding_reindex as reindex
+    entry = reindex.read_index_state()["namespaces"][metadata.namespace]
+    assert entry["status"] == "incomplete" and entry["reason_code"] == "near_tee_index_stale", entry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_every_canonical_memory_write_path_decays_after_commit(async_db, model_fabric_workspace):
+    """ORM and Core ``update(Memory)`` paths of the memory repository all decay."""
+    from src.db.engine import get_session
+    from src.db.models import Memory, MemoryKind, MemoryStatus
+    from src.memory.repository import memory_repository
+
+    # create_memory without a vector.
+    metadata = _complete_fixture_namespace()
+    created = await memory_repository.create_memory(content="Synthetic fixture memory about tea.")
+    memory_id = created.memory_id
+    _assert_decayed(metadata)
+    # A vector attached at creation does not decay.
+    metadata = _complete_fixture_namespace()
+    await memory_repository.create_memory(content="Synthetic fixture memory with a vector.",
+        embedding_id="fixture-vector-id")
+    from src.memory import near_embedding_reindex as reindex
+    assert reindex.namespace_complete(metadata.namespace)
+
+    # merge_memory: Core update(Memory) setting summary (~repository.py:4475).
+    metadata = _complete_fixture_namespace()
+    await memory_repository.merge_memory(memory_id, summary="Merged synthetic summary.")
+    _assert_decayed(metadata)
+
+    # update_memory_control_metadata: Core update of content (~:7392).
+    metadata = _complete_fixture_namespace()
+    await memory_repository.update_memory_control_metadata(memory_id, content="Edited synthetic content.")
+    _assert_decayed(metadata)
+
+    # Archiving does not decay; reactivation through rollback does (~:7477).
+    await memory_repository.update_memory_control_metadata(memory_id, status=MemoryStatus.archived)
+    metadata = _complete_fixture_namespace()
+    async with get_session() as db:
+        row = await db.get(Memory, memory_id)
+        expected = (row.updated_at, row.metadata_json, row.status)
+    assert reindex.namespace_complete(metadata.namespace)
+    await memory_repository.rollback_memory_if_unchanged(memory_id, expected_updated_at=expected[0],
+        expected_metadata_json=expected[1], expected_status=expected[2], confidence=0.5, importance=0.5,
+        reinforcement=1.0, last_confirmed_at=expected[0], metadata_updates={})
+    _assert_decayed(metadata)
+
+    # sync_scoped_memory: create, then the values_builder CAS update (~:4591).
+    scope = {"lesson_type": "fixture", "continuity_thread_id": "fixture-thread"}
+    await memory_repository.sync_scoped_memory(kind=MemoryKind.procedural, scope=scope,
+        content="Scoped synthetic fixture content one.")
+    metadata = _complete_fixture_namespace()
+    await memory_repository.sync_scoped_memory(kind=MemoryKind.procedural, scope=scope,
+        content="Scoped synthetic fixture content two.")
+    _assert_decayed(metadata)
+
+    # A rolled-back write never decays.
+    metadata = _complete_fixture_namespace()
+    with pytest.raises(RuntimeError):
+        async with get_session() as db:
+            db.add(Memory(content="Never committed synthetic memory."))
+            await db.flush()
+            raise RuntimeError("fixture rollback")
+    assert reindex.namespace_complete(metadata.namespace)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_first_run_has_no_unfenced_window(client, model_fabric_workspace, keyless_openrouter,
+        monkeypatch, isolated_broker, evidence_recorded):
+    """A change right after the first run captures its generation still blocks completion."""
+    from src.db.engine import get_session
+    from src.db.models import Memory
+    from src.memory import near_embedding_reindex as reindex
+    await _ready(client, monkeypatch)
+    await _seed_memories(2)
+    assert reindex.read_index_state()["namespaces"] == {}
+    original = reindex.canonical_memory_items
+    raced = []
+
+    async def items_after_a_change():
+        if not raced:
+            raced.append(True)
+            async with get_session() as db:
+                db.add(Memory(content="Synthetic memory written right after the run started."))
+        return await original()
+    monkeypatch.setattr(reindex, "canonical_memory_items", items_after_a_change)
+    status = await _run_to_end(client, budget=20000)
+    assert status["index_complete"] is False
+    assert status["index_reason_code"] == "near_tee_index_changed_during_run"
+    assert (await _run_to_end(client, budget=20000))["index_complete"] is True

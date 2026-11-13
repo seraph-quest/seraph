@@ -19,6 +19,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from tests.async_wait_support import started_or_raise
 from tests.cordis_research import needs_cordis, package_variant, research_host
 from tests.test_inference_accounting import accounting_db, request as broker_request, setup_configuration  # noqa: F401
 from tests.test_research_native_vertical import ResponseBytes, real_auth  # noqa: F401
@@ -190,7 +191,7 @@ async def test_one_broker_preserves_priority_cancellation_and_unknown_cost(accou
             order.append("interactive-queued")
             return {"usage": {"cost": "0.000001"}}
         holder = asyncio.create_task(broker.execute(broker_request("interactive-active"), active))
-        await started.wait()
+        await started_or_raise(started, holder)
         background = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="background",
             messages=_messages("cordis-background"), max_tokens=64, idempotency_key="inf-bg", host=env["host"]))
         assert await _until(lambda: _has_row(jobs, "remote:cordis-svc:"))
@@ -566,7 +567,7 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
             await release.wait()
             return {"usage": {"cost": "0.000001"}}
         holder = asyncio.create_task(broker.execute(broker_request("hold-lanes"), active))
-        await started.wait()
+        await started_or_raise(started, holder)
         background = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="background",
             messages=_messages("lane-background"), max_tokens=64, idempotency_key="lane-bg", host=env["host"]))
         assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 2))

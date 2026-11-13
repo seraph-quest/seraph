@@ -16,6 +16,7 @@ from fastapi import HTTPException
 import pytest
 from starlette.requests import Request
 
+from tests.async_wait_support import started_or_raise
 from src.approval.runtime import (
     get_current_session_id,
     get_current_trust_principal,
@@ -567,7 +568,7 @@ async def test_evolution_thread_cancellation_waits_for_sync_worker_completion():
 
     with patch("src.api.evolution.asyncio.to_thread", side_effect=delayed_thread):
         worker = asyncio.create_task(_run_evolution_thread_cancel_safe(persist_receipt))
-        await started.wait()
+        await started_or_raise(started, worker)
         worker.cancel()
         with pytest.raises(asyncio.CancelledError) as cancellation:
             await worker

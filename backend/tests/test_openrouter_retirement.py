@@ -103,10 +103,15 @@ def test_every_canonical_route_fails_closed_before_context(runtime_path):
     principal = _principal()
     if runtime_path == "audio_transcription":
         principal = replace(principal, grants=(*principal.grants, AuthorityGrant.INGRESS))
-    with pytest.raises(ProviderRetiredError) as raised:
+    with pytest.raises(NoCompliantModelRouteError) as raised:
         build_canonical_inference_context(runtime_path, payload={"message": "hello"}, output_tokens=64,
             timeout_seconds=5, principal=principal, session_id=principal.session_id)
-    assert raised.value.code == OPENROUTER_RETIRED_REASON
+    assert raised.value.reason_codes == (OPENROUTER_RETIRED_REASON,)
+    assert str(raised.value) == OPENROUTER_RETIRED_REASON
+    assert isinstance(raised.value.__cause__, ProviderRetiredError)
+    # Retirement is checked before identity: an unauthenticated caller gets the same reason.
+    with pytest.raises(NoCompliantModelRouteError):
+        build_canonical_inference_context(runtime_path, payload={}, output_tokens=1, timeout_seconds=1)
 
 
 def test_effective_policy_has_no_active_provider_even_with_stored_openrouter(model_fabric_workspace):
@@ -580,3 +585,99 @@ async def test_settings_api_retired_counterparts_for_profiles_canary_and_status(
     runtime = (await client.get("/api/runtime/status")).json()
     assert runtime["effective_runtime"]["inference_readiness"]["status"] == "blocked"
     assert OPENROUTER_RETIRED_REASON in runtime["effective_runtime"]["inference_readiness"]["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_caller_records_openrouter_retired(async_db, monkeypatch):
+    """An unwrapped scheduler caller records the stable reason, with no contact."""
+    from src.observer.screen_repository import screen_observation_repo
+    from src.scheduler.jobs import weekly_activity_review as job
+    events = []
+
+    async def summary(_week_start):
+        return {"total_observations": 3, "by_activity": {"coding": 600}, "by_project": {}, "daily_breakdown": []}
+
+    async def record(**kwargs):
+        events.append(kwargs)
+    monkeypatch.setattr(screen_observation_repo, "get_weekly_summary", summary)
+    monkeypatch.setattr(job, "log_scheduler_job_event", record)
+    with _no_provider_contact():
+        await job.run_weekly_activity_review()
+    assert [event["outcome"] for event in events] == ["failed"]
+    assert events[0]["details"]["error"] == OPENROUTER_RETIRED_REASON
+
+
+async def _stored_openrouter_and_near(client):
+    from tests.test_near_text_setup_api import save
+    with patch.object(retirement, "_OPENROUTER_RETIRED", False):
+        assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
+            "openrouter_setup": _v2_setup_payload()})).status_code == 200
+        assert (await save(client, 3, api_key="sk-near-kept")).status_code == 200
+    return read_model_fabric_configuration()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_boot_revoke_completes_its_own_interrupted_publication(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.model_fabric import configuration
+    from src.model_fabric.effective_policy import current_near_text_policy
+    stored = await _stored_openrouter_and_near(client)
+    original = configuration.write_model_fabric_configuration
+    writes = []
+
+    def crash_after_intermediate(target, **kwargs):
+        writes.append(target.egress_revision)
+        if len(writes) == 2:
+            raise SystemExit("simulated crash between r+1 and r+2")
+        return original(target, **kwargs)
+    monkeypatch.setattr(configuration, "write_model_fabric_configuration", crash_after_intermediate)
+    with pytest.raises(SystemExit):
+        configuration.publish_openrouter_route_revoke()
+    monkeypatch.setattr(configuration, "write_model_fabric_configuration", original)
+    interrupted = read_model_fabric_configuration()
+    assert interrupted.status == "ready" and interrupted.egress_revoked is True
+    assert interrupted.egress_revision == stored.egress_revision + 1
+    assert interrupted.egress_revocation_key == "boot:openrouter_route_revoke:active"
+
+    result = configuration.run_openrouter_route_revoke_at_boot()
+    assert result["status"] == "completed", result
+    final = read_model_fabric_configuration()
+    assert final.egress_revision == stored.egress_revision + 2
+    assert final.egress_revoked is False and final.egress_revocation_key is None
+    assert final.updated_at is not None
+    assert final.openrouter_setup.cloud_egress_acknowledged is False
+    near, _digest = current_near_text_policy()
+    assert near.near_text.plaintext_egress_consent_revision == final.egress_revision
+    assert configuration.run_openrouter_route_revoke_at_boot()["status"] == "noop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_boot_revoke_reports_foreign_interruption_as_degraded(client, model_fabric_workspace, keyless_openrouter):
+    from src.model_fabric import configuration
+    stored = await _stored_openrouter_and_near(client)
+    # A revoked intermediate carrying this publication's key whose stored
+    # routes were not actually retired is not this publication: refuse it.
+    configuration.write_model_fabric_configuration(replace(stored, egress_revision=stored.egress_revision + 1,
+        egress_revoked=True, egress_revocation_key="boot:openrouter_route_revoke:active"),
+        expected_revision=stored.egress_revision)
+    path = model_fabric_workspace / "model-fabric-settings.json"
+    before = path.read_bytes()
+    result = configuration.run_openrouter_route_revoke_at_boot()
+    assert result == {"status": "degraded", "reason_code": "openrouter_route_revoke_interrupted"}
+    assert path.read_bytes() == before
+    status = (await client.get("/api/settings/model-fabric")).json()
+    assert status["provider_retirement"]["openrouter"]["route_revoke"]["reason_code"] == "openrouter_route_revoke_interrupted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_boot_revoke_rereads_under_lock_and_noops_when_another_worker_won(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    from src.model_fabric import configuration
+    await _stored_openrouter_and_near(client)
+    assert configuration.publish_openrouter_route_revoke()["status"] == "published"
+    published = (model_fabric_workspace / "model-fabric-settings.json").read_bytes()
+    # A second worker that read the pre-revoke state before taking the lock
+    # re-reads under the lock and does not publish again.
+    assert configuration.publish_openrouter_route_revoke()["status"] == "noop"
+    assert (model_fabric_workspace / "model-fabric-settings.json").read_bytes() == published

@@ -48,15 +48,11 @@
    "category": "context_helper",
    "count": 3
   },
-  "agent/direct_chat.py::run_direct_local_chat::build_canonical_inference_context": {
-   "category": "agent_turn",
+  "agent/direct_chat.py::_retired_safe_context::build_canonical_inference_context": {
+   "category": "context_helper",
    "count": 1
   },
   "agent/direct_chat.py::run_direct_local_chat::completion_with_fallback_sync": {
-   "category": "agent_turn",
-   "count": 1
-  },
-  "agent/direct_chat.py::stream_direct_local_chat::build_canonical_inference_context": {
    "category": "agent_turn",
    "count": 1
   },

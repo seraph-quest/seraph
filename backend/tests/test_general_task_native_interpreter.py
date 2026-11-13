@@ -12,6 +12,9 @@ from tests.test_general_task_native_guard import running_task
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
+# ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["execute", "restart", "crash_before_assembly", "crash_before_claim", "crash_queued", "revision", "pause", "paused_revision"])

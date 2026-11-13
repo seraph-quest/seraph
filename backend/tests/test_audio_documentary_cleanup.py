@@ -18,6 +18,9 @@ from src.db.models import OperatorSession
 from src.model_fabric.repository import ModelFabricRepository
 from tests.test_audio_documentation import documentary, Bundle, Source, doc
 
+# ADR-035: pins documentary audio cleanup over the historical OpenRouter documentation route; retired metadata reads are covered in test_openrouter_retirement.py
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def settled(documentary, async_db):
     repository,operator,request,calls=documentary

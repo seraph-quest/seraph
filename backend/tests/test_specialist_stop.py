@@ -6,6 +6,9 @@ from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.test_specialist_evidence_runtime import copied_evidence_fixture
 
+# ADR-035: pins specialist delegation Work mechanics whose planner/model steps run over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def waiting_specialist(task_runtime,monkeypatch):
     from src.auth.service import authenticate_session

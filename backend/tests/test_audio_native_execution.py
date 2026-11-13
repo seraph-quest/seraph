@@ -26,6 +26,9 @@ from src.workspace.production import ProductionWorkspace, prepare_lifecycle_dire
 from tests.test_audio_worker import audio_worker_authority, _request, _wav, OPERATOR_OWNER
 from tests.test_audio_model_fabric_v3 import configured_audio, evidence, valid_response
 
+# ADR-035: pins native audio execution over the historical OpenRouter audio route; audio is not selectable under ADR-035
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def test_authoritative_money_preserves_sub_micro_dollar_remainder():
     from src.workflows.inference_accounting import account_charge_microusd

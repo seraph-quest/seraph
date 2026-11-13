@@ -112,6 +112,7 @@ def _model_patch(path, section):
     return text + SECTIONS[section].replace("test_a.py", path)
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: patch-section validation follows a planner call over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("section", _PROPOSAL_SECTIONS)
 async def test_single_shot_proposal_rejects_unsupported_patch_sections(async_db, tmp_path, monkeypatch, section):

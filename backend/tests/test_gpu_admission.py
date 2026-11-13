@@ -615,6 +615,7 @@ async def test_stream_holds_gpu_lease_until_final_delta():
     assert second_called is True
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical context over the historical OpenRouter route
 @pytest.mark.asyncio
 async def test_inference_context_derives_interactive_identity_and_priority():
     from src.model_fabric.caller_context import build_canonical_inference_context

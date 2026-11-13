@@ -19,6 +19,9 @@ from tests.test_inference_accounting import accounting_db, setup_configuration, 
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
+# ADR-035: pins historical OpenRouter broker, ledger and settlement mechanics that still settle retained liabilities
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def reservation(group, ordinal=1, *, owner=None, evidence=None):
     identifier = f"planning-specialist:{ordinal:04}"

@@ -19,6 +19,9 @@ from src.security.trust_contract import (
     TrustPrincipal,
 )
 
+# ADR-035: pins the historical OpenRouter embedding transport, validation and retry mechanics; retired denial is in test_openrouter_retirement.py
+pytestmark = pytest.mark.openrouter_legacy
+
 
 _EMBEDDING_COST_UPDATED_AT = time.time()
 _AUDIT_EVENTS: list[dict[str, object]] = []

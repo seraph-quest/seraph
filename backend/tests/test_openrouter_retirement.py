@@ -248,6 +248,53 @@ async def test_admission_denies_new_openrouter_and_old_unknown_still_settles(acc
     assert after["unknown_microusd"] == 0 and after["committed_microusd"] == 12
 
 
+@pytest.mark.asyncio
+async def test_retired_denial_on_every_broker_entry_leaves_no_waiter_or_lease(accounting_db):
+    """Stream, async and sync admission deny promptly and leave the broker idle.
+
+    Regression for the end-of-stack hang: a retired denial must finish the
+    caller's task before its provider callback runs, never park it in the
+    queue or hold the active slot for a later request.
+    """
+    import asyncio
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_inference_accounting import request, setup_configuration
+    with patch.object(retirement, "_OPENROUTER_RETIRED", False):
+        setup_configuration()
+        await DurableJobRepository().configure_inference_accounting(1000)
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    calls = []
+
+    async def stream_provider():
+        calls.append("stream")
+        yield {"usage": {"cost": "0.000001"}}
+
+    async def async_provider():
+        calls.append("async")
+        return {"usage": {"cost": "0.000001"}}
+
+    def sync_provider():
+        calls.append("sync")
+        return {"usage": {"cost": "0.000001"}}
+
+    async def consume():
+        return [part async for part in broker.stream(request("retired-stream"), stream_provider)]
+
+    for _round in range(2):
+        entries = (consume(), broker.execute(request("retired-async"), async_provider),
+            asyncio.to_thread(broker.execute_sync, request("retired-sync"), sync_provider))
+        results = await asyncio.wait_for(asyncio.gather(*entries, return_exceptions=True), 10)
+        assert all(isinstance(item, Exception) for item in results), results
+        assert all(OPENROUTER_RETIRED_REASON in str(item) for item in results), results
+        status = await broker.status()
+        assert status["active"] is None and status["queued"] == []
+        assert status["capacity"]["owners"] in ({}, [])
+    assert calls == []
+    snapshot = await DurableJobRepository().inference_accounting_snapshot()
+    assert snapshot["operations"] == []
+
+
 from tests.test_inference_accounting import accounting_db  # noqa: E402,F401
 
 

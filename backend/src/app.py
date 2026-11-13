@@ -220,6 +220,9 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
             "backend_health_endpoint": str(vlm_status.get("backend_health_endpoint") or ""),
         }
 
+    near_tee_route = _near_tee_chat_route_status(vlm_status)
+    if near_tee_route is not None:
+        return near_tee_route
     provider_label = provider or "unknown"
     policy = effective_workload_policy("chat_agent")
     persisted = read_model_fabric_configuration()
@@ -326,11 +329,78 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
     }
 
 
+def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, object] | None:
+    """ADR-035: the chat route when a NEAR TEE text slot is configured.
+
+    Reports the effective route only: the slot's canonical model and the
+    dated catalog hosting label when the slot is the active provider of
+    ``chat_agent``; otherwise the slot's local blocked reason with no
+    provider. Never a "verified" or "confidential" claim. Local only: no
+    catalog read or NEAR contact.
+    """
+    from src.model_fabric.configuration import near_tee_profile_for_slot, near_tee_slot, near_tee_slot_block_reason
+    from src.model_fabric.near_tee_catalog import catalog_receipt_block_reason, tee_hosting_label
+
+    configured = read_model_fabric_configuration()
+    if configured.status != "ready" or configured.near_tee is None:
+        return None
+    slot = near_tee_slot(configured, "text")
+    if slot is None:
+        return None
+    profile = near_tee_profile_for_slot("text", slot)
+    policy = effective_workload_policy("chat_agent")
+    active = tuple(policy.allowed_provider_kinds) == ("near_tee",) and policy.allowed_profile_ids == (profile.id,)
+    reasons: list[str] = []
+    if not active:
+        reasons.append(near_tee_slot_block_reason(configured, "text") or "near_tee_route_inactive")
+    if reason := catalog_receipt_block_reason("text", profile, revision=configured.egress_revision):
+        reasons.append(reason)
+    label = tee_hosting_label("text", profile, revision=configured.egress_revision) if not reasons else None
+    model = profile.model
+    model_label = model.split("/")[-1]
+    provider = "near_tee" if active else "none"
+    route_label = "NEAR TEE text slot" if active else "blocked"
+    return {
+        "runtime_path": "chat_agent",
+        "active_profile": profile.id if active else "",
+        "configured_profile": profile.id,
+        "provider": provider,
+        "provider_label": provider,
+        "model": model if active else "",
+        "configured_model": model,
+        "model_label": model_label if active else "",
+        "mode": "remote_provider" if active else "blocked",
+        "route_label": route_label,
+        "summary_label": f"{route_label} · {model_label}" if active else "blocked · no active inference provider",
+        "api_base": "https://cloud-api.near.ai/v1" if active else "",
+        "vlm_configured": bool(vlm_status.get("configured")),
+        "active_provider_policy": "near_tee_only",
+        # The only TEE statement: NEAR's dated catalog claim, never verified by Seraph.
+        "tee_hosting_label": label,
+        "tee_verified": False,
+        "e2ee": False,
+        "provider_receives_plaintext": True,
+        "inference_ready": not reasons,
+        "inference_readiness": {
+            "status": "ready" if not reasons else "blocked",
+            "reasons": reasons,
+            "provider": "near_tee" if active else None,
+            "active_only": True,
+            "cloud_egress": policy.egress_class.value,
+            "cloud_consent": bool(policy.cloud_egress_acknowledged),
+            "cost_ceiling_microusd": policy.max_cost_microusd,
+        },
+        "legacy_local_route_blocked": True,
+    }
+
+
 def _augment_inference_readiness(
     route_status: dict[str, object],
     fabric_status: dict[str, object],
 ) -> dict[str, object]:
     """Fold model-fabric profile/proof truth into the cheap runtime receipt."""
+    if route_status.get("active_provider_policy") == "near_tee_only":
+        return _augment_near_tee_readiness(route_status, fabric_status)
     if route_status.get("provider") != "openrouter":
         return route_status
     readiness = dict(route_status.get("inference_readiness") or {})
@@ -378,6 +448,32 @@ def _augment_inference_readiness(
     route_status["inference_ready"] = not deduped_reasons
     route_status["inference_readiness"] = readiness
     return route_status
+
+def _augment_near_tee_readiness(route_status: dict[str, object], fabric_status: dict[str, object]) -> dict[str, object]:
+    """Fold the NEAR TEE slot's credential, accounting and proof truth in."""
+    near = fabric_status.get("near_tee") if isinstance(fabric_status, dict) else None
+    slot = ((near or {}).get("slots") or {}).get("text") if isinstance(near, dict) else None
+    readiness = dict(route_status.get("inference_readiness") or {})
+    reasons = list(readiness.get("reasons") or [])
+    capabilities: dict[str, object] = {}
+    if not isinstance(slot, dict):
+        reasons.append("near_tee_status_unavailable")
+    else:
+        if slot.get("status") != "ready":
+            reasons.append(str(slot.get("reason_code") or "near_tee_slot_not_ready"))
+        capabilities = dict(slot.get("chat_capabilities") or {})
+    reasons = list(dict.fromkeys(reasons))
+    route_status = dict(route_status)
+    readiness.update({"status": "ready" if not reasons else "blocked", "reasons": reasons,
+        "profile_id": route_status.get("configured_profile"),
+        # Streaming chat and agent tool turns each need their own fresh check.
+        "capabilities": capabilities})
+    route_status["inference_ready"] = not reasons
+    route_status["inference_readiness"] = readiness
+    if reasons:
+        route_status["tee_hosting_label"] = None
+    return route_status
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

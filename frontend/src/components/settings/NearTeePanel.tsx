@@ -101,7 +101,7 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
   return <section className="mt-2 border border-retro-text/10 px-2 py-2" aria-label="NEAR TEE settings">
     <div className="flex justify-between gap-2 text-[10px]"><span>NEAR TEE</span><span>{stale ? "stale retained" : readable(setup?.status ?? "disabled")}</span></div>
     <p className="mt-1 text-[9px] text-retro-text/60">{NEAR_TEE_DISCLOSURE}</p>
-    <p className="mt-1 text-[9px] text-retro-text/60">Endpoint {NEAR_TEE_API_BASE}. Requests use the canonical model id with no aliasing. Saving and refreshing never call NEAR. Streaming and tools are not available yet.</p>
+    <p className="mt-1 text-[9px] text-retro-text/60">Endpoint {NEAR_TEE_API_BASE}. Requests use the canonical model id with no aliasing. Saving and refreshing never call NEAR. Streaming chat and agent tools use the text slot once its streaming and tool_use capability checks pass.</p>
     <fieldset disabled={busy !== null} className="mt-2 grid gap-2 text-[10px] sm:grid-cols-2">
       <div className="sm:col-span-2">NEAR TEE key: {setup?.key_present ? "present" : "not configured"}</div>
       <label className="sm:col-span-2">NEAR TEE API key · write only<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE API key" type="password" autoComplete="new-password" value={credential} onChange={e => setCredential(e.target.value)} placeholder="Blank keeps the existing key" /></label>

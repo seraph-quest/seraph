@@ -674,14 +674,11 @@ class DurableInferenceBrokerMixin:
             if handle.request.owner_id.startswith("operator:"):
                 from src.auth.service import authenticate_session
                 root_id = handle.request.session_id
-                from src.approval.runtime import get_current_trust_principal
-                bound = get_current_trust_principal()
-                if (bound is not None and bound.principal_id == handle.request.owner_id
-                        and bound.session_id == handle.request.session_id
-                        and bound.operator_session_id and bound.operator_session_id != root_id):
+                if handle.request.operator_session_id and handle.request.runtime_path != "audio_transcription":
                     # A conversation-scoped chat principal (REST/WebSocket turn):
-                    # its authenticated operator root session owns adoption.
-                    root_id = bound.operator_session_id
+                    # the operator root session captured immutably at admission
+                    # must still authenticate as the same owner to adopt.
+                    root_id = handle.request.operator_session_id
                 if handle.request.runtime_path == "audio_transcription":
                     from src.workflows.audio_native import AudioNativeAdmissionBindingV1
                     from .remote_inference_admission import RemoteInferenceReceiptBinding

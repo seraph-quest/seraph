@@ -1384,7 +1384,8 @@ In **Settings → NEAR TEE · text slot**:
    only (no inference) and passes only for `providerType=vllm`, attestation
    supported, verifiable, ready, text in/out, enough context and a reserve that
    covers maximum input and output at the catalog prices. The receipt expires
-   after its lifetime or when the slot changes.
+   after its lifetime and after any later settings save, so re-run the check
+   after saving.
 4. Press **Run capability check**: three billed, mechanics-only requests
    (text, health, latency) through the shared lane, producing the proofs that
    dispatch requires.

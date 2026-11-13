@@ -694,6 +694,10 @@ Private output requires current authority and settled-cost readback. The task
 requires human Review; successful execution supplies no automatic approval.
 Unknown cost discards the withheld answer, and debt reconciliation cannot recover
 it or resend inference. Every outcome records `no_learning`.
+Since #1147 PR3b (ADR-035) the route uses the shared NEAR client: every NEAR
+text request, inference and billing readback, also sends
+`x-no-aliasing: true`; the response model echo check is unchanged. The ADR-035
+catalog-receipt gate for `near.text` is not implemented yet.
 
 ## NEAR TEE text slot (ADR-035, #1147 PR3b)
 
@@ -709,8 +713,11 @@ slot and no save resurrects revoked consent.
 
 An explicit, authenticated **catalog check** reads only NEAR's
 `/v1/model/{id}` record (no inference, no operator content, no credential) and
-stores a content-safe receipt bound to the slot's complete profile hash with an
-operator TTL (1–24 h). Dispatch re-validates the receipt locally and never
+stores a content-safe receipt bound to the slot's complete profile hash and the
+current configuration revision, with an operator TTL (1–24 h); any later
+settings save requires a new check. It parses NEAR's catalog record shape
+(`metadata.architecture` modalities, `maxOutputLength`; absent readiness is
+not ready, an absent output limit allows at most 8192 output tokens). Dispatch re-validates the receipt locally and never
 refreshes it; a missing, failed, changed or expired receipt blocks the slot.
 Dispatch also needs fresh capability-check proofs (operator-triggered,
 cost-bounded mechanics only, through the broker and ledger).
@@ -722,7 +729,12 @@ the serial bound of one and durable reservations. Requests carry the canonical
 id with `x-no-aliasing: true`; a different response model fails the call
 after its cost settles; reasoning fields are never answer text. NEAR
 `/v1/billing/costs` readback runs inside the lease; a missing cost becomes an
-Unknown liability and keeps the lane blocked until fenced settlement.
+Unknown liability and keeps the lane blocked until fenced manual settlement,
+which also releases the lane (tested, including after the slot is disabled).
+Checks that must hold when bytes would leave (the `x-no-aliasing` header,
+current policy, and a deadline that still leaves the billing window) run under
+the contact writer: a lease granted too late is a durable never-contacted
+denial, not an Unknown.
 Streaming, tools, vision and embeddings are not served (PR3c/PR3d/PR4).
 Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
 plaintext; attestation not verified by Seraph; no end-to-end encryption".

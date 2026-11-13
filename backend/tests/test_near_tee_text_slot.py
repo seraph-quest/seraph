@@ -54,14 +54,38 @@ def slot_payload(**changes):
     return body
 
 
-def catalog_record(model=TEXT_MODEL, **metadata_changes):
-    metadata = {"providerType": "vllm", "attestationSupported": True, "verifiable": True, "isReady": True,
-        "contextLength": 262144, "maxOutputTokens": 65536, "inputModalities": ["text", "image"],
-        "outputModalities": ["text"], "supportedFeatures": ["tools", "structured_outputs", "reasoning"]}
+_ABSENT = object()
+
+
+def catalog_record(model=TEXT_MODEL, *, input_modalities=("text", "image"), output_modalities=("text",),
+                   **metadata_changes):
+    """The real NEAR ``/v1/model/{id}`` shape (lead's unauthenticated read, 2026-11-13).
+
+    ``_ABSENT`` removes an optional field (e.g. ``isReady`` is absent for
+    deepseek-ai/DeepSeek-V4.1-Flash-1017). Qwen/Qwen3.8-27B prices: $0.04/M
+    input = {40, 9}, $1.35/M output = {1350, 9}.
+    """
+    metadata = {"verifiable": True, "contextLength": 262144, "modelDisplayName": "Qwen3.8 27B",
+        "modelDescription": "fixture", "ownedBy": "Qwen", "aliases": ["Qwen/Qwen3.8"],
+        "providerType": "vllm", "providerConfig": {}, "attestationSupported": True,
+        "architecture": {"inputModalities": list(input_modalities), "outputModalities": list(output_modalities)},
+        "supportedFeatures": ["tools", "structured_outputs", "reasoning"], "maxOutputLength": 65536,
+        "supportedSamplingParameters": ["temperature", "top_p"], "isReady": True}
     metadata.update(metadata_changes)
-    metadata = {key: value for key, value in metadata.items() if value is not None}
-    return {"modelId": model, "inputCostPerToken": {"amount": 4, "scale": 8, "currency": "USD"},
-        "outputCostPerToken": {"amount": 135, "scale": 8, "currency": "USD"}, "metadata": metadata}
+    metadata = {key: value for key, value in metadata.items() if value is not _ABSENT}
+    return {"modelId": model, "inputCostPerToken": {"amount": 40, "scale": 9, "currency": "USD"},
+        "outputCostPerToken": {"amount": 1350, "scale": 9, "currency": "USD"},
+        "cacheReadCostPerToken": {"amount": 10, "scale": 9, "currency": "USD"},
+        "costPerImage": {"amount": 0, "scale": 9, "currency": "USD"}, "metadata": metadata}
+
+
+def flat_catalog_record():
+    """The older flat layout (modalities directly under metadata) must fail closed."""
+    record = catalog_record()
+    architecture = record["metadata"].pop("architecture")
+    record["metadata"].update(architecture)
+    record["metadata"]["maxOutputTokens"] = record["metadata"].pop("maxOutputLength")
+    return record
 
 
 class _Stream(httpx.AsyncByteStream):
@@ -94,6 +118,8 @@ class NearFixture:
         assert request.url.scheme == "https"
         path = request.url.raw_path.decode()
         if request.method == "GET" and path.startswith("/v1/model/"):
+            # NEAR accepts the encoded slash; the id is one path segment.
+            assert path == "/v1/model/" + self.catalog["modelId"].replace("/", "%2F")
             assert "authorization" not in request.headers
             return _json(self.catalog)
         body = json.loads(request.content)
@@ -116,9 +142,18 @@ class NearFixture:
         monkeypatch.setattr(httpx, "AsyncClient", clients)
 
         def forbidden(*_args, **_kwargs):
-            raise AssertionError("synchronous provider transport contacted")
+            raise AssertionError("provider transport contacted outside the NEAR fixture")
+        # Backstop: every real network transport (sync and async) fails the
+        # test, so a client that bypasses the injected MockTransport cannot
+        # reach any host; litellm dispatch is refused outright. (Client.send
+        # itself stays live because the in-process ASGI test client uses it.)
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden)
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden)
         monkeypatch.setattr(httpx.Client, "post", forbidden)
         monkeypatch.setattr(httpx.Client, "stream", forbidden)
+        import litellm
+        monkeypatch.setattr(litellm, "completion", forbidden)
+        monkeypatch.setattr(litellm, "acompletion", forbidden)
         return self
 
 
@@ -214,15 +249,32 @@ def test_answer_never_uses_reasoning_and_checks_echo():
     ({"providerType": "chutes"}, "near_tee_catalog_provider_not_vllm"),
     ({"attestationSupported": False}, "near_tee_catalog_not_attested"),
     ({"verifiable": False}, "near_tee_catalog_not_verifiable"),
-    ({"isReady": None}, "near_tee_catalog_not_ready"),
+    ({"isReady": _ABSENT}, "near_tee_catalog_not_ready"),
     ({"isReady": False}, "near_tee_catalog_not_ready"),
-    ({"inputModalities": ["image"]}, "near_tee_catalog_modality_missing"),
+    ({"input_modalities": ("image",)}, "near_tee_catalog_modality_missing"),
+    ({"output_modalities": ("image",)}, "near_tee_catalog_modality_missing"),
     ({"contextLength": 4096}, "near_tee_catalog_context_too_small"),
-    ({"maxOutputTokens": 512}, "near_tee_catalog_output_too_small"),
+    ({"maxOutputLength": 512}, "near_tee_catalog_output_too_small"),
 ])
 def test_catalog_failures(changes, reason):
     facts = parse_catalog_record(json.dumps(catalog_record(**changes)).encode(), model_id=TEXT_MODEL)
     assert evaluate_catalog(facts, slot_name="text", slot=_slot(enabled=True))[0] == reason
+
+
+def test_catalog_unknown_output_limit_and_flat_shape():
+    from src.model_fabric.near_tee_catalog import NearTeeCatalogError, UNKNOWN_OUTPUT_LIMIT_CAP
+    unknown = parse_catalog_record(json.dumps(catalog_record(maxOutputLength=_ABSENT)).encode(), model_id=TEXT_MODEL)
+    assert unknown.max_output_tokens is None
+    assert evaluate_catalog(unknown, slot_name="text", slot=_slot(enabled=True))[0] is None
+    too_large = _slot(enabled=True, max_output_tokens=UNKNOWN_OUTPUT_LIMIT_CAP + 1, request_cost_bound_microusd=10**8)
+    assert evaluate_catalog(unknown, slot_name="text", slot=too_large)[0] == "near_tee_catalog_output_limit_unknown"
+    with pytest.raises(NearTeeCatalogError, match="near_tee_catalog_response_invalid"):
+        parse_catalog_record(json.dumps(flat_catalog_record()).encode(), model_id=TEXT_MODEL)
+    # No silent top-level fallback for metadata fields.
+    hoisted = catalog_record(isReady=_ABSENT)
+    hoisted["isReady"] = True
+    facts = parse_catalog_record(json.dumps(hoisted).encode(), model_id=TEXT_MODEL)
+    assert evaluate_catalog(facts, slot_name="text", slot=_slot(enabled=True))[0] == "near_tee_catalog_not_ready"
 
 
 def test_catalog_cost_bound_and_shape():
@@ -538,3 +590,129 @@ def test_priority_and_serial_bound_preserved_for_near_tee_contexts():
     assert GpuPriority.INTERACTIVE_CHAT.rank > GpuPriority.REPORTS_RESEARCH_MEMORY.rank  # chat first
     with pytest.raises(ValueError):
         validate_inference_lane(InferenceLaneConfig(spend_ceiling_microusd=1000, max_inflight=2))
+
+
+async def _ready_slot(client, monkeypatch):
+    """Configure, catalog-check and capability-check the text slot (all intercepted)."""
+    from src.auth.service import authenticate_session
+    near = NearFixture().install(monkeypatch)
+    owner = await _login(client, monkeypatch)
+    await _configure(client)
+    assert (await client.post("/api/settings/model-fabric/near-tee/catalog-check",
+        json={"expected_policy_revision": 5})).status_code == 200
+    await _prove_slot(client, near)
+    operator = await authenticate_session(owner["session_id"], touch=False)
+    return near, operator
+
+
+def _report_call(operator, *, runtime_path="end_of_day_goal_report"):
+    from src.llm_runtime import completion_with_fallback
+    from src.model_fabric.caller_context import build_canonical_inference_context
+    messages = [{"role": "user", "content": "Summarize today's fixture activity."}]
+
+    async def call():
+        context = build_canonical_inference_context(runtime_path, payload=messages, output_tokens=900,
+            timeout_seconds=60, principal=operator.principal, session_id=operator.session_id)
+        return await completion_with_fallback(messages=messages, temperature=0.4, max_tokens=900,
+            runtime_path=runtime_path, request_context=context)
+    return call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_lease_granted_too_late_is_a_never_contacted_denial(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch, isolated_broker):
+    """A lease that starts after the billing window no longer fits is denied
+    durably before contact: no NEAR request, no Unknown, lease released."""
+    from src.approval.runtime import reset_runtime_context, set_runtime_context
+    from src.model_fabric import near_tee
+    from src.workflows.job_runtime import durable_job_repository
+
+    near, operator = await _ready_slot(client, monkeypatch)
+    tokens = set_runtime_context(operator.session_id, "high_risk", trust_principal=operator.principal)
+    original = near_tee.prepare_near_tee_call
+
+    async def late_admission(**kwargs):
+        call = await original(**kwargs)
+        # Preflight passed with a full window; by the time the lease is
+        # granted only 5s remain, less than the 16s billing reserve.
+        return replace(call, context=replace(call.context, deadline_at=time.time() + 5))
+    try:
+        monkeypatch.setattr(near_tee, "prepare_near_tee_call", late_admission)
+        before = len(near.requests)
+        with pytest.raises(Exception) as denied:
+            await _report_call(operator)()
+        assert "near_tee_deadline_insufficient" in repr(denied.value) + repr(denied.value.__cause__)
+        assert len(near.requests) == before  # no bytes left for NEAR
+        snapshot = await durable_job_repository.inference_accounting_snapshot()
+        assert snapshot["unknown_microusd"] == 0
+        assert all(row["state"] != "unknown" and row["contact_started_at"] is None
+            for row in snapshot["operations"] if row["runtime_path"] == "end_of_day_goal_report")
+        assert isolated_broker._active_operation_id is None  # lease released, not blocked
+        # The lane is free: the next ordinary call contacts NEAR and succeeds.
+        monkeypatch.setattr(near_tee, "prepare_near_tee_call", original)
+        response = await _report_call(operator)()
+        assert response.choices[0].message.content == "Report body from the NEAR TEE fixture."
+    finally:
+        reset_runtime_context(tokens)
+
+
+async def _unknown_operation(near, operator, durable_job_repository, broker):
+    from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
+    near.billing_missing = True
+    near.body_id = "chatcmpl-unknown-settle"
+    with pytest.raises(GpuAdmissionUncertainError):
+        await _report_call(operator)()
+    near.billing_missing = False
+    snapshot = await durable_job_repository.inference_accounting_snapshot()
+    (row,) = [item for item in snapshot["operations"] if item["state"] == "unknown"]
+    receipt = broker.receipt_for(row["operation_id"])
+    assert receipt.status == "blocked" and receipt.reconciliation_required
+    return row
+
+
+async def _settle(client, row):
+    return await client.post("/api/settings/model-fabric/accounting/settle", json={
+        "operation_id": row["operation_id"], "job_id": row["job_id"], "expected_revision": row["revision"],
+        "actual_cost_microusd": 1500, "evidence_digest": "e" * 64, "idempotency_key": "near-tee-manual-settle"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.parametrize("disable_first", [False, True])
+async def test_unknown_near_tee_operation_recovers_by_fenced_settlement(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch, isolated_broker, disable_first):
+    from src.approval.runtime import reset_runtime_context, set_runtime_context
+    from src.model_fabric.contracts import NoCompliantModelRouteError
+    from src.workflows.job_runtime import durable_job_repository
+
+    near, operator = await _ready_slot(client, monkeypatch)
+    tokens = set_runtime_context(operator.session_id, "high_risk", trust_principal=operator.principal)
+    try:
+        row = await _unknown_operation(near, operator, durable_job_repository, isolated_broker)
+        if disable_first:
+            current = read_model_fabric_configuration().egress_revision
+            disabled = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": current,
+                "near_tee": {"slots": {"text": slot_payload(enabled=False, plaintext_provider_egress_acknowledged=False)}}})
+            assert disabled.status_code == 200, disabled.text
+        settled = await _settle(client, row)
+        assert settled.status_code == 200, settled.text
+        body = settled.json()
+        assert body["status"] == "settled" and body["lane_recovery"]["status"] == "reconciled", body
+        receipt = isolated_broker.receipt_for(row["operation_id"])
+        assert receipt.status == "failed" and not receipt.reconciliation_required
+        snapshot = await durable_job_repository.inference_accounting_snapshot()
+        assert snapshot["unknown_microusd"] == 0
+        before = len(near.requests)
+        if disable_first:
+            # Lane recovered; the disabled slot stays blocked with no contact.
+            with pytest.raises(NoCompliantModelRouteError):
+                await _report_call(operator)()
+            assert len(near.requests) == before
+        else:
+            near.body_id = "chatcmpl-after-settle"
+            response = await _report_call(operator)()
+            assert response.choices[0].message.content == "Report body from the NEAR TEE fixture."
+            assert len(near.requests) == before + 2
+    finally:
+        reset_runtime_context(tokens)

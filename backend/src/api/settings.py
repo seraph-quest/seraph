@@ -511,13 +511,18 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     return read_screen_analysis_settings()
 
 
-def _strip_derived_screen_fields(payload: dict[str, object]) -> None:
-    """Drop read-time projections; the NEAR TEE route identity is canonical
-    model-fabric state and is never persisted in the screen settings file."""
-    for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff"):
+def _strip_derived_screen_fields(payload: dict[str, object], *, explicit_provider: bool = False) -> None:
+    """Drop read-time projections before persisting. Only the operator's
+    provider choice is stored; the NEAR TEE model is canonical model-fabric
+    state and is never persisted here."""
+    selected = payload.pop("provider_selected", None)
+    for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff",
+            "near_tee_vision_available"):
         payload.pop(derived, None)
+    if payload.get("provider") in {"", None} and selected == "near_tee" and not explicit_provider:
+        # Keep the operator's NEAR TEE choice across a temporarily unavailable slot.
+        payload["provider"] = "near_tee"
     if payload.get("provider") == "near_tee":
-        payload["provider"] = ""
         payload["model"] = ""
 
 
@@ -1180,7 +1185,7 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
         payload["archive_retention_days"] = body.archive_retention_days
-    _strip_derived_screen_fields(payload)
+    _strip_derived_screen_fields(payload, explicit_provider=body.provider is not None)
     _write_screen_analysis_settings(payload)
     return await get_screen_analysis_settings()
 

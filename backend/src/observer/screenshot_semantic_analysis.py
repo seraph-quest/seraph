@@ -14,6 +14,7 @@ import json
 import logging
 from pathlib import Path
 import time
+from contextvars import ContextVar
 from typing import Any
 from datetime import datetime, timezone
 
@@ -89,22 +90,24 @@ class ScreenshotSemanticAnalysisError(RuntimeError):
 def effective_vision_route() -> str | None:
     """The provider adapter for screenshot analysis, or None (fail closed).
 
-    ``near_tee`` when the NEAR TEE vision slot is the canonical route;
-    ``openrouter`` only for an unretired legacy install that selected it.
+    ``near_tee`` when the operator chose it in the screen-analysis settings
+    and the NEAR TEE vision slot is the canonical route (the settings reader
+    projects ``near_tee`` only then); ``openrouter`` only for an unretired
+    legacy install that selected it. Provider ``""`` is an explicit opt-out.
     No fallback between them.
     """
-    if near_tee_vision_route() is not None:
-        return NEAR_TEE_SCREEN_ANALYSIS_PROVIDER
+    provider = effective_screen_analysis_provider().lower()
+    if provider == NEAR_TEE_SCREEN_ANALYSIS_PROVIDER:
+        return NEAR_TEE_SCREEN_ANALYSIS_PROVIDER if near_tee_vision_route() is not None else None
     from src.model_fabric.retirement import openrouter_retired
     if openrouter_retired():
         return None
-    return "openrouter" if effective_screen_analysis_provider().lower() == "openrouter" else None
+    return "openrouter" if provider == "openrouter" else None
 
 
 def _screenshot_profile_id() -> str:
-    near_route = near_tee_vision_route()
-    if near_route is not None:
-        return near_route[0]
+    if effective_vision_route() == NEAR_TEE_SCREEN_ANALYSIS_PROVIDER:
+        return "near_tee.vision"
     profile_id = openrouter_profile_id_for_runtime_path("screenshot_image_analysis")
     return SCREENSHOT_VLM_PROFILE_ID if profile_id == "openrouter" else profile_id
 
@@ -320,6 +323,7 @@ async def analyze_screenshot_image(image_path: Path, artifacts: dict[str, Any]) 
     """Analyze one screenshot image through the effective governed vision route."""
     if not screenshot_semantic_analysis_enabled():
         return None
+    _dispatch_image.set(None)
     try:
         if effective_vision_route() == NEAR_TEE_SCREEN_ANALYSIS_PROVIDER:
             return await _analyze_with_near_tee(image_path, artifacts)
@@ -371,6 +375,9 @@ def screenshot_analysis_status_detail(
     if payload["provider"] == NEAR_TEE_SCREEN_ANALYSIS_PROVIDER:
         payload["profile_id"] = "near_tee.vision"
         payload["tee_hosting"] = _near_tee_vision_hosting_label()
+        if (image := _dispatch_image.get()) is not None:
+            # Dimensions only; never image bytes.
+            payload["image"] = dict(image)
     if reason:
         payload["reason"] = _bounded_reason(reason)
     if reanalysis_reason:
@@ -661,40 +668,89 @@ def _screenshot_dimensions(image_bytes: bytes, artifacts: dict[str, Any]) -> tup
         raise ScreenshotSemanticAnalysisError("remote_inference_blocked:near_tee_vision_image_dimensions_invalid") from exc
 
 
-async def _analyze_with_near_tee(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis:
-    """Send one bounded screenshot to the NEAR TEE vision slot (ADR-035).
+# Server-side preparation of the copy sent to NEAR (the stored private
+# capture is never changed): a larger or heavier image is re-encoded as JPEG
+# with its long side at most this many pixels and no metadata.
+NEAR_TEE_VISION_MAX_LONG_SIDE = 2048
+NEAR_TEE_VISION_REENCODE_ABOVE_BYTES = 4 * 1024 * 1024
+NEAR_TEE_VISION_JPEG_QUALITY = 85
+# Margin kept between the request deadline and the background job budget.
+NEAR_TEE_VISION_JOB_MARGIN_SECONDS = 10.0
+_dispatch_image: ContextVar[dict[str, Any] | None] = ContextVar("near_tee_vision_dispatch_image", default=None)
 
-    Precontact denials (policy, consent, stale catalog receipt, input or
-    request size, missing proofs) persist a denied route receipt and become
-    ``remote_inference_blocked:<reason>``. After contact the cost is settled
-    from NEAR billing inside the admitted lease; a missing cost is an Unknown
-    liability that keeps the serial lease blocked until fenced settlement.
-    Model output is untrusted data, parsed only by the strict Seraph contract;
-    reasoning fields are never read as the answer.
-    """
-    from src.model_fabric import persist_denied_route
-    from src.model_fabric.accounting import bind_precontact_guard
-    from src.model_fabric.near_tee import NearTeeDenied, near_tee_precontact_reason, near_tee_transport
-    from src.model_fabric.near_tee_vision import prepare_near_tee_vision_call
 
-    from src.model_fabric.configuration import near_tee_slot
+def near_tee_vision_max_timeout_seconds() -> float:
+    """Largest vision slot timeout the background analysis job can carry:
+    job budget minus the NEAR billing window and a fixed margin."""
     from src.model_fabric.near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS
-    slot = near_tee_slot(read_model_fabric_configuration(), "vision")
     try:
         job_budget = float(settings.screenshot_folder_analysis_job_timeout_seconds)
     except (TypeError, ValueError):
         job_budget = float(REMOTE_SCREENSHOT_TIMEOUT_SECONDS)
-    if slot is not None and float(slot.timeout_seconds) + NEAR_TEE_BILLING_RESERVE_SECONDS > job_budget:
-        # The background job would cancel a contacted request before its
+    return job_budget - NEAR_TEE_BILLING_RESERVE_SECONDS - NEAR_TEE_VISION_JOB_MARGIN_SECONDS
+
+
+def _prepare_vision_image(image_bytes: bytes, media_type: str, width: int, height: int) -> tuple[bytes, str, int, int]:
+    """Return the bytes to send; downscale/re-encode only when larger or heavier."""
+    if max(width, height) <= NEAR_TEE_VISION_MAX_LONG_SIDE and len(image_bytes) <= NEAR_TEE_VISION_REENCODE_ABOVE_BYTES:
+        return image_bytes, media_type, width, height
+    import io
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            image = source.convert("RGB")
+        image.thumbnail((NEAR_TEE_VISION_MAX_LONG_SIDE, NEAR_TEE_VISION_MAX_LONG_SIDE), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        # A fresh RGB image carries no EXIF/ICC/text metadata into the JPEG.
+        image.save(buffer, format="JPEG", quality=NEAR_TEE_VISION_JPEG_QUALITY, optimize=True)
+    except Exception as exc:
+        raise ScreenshotSemanticAnalysisError("remote_inference_blocked:near_tee_vision_image_reencode_failed") from exc
+    return buffer.getvalue(), "image/jpeg", image.width, image.height
+
+
+def dispatch_image_metadata() -> dict[str, Any] | None:
+    """Content-safe dimensions of the last NEAR vision dispatch in this context."""
+    return _dispatch_image.get()
+
+
+async def _analyze_with_near_tee(image_path: Path, artifacts: dict[str, Any]) -> ScreenshotAnalysis:
+    """Send one bounded screenshot to the NEAR TEE vision slot (ADR-035).
+
+    Precontact denials (policy, consent, stale catalog receipt, input or
+    request size, missing or mode-mismatched proofs, job budget) persist a
+    denied route receipt where a context exists and become
+    ``remote_inference_blocked:<reason>``. After contact the cost is settled
+    from NEAR billing inside the admitted lease; a missing cost is an Unknown
+    liability that keeps the serial lease blocked until fenced settlement.
+    Model output is untrusted data, parsed inside the lease by the strict
+    Seraph contract so the route receipt records an invalid answer as failed;
+    reasoning fields are never read as the answer.
+    """
+    from src.model_fabric import persist_denied_route
+    from src.model_fabric.accounting import bind_precontact_guard
+    from src.model_fabric.configuration import near_tee_slot
+    from src.model_fabric.near_tee import NearTeeDenied, near_tee_precontact_reason, near_tee_transport
+    from src.model_fabric.near_tee_vision import prepare_near_tee_vision_call
+
+    slot = near_tee_slot(read_model_fabric_configuration(), "vision")
+    if slot is not None and float(slot.timeout_seconds) > near_tee_vision_max_timeout_seconds():
+        # The background job could cancel a contacted request before its
         # billing readback: refuse before contact instead of risking an Unknown.
         raise ScreenshotSemanticAnalysisError("remote_inference_blocked:near_tee_vision_timeout_exceeds_job_budget")
-    image_bytes = image_path.read_bytes()
-    if len(image_bytes) > MAX_IMAGE_BYTES:
+    original = image_path.read_bytes()
+    if len(original) > MAX_IMAGE_BYTES:
         raise ScreenshotSemanticAnalysisError("remote_inference_blocked:near_tee_vision_request_too_large")
-    media_type = _sniffed_media_type(image_bytes)
+    media_type = _sniffed_media_type(original)
     if media_type is None:
         raise ScreenshotSemanticAnalysisError("remote_inference_blocked:near_tee_vision_media_type_unsupported")
-    width, height = _screenshot_dimensions(image_bytes, artifacts)
+    original_width, original_height = _screenshot_dimensions(original, artifacts)
+    image_bytes, sent_media_type, width, height = _prepare_vision_image(original, media_type, original_width,
+        original_height)
+    reencoded = image_bytes is not original
+    del original
+    media_type = sent_media_type
+    _dispatch_image.set({"original_width": original_width, "original_height": original_height,
+        "sent_width": width, "sent_height": height, "sent_media_type": media_type, "reencoded": reencoded})
     metadata = {
         "captured_at": artifacts.get("created_at"),
         "source": artifacts.get("source") or "screenshot_folder",
@@ -714,6 +770,7 @@ async def _analyze_with_near_tee(image_path: Path, artifacts: dict[str, Any]) ->
             await persist_denied_route(context=context, decision=denied.decision, reason_codes=(denied.code,))
         raise ScreenshotSemanticAnalysisError(f"remote_inference_blocked:{_bounded_reason(denied.code)}") from None
     del image_bytes
+    mode = "structured" if structured else "prompt_json"
     hooks = _OutcomeAwareReceiptHooks(capability_proof_hashes=call.proof_hashes)
 
     async def adapter(_candidate, follow_redirects: bool):
@@ -722,24 +779,26 @@ async def _analyze_with_near_tee(image_path: Path, artifacts: dict[str, Any]) ->
         outcome = await near_tee_transport(call)
         if outcome.failure_code is not None or outcome.text is None:
             hooks.failure_code = outcome.failure_code or "near_tee_empty_output"
-        return outcome
+            return outcome, None
+        # Parse inside the lease (cost already settled from billing) so the
+        # route receipt records an invalid answer as a failed attempt; a
+        # returned value never raises here, keeping the lease unblocked.
+        try:
+            return outcome, parse_screenshot_analysis_output(outcome.text)
+        except ScreenshotAnalysisContractError:
+            hooks.failure_code = f"near_tee_vision_output_invalid:{mode}"
+            return outcome, None
 
     with bind_precontact_guard(lambda: near_tee_precontact_reason(call)):
-        outcome = await run_preflighted_adapter(context=call.context, decision=call.decision,
+        outcome, analysis = await run_preflighted_adapter(context=call.context, decision=call.decision,
             adapter=adapter, hooks=hooks)
     persistence = await hooks.persistence_result(call.context.request_id)
     if persistence is None or not persistence.persisted:
         raise ScreenshotSemanticAnalysisError("VLM route receipt persistence failed")
-    if outcome.failure_code is not None or outcome.text is None:
+    if analysis is None:
         # Contact happened and its cost was settled; no output is adopted.
-        raise ScreenshotSemanticAnalysisError(outcome.failure_code or "near_tee_empty_output")
-    try:
-        # json_schema when the receipt lists structured_outputs, otherwise the
-        # prompt's strict-JSON instruction: the same strict parser either way.
-        return parse_screenshot_analysis_output(outcome.text)
-    except ScreenshotAnalysisContractError as exc:
-        mode = "structured" if structured else "prompt_json"
-        raise ScreenshotSemanticAnalysisError(f"near_tee_vision_output_invalid:{mode}") from exc
+        raise ScreenshotSemanticAnalysisError(hooks.failure_code or "near_tee_empty_output")
+    return analysis
 
 
 def _sniffed_media_type(content: bytes) -> str | None:

@@ -215,14 +215,38 @@ async def test_vision_save_needs_separate_screenshot_consent_and_keeps_text(clie
     assert vision["reason_code"] == "near_tee_catalog_receipt_missing"
     assert "plaintext" in tee["screenshot_disclosure"] and "not verified by Seraph" in tee["screenshot_disclosure"]
     assert tee["check_capabilities"]["vision"] == ["health", "latency_ms", "structured_output", "vision"]
-    # Screen settings show the NEAR TEE vision route; the daemon is told no cloud provider.
+    # The slot is available but screen analysis stays off until the operator
+    # chooses it; the daemon is always told there is no cloud provider.
+    from src.observer.screenshot_semantic_analysis import screenshot_semantic_analysis_enabled
     screen = (await client.get("/api/settings/screen-analysis")).json()
-    assert screen["provider"] == "near_tee" and screen["model"] == VISION_MODEL
+    assert screen["provider"] == "" and screen["near_tee_vision_available"] is True
     assert screen["daemon_cloud_provider"] is None and screen["daemon_capture_handoff"] == "local_upload"
-    put = await client.put("/api/settings/screen-analysis", json={"enabled": True})
-    assert put.status_code == 200 and put.json()["provider"] == "near_tee"
+    assert screenshot_semantic_analysis_enabled() is False
+    put = await client.put("/api/settings/screen-analysis", json={"provider": "near_tee"})
+    assert put.status_code == 200 and put.json()["provider"] == "near_tee" and put.json()["model"] == VISION_MODEL
+    assert screenshot_semantic_analysis_enabled() is True
     stored = json.loads((model_fabric_workspace / "screen-analysis-settings.json").read_text())
-    assert stored["provider"] == "" and "daemon_cloud_provider" not in stored
+    assert stored["provider"] == "near_tee" and stored["model"] == "" and "daemon_cloud_provider" not in stored
+    # An unrelated save keeps the choice; an explicit "" opts out while the slot stays configured.
+    assert (await client.put("/api/settings/screen-analysis", json={"enabled": True})).json()["provider"] == "near_tee"
+    off = await client.put("/api/settings/screen-analysis", json={"provider": ""})
+    assert off.json()["provider"] == "" and screenshot_semantic_analysis_enabled() is False
+    assert (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]["enabled"] is True
+
+    # An explicit false screenshot acknowledgement on the unchanged, consented
+    # vision slot withdraws its consent (saved, then blocked); text is untouched.
+    withdrawn = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 7,
+        "near_tee": {"slots": {"vision": vision_payload(plaintext_provider_egress_acknowledged=False,
+            screenshot_plaintext_egress_acknowledged=False)}}})
+    assert withdrawn.status_code == 200, withdrawn.text
+    slots = withdrawn.json()["near_tee"]["slots"]
+    assert slots["vision"]["consent_current"] is False
+    assert slots["vision"]["reason_code"] == "near_tee_purpose_consent_required"
+    assert slots["text"]["consent_current"] is True
+    # Omitting the field on the next unchanged save does not resurrect it.
+    resaved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 9,
+        "near_tee": {"slots": {"text": slot_payload(plaintext_provider_egress_acknowledged=False)}}})
+    assert resaved.status_code == 200 and resaved.json()["near_tee"]["slots"]["vision"]["consent_current"] is False
     assert near.requests == []  # settings never contact NEAR
 
 
@@ -249,10 +273,19 @@ async def _ready_vision(client, monkeypatch, near, *, structured=True):
     refused = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "near_tee.vision",
         "capability": "text", "timeout_seconds": 40, "proof_ttl_seconds": 600})
     assert refused.status_code == 422
-    canary_vision = near.chat_bodies()[0]
+    canary_vision, canary_structured = near.chat_bodies()[:2]
     assert canary_vision["messages"][0]["content"][1]["type"] == "image_url"
+    # The structured_output check runs the runtime's request mode for this receipt.
+    assert canary_structured["messages"][0]["content"][1]["type"] == "image_url"
+    if structured:
+        assert canary_structured["response_format"]["type"] == "json_schema"
+        assert canary_structured["response_format"]["json_schema"]["strict"] is True
+    else:
+        assert "response_format" not in canary_structured
     status = (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]
     assert status["status"] == "ready", status
+    chosen = await client.put("/api/settings/screen-analysis", json={"provider": "near_tee"})
+    assert chosen.status_code == 200 and chosen.json()["provider"] == "near_tee", chosen.text
     return await authenticate_session(owner["session_id"], touch=False)
 
 
@@ -325,6 +358,8 @@ async def test_uploaded_capture_is_analyzed_on_near_vision_and_reaches_the_diges
 
     observation, analysis, status = await _details(observation_id)
     assert status["status"] == "succeeded" and status["profile_id"] == "near_tee.vision"
+    assert status["image"] == {"original_width": 64, "original_height": 48, "sent_width": 64, "sent_height": 48,
+        "sent_media_type": "image/png", "reencoded": False}
     assert status["tee_hosting"].startswith("TEE-hosted per NEAR catalog as of ")
     assert analysis["summary"] == "Editing the NEAR vision adapter in the editor."
     assert "PRIVATE-VISION-REASONING" not in (observation.details_json or "")
@@ -372,6 +407,10 @@ async def test_prompt_json_path_and_known_cost_failures_do_not_crash(client, mod
     _obs, analysis, status = await _details(second)
     assert analysis is None and status["status"] == "failed"
     assert status["reason"] == "near_tee_vision_output_invalid:prompt_json"
+    from src.model_fabric.repository import model_fabric_repository
+    route = await model_fabric_repository.latest_route(runtime_path="screenshot_image_analysis")
+    assert route.outcome == "failed"
+    assert route.attempts[-1].error_code == "near_tee_vision_output_invalid:prompt_json"
     assert isolated_broker._active_operation_id is None
 
     # Model echo mismatch: contact happened, cost settles, nothing adopted.
@@ -423,6 +462,8 @@ async def test_precontact_denials_block_without_contact(client, model_fabric_wor
     monkeypatch.setattr(settings, "screenshot_folder_analysis_job_timeout_seconds", 120)
 
     # Input over max_input_tokens (image counted conservatively): blocked before contact.
+    from src.observer import screenshot_semantic_analysis as analysis_module
+    monkeypatch.setattr(analysis_module, "NEAR_TEE_VISION_MAX_LONG_SIDE", 8192)  # no downscale for this case
     large = await _upload(shots, monkeypatch, size=(4000, 4000), capture_id="cap-vision-0006", color=(1, 2, 3))
     await _analyze(operator)
     assert (await _details(large))[2]["status"] == "blocked"
@@ -451,3 +492,78 @@ async def test_precontact_denials_block_without_contact(client, model_fabric_wor
     assert len(near.requests) == before  # no NEAR (or other) contact for any denial
     snapshot = await durable_job_repository.inference_accounting_snapshot()
     assert [row for row in snapshot["operations"] if row["runtime_path"] == "screenshot_image_analysis"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_large_capture_is_downscaled_for_near_and_stored_unchanged(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch, tmp_path):
+    from PIL import Image
+
+    near = VisionFixture().install(monkeypatch)
+    operator = await _ready_vision(client, monkeypatch, near)
+    observation_id = await _upload(tmp_path / "shots", monkeypatch, size=(5120, 2880), capture_id="cap-vision-0020",
+        color=(120, 30, 60))
+    # 5120x2880 would need 183*103+64 image tokens, over the 16,384 limit.
+    assert estimate_image_tokens(5120, 2880) > 16384
+    assert (await _analyze(operator)).analyzed == 1
+    body = near.chat_bodies()[-1]
+    assert len(json.dumps(body).encode()) <= 8 * 1024 * 1024
+    url = body["messages"][0]["content"][1]["image_url"]["url"]
+    assert url.startswith("data:image/jpeg;base64,")
+    sent = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1])))
+    assert sent.size == (2048, 1152) and not sent.info.get("exif")
+    observation, analysis, status = await _details(observation_id)
+    assert analysis is not None
+    assert status["image"] == {"original_width": 5120, "original_height": 2880, "sent_width": 2048,
+        "sent_height": 1152, "sent_media_type": "image/jpeg", "reencoded": True}
+    assert "base64" not in (observation.details_json or "")
+    # The stored private capture is unchanged.
+    artifacts = next(json.loads(item.removeprefix("capture_artifacts:"))
+        for item in json.loads(observation.details_json) if item.startswith("capture_artifacts:"))
+    assert Image.open(artifacts["image_path"]).size == (5120, 2880)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_structured_proof_mode_must_match_the_current_receipt(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch, tmp_path):
+    from src.model_fabric.configuration import near_tee_profile_for_slot as profile_for
+    from src.model_fabric.contracts import transport_endpoint
+    from src.model_fabric.repository import model_fabric_repository
+    from src.model_fabric.selector import candidate_from_profile
+
+    near = VisionFixture().install(monkeypatch)
+    operator = await _ready_vision(client, monkeypatch, near, structured=True)
+    profile = profile_for("vision", read_model_fabric_configuration().near_tee.slots["vision"])
+    candidate = candidate_from_profile(profile)
+    proof = await model_fabric_repository.latest_capability_proof(profile_schema_version=profile.schema_version,
+        profile_contract_hash=profile.contract_hash, profile_id=profile.id, model=profile.model,
+        endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class, adapter=candidate.adapter,
+        capability="structured_output")
+    assert proof.proven_value == "vision_json_schema" and candidate.endpoint == transport_endpoint(profile)
+    # NEAR's catalog stops listing structured_outputs: the json_schema proof no
+    # longer matches the prompt-JSON mode the runtime would now use.
+    near.catalogs[VISION_MODEL] = vision_catalog(supportedFeatures=["logprobs"])
+    rechecked = await client.post("/api/settings/model-fabric/near-tee/catalog-check",
+        json={"expected_policy_revision": read_model_fabric_configuration().egress_revision})
+    assert rechecked.status_code == 200
+    assert rechecked.json()["near_tee"]["slots"]["vision"]["reason_code"] == "proof_mode_mismatch:structured_output"
+    before = len(near.requests)
+    observation_id = await _upload(tmp_path / "shots", monkeypatch, capture_id="cap-vision-0030", color=(70, 20, 200))
+    await _analyze(operator)
+    status = (await _details(observation_id))[2]
+    assert status["status"] == "blocked"
+    assert status["reason"] == "remote_inference_blocked:near_tee_vision_structured_proof_mode_mismatch"
+    assert len(near.requests) == before  # no contact
+    # Re-running the structured_output check in the new mode restores dispatch.
+    redo = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "near_tee.vision",
+        "capability": "structured_output", "timeout_seconds": 40, "proof_ttl_seconds": 600})
+    assert redo.json()["outcome"] == "passed"
+    assert "response_format" not in near.chat_bodies()[-1]
+    redone = await model_fabric_repository.latest_capability_proof(profile_schema_version=profile.schema_version,
+        profile_contract_hash=profile.contract_hash, profile_id=profile.id, model=profile.model,
+        endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class, adapter=candidate.adapter,
+        capability="structured_output")
+    assert redone.proven_value == "vision_prompt_json"
+    assert (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]["status"] == "ready"

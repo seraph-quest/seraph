@@ -26,6 +26,7 @@ the vectors are derived workspace state.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -33,6 +34,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import threading
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -111,10 +113,37 @@ def read_index_state() -> dict[str, Any]:
     return payload
 
 
+# Every read-modify-write of the state file runs under this process lock and
+# an exclusive advisory file lock (other worker processes), so concurrent
+# writers (re-index runs, add_memory, canonical memory hooks) never lose an
+# update.
+_STATE_LOCK = threading.RLock()
+
+
+@contextmanager
+def _state_transaction():
+    """Yield the current state; it is written back only if the body succeeds."""
+    with _STATE_LOCK:
+        path = _state_path()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(path.with_name(f".{path.name}.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                import fcntl
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except ImportError:  # pragma: no cover - non-POSIX hosts keep the process lock
+                pass
+            state = read_index_state()
+            yield state
+            _write_index_state(state)
+        finally:
+            os.close(descriptor)  # closing releases the advisory lock
+
+
 def _write_index_state(state: dict[str, Any]) -> None:
     path = _state_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.tmp")
     try:
         descriptor = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(descriptor, "w") as handle:
@@ -126,11 +155,84 @@ def _write_index_state(state: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _decay(entry: dict, reason_code: str) -> None:
+    entry["decay_generation"] = int(entry.get("decay_generation") or 0) + 1
+    if entry.get("status") == "complete":
+        entry.update(status="incomplete", reason_code=reason_code,
+            updated_at=datetime.now(timezone.utc).isoformat())
+
+
 def mark_namespace_incomplete(metadata, reason_code: str) -> None:
-    """Completeness decays: recall degrades to lexical until another run."""
-    entry = read_index_state()["namespaces"].get(metadata.namespace)
-    if isinstance(entry, dict) and entry.get("status") == "complete":
-        _update_namespace(metadata, status="incomplete", reason_code=reason_code)
+    """Completeness decays: recall degrades to lexical until another run.
+
+    Bumps the namespace's decay generation even while a run is indexing, so
+    that run cannot mark the namespace complete over a change it never saw.
+    """
+    with _state_transaction() as state:
+        entry = state["namespaces"].get(metadata.namespace)
+        if isinstance(entry, dict):
+            _decay(entry, reason_code)
+
+
+def note_canonical_memory_change(reason_code: str = "near_tee_index_stale") -> None:
+    """A canonical memory was created without a vector or its text changed.
+
+    Called from the ``Memory`` ORM hook on every write path; decays every
+    known namespace. Cheap when no index state exists; never raises.
+    """
+    try:
+        if not _state_path().exists():
+            return
+        with _state_transaction() as state:
+            for entry in state["namespaces"].values():
+                if isinstance(entry, dict):
+                    _decay(entry, reason_code)
+    except Exception:
+        logger.warning("could not record a canonical memory change for the NEAR index", exc_info=True)
+
+
+def canonical_memory_written(kind: str, memory) -> None:
+    """``Memory`` ORM hook: an active memory inserted without a vector, or an
+    active memory whose summary/content changed or that became active again,
+    decays every completed namespace. Attaching a vector (``embedding_id``) or
+    archiving does not (archived rows are filtered by recall and pruned by the
+    next run). Conservative: a flush that later rolls back still decays."""
+    try:
+        status = getattr(getattr(memory, "status", None), "value", getattr(memory, "status", None))
+        if status != "active":
+            return
+        if kind == "insert":
+            if not getattr(memory, "embedding_id", None):
+                note_canonical_memory_change()
+            return
+        from sqlalchemy import inspect
+        attrs = inspect(memory).attrs
+        if any(attrs[name].history.has_changes() for name in ("content", "summary", "status")):
+            note_canonical_memory_change()
+    except Exception:
+        logger.warning("NEAR index memory hook failed", exc_info=True)
+
+
+def _decay_generation(namespace: str) -> int:
+    entry = read_index_state()["namespaces"].get(namespace)
+    return int(entry.get("decay_generation") or 0) if isinstance(entry, dict) else 0
+
+
+def _complete_if_unchanged(metadata, generation: int, **values) -> bool:
+    """Mark complete only if no decay happened since the run read its source."""
+    with _state_transaction() as state:
+        entry = dict(state["namespaces"].get(metadata.namespace) or {})
+        current = int(entry.get("decay_generation") or 0)
+        entry.update({"provider": metadata.provider, "model": metadata.model, "dimension": metadata.dimension,
+            "schema_version": metadata.schema_version, "updated_at": datetime.now(timezone.utc).isoformat()})
+        if current != generation:
+            entry.update(status="incomplete", reason_code="near_tee_index_changed_during_run",
+                job_id=values.get("job_id"))
+            state["namespaces"][metadata.namespace] = entry
+            return False
+        entry.update(status="complete", **values)
+        state["namespaces"][metadata.namespace] = entry
+        return True
 
 
 def namespace_complete(namespace: str) -> bool:
@@ -139,18 +241,16 @@ def namespace_complete(namespace: str) -> bool:
 
 
 def _update_namespace(metadata, **values) -> None:
-    state = read_index_state()
-    entry = dict(state["namespaces"].get(metadata.namespace) or {})
-    entry.update({"provider": metadata.provider, "model": metadata.model, "dimension": metadata.dimension,
-        "schema_version": metadata.schema_version, "updated_at": datetime.now(timezone.utc).isoformat()}, **values)
-    state["namespaces"][metadata.namespace] = entry
-    _write_index_state(state)
+    with _state_transaction() as state:
+        entry = dict(state["namespaces"].get(metadata.namespace) or {})
+        entry.update({"provider": metadata.provider, "model": metadata.model, "dimension": metadata.dimension,
+            "schema_version": metadata.schema_version, "updated_at": datetime.now(timezone.utc).isoformat()}, **values)
+        state["namespaces"][metadata.namespace] = entry
 
 
 def _remember_job(job_id: str) -> None:
-    state = read_index_state()
-    state["last_job_id"] = job_id
-    _write_index_state(state)
+    with _state_transaction() as state:
+        state["last_job_id"] = job_id
 
 
 # ── Canonical source ────────────────────────────────────────────────────
@@ -196,15 +296,6 @@ def is_covered(item, stored: dict[str, str]) -> bool:
     if item[0] in stored and _normalize(stored[item[0]]) == item[1]:
         return True
     return bool(item[3]) and item[3] in stored and _normalize(stored[item[3]]) in item[4]
-
-
-def index_gaps(items, stored, *, max_input_tokens: int) -> tuple[bool, int]:
-    """(over cap, uncovered non-oversize count) of the canonical set vs the index."""
-    from src.model_fabric.near_tee_embeddings import estimate_input_tokens
-    over_cap = len(items) > MAX_REINDEX_ITEMS
-    missing = sum(1 for item in items[:MAX_REINDEX_ITEMS] if not is_covered(item, stored)
-        and estimate_input_tokens([item[1]]) <= max_input_tokens)
-    return over_cap, missing
 
 
 def _batches(items, *, max_batch: int, max_tokens: int):
@@ -267,22 +358,10 @@ async def reindex_status() -> dict[str, Any]:
             job = _job_projection(await durable_job_repository.get_job(state["last_job_id"]))
         except Exception:
             job = None
-    complete = metadata is not None and namespace_complete(metadata.namespace)
-    if complete and slot is not None:
-        # Completeness decays when canonical memory changed without a vector
-        # (created, edited, or an add_memory write that failed): compare the
-        # canonical set with the stored index locally (no contact).
-        try:
-            from src.memory import vector_store
-            items = await canonical_memory_items()
-            stored = await asyncio.to_thread(vector_store.namespace_row_texts, metadata)
-            over_cap, missing = index_gaps(items, stored, max_input_tokens=slot.max_input_tokens)
-            if over_cap or missing:
-                mark_namespace_incomplete(metadata, "near_tee_reindex_over_cap" if over_cap else "near_tee_index_stale")
-                complete = False
-        except Exception:
-            complete = False
-    entry = read_index_state()["namespaces"].get(metadata.namespace) if metadata else None
+    # Read-only projection: completeness decays at write time (the Memory ORM
+    # hook and add_memory), never on a settings read; no canonical or index scan.
+    entry = state["namespaces"].get(metadata.namespace) if metadata else None
+    complete = isinstance(entry, dict) and entry.get("status") == "complete"
     semantic = complete and reason is None
     return {"schema_version": "seraph.near.tee.embedding.reindex.status.v1",
         "slot_configured": slot is not None, "slot_reason_code": reason,
@@ -432,6 +511,9 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
         "indexed_items": 0, "skipped_existing": 0, "oversize_items": 0, "batches": 0, "spent_microusd": 0}
     result = {"memory_status": "derived_index_only", "namespace": plan["namespace"]}
     try:
+        # Captured before the canonical source is read: any decay after this
+        # point prevents this run from marking the namespace complete.
+        generation = _decay_generation(metadata.namespace)
         probe = await canonical_memory_items()
         over_cap = len(probe) > MAX_REINDEX_ITEMS
         items = probe[:MAX_REINDEX_ITEMS]
@@ -524,7 +606,7 @@ async def _run(job_id, owner, fence, principal, plan, metadata, runner: _Runner)
         elif remaining == 0:
             # Oversize memories (over the slot's input bound) are never
             # truncated; they stay reachable through lexical recall only.
-            _update_namespace(metadata, status="complete", job_id=job_id, item_count=len(items), reason_code=None,
+            _complete_if_unchanged(metadata, generation, job_id=job_id, item_count=len(items), reason_code=None,
                 excluded_oversize_items=progress["oversize_items"],
                 completed_at=datetime.now(timezone.utc).isoformat())
         else:

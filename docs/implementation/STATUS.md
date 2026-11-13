@@ -784,10 +784,15 @@ dimension and schema, never mixed with older OpenRouter vectors. Recall uses it
 only with current proofs and a completed index; otherwise search returns the
 labelled lexical/degraded result without contact and new memories are not
 embedded. After indexing, new memories and recall queries are sent to NEAR.
-Completeness decays: a failed NEAR-mode memory write, or a canonical memory
-created or edited without a vector (compared locally in the status
-projection), marks the namespace incomplete and recall returns to lexical. A
-vector written for a new memory counts under its `embedding_id`. Re-indexing is never automatic: an authenticated settings action with
+Completeness decays at write time: a failed NEAR-mode memory write, or a
+canonical memory inserted without a vector or whose summary/content changes
+(an ORM hook on every `Memory` write path; raw SQL bypasses it), marks the
+namespace incomplete and recall returns to lexical without anyone opening
+settings. A run that started before such a change never marks the namespace
+complete (`near_tee_index_changed_during_run`). The index state file is
+updated under a process lock and an exclusive file lock; the status
+projection only reads it. A vector written for a new memory counts under its
+`embedding_id`. Re-indexing is never automatic: an authenticated settings action with
 a per-run consent and spend cap starts one durable job (existing workflow job
 ledger) that embeds canonical memory in bounded batches, checkpoints each
 batch, stops at the budget, can be cancelled, resumes idempotently from the

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import event as sa_event
 from sqlmodel import Field, SQLModel, Relationship
 from src.browser.forgejo_forms import EMPTY_FORM_PROFILES as _FORGEJO_EMPTY_FORM_PROFILES
 
@@ -2218,6 +2219,20 @@ class Memory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
     last_confirmed_at: Optional[datetime] = Field(default=None)
+
+
+def _memory_vector_index_hook(kind: str):
+    """ADR-035 (#1147 PR3d): every ORM write path of canonical memory reports
+    a missing or stale vector, so a completed NEAR embedding index decays to
+    lexical recall at write time. The handler is lazy and never raises."""
+    def handler(_mapper, _connection, target):
+        from src.memory.near_embedding_reindex import canonical_memory_written
+        canonical_memory_written(kind, target)
+    return handler
+
+
+sa_event.listen(Memory, "after_insert", _memory_vector_index_hook("insert"))
+sa_event.listen(Memory, "after_update", _memory_vector_index_hook("update"))
 
 
 class MemoryTombstone(SQLModel, table=True):

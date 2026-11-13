@@ -637,11 +637,12 @@ async def test_add_memory_vectors_count_and_completeness_decays(client, model_fa
             memory = await db.get(Memory, ids[0])
             memory.content = "Edited synthetic fixture memory with new wording."
             await db.commit()
-        stale = (await client.get("/api/settings/model-fabric/near-tee/embedding-reindex")).json()
-        assert stale["recall_mode"] == "lexical" and stale["index_reason_code"] == "near_tee_index_stale"
+        # Decay happens at write time: search is lexical before anyone opens settings.
         before = len(near.requests)
         assert await asyncio.to_thread(search_with_status, "orchard") == ([], True)
         assert len(near.requests) == before  # lexical, no contact
+        stale = (await client.get("/api/settings/model-fabric/near-tee/embedding-reindex")).json()
+        assert stale["recall_mode"] == "lexical" and stale["index_reason_code"] == "near_tee_index_stale"
         assert (await _run_to_end(client, budget=20000))["recall_mode"] == "semantic"
 
         # A failed NEAR-mode add_memory write decays completeness too.
@@ -674,3 +675,71 @@ async def test_omitted_slot_without_current_consent_never_blocks_another_save(cl
     assert embedding["enabled"] is True and embedding["consent_current"] is False
     assert embedding["status"] == "blocked" and embedding["reason_code"] == "near_tee_purpose_consent_required"
     assert saved.json()["near_tee"]["slots"]["text"]["consent_current"] is True
+
+
+def test_state_file_writers_never_lose_updates(model_fabric_workspace):
+    """Interleaved writers (threads) on the derived index state file."""
+    import threading
+    from src.memory import near_embedding_reindex as reindex
+    from src.memory.embedder import EMBEDDING_SCHEMA_VERSION, EmbeddingMetadata
+    spaces = [EmbeddingMetadata(EMBEDDING_SCHEMA_VERSION, "near_tee", f"fixture/model-{index}", 8) for index in range(4)]
+    for metadata in spaces:
+        reindex._update_namespace(metadata, status="complete")
+    marks_per_thread = 25
+
+    def writer(metadata):
+        for _ in range(marks_per_thread):
+            reindex.mark_namespace_incomplete(metadata, "fixture_decay")
+            reindex._remember_job("fixture-job")
+
+    def broadcaster():
+        for _ in range(marks_per_thread):
+            reindex.note_canonical_memory_change("fixture_change")
+
+    threads = [threading.Thread(target=writer, args=(metadata,)) for metadata in spaces]
+    threads.append(threading.Thread(target=broadcaster))
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    state = reindex.read_index_state()
+    assert state["last_job_id"] == "fixture-job"
+    for metadata in spaces:
+        entry = state["namespaces"][metadata.namespace]
+        assert entry["decay_generation"] == 2 * marks_per_thread and entry["status"] == "incomplete"
+    leftovers = [path.name for path in reindex._state_path().parent.iterdir() if path.name.endswith(".tmp")]
+    assert leftovers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_decay_during_a_run_prevents_completion(client, model_fabric_workspace, keyless_openrouter,
+        monkeypatch, isolated_broker, evidence_recorded):
+    from src.db.engine import get_session
+    from src.db.models import Memory
+    from src.memory import vector_store
+    await _ready(client, monkeypatch)
+    await _seed_memories(2)
+    original = vector_store.write_namespace_rows
+    created = []
+
+    def write_and_race(metadata, rows):
+        result = original(metadata, rows)
+        if not created:
+            created.append(True)
+            # A canonical memory arrives without a vector while the run is
+            # indexing (the ORM hook records it on flush).
+            async def add():
+                async with get_session() as db:
+                    db.add(Memory(content="Synthetic fixture memory created during the run."))
+                    await db.commit()
+            asyncio.run(add())
+        return result
+    monkeypatch.setattr(vector_store, "write_namespace_rows", write_and_race)
+    status = await _run_to_end(client, budget=20000)
+    assert status["job"]["status"] == "succeeded"
+    assert status["index_complete"] is False and status["recall_mode"] == "lexical"
+    assert status["index_reason_code"] == "near_tee_index_changed_during_run"
+    monkeypatch.setattr(vector_store, "write_namespace_rows", original)
+    resumed = await _run_to_end(client, budget=20000)
+    assert resumed["index_complete"] is True and resumed["job"]["indexed_items"] == 1

@@ -19,6 +19,9 @@ fallback):
   ``inputCostPerToken`` / ``outputCostPerToken`` as
   ``{"amount": int, "scale": int, "currency": "USD"}`` (USD per token =
   amount x 10^-scale; e.g. glm-5.3-flash input ``{80, 9}`` = $0.08/M);
+* optional top-level ``costPerImage`` (same price shape, USD per image); the
+  vision slot adds it once per request to the cost bound (one image per
+  request) and fails closed when it is malformed;
 * ``metadata``: ``providerType``, ``attestationSupported``, ``verifiable``,
   ``contextLength``, ``architecture.inputModalities`` /
   ``architecture.outputModalities``, ``supportedFeatures``, optional
@@ -57,7 +60,7 @@ TEE_LABEL_TEMPLATE = ("TEE-hosted per NEAR catalog as of {as_of}; NEAR gateway r
     "attestation not verified by Seraph; no end-to-end encryption")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 # The modalities each implemented slot needs from the catalog record.
-_SLOT_MODALITIES = {"text": ({"text"}, {"text"})}
+_SLOT_MODALITIES = {"text": ({"text"}, {"text"}), "vision": ({"text", "image"}, {"text"})}
 # Conservative output bound when the catalog omits maxOutputLength.
 UNKNOWN_OUTPUT_LIMIT_CAP = 8192
 
@@ -82,6 +85,8 @@ class CatalogFacts:
     features: tuple[str, ...]
     input_price: tuple[int, int] | None
     output_price: tuple[int, int] | None
+    image_price: tuple[int, int] | None = None
+    image_price_invalid: bool = False
 
 
 def _store_path() -> Path:
@@ -147,6 +152,11 @@ def parse_catalog_record(raw: bytes, *, model_id: str) -> CatalogFacts:
     provider_type = metadata.get("providerType")
     if provider_type is not None and (not isinstance(provider_type, str) or _SAFE_TOKEN.fullmatch(provider_type) is None):
         raise NearTeeCatalogError("near_tee_catalog_response_invalid")
+    try:
+        image_price, image_price_invalid = _price(payload.get("costPerImage")), False
+    except NearTeeCatalogError:
+        # Only the vision slot prices images; it fails closed on this flag.
+        image_price, image_price_invalid = None, True
     return CatalogFacts(model_id=model_id, provider_type=provider_type,
         attestation_supported=_optional_bool(metadata.get("attestationSupported")),
         verifiable=_optional_bool(metadata.get("verifiable")), is_ready=_optional_bool(metadata.get("isReady")),
@@ -156,25 +166,35 @@ def parse_catalog_record(raw: bytes, *, model_id: str) -> CatalogFacts:
         output_modalities=_safe_list(architecture.get("outputModalities")),
         features=_safe_list(metadata.get("supportedFeatures")),
         input_price=_price(payload.get("inputCostPerToken")),
-        output_price=_price(payload.get("outputCostPerToken")))
+        output_price=_price(payload.get("outputCostPerToken")),
+        image_price=image_price, image_price_invalid=image_price_invalid)
 
 
-def required_cost_microusd(facts: CatalogFacts, *, max_input_tokens: int, max_output_tokens: int) -> int | None:
-    """Exact ceiling of max_in x input price + max_out x output price, in microUSD."""
+def required_cost_microusd(facts: CatalogFacts, *, max_input_tokens: int, max_output_tokens: int,
+                           images: int = 0) -> int | None:
+    """Exact ceiling of max_in x input price + max_out x output price
+    (+ images x per-image price when the catalog lists one), in microUSD."""
     if facts.input_price is None or facts.output_price is None:
         return None
     total = 0
     from fractions import Fraction
-    for tokens, (amount, scale) in ((max_input_tokens, facts.input_price), (max_output_tokens, facts.output_price)):
-        total += Fraction(tokens * amount * 1_000_000, 10 ** scale)
+    terms = [(max_input_tokens, facts.input_price), (max_output_tokens, facts.output_price)]
+    if images and facts.image_price is not None:
+        terms.append((images, facts.image_price))
+    for units, (amount, scale) in terms:
+        total += Fraction(units * amount * 1_000_000, 10 ** scale)
     return math.ceil(total)
 
 
 def evaluate_catalog(facts: CatalogFacts, *, slot_name: str, slot) -> tuple[str | None, int | None]:
     """Return (failure reason or None, required cost microUSD)."""
     needed_in, needed_out = _SLOT_MODALITIES[slot_name]
+    images = 0
+    if slot_name == "vision":
+        from .configuration import NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST
+        images = NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST
     required = required_cost_microusd(facts, max_input_tokens=slot.max_input_tokens,
-        max_output_tokens=slot.max_output_tokens)
+        max_output_tokens=slot.max_output_tokens, images=images)
     if facts.provider_type != "vllm":
         return "near_tee_catalog_provider_not_vllm", required
     if facts.attestation_supported is not True:
@@ -192,6 +212,8 @@ def evaluate_catalog(facts: CatalogFacts, *, slot_name: str, slot) -> tuple[str 
             return "near_tee_catalog_output_limit_unknown", required
     elif facts.max_output_tokens < slot.max_output_tokens:
         return "near_tee_catalog_output_too_small", required
+    if images and facts.image_price_invalid:
+        return "near_tee_catalog_response_invalid", required
     if required is None:
         return "near_tee_catalog_price_missing", required
     if slot.request_cost_bound_microusd < required:
@@ -204,6 +226,24 @@ def _price_text(price: tuple[int, int] | None) -> str | None:
         return None
     from decimal import Decimal
     return format(Decimal(price[0]).scaleb(-price[1]) * 1_000_000, "f")
+
+
+def _image_price_text(price: tuple[int, int] | None) -> str | None:
+    if price is None:
+        return None
+    from decimal import Decimal
+    return format(Decimal(price[0]).scaleb(-price[1]), "f")
+
+
+def receipt_structured_outputs(slot_name: str, *, receipts: dict[str, dict[str, object]] | None = None) -> bool:
+    """Whether the slot's stored receipt lists NEAR's ``structured_outputs`` feature.
+
+    Read only after ``catalog_receipt_block_reason`` passed for the same
+    receipts; never refreshes the catalog.
+    """
+    receipt = (read_catalog_receipts() if receipts is None else receipts).get(slot_name)
+    features = receipt.get("features") if isinstance(receipt, dict) else None
+    return isinstance(features, list) and "structured_outputs" in features
 
 
 def build_receipt(*, slot_name: str, slot, profile, facts: CatalogFacts | None, raw: bytes | None,
@@ -225,6 +265,9 @@ def build_receipt(*, slot_name: str, slot, profile, facts: CatalogFacts | None, 
         "features": list(facts.features) if facts else [],
         "input_price_usd_per_million": _price_text(facts.input_price) if facts else None,
         "output_price_usd_per_million": _price_text(facts.output_price) if facts else None,
+        # USD per image (not per million); recorded for the vision slot only.
+        "image_price_usd": (_image_price_text(facts.image_price) if facts and slot_name == "vision" else None),
+        "structured_outputs": bool(facts and "structured_outputs" in facts.features),
         "context_length": facts.context_length if facts else None,
         "max_output_tokens": facts.max_output_tokens if facts else None,
         "required_cost_microusd": required,

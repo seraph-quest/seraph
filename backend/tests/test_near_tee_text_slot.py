@@ -192,8 +192,9 @@ def test_setup_is_closed_disabled_by_default_and_allowlisted():
             "openrouter/z-ai/glm-5.3-flash", "z-ai/GLM-5.3-flash"):
         with pytest.raises(ValueError, match="near_tee_model_not_allowlisted"):
             validate_near_tee_setup(NearTeeSetup(slots={"text": _slot(model_id=model)}))
+    # Vision is implemented by PR4 (own allowlist); embedding stays typed room.
     with pytest.raises(ValueError, match="near_tee_slot_not_implemented"):
-        validate_near_tee_setup(NearTeeSetup(slots={"vision": _slot()}))
+        validate_near_tee_setup(NearTeeSetup(slots={"embedding": _slot()}))
     with pytest.raises(ValueError):
         validate_near_tee_setup(NearTeeSetup(slots={"text": _slot(max_input_tokens=262_145)}))
     with pytest.raises(ValueError):

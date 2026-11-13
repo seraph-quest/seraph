@@ -323,6 +323,9 @@ class NearTeeSlotInput(BaseModel):
     request_cost_bound_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
     catalog_ttl_hours: int = Field(default=24, strict=True, ge=1, le=24)
     plaintext_provider_egress_acknowledged: bool = Field(default=False, strict=True)
+    # Vision only: the separate screenshot purpose consent. Screenshots reach
+    # the NEAR gateway in plaintext (ADR-035); never implied by the text slot.
+    screenshot_plaintext_egress_acknowledged: bool = Field(default=False, strict=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -336,8 +339,10 @@ class NearTeeSlotInput(BaseModel):
 
 class NearTeeSlotsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # Typed room for vision/embedding (PR3d/PR4); only text is accepted now.
+    # Typed room for embedding (PR3d); text (PR3b) and vision (PR4) are
+    # accepted. An omitted slot keeps its stored value; null removes it.
     text: NearTeeSlotInput | None = None
+    vision: NearTeeSlotInput | None = None
 
 
 class NearTeeSetupInput(BaseModel):
@@ -663,18 +668,31 @@ async def _put_near_tee(body, persisted):
         raise HTTPException(status_code=409, detail="inference_lane_required")
     incoming = body.near_tee
     prior = persisted.near_tee
-    slot_inputs = {"text": incoming.slots.text}
     slots: dict[str, NearTeeSlot | None] = {}
     acknowledged: dict[str, bool] = {}
-    for name, slot_input in slot_inputs.items():
+    for name in NEAR_TEE_IMPLEMENTED_SLOTS:
+        if name not in incoming.slots.model_fields_set:
+            # Omitted: keep the stored slot. Its consent carries only when it
+            # is still current; it is never newly granted without a fresh
+            # acknowledgement (fail closed, no resurrection).
+            prior_slot = (prior.slots or {}).get(name) if prior is not None else None
+            if prior_slot is not None:
+                slots[name] = prior_slot
+                acknowledged[name] = None
+            continue
+        slot_input = getattr(incoming.slots, name)
         if slot_input is None:
             slots[name] = None
             continue
         if slot_input.model_id not in NEAR_TEE_SLOT_ALLOWLISTS[name]:
             raise HTTPException(status_code=422, detail="near_tee_model_not_allowlisted")
-        fields = slot_input.model_dump(exclude={"plaintext_provider_egress_acknowledged"})
+        if name != "vision" and slot_input.screenshot_plaintext_egress_acknowledged:
+            raise HTTPException(status_code=422, detail="near_tee_screenshot_consent_vision_only")
+        fields = slot_input.model_dump(exclude={"plaintext_provider_egress_acknowledged",
+            "screenshot_plaintext_egress_acknowledged"})
         slots[name] = NearTeeSlot(**fields)
-        acknowledged[name] = slot_input.plaintext_provider_egress_acknowledged
+        acknowledged[name] = slot_input.plaintext_provider_egress_acknowledged and (
+            name != "vision" or slot_input.screenshot_plaintext_egress_acknowledged)
     setup = NearTeeSetup(credential_fingerprint=prior.credential_fingerprint if prior else None, slots=slots)
     raw_key = incoming.api_key.get_secret_value() if incoming.api_key is not None else ""
     if raw_key.strip():
@@ -690,8 +708,14 @@ async def _put_near_tee(body, persisted):
     consented = {}
     for name, slot in (setup.slots or {}).items():
         if slot is not None and slot.enabled and slot.purpose_consent_revision is None:
+            if acknowledged.get(name) is None and name in acknowledged:
+                # A kept (omitted) slot whose consent is no longer current
+                # stays blocked on near_tee_purpose_consent_required.
+                consented[name] = slot
+                continue
             if not acknowledged.get(name):
-                raise HTTPException(status_code=403, detail="near_tee_plaintext_acknowledgement_required")
+                raise HTTPException(status_code=403, detail=("near_tee_screenshot_acknowledgement_required"
+                    if name == "vision" else "near_tee_plaintext_acknowledgement_required"))
             slot = replace(slot, purpose_consent_revision=final_revision)
         consented[name] = slot
     setup = replace(setup, slots=consented)
@@ -1391,13 +1415,21 @@ def _catalog_receipt_summary(receipt):
         return None
     keys = ("slot", "model_id", "profile_hash", "checked_at_iso", "expires_at", "ttl_hours", "outcome",
         "reason_code", "provider_type", "attestation_supported", "verifiable", "is_ready", "input_modalities",
-        "output_modalities", "features", "input_price_usd_per_million", "output_price_usd_per_million",
+        "output_modalities", "features", "structured_outputs", "input_price_usd_per_million",
+        "output_price_usd_per_million", "image_price_usd",
         "context_length", "max_output_tokens", "required_cost_microusd", "response_sha256",
         "tee_hosted_per_catalog", "tee_verified", "e2ee")
     summary = {key: receipt.get(key) for key in keys}
     if isinstance(summary.get("expires_at"), (int, float)):
         summary["expires_at"] = datetime.fromtimestamp(summary["expires_at"], timezone.utc).isoformat()
     return summary
+
+
+_NEAR_TEE_SCREENSHOT_DISCLOSURE = ("Screenshots are sent to the NEAR gateway in plaintext for analysis. "
+    "TEE-hosted per NEAR catalog, not verified by Seraph; no end-to-end encryption.")
+# Proofs each slot's dispatch requires, in status order.
+_NEAR_TEE_STATUS_PROOFS = {"text": ("health", "latency_ms", "text"),
+    "vision": ("health", "latency_ms", "vision", "structured_output")}
 
 
 async def _near_tee_setup_status(configured, accounting):
@@ -1409,13 +1441,16 @@ async def _near_tee_setup_status(configured, accounting):
     allowlists = {slot: sorted(models) for slot, models in NEAR_TEE_SLOT_ALLOWLISTS.items()}
     disclosure = ("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in "
         "plaintext; no end-to-end encryption.")
+    from src.model_fabric.near_tee import NEAR_TEE_SLOT_CHECK_CAPABILITIES
     base = {"schema_version": "seraph.near.tee.setup.v1", "api_base": "https://cloud-api.near.ai/v1",
         "allowlist": allowlists, "implemented_slots": list(NEAR_TEE_IMPLEMENTED_SLOTS),
         "tee_verified": False, "e2ee": False, "disclosure": disclosure,
+        "screenshot_disclosure": _NEAR_TEE_SCREENSHOT_DISCLOSURE,
+        "check_capabilities": {slot: sorted(items) for slot, items in NEAR_TEE_SLOT_CHECK_CAPABILITIES.items()},
         "catalog_check_endpoint": "/api/settings/model-fabric/near-tee/catalog-check"}
     if setup is None:
         return {**base, "configured": False, "status": "disabled", "reason_code": None, "key_present": False,
-            "credential_fingerprint": None, "slots": {"text": None}}
+            "credential_fingerprint": None, "slots": {name: None for name in NEAR_TEE_IMPLEMENTED_SLOTS}}
     key_present = False
     key_unavailable = False
     try:
@@ -1428,7 +1463,7 @@ async def _near_tee_setup_status(configured, accounting):
     except Exception:
         receipts = {}
     slots = {}
-    for name in ("text",):
+    for name in NEAR_TEE_IMPLEMENTED_SLOTS:
         slot = (setup.slots or {}).get(name)
         if slot is None:
             slots[name] = None
@@ -1450,7 +1485,7 @@ async def _near_tee_setup_status(configured, accounting):
         if reason is None:
             candidate = candidate_from_profile(profile)
             try:
-                for capability in ("health", "latency_ms", "text"):
+                for capability in _NEAR_TEE_STATUS_PROOFS[name]:
                     proof = await model_fabric_repository.latest_capability_proof(
                         profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
                         profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
@@ -1517,13 +1552,13 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
     setup = configured.openrouter_setup
     near_tee_key = None
     if profile.provider_kind == "near_tee":
-        from src.model_fabric.near_tee import NEAR_TEE_CHECK_CAPABILITIES
+        from src.model_fabric.near_tee import NEAR_TEE_SLOT_CHECK_CAPABILITIES
         from src.model_fabric.near_tee_catalog import catalog_receipt_block_reason
         from src.model_fabric.configuration import capture_near_tee_credential, near_tee_slot_for_profile
         slot_name = near_tee_slot_for_profile(profile.id)
         if slot_name is None:
             raise HTTPException(status_code=403, detail="canary_exact_slot_required")
-        if body.capability not in NEAR_TEE_CHECK_CAPABILITIES:
+        if body.capability not in NEAR_TEE_SLOT_CHECK_CAPABILITIES.get(slot_name, ()):
             # Streaming and tool-use checks arrive with PR3c.
             raise HTTPException(status_code=422, detail="near_tee_capability_check_unsupported")
         if reason := near_tee_slot_block_reason(configured, slot_name):
@@ -1535,7 +1570,9 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
                 expected_fingerprint=configured.near_tee.credential_fingerprint)
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc) or "near_tee_credential_unavailable") from exc
-        policy = near_tee_policy_for_runtime(configured, "chat_agent") or WorkloadPolicy(runtime_path="capability_probe")
+        slot_runtime_path = {"text": "chat_agent", "vision": "screenshot_image_analysis"}[slot_name]
+        policy = (near_tee_policy_for_runtime(configured, slot_runtime_path)
+            or WorkloadPolicy(runtime_path="capability_probe"))
     elif setup is not None and setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         # This existing proof generator is an explicit target exception, never
         # an ordinary task-class mapping or an unknown-to-text fallback.

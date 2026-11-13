@@ -158,6 +158,9 @@ async def prepare_near_tee_call(
         raise NearTeeDenied(str(exc)) from None
     if slot_name not in NEAR_TEE_IMPLEMENTED_SLOTS:
         raise NearTeeDenied("near_tee_slot_not_implemented")
+    if slot_name != "text":
+        # The vision slot has its own image adapter (near_tee_vision.py).
+        raise NearTeeDenied("near_tee_slot_adapter_mismatch")
     capabilities = set(context.requirements.capabilities)
     if ModelCapability.STREAMING.value in capabilities:
         raise NearTeeDenied("near_tee_streaming_unavailable")
@@ -289,7 +292,12 @@ async def near_tee_transport(call: NearTeeCall) -> NearTeeOutcome:
         cost_microusd=evidence.cost_microusd)
 
 
-NEAR_TEE_CHECK_CAPABILITIES = frozenset({"text", "structured_output", "health", "latency_ms"})
+# Capability checks each slot may run (mechanics only, never evals).
+NEAR_TEE_SLOT_CHECK_CAPABILITIES = {
+    "text": frozenset({"text", "structured_output", "health", "latency_ms"}),
+    "vision": frozenset({"vision", "structured_output", "health", "latency_ms"}),
+}
+NEAR_TEE_CHECK_CAPABILITIES = frozenset().union(*NEAR_TEE_SLOT_CHECK_CAPABILITIES.values())
 
 
 async def near_tee_capability_check_transport(*, profile, capability: str, body: dict[str, object],

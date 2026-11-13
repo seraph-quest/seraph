@@ -52,9 +52,10 @@ NEAR_TEE_API_BASE = "https://cloud-api.near.ai/v1"
 NEAR_TEE_CREDENTIAL_REF = "vault:near_api_key"
 NEAR_TEE_VAULT_KEY = "near_api_key"
 NEAR_TEE_SECRET_REF = "NEAR_API_KEY"
-# Typed room for the ADR-035 slots; only ``text`` is implemented (PR3b).
+# Typed room for the ADR-035 slots; ``text`` (PR3b) and ``vision`` (PR4) are
+# implemented; ``embedding`` stays typed room until PR3d.
 NEAR_TEE_SLOTS = ("text", "vision", "embedding")
-NEAR_TEE_IMPLEMENTED_SLOTS = ("text",)
+NEAR_TEE_IMPLEMENTED_SLOTS = ("text", "vision")
 # ADR-035 closed allowlist (catalog read 2026-11-13): canonical id ->
 # design-basis context window. The catalog check decides dispatch.
 NEAR_TEE_TEXT_ALLOWLIST: dict[str, int] = {
@@ -63,7 +64,24 @@ NEAR_TEE_TEXT_ALLOWLIST: dict[str, int] = {
     "deepseek-ai/DeepSeek-V4.1-Flash-1017": 1_048_576,
     "Qwen/Qwen3.6-35B-A3B-FP8": 262_144,
 }
-NEAR_TEE_SLOT_ALLOWLISTS: dict[str, dict[str, int]] = {"text": NEAR_TEE_TEXT_ALLOWLIST}
+# ADR-035 vision rows (text+image input per the 2026-11-13 catalog read).
+# DeepSeek-V4.1-Flash-1017 is listed but its catalog record lacks
+# ``isReady`` and structured outputs, so the catalog check fails closed.
+NEAR_TEE_VISION_ALLOWLIST: dict[str, int] = {
+    "z-ai/glm-5.3-flash": 1_048_576,
+    "Qwen/Qwen3.8-27B": 262_144,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 16_384,
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": 1_048_576,
+}
+NEAR_TEE_SLOT_ALLOWLISTS: dict[str, dict[str, int]] = {
+    "text": NEAR_TEE_TEXT_ALLOWLIST, "vision": NEAR_TEE_VISION_ALLOWLIST}
+# Capabilities each implemented slot profile declares; the canonical caller
+# still needs a fresh capability proof for each one it requires.
+NEAR_TEE_SLOT_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "text": ("text", "structured_output"), "vision": ("vision", "structured_output")}
+# One screenshot per vision request; the image counts against the input and
+# cost bounds (ADR-035 "images counted per the provider's pricing").
+NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST = 1
 _MAX_NEAR_TEE_OUTPUT_TOKENS = 65_536
 _MAX_NEAR_TEE_TIMEOUT_SECONDS = 120.0
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -298,18 +316,22 @@ def near_tee_slot(configuration: "ModelFabricConfiguration", slot: str) -> NearT
 def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProfile:
     """Deterministic profile; its contract hash binds proofs and catalog receipts."""
     validate_near_tee_slot(slot_name, slot)
-    tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis")
-        if route_slot_for_task_class(task) == slot_name)
+    tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis",
+        "vision_analysis") if route_slot_for_task_class(task) == slot_name)
     controls = {"temperature": slot.temperature, "output_limit": slot.max_output_tokens,
         "timeout_seconds": float(slot.timeout_seconds), "input_limit": slot.max_input_tokens,
         "request_cost_bound_microusd": slot.request_cost_bound_microusd,
         "catalog_ttl_hours": slot.catalog_ttl_hours}
+    if slot_name == "vision":
+        controls["max_images_per_request"] = NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST
     return ProviderProfile(id=near_tee_profile_id(slot_name), provider_kind=NEAR_TEE_PROVIDER_KIND,
         model=slot.model_id, routing_model=slot.model_id, api_base=NEAR_TEE_API_BASE,
         secret_env=NEAR_TEE_SECRET_REF, options={"_seraph_near_tee": controls},
-        # Callers needing structured output still need that capability's
-        # fresh proof on this exact profile (ADR-035); tools/streaming: PR3c.
-        capabilities=("text", "structured_output"), task_class=tasks[0], task_classes=tasks, budget_class="medium",
+        # Callers needing structured output (or vision) still need that
+        # capability's fresh proof on this exact profile (ADR-035);
+        # tools/streaming: PR3c.
+        capabilities=NEAR_TEE_SLOT_CAPABILITIES[slot_name], task_class=tasks[0], task_classes=tasks,
+        budget_class="medium",
         enabled=slot.enabled, keyless=False, transport_adapter="openai_compatible_chat",
         context_window_tokens=slot.max_input_tokens, max_output_tokens=slot.max_output_tokens,
         cost_microusd=slot.request_cost_bound_microusd, cost_source="near_tee_catalog_receipt",

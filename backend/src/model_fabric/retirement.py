@@ -13,6 +13,7 @@ through an explicit fixture (``tests/conftest.py::openrouter_legacy_reenabled``)
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 OPENROUTER_RETIRED_REASON = "openrouter_retired"
@@ -24,11 +25,28 @@ _OPENROUTER_RETIRED = True
 
 
 class ProviderRetiredError(PermissionError):
-    """A precontact denial: the selected provider is retired by policy."""
+    """A precontact denial: the selected provider is retired by policy.
+
+    It stays a ``PermissionError`` so existing fail-closed callers keep
+    treating it as unavailable authority. Chat and agent boundaries convert it
+    to ``NoCompliantModelRouteError`` with the same stable reason through
+    ``retired_as_route_error`` so operators see ``openrouter_retired``.
+    """
 
     def __init__(self, code: str = OPENROUTER_RETIRED_REASON) -> None:
         super().__init__(code)
         self.code = code
+        self.reason_codes = (code,)
+
+
+@contextmanager
+def retired_as_route_error():
+    """Re-raise a retirement denial as the canonical no-contact route error."""
+    from .contracts import NoCompliantModelRouteError
+    try:
+        yield
+    except ProviderRetiredError as exc:
+        raise NoCompliantModelRouteError((exc.code,)) from exc
 
 
 def openrouter_retired() -> bool:

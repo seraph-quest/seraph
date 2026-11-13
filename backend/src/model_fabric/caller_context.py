@@ -232,6 +232,12 @@ def build_canonical_inference_context(
 ) -> InferenceRequestContext:
     """Build one fail-closed context from a registered production route."""
     spec = canonical_route_spec(runtime_path)
+    if openrouter_retired():
+        # ADR-035: every canonical route binds the OpenRouter provider
+        # allowlist below, and OpenRouter is retired by policy. Fail closed
+        # first, before identity, accounting, admission or transport, so every
+        # caller sees the same stable reason; no fallback.
+        raise ProviderRetiredError()
 
     effective_principal = principal or get_current_trust_principal()
     if effective_principal is None:
@@ -251,11 +257,6 @@ def build_canonical_inference_context(
     ):
         raise ValueError("inference principal must exactly match session and job identity")
 
-    if openrouter_retired():
-        # ADR-035: every canonical route binds the OpenRouter provider
-        # allowlist below, and OpenRouter is retired by policy. Fail closed
-        # before any accounting, admission or transport; no fallback.
-        raise ProviderRetiredError()
     data_digest = canonical_digest(payload)
     policy = effective_workload_policy(runtime_path)
     if bool(getattr(policy, "fallback_allowed", False)):

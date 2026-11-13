@@ -35,6 +35,13 @@ _MID_TURN = (
 PROVIDER_OVERRUN_CODE = "provider_charge_exceeded_reservation"
 
 
+def _retired_safe_context(runtime_path: str, **kwargs):
+    """Build the canonical context; a retired provider is a no-contact route block."""
+    from src.model_fabric.retirement import retired_as_route_error
+    with retired_as_route_error():
+        return build_canonical_inference_context(runtime_path, **kwargs)
+
+
 def openrouter_route_block_reason(error: BaseException) -> str:
     """Return the first specific selector rejection carried by a route error."""
     for code in getattr(error, "reason_codes", ()) or ():
@@ -71,6 +78,13 @@ async def route_block_overrun_minimum(error: BaseException) -> int | None:
 def _route_block_body(reason: str, minimum_bound_microusd: int | None = None) -> tuple[str, str]:
     code, _, detail = reason.partition(":")
     capability = detail.replace("_", " ") if detail else ""
+    if code == "openrouter_retired":
+        return (
+            "Chat is blocked: OpenRouter is retired (ADR-035) and no NEAR TEE route is available yet, "
+            "so Seraph has no active inference provider. Existing OpenRouter costs can still be settled "
+            "under Inference accounting.",
+            "openrouter_retired",
+        )
     if code == PROVIDER_OVERRUN_CODE:
         target = (
             f"at least ${microusd_dollars(minimum_bound_microusd)} ({minimum_bound_microusd:,} µUSD, "
@@ -350,7 +364,7 @@ async def run_direct_local_chat(
         runtime_path=runtime_path,
         request_id=request_id,
         local_runtime_only=False,
-        request_context=build_canonical_inference_context(
+        request_context=_retired_safe_context(
             runtime_path,
             payload=messages,
             output_tokens=min(settings.model_max_tokens, 512),
@@ -381,7 +395,7 @@ async def stream_direct_local_chat(
     task_context = await session_manager.get_task_continuity_context(session_id)
     if task_context:
         messages[0]["content"] += "\n\n" + task_context
-    context = build_canonical_inference_context(
+    context = _retired_safe_context(
         runtime_path,
         payload=messages,
         output_tokens=min(settings.model_max_tokens, 512),

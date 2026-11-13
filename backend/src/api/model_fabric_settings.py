@@ -311,6 +311,7 @@ class InferenceLaneInput(BaseModel):
     max_inflight: int = Field(default=1, strict=True, ge=1, le=1)
     max_outstanding_per_owner: int = Field(default=16, strict=True, ge=1, le=16)
     max_retries: int = Field(default=2, strict=True, ge=0, le=2)
+    request_reserve_review_microusd: int | None = Field(default=None, strict=True, ge=1, le=1_000_000_000)
 
 
 class ModelFabricConfigurationRequest(BaseModel):
@@ -714,6 +715,8 @@ async def _put_inference_lane(body, persisted):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     review = near.request_cost_bound_microusd if near is not None and near.enabled else None
+    if lane.request_reserve_review_microusd is not None:
+        review = max(review or 0, lane.request_reserve_review_microusd)
     if old_or is not None and not openrouter_retired():
         bounds = [route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled]
         review = max([*bounds, *([review] if review else [])], default=None)
@@ -768,10 +771,12 @@ def _inference_lane_status(configured):
 
 
 def _provider_retirement_status():
+    from src.model_fabric.configuration import openrouter_route_revoke_status
     return {"openrouter": {"state": "retired" if openrouter_retired() else "active",
         "reason_code": OPENROUTER_RETIRED_REASON if openrouter_retired() else None,
         "decision": "ADR-035", "label": OPENROUTER_RETIRED_LABEL if openrouter_retired() else None,
-        "new_requests_allowed": not openrouter_retired(), "settlement_available": True}}
+        "new_requests_allowed": not openrouter_retired(), "settlement_available": True,
+        "route_revoke": openrouter_route_revoke_status()}}
 
 
 @router.get("/settings/model-fabric")
@@ -988,7 +993,7 @@ async def _put_openrouter_v2(body, setup_input, persisted):
         raise HTTPException(status_code=409, detail="provider_policy_reconciliation_required")
     existing = persisted.openrouter_setup
     prior = (migrate_openrouter_setup_to_v3 if setup_input.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else migrate_openrouter_setup_v1_to_v2)(existing, egress_revision=revision,
-        allow_unconsented=persisted.near_text is not None) if existing and setup_input.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION} else existing
+        allow_unconsented=persisted.near_text is not None or persisted.inference_lane is not None) if existing and setup_input.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION} else existing
     setup = _openrouter_setup_from_input(setup_input, existing=prior)
     raw_key = setup_input.api_key.get_secret_value() if setup_input.api_key is not None else ""
     if raw_key.strip() and (len(raw_key) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in raw_key)):
@@ -1466,6 +1471,10 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "active_inference_provider": None if openrouter_retired() else OPENROUTER_PROVIDER_KIND,
         "inference_block_reason": (OPENROUTER_RETIRED_REASON if configured.openrouter_setup is not None
             else NO_ACTIVE_PROVIDER_REASON) if openrouter_retired() else None,
+        # "blocked" above is scoped to the canonical inference routes; the
+        # separate NEAR text Work capability reports its own readiness here.
+        "status_scope": "canonical_inference_routes",
+        "near_text_ready": near_status is not None and near_status.get("status") == "configured",
         "inference_accounting": accounting,
         "egress_revision": configured.egress_revision,
         "egress_revoked": configured.egress_revoked,
@@ -1535,7 +1544,8 @@ async def _openrouter_setup_status(setup: OpenRouterSetup | None, *, configurati
     original_setup = setup
     revision = configuration.egress_revision if configuration is not None else 1
     setup = (migrate_openrouter_setup_to_v3 if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else migrate_openrouter_setup_v1_to_v2)(setup, egress_revision=revision,
-        allow_unconsented=configuration is not None and configuration.near_text is not None)
+        allow_unconsented=configuration is not None and (configuration.near_text is not None
+            or configuration.inference_lane is not None))
     payload = _openrouter_setup_payload(setup)
     payload.update(
         {

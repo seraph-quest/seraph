@@ -431,6 +431,12 @@ async def _lifespan_services(app: FastAPI):
                 "OpenRouter credential hydration failed; inference remains fail-closed",
                 exc_info=True,
             )
+        # ADR-035: publish the route-scoped revoke of stored OpenRouter routes
+        # once, before any scheduler or inference path runs. Idempotent; a
+        # failure is logged and surfaced as degraded, never a startup crash.
+        from src.model_fabric.configuration import run_openrouter_route_revoke_at_boot
+
+        run_openrouter_route_revoke_at_boot()
         # Recover expired durable invocation leases before scheduler jobs can
         # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
         # is fail-closed and operator-visible; a failed recovery is not hidden as

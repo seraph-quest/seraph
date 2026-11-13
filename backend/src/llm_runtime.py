@@ -3891,7 +3891,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     extra_capabilities.append(ModelCapability.TOOL_USE)
                 if response_format is not None:
                     extra_capabilities.append(ModelCapability.STRUCTURED_OUTPUT)
-                request_context = build_canonical_inference_context(
+                from src.model_fabric.retirement import retired_as_route_error
+                with retired_as_route_error():
+                    request_context = build_canonical_inference_context(
                     runtime_path,
                     payload={
                         "messages": _transport_json_value(messages),
@@ -4428,7 +4430,9 @@ def completion_with_fallback_sync(
             principal = get_current_trust_principal()
             if principal is None:
                 raise PermissionError("canonical completion requires explicit runtime principal")
-            request_context = build_canonical_inference_context(
+            from src.model_fabric.retirement import retired_as_route_error
+            with retired_as_route_error():
+                request_context = build_canonical_inference_context(
                 runtime_path,
                 payload={
                     "messages": _transport_json_value(messages),

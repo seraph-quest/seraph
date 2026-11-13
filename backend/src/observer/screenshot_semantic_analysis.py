@@ -702,18 +702,17 @@ def _prepare_vision_image(image_bytes: bytes, media_type: str, width: int, heigh
     if max(width, height) <= NEAR_TEE_VISION_MAX_LONG_SIDE and len(image_bytes) <= NEAR_TEE_VISION_REENCODE_ABOVE_BYTES:
         return image_bytes, media_type, width, height
     import io
-    import warnings
     from PIL import Image, ImageOps
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(image_bytes)) as source:
-                if source.width * source.height > NEAR_TEE_VISION_MAX_DECODE_PIXELS:
-                    raise ValueError("declared pixels exceed cap")
-                if source.format == "JPEG":
-                    # Decode at reduced scale when possible.
-                    source.draft("RGB", (NEAR_TEE_VISION_MAX_LONG_SIDE, NEAR_TEE_VISION_MAX_LONG_SIDE))
-                image = ImageOps.exif_transpose(source).convert("RGB")
+        # The 40M cap sits below Pillow's own bomb threshold, so no
+        # process-wide warning filter is needed (not thread-safe).
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            if source.width * source.height > NEAR_TEE_VISION_MAX_DECODE_PIXELS:
+                raise ValueError("declared pixels exceed cap")
+            if source.format == "JPEG":
+                # Decode at reduced scale when possible.
+                source.draft("RGB", (NEAR_TEE_VISION_MAX_LONG_SIDE, NEAR_TEE_VISION_MAX_LONG_SIDE))
+            image = ImageOps.exif_transpose(source).convert("RGB")
         image.thumbnail((NEAR_TEE_VISION_MAX_LONG_SIDE, NEAR_TEE_VISION_MAX_LONG_SIDE), Image.Resampling.LANCZOS)
         buffer = io.BytesIO()
         # A fresh RGB image carries no EXIF/ICC/text metadata into the JPEG.

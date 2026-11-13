@@ -690,15 +690,30 @@ def near_tee_vision_max_timeout_seconds() -> float:
     return job_budget - NEAR_TEE_BILLING_RESERVE_SECONDS - NEAR_TEE_VISION_JOB_MARGIN_SECONDS
 
 
+NEAR_TEE_VISION_MAX_DECODE_PIXELS = 40_000_000
+
+
 def _prepare_vision_image(image_bytes: bytes, media_type: str, width: int, height: int) -> tuple[bytes, str, int, int]:
     """Return the bytes to send; downscale/re-encode only when larger or heavier."""
+    if width * height > NEAR_TEE_VISION_MAX_DECODE_PIXELS:
+        # Header-declared size checked before any decode: a small compressed
+        # file can declare enough pixels to exhaust memory (critic finding A).
+        raise ScreenshotSemanticAnalysisError("remote_inference_blocked:near_tee_vision_image_dimensions_too_large")
     if max(width, height) <= NEAR_TEE_VISION_MAX_LONG_SIDE and len(image_bytes) <= NEAR_TEE_VISION_REENCODE_ABOVE_BYTES:
         return image_bytes, media_type, width, height
     import io
-    from PIL import Image
+    import warnings
+    from PIL import Image, ImageOps
     try:
-        with Image.open(io.BytesIO(image_bytes)) as source:
-            image = source.convert("RGB")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(image_bytes)) as source:
+                if source.width * source.height > NEAR_TEE_VISION_MAX_DECODE_PIXELS:
+                    raise ValueError("declared pixels exceed cap")
+                if source.format == "JPEG":
+                    # Decode at reduced scale when possible.
+                    source.draft("RGB", (NEAR_TEE_VISION_MAX_LONG_SIDE, NEAR_TEE_VISION_MAX_LONG_SIDE))
+                image = ImageOps.exif_transpose(source).convert("RGB")
         image.thumbnail((NEAR_TEE_VISION_MAX_LONG_SIDE, NEAR_TEE_VISION_MAX_LONG_SIDE), Image.Resampling.LANCZOS)
         buffer = io.BytesIO()
         # A fresh RGB image carries no EXIF/ICC/text metadata into the JPEG.
@@ -744,8 +759,9 @@ async def _analyze_with_near_tee(image_path: Path, artifacts: dict[str, Any]) ->
     if media_type is None:
         raise ScreenshotSemanticAnalysisError("remote_inference_blocked:near_tee_vision_media_type_unsupported")
     original_width, original_height = _screenshot_dimensions(original, artifacts)
-    image_bytes, sent_media_type, width, height = _prepare_vision_image(original, media_type, original_width,
-        original_height)
+    # Resize/encode off the event loop so chat latency is unaffected.
+    image_bytes, sent_media_type, width, height = await asyncio.to_thread(
+        _prepare_vision_image, original, media_type, original_width, original_height)
     reencoded = image_bytes is not original
     del original
     media_type = sent_media_type

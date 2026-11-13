@@ -567,3 +567,17 @@ async def test_structured_proof_mode_must_match_the_current_receipt(client, mode
         capability="structured_output")
     assert redone.proven_value == "vision_prompt_json"
     assert (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]["status"] == "ready"
+
+
+def test_decode_bomb_dimensions_are_refused_before_decode():
+    import pytest as _pytest
+
+    from src.observer.screenshot_semantic_analysis import (
+        NEAR_TEE_VISION_MAX_DECODE_PIXELS,
+        ScreenshotSemanticAnalysisError,
+        _prepare_vision_image,
+    )
+
+    side = int(NEAR_TEE_VISION_MAX_DECODE_PIXELS ** 0.5) + 10
+    with _pytest.raises(ScreenshotSemanticAnalysisError, match="image_dimensions_too_large"):
+        _prepare_vision_image(b"\x89PNG not decoded", "image/png", side, side)

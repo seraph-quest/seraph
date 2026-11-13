@@ -73,14 +73,14 @@ def effective_vlm_status(*, live_probe: dict[str, object] | None = None) -> dict
     base_url = effective_vlm_base_url()
     backend_url = effective_vlm_backend_url()
     mode = effective_vlm_mode()
-    # The OpenRouter migration removes the local wrapper from the active
+    # ADR-035 (NEAR TEE-hosted inference only) keeps the local wrapper out of the active
     # runtime.  Keep configured endpoint metadata for historical diagnostics,
     # but never advertise it as active or make readiness depend on it.
     local_runtime_active = False
     status = {
         "mode": mode,
         "active": local_runtime_active,
-        "disabled_reason": None if local_runtime_active else "local_vlm_disabled_openrouter_only",
+        "disabled_reason": None if local_runtime_active else "local_vlm_disabled_near_tee_only",
         "configured": bool(base_url),
         "base_url": base_url,
         "backend_url": backend_url,
@@ -117,13 +117,13 @@ async def probe_effective_vlm_runtime(*, timeout_seconds: float = 0.75) -> dict[
     """Return the retired local-runtime receipt without making a network call.
 
     The function remains as a compatibility seam for status callers and older
-    integrations.  The OpenRouter-only phase must never probe or depend on a
+    integrations.  Under ADR-035 (NEAR TEE only) it must never probe or depend on a
     local wrapper, GPU host, or VLM queue.
     """
     return {
         "checked": False,
         "reachable": False,
-        "reason": "local_vlm_disabled_openrouter_only",
+        "reason": "local_vlm_disabled_near_tee_only",
         "health": _unprobed_endpoint(),
         "backend_health": _unprobed_endpoint(),
         "queue_status": _unprobed_endpoint(),
@@ -138,14 +138,14 @@ async def direct_local_chat_route_error(
 ) -> str | None:
     """Return a route error for legacy local chat callers.
 
-    OpenRouter direct chat is governed by the model fabric and must not depend
+    Governed direct chat goes through the model fabric and must not depend
     on the retired local VLM health endpoints.  Keep the no-argument behavior
     for historical diagnostics, while allowing active chat callers to bypass
     those probes explicitly.
     """
     # REST/WebSocket lightweight turns still use this compatibility seam, but
     # canonical chat/onboarding paths now dispatch through the governed
-    # OpenRouter model fabric. Only callers without a canonical route remain
+    # model fabric (NEAR TEE text slot, ADR-035). Only callers without a canonical route remain
     # legacy local-runtime diagnostics.
     if runtime_path:
         try:
@@ -155,7 +155,7 @@ async def direct_local_chat_route_error(
                 return None
         except (ImportError, ValueError):
             pass
-    return "local_vlm_disabled_openrouter_only"
+    return "local_vlm_disabled_near_tee_only"
 
 def _trim_url(value: str | None) -> str:
     return str(value or "").strip().rstrip("/")

@@ -1379,7 +1379,7 @@ async def get_artifact_storage_settings():
             # The legacy provider flag can disable the active cloud phase, but
             # it must never make the retired local/GPU route executable again.
             "active": False,
-            "disabled_reason": "local_inference_disabled_openrouter_only",
+            "disabled_reason": "local_inference_disabled_near_tee_only",
             "gateway_configured": bool(
                 settings.local_llm_api_base.strip() or effective_vlm_base_url()
             ),

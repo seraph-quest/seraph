@@ -308,6 +308,8 @@ export interface NearTeeEmbeddingIndexStatus {
   model: string | null;
   measured_dimension: number | null;
   index_complete: boolean;
+  /** Why a once-complete or partial index is not usable (over cap, stale, missing vector). */
+  index_reason_code?: string | null;
   recall_mode: "semantic" | "lexical";
   notice: string | null;
   max_items: number;
@@ -586,7 +588,7 @@ function normalizeEmbeddingIndex(value: unknown): NearTeeEmbeddingIndexStatus | 
   return {
     slot_reason_code: text(row.slot_reason_code), namespace: text(row.namespace), model: text(row.model),
     measured_dimension: typeof row.measured_dimension === "number" ? row.measured_dimension : null,
-    index_complete: row.index_complete === true,
+    index_complete: row.index_complete === true, index_reason_code: text(row.index_reason_code),
     // Anything but an explicit, complete semantic projection is lexical.
     recall_mode: row.recall_mode === "semantic" && row.index_complete === true ? "semantic" : "lexical",
     notice: text(row.notice), max_items: count(row.max_items) || 10_000,

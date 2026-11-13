@@ -1409,6 +1409,9 @@ billing endpoints honour x-no-aliasing (ADR-035)" (`near_tee_embedding_evidence_
 No setting, catalog check or capability check can clear this; it needs a
 reviewed ADR-035 amendment. Until then the capability check and re-index stay
 disabled, NEAR receives no memory text, and recall shows **Recall: lexical**.
+NEAR's current catalog record for the model also has no readiness flag, so the
+catalog check reports the slot **not ready** even after an evidence amendment;
+that amendment must also decide how readiness is handled.
 
 Once the gate is cleared, the operator flow is:
 
@@ -1426,6 +1429,13 @@ Once the gate is cleared, the operator flow is:
    **Cancel re-index** (a batch already sent finishes and is billed), and
    **Resume re-index** continues from what is already indexed. Recall switches
    to **semantic** only after a run covers every active canonical memory.
+
+After indexing, new memories and recall queries are sent to NEAR. If a new
+memory's vector cannot be written, or a memory is created or edited without
+one, recall returns to lexical with the reason shown until another run. More
+than 10,000 memories cannot be covered by one run, so recall stays lexical
+(`near_tee_reindex_over_cap`). Saving one slot never fails because another
+slot's consent has lapsed; that slot just shows as blocked.
 
 Vectors are stored locally in a namespace for this provider, model and measured
 dimension; older OpenRouter vectors are never mixed in or queried. Changing the

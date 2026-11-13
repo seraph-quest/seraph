@@ -750,8 +750,16 @@ honour `x-no-aliasing` before the slot may dispatch, and the repository holds
 none (the 2026-10-05 trust-boundary research and ADR-025's billing sources
 cover chat completions only). The gate is a code constant that only a reviewed
 ADR-035 amendment with dated source evidence may set; no setting, catalog
-receipt or capability check clears it. Until then memory recall stays lexical
-and NEAR receives no memory text.
+receipt or capability check clears it. NEAR's specialized-endpoints guide
+(read by the lead 2026-11-14) documents OpenAI-format `/v1/embeddings` for this
+model but says nothing about aliasing or embedding billing. Until then memory
+recall stays lexical and NEAR receives no memory text.
+
+A second blocker remains even after an evidence amendment: the real catalog
+record for `Qwen/Qwen3-Embedding-0.6B` (lead's read 2026-11-14) has no
+`isReady` field and no dimension field, so under ADR-035's readiness rule the
+catalog check reports `near_tee_catalog_not_ready` (fixture-tested). The
+amendment must also decide how readiness is handled for this model.
 
 Implemented mechanics (proven with intercepted transport and the gate lifted
 in tests only): the slot takes `Qwen/Qwen3-Embedding-0.6B` from the closed
@@ -759,8 +767,10 @@ allowlist, a per-request input-token bound (conservatively one token per UTF-8
 byte plus overhead) and batch size (1–64), a per-request reserve, and its own
 purpose consent acknowledging that memory text reaches NEAR in plaintext. The
 catalog check requires vllm, attested, verifiable, ready, text input and an
-embedding output modality, enough context and a reserve covering the input
-price (output is not billed); a stated dimension is recorded. The
+embedding output modality, enough context and a reserve covering maximum input
+x input price plus the one-token output bound x output price (the catalog lists
+an output price; how NEAR bills embedding output, per vector or per dimension,
+is unsourced); a stated dimension is recorded. The
 `embedding` capability check measures the vector dimension. Dispatch posts
 `/v1/embeddings` with the canonical id and `x-no-aliasing: true` on the
 `memory_embedding` route (background priority below chat) through the one
@@ -773,12 +783,19 @@ Vectors live in a namespace keyed by provider `near_tee`, model, measured
 dimension and schema, never mixed with older OpenRouter vectors. Recall uses it
 only with current proofs and a completed index; otherwise search returns the
 labelled lexical/degraded result without contact and new memories are not
-embedded. Re-indexing is never automatic: an authenticated settings action with
+embedded. After indexing, new memories and recall queries are sent to NEAR.
+Completeness decays: a failed NEAR-mode memory write, or a canonical memory
+created or edited without a vector (compared locally in the status
+projection), marks the namespace incomplete and recall returns to lexical. A
+vector written for a new memory counts under its `embedding_id`. Re-indexing is never automatic: an authenticated settings action with
 a per-run consent and spend cap starts one durable job (existing workflow job
 ledger) that embeds canonical memory in bounded batches, checkpoints each
 batch, stops at the budget, can be cancelled, resumes idempotently from the
 namespace contents, removes rows of memories that are no longer active, and
-records a verified local readback before success. No live NEAR call, price,
+records a verified local readback before success. More than 10,000 canonical
+memories leaves the index incomplete (`near_tee_reindex_over_cap`); it never
+completes. A new Unknown accounting operation during a run ends it as a cost
+liability. No live NEAR call, price,
 availability or embedding quality is established.
 
 ## Epic #736/#775 OpenRouter inference phase

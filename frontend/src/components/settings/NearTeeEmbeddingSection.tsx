@@ -39,7 +39,7 @@ function draftFrom(slot?: NearTeeSlotStatus | null): Draft {
     reserveUsd: usd(slot?.request_cost_bound_microusd ?? 5_000), ttl: String(slot?.catalog_ttl_hours ?? 24) };
 }
 function blockedText(reason: string | null | undefined) {
-  if (reason === EVIDENCE_REASON) return "Blocked: NEAR embeddings stay off until source evidence shows the embeddings and billing endpoints honour x-no-aliasing (ADR-035). Saving, the catalog check and capability checks cannot clear this.";
+  if (reason === EVIDENCE_REASON) return "Blocked: NEAR embeddings stay off until source evidence shows the embeddings and billing endpoints honour x-no-aliasing (ADR-035). Saving, the catalog check and capability checks cannot clear this. NEAR's catalog record for this model also has no readiness flag, so the catalog check reports it not ready; the ADR amendment must decide how readiness is handled.";
   return reason ? "Blocked: " + readable(reason) : null;
 }
 
@@ -151,7 +151,8 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
     {blocked && <p className="mt-1 text-[9px]">{blocked}</p>}
     <p role="note" className="mt-1 text-[9px]">{index?.recall_mode === "semantic"
       ? `Recall: semantic (NEAR namespace, dimension ${index.measured_dimension ?? "?"}).`
-      : "Recall: lexical. " + (index?.notice ?? "Semantic recall is unavailable until the NEAR embedding re-index completes.")}</p>
+      : "Recall: lexical. " + (index?.notice ?? "Semantic recall is unavailable until the NEAR embedding re-index completes.")
+        + (index?.index_reason_code ? " (" + readable(index.index_reason_code) + ")" : "")}</p>
     <fieldset disabled={busy !== null} className="mt-2 grid gap-2 text-[10px] sm:grid-cols-2">
       <label className="flex gap-2"><input type="checkbox" aria-label="Enable NEAR TEE embedding slot" checked={draft.enabled} onChange={e => update("enabled", e.target.checked)} />Enable embedding slot</label>
       <label>Embedding model<select className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding model" value={draft.model} onChange={e => update("model", e.target.value)}>
@@ -163,7 +164,7 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
       <label>Request timeout · seconds<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding request timeout" type="number" min={1} max={120} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
       <label>Per-request reserve · USD<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding per-request reserve USD" inputMode="decimal" value={draft.reserveUsd} onChange={e => update("reserveUsd", e.target.value)} /></label>
       <label>Catalog receipt lifetime · hours<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding catalog receipt hours" type="number" min={1} max={24} value={draft.ttl} onChange={e => update("ttl", e.target.value)} /></label>
-      {draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge NEAR TEE memory plaintext access" checked={acknowledged} onChange={e => setAcknowledged(e.target.checked)} /><span>I acknowledge that NEAR receives memory text in plaintext for embeddings. Seraph does not verify attestation and there is no end-to-end encryption.</span></label>}
+      {draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge NEAR TEE memory plaintext access" checked={acknowledged} onChange={e => setAcknowledged(e.target.checked)} /><span>I acknowledge that NEAR receives memory text in plaintext for embeddings. After indexing, new memories and recall queries are sent to NEAR. Seraph does not verify attestation and there is no end-to-end encryption.</span></label>}
     </fieldset>
     <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
       <button type="button" disabled={busy !== null} onClick={() => void save()}>{busy === "save" ? "Saving…" : "Save embedding slot"}</button>
@@ -172,7 +173,7 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
     <div className="mt-2 grid gap-2 text-[10px] sm:grid-cols-2" aria-label="NEAR TEE embedding re-index">
       <label>Re-index budget · USD<input className={inputClass + " mt-1 w-full"} aria-label="Re-index budget USD" inputMode="decimal" value={budgetUsd} onChange={e => setBudgetUsd(e.target.value)} /></label>
       <label>Maximum memories this run<input className={inputClass + " mt-1 w-full"} aria-label="Re-index maximum memories" type="number" min={1} value={maxItems} onChange={e => setMaxItems(e.target.value)} /></label>
-      <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge re-index memory egress" checked={reindexAck} onChange={e => setReindexAck(e.target.checked)} /><span>Send canonical memory text to NEAR in plaintext to rebuild the embedding index, within this budget.</span></label>
+      <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge re-index memory egress" checked={reindexAck} onChange={e => setReindexAck(e.target.checked)} /><span>Send canonical memory text to NEAR in plaintext to rebuild the embedding index, within this budget. After indexing, new memories and recall queries are sent to NEAR.</span></label>
       {job && <p className="sm:col-span-2 text-[9px]" role="status" aria-label="Re-index progress">Re-index {readable(job.status)}: {job.indexed_items} of {job.planned_items ?? "?"} memories indexed, {job.skipped_existing} already current, spent ${usd(job.spent_microusd)}{job.budget_microusd ? ` of $${usd(job.budget_microusd)}` : ""}{job.reason_code ? " · " + readable(job.reason_code) : ""}.</p>}
     </div>
     {error && <div role="alert" className="mt-2 text-[10px] text-red-400">{error}</div>}

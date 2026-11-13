@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { NEAR_TEE_DISCLOSURE, normalizeModelFabricSettings } from "../../lib/modelFabric";
 import type { ModelFabricSettingsStatus, NearTeeEmbeddingIndexStatus, NearTeeSetupStatus, NearTeeSlotStatus } from "../../lib/modelFabric";
 import { NearTeeEmbeddingSection } from "./NearTeeEmbeddingSection";
+import { NearTeePanel } from "./NearTeePanel";
 
 const slot: NearTeeSlotStatus = {
   model_id: "Qwen/Qwen3-Embedding-0.6B", enabled: true, max_input_tokens: 8192, max_output_tokens: 1, max_batch_size: 16,
@@ -31,6 +32,7 @@ it("shows the evidence block and lexical recall, and keeps checks and re-index d
   const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
   render(<NearTeeEmbeddingSection setup={setup()} stale={false} revision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
   expect(screen.getByText(/source evidence shows the embeddings and billing endpoints honour x-no-aliasing/)).toBeInTheDocument();
+  expect(screen.getByText(/no readiness flag, so the catalog check reports it not ready/)).toBeInTheDocument();
   expect(screen.getByRole("note")).toHaveTextContent("Recall: lexical. Semantic recall is unavailable");
   expect(screen.getByRole("button", { name: "Run embedding capability check" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Start re-index" })).toBeDisabled();
@@ -97,4 +99,20 @@ it("normalizes the embedding index fail-closed to lexical", () => {
   expect(next?.near_tee?.allowlist.embedding).toEqual(["Qwen/Qwen3-Embedding-0.6B"]);
   expect(next?.near_tee?.embedding_index?.recall_mode).toBe("lexical");
   expect(next?.near_tee?.slots.embedding?.evidence_required).toBe(true);
+});
+
+it("reports catalog-check outcomes per slot", async () => {
+  const text: NearTeeSlotStatus = { ...slot, model_id: "Qwen/Qwen3.8-27B", profile_id: "near_tee.text", max_output_tokens: 1024,
+    max_batch_size: null, status: "configuration_required", reason_code: "proof_missing:health", evidence_required: false,
+    catalog_receipt: { model_id: "Qwen/Qwen3.8-27B", checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null,
+      outcome: "passed", reason_code: null, required_cost_microusd: 1711 } };
+  const embedding: NearTeeSlotStatus = { ...slot, catalog_receipt: { model_id: "Qwen/Qwen3-Embedding-0.6B",
+    checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null, outcome: "failed",
+    reason_code: "near_tee_catalog_not_ready", required_cost_microusd: 82 } };
+  const response = { ...saved(5), near_tee: { ...setup(embedding), slots: { text, embedding } } };
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(response), { status: 200 })));
+  render(<NearTeePanel setup={response.near_tee} stale={false} policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Run catalog check" }));
+  await waitFor(() => expect(screen.getByText(/text slot: catalog check passed/)).toBeInTheDocument());
+  expect(screen.getByText(/embedding slot: catalog check failed \(near tee catalog not ready\)/)).toBeInTheDocument();
 });

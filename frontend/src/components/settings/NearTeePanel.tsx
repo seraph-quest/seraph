@@ -118,9 +118,12 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
       const next = normalizeModelFabricSettings(await response.json());
       if (!mounted.current) return;
       if (next) { onRefreshed?.(next); setRevision(next.egress_revision); }
-      const receipt = next?.near_tee?.slots.text?.catalog_receipt ?? next?.near_tee?.slots.embedding?.catalog_receipt;
-      setMessage(receipt?.outcome === "passed" ? "Catalog check passed. This reads NEAR's catalog only; it is not a capability check."
-        : "Catalog check failed: " + readable(receipt?.reason_code ?? "unknown") + ". The slot stays blocked.");
+      const checked = ([["text", next?.near_tee?.slots.text], ["embedding", next?.near_tee?.slots.embedding]] as const)
+        .filter(([, item]) => item?.enabled && item.catalog_receipt);
+      setMessage(checked.length === 0 ? "Catalog check returned no receipt." : checked.map(([name, item]) =>
+        item?.catalog_receipt?.outcome === "passed" ? `${name} slot: catalog check passed.`
+          : `${name} slot: catalog check failed (${readable(item?.catalog_receipt?.reason_code ?? "unknown")}); the slot stays blocked.`,
+      ).join(" ") + " This reads NEAR's catalog only; it is not a capability check.");
     } catch (reason) { if (mounted.current) setError(safeError(reason, "Catalog check failed.")); }
     finally { if (mounted.current) setBusy(null); }
   }

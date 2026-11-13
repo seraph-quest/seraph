@@ -28,7 +28,8 @@ from .contracts import (
     transport_model_for_provider,
 )
 from .receipts import safe_code
-from .selector import active_provider_exclusion_reason, classify_endpoint, profile_exclusion_reason
+from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+from .selector import classify_endpoint, openrouter_contract_exclusion_reason, profile_exclusion_reason
 
 
 CONFIG_SCHEMA_VERSION = "seraph.model-fabric.settings.v1"
@@ -44,6 +45,7 @@ NEAR_TEXT_PROFILE_ID = "near.text"
 NEAR_TEXT_MODEL_ID = "z-ai/glm-5.3-flash"
 NEAR_TEXT_API_BASE = "https://cloud-api.near.ai/v1"
 NEAR_TEXT_CREDENTIAL_REF = "vault:near_text_api_key"
+INFERENCE_LANE_SCHEMA_VERSION = "seraph.inference.lane.v1"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_UPSTREAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
@@ -151,6 +153,103 @@ class NearTextSetup:
     plaintext_egress_consent_revision: int | None = None
 
 
+@dataclass(frozen=True)
+class InferenceLaneConfig:
+    """Provider-neutral limits of the one shared remote-inference lane (ADR-035).
+
+    The lane owns the deployment spend ceiling and the broker bounds. It binds
+    the same deployment ledger and witness as before; provider setups mirror
+    the ceiling and never fund their own.
+    """
+
+    spend_ceiling_microusd: int
+    max_queued: int = _MAX_OPENROUTER_QUEUE
+    max_inflight: int = 1
+    max_outstanding_per_owner: int = _MAX_OPENROUTER_OWNER_OUTSTANDING
+    max_retries: int = _MAX_OPENROUTER_RETRIES
+    # Explicit operator reserve review (ADR-035 "reserve review"): reviews an
+    # unreviewed overrun up to this bound when the lane is published, even when
+    # no provider route is enabled (for example an OpenRouter-only install).
+    request_reserve_review_microusd: int | None = None
+    schema_version: str = INFERENCE_LANE_SCHEMA_VERSION
+
+
+def validate_inference_lane(lane: InferenceLaneConfig) -> None:
+    if not isinstance(lane, InferenceLaneConfig) or lane.schema_version != INFERENCE_LANE_SCHEMA_VERSION:
+        raise ValueError("unsupported inference lane schema")
+    for field, lower, upper in (("spend_ceiling_microusd", 1, 1_000_000_000),
+            ("max_queued", 1, _MAX_OPENROUTER_QUEUE), ("max_inflight", 1, 1),
+            ("max_outstanding_per_owner", 1, _MAX_OPENROUTER_OWNER_OUTSTANDING),
+            ("max_retries", 0, _MAX_OPENROUTER_RETRIES)):
+        value = getattr(lane, field)
+        if type(value) is not int or not lower <= value <= upper:
+            raise ValueError(f"invalid inference lane {field}")
+    review = lane.request_reserve_review_microusd
+    if review is not None and (type(review) is not int or not 1 <= review <= lane.spend_ceiling_microusd):
+        raise ValueError("invalid inference lane request_reserve_review_microusd")
+
+
+def _inference_lane_from_payload(payload: object) -> InferenceLaneConfig:
+    declared = set(InferenceLaneConfig.__dataclass_fields__)
+    if not isinstance(payload, dict) or set(payload) != declared:
+        raise ValueError("inference lane must contain exactly the declared fields")
+    lane = InferenceLaneConfig(**payload)
+    validate_inference_lane(lane)
+    return lane
+
+
+def migrate_inference_lane(openrouter_setup: "OpenRouterSetup | None",
+        near_text: "NearTextSetup | None") -> InferenceLaneConfig | None:
+    """Pure projection of the legacy lane limits into the neutral lane.
+
+    Copies the persisted values exactly; it never touches ledgers, liabilities,
+    reservations or revisions, and makes no provider contact.
+    """
+    if openrouter_setup is not None:
+        lane = InferenceLaneConfig(
+            spend_ceiling_microusd=openrouter_setup.spend_ceiling_microusd,
+            max_queued=openrouter_setup.max_queued,
+            max_inflight=openrouter_setup.max_inflight,
+            max_outstanding_per_owner=openrouter_setup.max_outstanding_per_owner,
+            max_retries=openrouter_setup.max_retries,
+        )
+    elif near_text is not None:
+        lane = InferenceLaneConfig(spend_ceiling_microusd=near_text.spend_ceiling_microusd)
+    else:
+        return None
+    validate_inference_lane(lane)
+    return lane
+
+
+def effective_inference_lane(configuration: "ModelFabricConfiguration") -> InferenceLaneConfig | None:
+    """The persisted lane, or its pure migration when not yet published."""
+    if configuration.inference_lane is not None:
+        return configuration.inference_lane
+    return migrate_inference_lane(configuration.openrouter_setup, configuration.near_text)
+
+
+def retire_openrouter_setup(setup: "OpenRouterSetup | None") -> "OpenRouterSetup | None":
+    """Route-scoped revoke of stored OpenRouter routes (ADR-035).
+
+    Disables every stored route, drops purpose consents and withdraws cloud
+    egress acknowledgement, so an older binary cannot resume contact. Model
+    ids, credential metadata and bounds stay readable for reconciliation.
+    Global egress (and therefore NEAR) is not fenced by this projection.
+    """
+    if setup is None:
+        return None
+    routes = setup.routes
+    if routes is not None:
+        routes = {slot: (replace(route, enabled=False) if route is not None else None) for slot, route in routes.items()}
+    return replace(setup, routes=routes,
+        purpose_consents={} if setup.purpose_consents is not None or routes is not None else None,
+        cloud_egress_acknowledged=False)
+
+
+def openrouter_setup_is_retired(setup: "OpenRouterSetup | None") -> bool:
+    return setup is not None and retire_openrouter_setup(setup) == setup
+
+
 def validate_near_text_setup(setup: NearTextSetup) -> None:
     for field, expected in (("schema_version", NEAR_TEXT_SCHEMA_VERSION),
             ("profile_id", NEAR_TEXT_PROFILE_ID), ("model_id", NEAR_TEXT_MODEL_ID),
@@ -189,8 +288,20 @@ def near_text_profile_for_setup(setup: NearTextSetup) -> ProviderProfile:
 
 
 def deployment_spend_ceiling(configuration: ModelFabricConfiguration) -> int:
-    values = [setup.spend_ceiling_microusd for setup in
-        (configuration.openrouter_setup, configuration.near_text) if setup is not None]
+    """Return the one deployment ceiling.
+
+    Once the provider-neutral lane is published it is the only authority:
+    NEAR text must mirror it, and a retained (retired) OpenRouter ceiling is
+    historical readback only. Before publication, the legacy mirror rule
+    between OpenRouter and NEAR text still applies.
+    """
+    if configuration.inference_lane is not None:
+        values = [configuration.inference_lane.spend_ceiling_microusd]
+        if configuration.near_text is not None:
+            values.append(configuration.near_text.spend_ceiling_microusd)
+    else:
+        values = [setup.spend_ceiling_microusd for setup in
+            (configuration.openrouter_setup, configuration.near_text) if setup is not None]
     if not values or any(type(value) is not int or not 1 <= value <= 1_000_000_000 for value in values):
         raise ValueError("deployment spend ceiling unavailable")
     if len(set(values)) != 1:
@@ -232,6 +343,7 @@ class ModelFabricConfiguration:
     egress_revocation_key: str | None = None
     v1_rollback_snapshot: dict[str, object] | None = None
     audio_metadata_access: dict[str, object] | None = None
+    inference_lane: InferenceLaneConfig | None = None
 
 
 def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
@@ -273,7 +385,7 @@ def read_model_fabric_configuration() -> ModelFabricConfiguration:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         configured = _configuration_from_payload(payload)
-        if configured.openrouter_setup is not None or configured.near_text is not None:
+        if configured.openrouter_setup is not None or configured.near_text is not None or configured.inference_lane is not None:
             from src.workspace.accounting_witness import policy_continuity
             from src.workspace.production import ProductionWorkspace
             try:
@@ -339,7 +451,7 @@ def write_model_fabric_configuration(configuration: ModelFabricConfiguration, *,
             generation = home_projection.begin_policy_publication()
             publication()
             home_projection.finish_policy_publication(generation,validated)
-    if validated.openrouter_setup is not None or validated.near_text is not None:
+    if validated.openrouter_setup is not None or validated.near_text is not None or validated.inference_lane is not None:
         from src.workspace.accounting_witness import _publish_policy_locked, maintenance_accounting_lock
         if publication_workspace is None:
             with maintenance_accounting_lock(path.parent) as workspace:
@@ -366,9 +478,11 @@ def validate_active_model_fabric_configuration(
     """Validate that a newly supplied configuration cannot activate legacy routes."""
     validated = _configuration_from_payload(_configuration_payload(configuration))
     for profile in validated.profiles:
-        if reason := active_provider_exclusion_reason(profile):
+        # Retained OpenRouter profiles stay structurally valid and readable;
+        # retirement is enforced at every route, not by refusing the file.
+        if reason := openrouter_contract_exclusion_reason(profile):
             raise ValueError(f"model-fabric profile is ineligible: {reason}")
-        if reason := profile_exclusion_reason(profile):
+        if (reason := profile_exclusion_reason(profile)) and reason != OPENROUTER_RETIRED_REASON:
             raise ValueError(f"model-fabric profile is ineligible: {reason}")
     for policy in validated.workload_policies:
         if policy.fallback_allowed:
@@ -376,10 +490,131 @@ def validate_active_model_fabric_configuration(
         if policy.allowed_provider_kinds and set(policy.allowed_provider_kinds) != {"openrouter"}:
             raise ValueError("active model-fabric policies may allow only openrouter")
     if validated.openrouter_setup is not None:
-        validate_openrouter_setup(validated.openrouter_setup, allow_unconsented=validated.near_text is not None)
+        validate_openrouter_setup(validated.openrouter_setup,
+            allow_unconsented=validated.near_text is not None or validated.inference_lane is not None)
     if validated.near_text is not None:
         validate_near_text_setup(validated.near_text)
+    if validated.inference_lane is not None:
+        validate_inference_lane(validated.inference_lane)
+    if validated.near_text is not None or validated.inference_lane is not None:
         deployment_spend_ceiling(validated)
+
+
+_openrouter_route_revoke_status: dict[str, object] = {"status": "not_run", "reason_code": None}
+
+
+def openrouter_route_revoke_status() -> dict[str, object]:
+    return dict(_openrouter_route_revoke_status)
+
+
+def _retired_openrouter_profiles(profiles: tuple[ProviderProfile, ...]) -> tuple[ProviderProfile, ...]:
+    return tuple(replace(profile, enabled=False) if profile.provider_kind == OPENROUTER_PROVIDER_KIND else profile
+        for profile in profiles)
+
+
+BOOT_ROUTE_REVOKE_KEY_PREFIX = "boot:openrouter_route_revoke:"
+
+
+def _boot_revoke_plan(configured: "ModelFabricConfiguration") -> tuple[str, "ModelFabricConfiguration | None", int]:
+    """Classify the stored configuration for the boot revoke.
+
+    Returns ("noop" | "publish" | "complete" | "degraded:<code>", final, base).
+    ``complete`` finishes an interrupted boot publication whose revoked
+    intermediate (r+1) carries this publication's own revocation key.
+    """
+    if configured.status == "missing":
+        return "noop", None, 0
+    if configured.status != "ready":
+        return "degraded:" + (configured.error_code or "configuration_unavailable"), None, 0
+    key = configured.egress_revocation_key or ""
+    if configured.egress_revoked and key.startswith(BOOT_ROUTE_REVOKE_KEY_PREFIX):
+        prior = key.removeprefix(BOOT_ROUTE_REVOKE_KEY_PREFIX)
+        if (prior not in {"active", "revoked"} or not openrouter_setup_is_retired(configured.openrouter_setup)
+                or _retired_openrouter_profiles(configured.profiles) != configured.profiles
+                or configured.inference_lane is None):
+            return "degraded:openrouter_route_revoke_interrupted", None, 0
+        # The intermediate already holds the final values (NEAR consent was
+        # carried to r+2 under the existing rule); only the revoke flag and
+        # this publication's key are restored.
+        final = replace(configured, egress_revision=configured.egress_revision + 1,
+            egress_revoked=prior == "revoked", egress_revocation_key=None,
+            updated_at=datetime.now(timezone.utc).isoformat())
+        return "complete", final, configured.egress_revision
+    setup = configured.openrouter_setup
+    profiles = _retired_openrouter_profiles(configured.profiles)
+    if profiles == configured.profiles and (setup is None or openrouter_setup_is_retired(setup)):
+        return "noop", None, 0
+    revision = configured.egress_revision
+    final_revision = revision + 2
+    near = configured.near_text
+    if (near is not None and near.enabled and not configured.egress_revoked
+            and near.plaintext_egress_consent_revision == revision):
+        near = replace(near, plaintext_egress_consent_revision=final_revision)
+    final = replace(configured, openrouter_setup=retire_openrouter_setup(setup), profiles=profiles,
+        near_text=near, inference_lane=effective_inference_lane(configured),
+        egress_revision=final_revision, egress_revocation_key=None,
+        updated_at=datetime.now(timezone.utc).isoformat())
+    return "publish", final, revision
+
+
+def publish_openrouter_route_revoke() -> dict[str, object]:
+    """One-shot, idempotent, witnessed boot publication of the ADR-035 revoke.
+
+    Disables the stored OpenRouter routes and profiles and withdraws their
+    consents so an older binary cannot resume contact, without waiting for an
+    operator save. Publishes revoked (r+1, keyed as this publication) then
+    final (r+2) under the maintenance accounting lock with revision CAS, and
+    re-reads the configuration under that lock so concurrent workers no-op.
+    A crash between r+1 and r+2 is completed on the next boot when the
+    witnessed intermediate carries this publication's key; anything else is
+    reported as ``openrouter_route_revoke_interrupted``. It never touches the
+    ledger; when no lane is published yet, the migrated lane (identical
+    ceiling and bounds) is published with it so the retained, unconsented
+    OpenRouter object stays a valid readable configuration. Global egress
+    revocation is preserved, never set or cleared; a current NEAR text
+    consent is carried to the new revision, so NEAR is not fenced.
+    """
+    global _openrouter_route_revoke_status
+    if not openrouter_retired():
+        result = {"status": "skipped", "reason_code": "openrouter_not_retired"}
+    else:
+        path = model_fabric_configuration_path()
+        if not path.exists():
+            result = {"status": "noop", "reason_code": None}
+        else:
+            from src.workspace.accounting_witness import maintenance_accounting_lock
+            with maintenance_accounting_lock(path.parent) as workspace:
+                plan, final, base = _boot_revoke_plan(read_model_fabric_configuration())
+                if plan == "publish":
+                    marker = BOOT_ROUTE_REVOKE_KEY_PREFIX + ("revoked" if final.egress_revoked else "active")
+                    write_model_fabric_configuration(replace(final, egress_revision=base + 1, egress_revoked=True,
+                        egress_revocation_key=marker), expected_revision=base, publication_workspace=workspace)
+                    write_model_fabric_configuration(final, expected_revision=base + 1,
+                        publication_workspace=workspace)
+                elif plan == "complete":
+                    write_model_fabric_configuration(final, expected_revision=base, publication_workspace=workspace)
+            if plan in {"publish", "complete"}:
+                result = {"status": "published" if plan == "publish" else "completed", "reason_code": None,
+                    "revision": final.egress_revision}
+            elif plan.startswith("degraded:"):
+                result = {"status": "degraded", "reason_code": plan.removeprefix("degraded:")}
+            else:
+                result = {"status": "noop", "reason_code": None}
+    _openrouter_route_revoke_status = result
+    return dict(result)
+
+
+def run_openrouter_route_revoke_at_boot() -> dict[str, object]:
+    """Startup wrapper: never raises; a failure stays visible as degraded."""
+    global _openrouter_route_revoke_status
+    try:
+        return publish_openrouter_route_revoke()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("OpenRouter route-scoped revoke publication failed; "
+            "OpenRouter stays retired at every route", exc_info=True)
+        _openrouter_route_revoke_status = {"status": "degraded", "reason_code": "openrouter_route_revoke_unavailable"}
+        return dict(_openrouter_route_revoke_status)
 
 
 def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> dict[str, ProviderProfile]:
@@ -388,20 +623,20 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
     profiles = dict(legacy_profiles)
     if configured.status == "ready":
         profiles.update({profile.id: profile for profile in configured.profiles})
-        setup = configured.openrouter_setup
-        if setup is not None:
+        lane = effective_inference_lane(configured)
+        if lane is not None:
             # The admission broker is process-local by design, but its limits
-            # are still canonical policy. Apply them on every profile
-            # resolution so a restart or a settings update cannot leave the
-            # active lane using stale defaults.
+            # are still canonical policy. Apply the provider-neutral lane on
+            # every profile resolution so a restart or a settings update
+            # cannot leave the shared lane using stale defaults.
             from .remote_inference_admission import configure_remote_inference_admission
 
             configure_remote_inference_admission(
-                max_queued=setup.max_queued,
-                max_inflight=setup.max_inflight,
-                max_outstanding_per_owner=setup.max_outstanding_per_owner,
-                max_owner_cost_microusd=setup.spend_ceiling_microusd,
-                max_retries=setup.max_retries,
+                max_queued=lane.max_queued,
+                max_inflight=lane.max_inflight,
+                max_outstanding_per_owner=lane.max_outstanding_per_owner,
+                max_owner_cost_microusd=lane.spend_ceiling_microusd,
+                max_retries=lane.max_retries,
             )
     else:
         from .remote_inference_admission import configure_remote_inference_admission
@@ -413,6 +648,11 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
 def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
     configured = read_model_fabric_configuration()
     if configured.egress_revoked:
+        return WorkloadPolicy(runtime_path=runtime_path)
+    if openrouter_retired():
+        # ADR-035: OpenRouter is the only provider the canonical routes have
+        # ever carried; retired by policy, no canonical route has an active
+        # provider until NEAR TEE slots land. Fail closed, never fall back.
         return WorkloadPolicy(runtime_path=runtime_path)
     if configured.status == "ready":
         if configured.openrouter_setup is not None:
@@ -455,8 +695,11 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         except TypeError as exc:
             raise ValueError("invalid NEAR setup") from exc
         validate_near_text_setup(near)
+    raw_lane = payload.get("inference_lane")
+    lane = _inference_lane_from_payload(raw_lane) if raw_lane is not None else None
     raw_setup = payload.get("openrouter_setup")
-    setup = _openrouter_setup_from_payload(raw_setup, allow_unconsented=near is not None) if raw_setup is not None else None
+    setup = (_openrouter_setup_from_payload(raw_setup, allow_unconsented=near is not None or lane is not None)
+        if raw_setup is not None else None)
     configuration = ModelFabricConfiguration(
         profiles=profiles,
         workload_policies=policies,
@@ -469,11 +712,12 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         egress_revocation_key=payload.get("egress_revocation_key"),
         v1_rollback_snapshot=payload.get("v1_rollback_snapshot"),
         audio_metadata_access=payload.get("audio_metadata_access"),
+        inference_lane=lane,
     )
     if configuration.audio_metadata_access is not None:
         from .audio_documentation import AudioMetadataAccessV1
         AudioMetadataAccessV1.model_validate(configuration.audio_metadata_access)
-    if near is not None:
+    if near is not None or lane is not None:
         deployment_spend_ceiling(configuration)
     return configuration
 
@@ -589,6 +833,8 @@ def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str,
         payload["openrouter_setup"] = _openrouter_setup_payload(configuration.openrouter_setup)
     if configuration.near_text is not None:
         payload["near_text"] = asdict(configuration.near_text)
+    if configuration.inference_lane is not None:
+        payload["inference_lane"] = asdict(configuration.inference_lane)
     return payload
 
 

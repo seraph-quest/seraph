@@ -1671,6 +1671,8 @@ def _governed_openai_chat_completion(
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     from src.model_fabric.accounting import assert_current_inference_policy, capture_response_usage
+    from src.model_fabric.retirement import assert_openrouter_contact_allowed
+    assert_openrouter_contact_allowed(provider_kind=candidate.profile.provider_kind, api_base=candidate.endpoint)
     assert_current_inference_policy()
     with httpx.Client(follow_redirects=False, timeout=httpx.Timeout(remaining)) as client:
         response = client.post(candidate.endpoint, headers=headers, json=body)
@@ -1729,6 +1731,8 @@ async def _governed_bounded_chat_transfer(
     headers = {"content-type": "application/json", "accept-encoding": "identity"}
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
+    from src.model_fabric.retirement import assert_openrouter_contact_allowed
+    assert_openrouter_contact_allowed(provider_kind=candidate.profile.provider_kind, api_base=candidate.endpoint)
     assert_current_inference_policy()
     # Final policy work consumes the original deadline; it never grants a
     # fresh relative timeout before the provider transfer begins.
@@ -3270,6 +3274,20 @@ async def preflight_governed_completion_target_async(
     return None
 
 
+def _openrouter_retired_target(target: dict[str, Any]) -> bool:
+    """True when a concrete target would contact retired OpenRouter."""
+    from src.model_fabric.retirement import is_openrouter_destination, openrouter_retired
+
+    if not openrouter_retired():
+        return False
+    profile_id = str(target.get("profile") or "")
+    resolved_id = "local-ollama" if profile_id == "local" else profile_id
+    profile = _provider_profile(resolved_id) if resolved_id else None
+    if profile is not None and profile.provider_kind == "openrouter":
+        return True
+    return is_openrouter_destination(api_base=target.get("api_base"), model_id=target.get("model_id"))
+
+
 def _governed_preflight_target(
     target: dict[str, Any],
     request_context: Any | None,
@@ -3873,7 +3891,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     extra_capabilities.append(ModelCapability.TOOL_USE)
                 if response_format is not None:
                     extra_capabilities.append(ModelCapability.STRUCTURED_OUTPUT)
-                request_context = build_canonical_inference_context(
+                from src.model_fabric.retirement import retired_as_route_error
+                with retired_as_route_error():
+                    request_context = build_canonical_inference_context(
                     runtime_path,
                     payload={
                         "messages": _transport_json_value(messages),
@@ -3998,6 +4018,16 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             assert_runtime_not_revoked()
             reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
+            if _openrouter_retired_target(target):
+                # ADR-035: zero OpenRouter contact on governed and legacy
+                # targets alike; a retired target is a precontact denial with
+                # no fallback to another provider.
+                from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
+                if is_primary:
+                    primary_preflight_rejected = True
+                denial_reasons.append(OPENROUTER_RETIRED_REASON)
+                last_error = NoCompliantModelRouteError((OPENROUTER_RETIRED_REASON,))
+                continue
             route_attempt_started = False
             try:
                 target_messages = _messages_for_local_target(
@@ -4400,7 +4430,9 @@ def completion_with_fallback_sync(
             principal = get_current_trust_principal()
             if principal is None:
                 raise PermissionError("canonical completion requires explicit runtime principal")
-            request_context = build_canonical_inference_context(
+            from src.model_fabric.retirement import retired_as_route_error
+            with retired_as_route_error():
+                request_context = build_canonical_inference_context(
                 runtime_path,
                 payload={
                     "messages": _transport_json_value(messages),
@@ -4560,6 +4592,16 @@ def completion_with_fallback_sync(
             assert_runtime_not_revoked()
             reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
+            if _openrouter_retired_target(target):
+                # ADR-035: zero OpenRouter contact on governed and legacy
+                # targets alike; a retired target is a precontact denial with
+                # no fallback to another provider.
+                from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
+                if is_primary:
+                    primary_preflight_rejected = True
+                denial_reasons.append(OPENROUTER_RETIRED_REASON)
+                last_error = NoCompliantModelRouteError((OPENROUTER_RETIRED_REASON,))
+                continue
             route_attempt_started = False
             try:
                 target_messages = _messages_for_local_target(
@@ -5007,6 +5049,8 @@ async def stream_completion_with_fallback(
             raise TimeoutError("model_fabric_deadline_exceeded")
         async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds) as client:
             from src.model_fabric.accounting import assert_current_inference_policy, capture_inference_usage
+            from src.model_fabric.retirement import assert_openrouter_contact_allowed
+            assert_openrouter_contact_allowed(provider_kind=candidate.profile.provider_kind, api_base=candidate.endpoint)
             assert_current_inference_policy()
             async with client.stream(
                 "POST", candidate.endpoint, headers=headers, json=transport_body

@@ -168,6 +168,9 @@ def assert_current_inference_policy() -> None:
     if expected is not None:
         from src.auth.cancellation import assert_runtime_not_revoked
         assert_runtime_not_revoked()
+        from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+        if _current_runtime.get() != "near_text_native" and openrouter_retired():
+            raise InferenceAccountingError(OPENROUTER_RETIRED_REASON)
         _configured, actual = _policy_for_runtime(_current_runtime.get())
         if expected != actual:
             raise InferenceAccountingError("provider_policy_revision_changed")
@@ -402,6 +405,11 @@ class DurableInferenceBrokerMixin:
         try:
             if not isinstance(request.owner_id, str) or not request.owner_id.startswith(("operator:", "service:")) or len(request.owner_id) > 256:
                 raise InferenceAccountingError("accounting_job_authority_invalid")
+            from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+            if request.runtime_path != "near_text_native" and openrouter_retired():
+                # ADR-035: every non-NEAR broker path is an OpenRouter route.
+                # Deny before any reservation, so no Unknown liability arises.
+                raise InferenceAccountingError(OPENROUTER_RETIRED_REASON)
             from .configuration import read_model_fabric_configuration
             persisted = read_model_fabric_configuration()
             if persisted.status == "degraded":

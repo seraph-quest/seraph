@@ -266,6 +266,12 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         else str(getattr(settings, "openrouter_data_retention_policy", "deny") or "deny")
     )
     readiness_reasons: list[str] = []
+    from src.model_fabric.retirement import NO_ACTIVE_PROVIDER_REASON, OPENROUTER_RETIRED_REASON, openrouter_retired
+    retired = openrouter_retired()
+    if retired:
+        # ADR-035: OpenRouter is retired and NEAR TEE slots are not yet
+        # implemented, so no canonical route has an active provider.
+        readiness_reasons.extend((OPENROUTER_RETIRED_REASON, NO_ACTIVE_PROVIDER_REASON))
     if not provider_only:
         readiness_reasons.append("openrouter_only_mode_disabled")
     if provider != "openrouter":
@@ -305,12 +311,12 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         "summary_label": f"{provider_label} · {model_label or model or 'unknown'}",
         "api_base": runtime.get("api_base", ""),
         "vlm_configured": bool(vlm_status.get("configured")),
-        "active_provider_policy": "openrouter_only",
+        "active_provider_policy": "none_openrouter_retired" if retired else "openrouter_only",
         "inference_ready": inference_ready,
         "inference_readiness": {
-            "status": "ready" if inference_ready else "configuration_required",
+            "status": "ready" if inference_ready else "blocked" if retired else "configuration_required",
             "reasons": readiness_reasons,
-            "provider": "openrouter",
+            "provider": None if retired else "openrouter",
             "active_only": provider_only,
             "cloud_egress": policy.egress_class.value,
             "cloud_consent": bool(policy.cloud_egress_acknowledged),
@@ -362,7 +368,8 @@ def _augment_inference_readiness(
     deduped_reasons = list(dict.fromkeys(reasons))
     readiness.update(
         {
-            "status": "ready" if not deduped_reasons else "configuration_required",
+            "status": "ready" if not deduped_reasons
+            else "blocked" if "openrouter_retired" in deduped_reasons else "configuration_required",
             "reasons": deduped_reasons,
             "profile_id": active_profile or None,
         }
@@ -424,6 +431,12 @@ async def _lifespan_services(app: FastAPI):
                 "OpenRouter credential hydration failed; inference remains fail-closed",
                 exc_info=True,
             )
+        # ADR-035: publish the route-scoped revoke of stored OpenRouter routes
+        # once, before any scheduler or inference path runs. Idempotent; a
+        # failure is logged and surfaced as degraded, never a startup crash.
+        from src.model_fabric.configuration import run_openrouter_route_revoke_at_boot
+
+        run_openrouter_route_revoke_at_boot()
         # Recover expired durable invocation leases before scheduler jobs can
         # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
         # is fail-closed and operator-visible; a failed recovery is not hidden as

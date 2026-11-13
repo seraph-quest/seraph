@@ -12,6 +12,7 @@ from src.goals.repository import GoalRepository
 from src.db.models import GuardianInboxDisposition,GuardianOpportunity,GuardianDecisionPacket,Goal
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: home wire whose setup saves the historical OpenRouter route
 async def test_genuine_source_and_opportunity_auth_home_wire(accounting_db,real_auth,monkeypatch):
     from fastapi import FastAPI
     from src.api.operator import router

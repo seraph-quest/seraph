@@ -190,7 +190,10 @@ describe("ArtifactStoragePanel", () => {
     });
     render(<ArtifactStoragePanel />);
     await screen.findByRole("region", { name: "NEAR text settings" });
-    for (const slot of ["text", "vision", "embedding"]) expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toBeEnabled();
+    // ADR-035: OpenRouter is retired; its controls are present but cannot activate it.
+    for (const slot of ["text", "vision", "embedding"]) expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toBeDisabled();
+    expect(screen.getByTestId("openrouter-retired-banner")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Shared inference lane" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Canary profile").querySelectorAll("option")).toHaveLength(1));
     expect(screen.getByRole("button", { name: "Run canary" })).toBeDisabled();
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
@@ -448,6 +451,9 @@ describe("ArtifactStoragePanel", () => {
       defaults: { egress_class: "cloud_allowed_full", fallback_allowed: false },
       canary_endpoint: "/api/settings/model-fabric/canary", egress_revision: 7, egress_revoked: false,
       openrouter_setup: setup,
+      // Pins the historical (pre-ADR-035) save journey with an explicit
+      // "active" report; the default retired state is asserted separately.
+      provider_retirement: { openrouter: { state: "active" } },
     };
     let currentSettings = settingsPayload;
     let rejectSave = true;

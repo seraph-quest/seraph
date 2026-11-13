@@ -9,6 +9,11 @@ from src.model_fabric.configuration import WorkloadPolicy
 from src.scheduler import screen_llm_policy as module
 from src.security.trust_contract import EgressClass
 
+# ADR-035 retired OpenRouter by policy. This module pins historical OpenRouter
+# mechanics behind the explicit legacy fixture; retirement-blocked behavior is
+# asserted in tests/test_openrouter_retirement.py.
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def _cloud_policy() -> WorkloadPolicy:
     return WorkloadPolicy(

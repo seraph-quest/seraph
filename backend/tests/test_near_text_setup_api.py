@@ -92,6 +92,7 @@ async def test_separate_vault_key_and_capture_revision(client, model_fabric_work
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.openrouter_legacy  # ADR-035: pins historical OpenRouter+NEAR coexistence
 async def test_near_regrant_does_not_resurrect_revoked_or_consent(client, model_fabric_workspace, keyless_openrouter):
     assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
         "openrouter_setup": _v2_setup_payload(api_key="sk-or-kept")})).status_code == 200
@@ -140,6 +141,7 @@ async def test_disabled_save_keeps_global_revoke_and_vault(client, model_fabric_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 @pytest.mark.parametrize("tamper", ("mirror", "malformed_near"))
+@pytest.mark.openrouter_legacy  # ADR-035: pins historical OpenRouter+NEAR coexistence
 async def test_persisted_mismatch_and_malformed_near_degrade_without_widening_or(client, model_fabric_workspace, keyless_openrouter, tamper):
     assert (await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
         "openrouter_setup": _v2_setup_payload()})).status_code == 200
@@ -188,6 +190,7 @@ async def test_near_stale_cas_and_missing_ack_do_not_store_key(client, model_fab
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
+@pytest.mark.openrouter_legacy  # ADR-035: pins historical OpenRouter+NEAR coexistence
 async def test_near_preserves_or_slots_and_shared_ceiling(client, model_fabric_workspace, keyless_openrouter):
     response = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
         "openrouter_setup": _v2_setup_payload(api_key="sk-or-original")})

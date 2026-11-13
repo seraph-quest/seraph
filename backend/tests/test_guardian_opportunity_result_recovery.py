@@ -20,6 +20,9 @@ from src.guardian import opportunity_runtime as runtime
 from src.guardian.opportunities import now
 from src.workflows.job_runtime import durable_job_repository
 
+# ADR-035: pins guardian result recovery whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @asynccontextmanager
 async def persisted_result(accounting_db, real_auth, monkeypatch, *, silent=False, expect_invalid=False):

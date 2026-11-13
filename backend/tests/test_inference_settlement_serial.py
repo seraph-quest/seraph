@@ -20,6 +20,9 @@ from src.model_fabric.remote_inference_admission import (
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError
 
+# ADR-035: pins historical OpenRouter broker, ledger and settlement mechanics that still settle retained liabilities
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def bounded(awaitable):
     return await asyncio.wait_for(awaitable, timeout=10)

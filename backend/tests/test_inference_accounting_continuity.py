@@ -18,6 +18,9 @@ from src.workflows.job_runtime import DurableJobRepository
 from src.workspace.accounting_continuity import acknowledge_accounting_period
 from src.workspace.production import ProductionWorkspace, read_lifecycle_receipt
 
+# ADR-035: pins historical OpenRouter ledger continuity, restore and period-review mechanics that still settle retained liabilities
+pytestmark = pytest.mark.openrouter_legacy
+
 
 CLI = Path(__file__).resolve().parents[1] / "workspace_cli.py"
 

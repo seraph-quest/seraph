@@ -1109,6 +1109,11 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
     if body.enabled is not None:
         payload["enabled"] = body.enabled
     if body.provider is not None:
+        from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
+        from src.observer.screen_analysis_settings import selectable_screen_analysis_providers
+        if body.provider in _VALID_SCREEN_ANALYSIS_PROVIDERS and body.provider not in selectable_screen_analysis_providers():
+            raise HTTPException(status_code=422, detail={"code": OPENROUTER_RETIRED_REASON,
+                "message": "OpenRouter is retired (ADR-035); no cloud screenshot provider can be selected."})
         if body.provider not in _VALID_SCREEN_ANALYSIS_PROVIDERS:
             raise HTTPException(
                 status_code=422,
@@ -1159,6 +1164,7 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
         payload["archive_retention_days"] = body.archive_retention_days
+    payload.pop("provider_blocked_reason", None)
     _write_screen_analysis_settings(payload)
     return await get_screen_analysis_settings()
 
@@ -1175,6 +1181,7 @@ async def pick_screenshot_folder(request: Request):
     payload = _read_screen_analysis_settings()
     payload["screenshot_folder"] = normalized
     payload["screenshot_folder_source"] = "screen-analysis-settings"
+    payload.pop("provider_blocked_reason", None)
     _write_screen_analysis_settings(payload)
     return ScreenshotFolderPickResponse(
         screenshot_folder=normalized,

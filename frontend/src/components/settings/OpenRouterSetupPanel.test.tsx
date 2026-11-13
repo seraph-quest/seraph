@@ -11,6 +11,10 @@ import {
 } from "../../lib/modelFabric";
 import { OpenRouterSetupPanel } from "./OpenRouterSetupPanel";
 
+// ADR-035 retired OpenRouter by policy. Tests that pin the historical editing
+// mechanics render the panel with an explicit `retired={false}`; the default
+// (retired) behavior is asserted in the "ADR-035 retirement" block below.
+
 // Explicit synthetic fixture selections. No transport in these tests contacts a provider.
 function route(slot: OpenRouterPurpose): OpenRouterRouteStatus {
   return {
@@ -35,6 +39,7 @@ const setup: OpenRouterSetupStatus = {
   max_queued: 64, max_inflight: 1, max_outstanding_per_owner: 16, max_retries: 2,
   credential_ref: "vault:openrouter_api_key", credential_fingerprint: null, credential_configured: false,
   status: "configuration_required", error_code: "credential_missing", provider_calls: "manual_canary_only",
+  retired: false, retirement_label: null, settlement_available: true,
 };
 function savedSettings(nextSetup = setup, revision = 9): ModelFabricSettingsStatus {
   return {
@@ -65,7 +70,7 @@ afterEach(() => {
 describe("OpenRouterSetupPanel", () => {
   it("keeps audio absent in legacy saves and upgrades only on explicit optional-slot selection", async () => {
     const onSave = vi.fn(async () => savedSettings());
-    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     expect(screen.queryByLabelText("OpenRouter audio model ID")).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Configure optional OpenRouter audio slot"));
     expect(screen.getByLabelText("OpenRouter audio model ID")).toHaveValue("");
@@ -79,7 +84,7 @@ describe("OpenRouterSetupPanel", () => {
   it("requires independent audio consent and preserves the blocked server proof status", async () => {
     const v3: OpenRouterSetupStatus = { ...setup, schema_version: "seraph.openrouter.setup.v3", routes: { ...setup.routes, audio: null }, slot_statuses: { ...setup.slot_statuses, audio: { status: "blocked", error_code: "audio_documentary_acquisition_unavailable", proof_expires_at: null } } };
     const onSave = vi.fn(async () => savedSettings(v3));
-    render(<OpenRouterSetupPanel setup={v3} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={v3} stale={false} policyRevision={7} onSave={onSave} />);
     expect(screen.getByTestId("openrouter-audio-status")).toHaveTextContent("audio_documentary_acquisition_unavailable");
     fireEvent.click(screen.getByLabelText("Enable OpenRouter audio route"));
     change("OpenRouter audio model ID", "fixture/audio");
@@ -97,7 +102,7 @@ describe("OpenRouterSetupPanel", () => {
   it("has three independent absent slots without inventing a model or upstream", () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
-    render(<OpenRouterSetupPanel setup={null} stale={false} policyRevision={7} onSave={vi.fn()} />);
+    render(<OpenRouterSetupPanel retired={false} setup={null} stale={false} policyRevision={7} onSave={vi.fn()} />);
     for (const slot of ["text", "vision", "embedding"]) {
       expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toHaveValue("");
       expect(screen.getByLabelText("OpenRouter " + slot + " upstream allow-list")).toHaveValue("");
@@ -109,7 +114,7 @@ describe("OpenRouterSetupPanel", () => {
 
   it("saves exact v2 values/current revision and keeps absent purposes independent and blank key omitted", async () => {
     const onSave = vi.fn(async () => savedSettings());
-    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     save();
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     const payload = request(onSave);
@@ -133,7 +138,7 @@ describe("OpenRouterSetupPanel", () => {
 
   it("proposes chat-ready text capabilities and a prefilled dollar request bound for a new route", async () => {
     const onSave = vi.fn(async () => savedSettings());
-    render(<OpenRouterSetupPanel setup={null} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={null} stale={false} policyRevision={7} onSave={onSave} />);
     for (const capability of ["text", "tool_use", "structured_output", "streaming"]) {
       expect(screen.getByLabelText("OpenRouter text " + capability + " capability")).toBeChecked();
     }
@@ -157,7 +162,7 @@ describe("OpenRouterSetupPanel", () => {
   });
 
   it("previews the worst-case call cost and warns when the bound is below it", () => {
-    render(<OpenRouterSetupPanel setup={null} stale={false} policyRevision={7} onSave={vi.fn()} />);
+    render(<OpenRouterSetupPanel retired={false} setup={null} stale={false} policyRevision={7} onSave={vi.fn()} />);
     const preview = () => screen.getByTestId("openrouter-text-worst-case");
     // Default 65,536-token window + 4,096 output at the $3/$15 reference prices.
     expect(preview()).toHaveTextContent("Worst case per call: 65,536 prompt + 4,096 output tokens ≈ $0.258048 at a reference");
@@ -178,7 +183,7 @@ describe("OpenRouterSetupPanel", () => {
   it("round-trips stored micro-USD values through the dollar inputs unchanged", async () => {
     const stored = { ...setup, spend_ceiling_microusd: 12_345_678, routes: { ...setup.routes, text: { ...route("text"), request_cost_bound_microusd: 1_234 } } };
     const onSave = vi.fn(async () => savedSettings(stored));
-    render(<OpenRouterSetupPanel setup={stored} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={stored} stale={false} policyRevision={7} onSave={onSave} />);
     expect(screen.getByLabelText("OpenRouter spend ceiling (USD)")).toHaveValue("12.345678");
     expect(screen.getByLabelText("OpenRouter text request cost bound (USD)")).toHaveValue("0.001234");
     save();
@@ -190,8 +195,8 @@ describe("OpenRouterSetupPanel", () => {
 
   it("accepts the outer revision when an initially empty setup finishes loading", async () => {
     const onSave = vi.fn(async () => savedSettings());
-    const view = render(<OpenRouterSetupPanel setup={undefined} stale={false} onSave={onSave} />);
-    view.rerender(<OpenRouterSetupPanel setup={null} stale={false} policyRevision={7} onSave={onSave} />);
+    const view = render(<OpenRouterSetupPanel retired={false} setup={undefined} stale={false} onSave={onSave} />);
+    view.rerender(<OpenRouterSetupPanel retired={false} setup={null} stale={false} policyRevision={7} onSave={onSave} />);
     fireEvent.click(screen.getByLabelText("Enable OpenRouter text route"));
     change("OpenRouter text model ID", "fixture/text");
     change("OpenRouter text upstream allow-list", "fixture-upstream");
@@ -205,7 +210,7 @@ describe("OpenRouterSetupPanel", () => {
 
   it("requires separate fresh purpose acknowledgments and sends independent route selections", async () => {
     const onSave = vi.fn(async () => savedSettings());
-    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     enable("vision");
     enable("embedding");
     expect(screen.getByLabelText("Acknowledge OpenRouter vision egress")).not.toBeChecked();
@@ -236,7 +241,7 @@ describe("OpenRouterSetupPanel", () => {
   it("keeps unchanged sensitive routes without prechecked/repeated acknowledgments and retains disabled selections", async () => {
     const existing = { ...setup, routes: { text: route("text"), vision: route("vision"), embedding: route("embedding") } };
     const onSave = vi.fn(async () => savedSettings(existing));
-    render(<OpenRouterSetupPanel setup={existing} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={existing} stale={false} policyRevision={7} onSave={onSave} />);
     expect(screen.queryByLabelText("Acknowledge OpenRouter vision egress")).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Enable OpenRouter embedding route"));
     save();
@@ -249,9 +254,9 @@ describe("OpenRouterSetupPanel", () => {
 
   it("preserves last-known status, editable independent controls and dirty drafts through partial metadata", async () => {
     const onSave = vi.fn(async () => savedSettings());
-    const view = render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    const view = render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     change("OpenRouter text model ID", "fixture/edited");
-    view.rerender(<OpenRouterSetupPanel setup={null} stale={true} onSave={onSave} />);
+    view.rerender(<OpenRouterSetupPanel retired={false} setup={null} stale={true} onSave={onSave} />);
     expect(screen.getByLabelText("OpenRouter text model ID")).toHaveValue("fixture/edited");
     expect(screen.getByLabelText("OpenRouter vision model ID")).toBeEnabled();
     expect(screen.getByLabelText("OpenRouter spend ceiling (USD)")).toHaveValue("0.01");
@@ -273,7 +278,7 @@ describe("OpenRouterSetupPanel", () => {
     };
     const normalized = normalizeModelFabricSettings(savedSettings(current));
     expect(normalized?.openrouter_setup?.slot_statuses.text.proof_expires_at).toBe("2026-10-05T20:00:00+00:00");
-    render(<OpenRouterSetupPanel setup={normalized?.openrouter_setup ?? null} stale={false} policyRevision={7} onSave={vi.fn()} />);
+    render(<OpenRouterSetupPanel retired={false} setup={normalized?.openrouter_setup ?? null} stale={false} policyRevision={7} onSave={vi.fn()} />);
     expect(screen.getByTestId("openrouter-text-status")).toHaveTextContent("ready · proof expires 2026-10-05T20:00:00+00:00");
     expect(screen.getByTestId("openrouter-vision-status")).toHaveTextContent("blocked · provider_policy_revoked");
     expect(screen.getByTestId("openrouter-embedding-status")).toHaveTextContent("route_missing");
@@ -286,7 +291,7 @@ describe("OpenRouterSetupPanel", () => {
       return { ok: true, status: 200, json: async () => savedSettings(setup, 11) };
     });
     vi.stubGlobal("fetch", fetch);
-    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     change("OpenRouter text model ID", "fixture/retained");
     save();
     expect(await screen.findByRole("alert")).toHaveTextContent("409");
@@ -306,7 +311,7 @@ describe("OpenRouterSetupPanel", () => {
   it("blocks saves without an exact revision and keeps controls usable after a failed refresh", async () => {
     const onSave = vi.fn();
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("metadata unavailable"); }));
-    render(<OpenRouterSetupPanel setup={setup} stale={false} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} onSave={onSave} />);
     save();
     expect(await screen.findByRole("alert")).toHaveTextContent("policy revision");
     fireEvent.click(screen.getByRole("button", { name: "Refresh current OpenRouter settings" }));
@@ -328,7 +333,7 @@ describe("OpenRouterSetupPanel", () => {
     ["OpenRouter max retries", "3", "Max retries"],
   ])("rejects invalid bound or incomplete selection %s before saving", async (label, value, message) => {
     const onSave = vi.fn();
-    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     change(label, value);
     save();
     expect(await screen.findByRole("alert")).toHaveTextContent(message);
@@ -337,7 +342,7 @@ describe("OpenRouterSetupPanel", () => {
 
   it("requires ZDR for newly enabled purposes without affecting text", async () => {
     const onSave = vi.fn();
-    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     enable("vision");
     fireEvent.click(screen.getByLabelText("Enable OpenRouter vision zero data retention"));
     save();
@@ -348,7 +353,7 @@ describe("OpenRouterSetupPanel", () => {
 
   it("requires fresh cloud/purpose review after revocation", () => {
     const current = { ...setup, routes: { ...setup.routes, vision: route("vision") } };
-    render(<OpenRouterSetupPanel setup={current} stale={false} policyRevision={7} policyRevoked onSave={vi.fn()} />);
+    render(<OpenRouterSetupPanel retired={false} setup={current} stale={false} policyRevision={7} policyRevoked onSave={vi.fn()} />);
     expect(screen.getByLabelText("Acknowledge OpenRouter cloud egress")).not.toBeChecked();
     expect(screen.getByLabelText("Acknowledge OpenRouter vision egress")).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Review and re-grant OpenRouter egress" })).toBeEnabled();
@@ -358,7 +363,7 @@ describe("OpenRouterSetupPanel", () => {
     const sentinel = "sk-ui-synthetic-secret";
     const configured = { ...setup, credential_configured: true, credential_fingerprint: "0123456789ab" };
     const onSave = vi.fn(async () => savedSettings(configured));
-    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    render(<OpenRouterSetupPanel retired={false} setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
     change("OpenRouter API key (write-only)", sentinel);
     save();
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
@@ -377,5 +382,46 @@ describe("OpenRouterSetupPanel", () => {
     expect(JSON.stringify(normalized)).not.toContain("purpose_consents");
     expect(JSON.stringify(window.localStorage)).not.toContain(sentinel);
     expect(normalized.openrouter_setup!.routes.text!.model_id).toBe("fixture/text");
+  });
+});
+
+describe("ADR-035 retirement", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("is retired by default and disables every activating control", () => {
+    const onSave = vi.fn();
+    render(<OpenRouterSetupPanel setup={setup} stale={false} policyRevision={7} onSave={onSave} />);
+    expect(screen.getByTestId("openrouter-retired-banner").textContent).toContain(
+      "Retired (ADR-035) — no new requests; existing costs can still be settled");
+    expect(screen.getByLabelText("Enable OpenRouter text route").matches(":disabled")).toBe(true);
+    expect(screen.getByLabelText("OpenRouter API key (write-only)").matches(":disabled")).toBe(true);
+    expect(screen.getByLabelText("Acknowledge OpenRouter cloud egress").matches(":disabled")).toBe(true);
+    const saveButton = screen.getByRole("button", { name: "OpenRouter retired · no new requests" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+    fireEvent.click(saveButton);
+    expect(onSave).not.toHaveBeenCalled();
+    // Retained routes stay readable and refresh stays usable.
+    expect((screen.getByLabelText("OpenRouter text model ID") as HTMLInputElement).value).toBe("fixture/text");
+    expect((screen.getByRole("button", { name: "Refresh current OpenRouter settings" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("treats retired backend metadata as retired even if the caller omits the flag", () => {
+    const normalized = normalizeModelFabricSettings({
+      schema_version: "seraph.model-fabric.settings.v1", status: "blocked", egress_revision: 3,
+      provider_retirement: { openrouter: { state: "retired" } }, inference_block_reason: "openrouter_retired",
+      openrouter_setup: { ...setup, status: "retired", error_code: "openrouter_retired", retired: true,
+        slot_statuses: { ...setup.slot_statuses, text: { status: "retired", error_code: "openrouter_retired", proof_expires_at: null } } },
+    });
+    expect(normalized?.openrouter_retired).toBe(true);
+    expect(normalized?.inference_block_reason).toBe("openrouter_retired");
+    expect(normalized?.openrouter_setup?.slot_statuses.text.status).toBe("retired");
+    render(<OpenRouterSetupPanel retired={false} setup={normalized?.openrouter_setup ?? null} stale={false} policyRevision={3} onSave={vi.fn()} />);
+    expect(screen.getByTestId("openrouter-retired-banner")).toBeTruthy();
+    expect(screen.getByTestId("openrouter-text-status").textContent).toContain("retired");
+  });
+
+  it("fails closed when retirement metadata is missing", () => {
+    const normalized = normalizeModelFabricSettings({ schema_version: "seraph.model-fabric.settings.v1", status: "blocked" });
+    expect(normalized?.openrouter_retired).toBe(true);
   });
 });

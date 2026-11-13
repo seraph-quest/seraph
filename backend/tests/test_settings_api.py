@@ -1038,7 +1038,10 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"
         screenshot_root = tmp_path / "screenshots"
-        resp = await client.put(
+        before = (await client.get("/api/settings/screen-analysis")).json()
+        # ADR-035: OpenRouter is retired, so selecting it as the screenshot
+        # provider is refused with the stable reason and nothing is saved.
+        refused = await client.put(
             "/api/settings/screen-analysis",
             json={
                 "enabled": True,
@@ -1049,12 +1052,25 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
                 "screenshot_folder": str(screenshot_root),
             },
         )
+        assert refused.status_code == 422
+        assert refused.json()["detail"]["code"] == "openrouter_retired"
+        assert (await client.get("/api/settings/screen-analysis")).json() == before
+
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={
+                "enabled": True,
+                "preserve_captures": True,
+                "archive_dir": str(archive),
+                "screenshot_folder": str(screenshot_root),
+            },
+        )
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is True
-        assert data["provider"] == "openrouter"
-        assert data["model"] == "openrouter/google/gemini-2.5-flash"
+        assert data["provider"] == ""
+        assert data["model"] == ""
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
         assert data["screenshot_folder"] == str(screenshot_root)
@@ -1064,8 +1080,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
         assert storage["screen"]["analysis_enabled"] is True
-        assert storage["screen"]["provider"] == "openrouter"
-        assert storage["screen"]["model"] == "openrouter/google/gemini-2.5-flash"
+        assert storage["screen"]["provider"] == ""
+        assert storage["screen"]["model"] == ""
         assert "archive_dir" not in storage["screen"]
         assert "preservation_enabled" not in storage["screen"]
         assert storage["screenshot_folder"]["path"] == str(screenshot_root)

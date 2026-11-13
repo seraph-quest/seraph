@@ -4,7 +4,8 @@ import pytest
 from sqlalchemy import select
 from src.memory import task_methods as methods
 
-pytestmark = pytest.mark.parametrize('async_db', ['file'], indirect=True)
+# ADR-035 (openrouter_legacy): pins specialist delegation Work mechanics whose planner/model steps run over the intercepted historical OpenRouter route
+pytestmark = [pytest.mark.parametrize('async_db', ['file'], indirect=True), pytest.mark.openrouter_legacy]
 
 
 @pytest.mark.asyncio

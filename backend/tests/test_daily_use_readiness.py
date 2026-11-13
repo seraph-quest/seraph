@@ -40,6 +40,9 @@ from src.scheduler import background_inference
 from src.scheduler.engine import _async_job_wrapper
 from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 
+# ADR-035: pins #1068 OpenRouter text-route admission and overrun-block mechanics; the retired chat block is covered in test_openrouter_retirement.py
+pytestmark = pytest.mark.openrouter_legacy
+
 # The capability set the Settings panel now proposes for a new text route.
 DEFAULT_TEXT_CAPABILITIES = ("text", "tool_use", "structured_output", "streaming")
 # Selector tests use one fixed clock for profile pricing time, proofs, request

@@ -12,6 +12,9 @@ from src.guardian.opportunities import now
 from src.guardian.opportunity_contracts import OpportunityError
 from src.observer.native_notification_queue import NativeNotificationQueue
 
+# ADR-035: pins guardian opportunity notifications whose setup saves the historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def test_opportunity_outbox_default_opt_in_idempotency_unknown_cap(isolated_runtime):
     sessions, goal, _, _, row, _ = await publish_source(isolated_runtime)

@@ -89,6 +89,7 @@ def _configure_openrouter(monkeypatch, profile: ProviderProfile) -> None:
     )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: screenshot analysis mechanics over the historical OpenRouter vision route
 @pytest.mark.asyncio
 async def test_openrouter_screenshot_uses_inline_bytes_and_no_local_endpoint(tmp_path, monkeypatch):
     from src.observer import screenshot_semantic_analysis as module
@@ -164,6 +165,7 @@ async def test_local_provider_is_hard_disabled_even_when_legacy_flag_is_false(tm
         await module._analyze_with_local_vlm(image, {})
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: screenshot analysis mechanics over the historical OpenRouter vision route
 @pytest.mark.asyncio
 async def test_oversize_image_is_rejected_before_governed_dispatch(tmp_path, monkeypatch):
     from src.observer import screenshot_semantic_analysis as module

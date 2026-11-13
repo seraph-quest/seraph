@@ -40,9 +40,14 @@ from .contracts import (
     OPENROUTER_PROVIDER_KIND,
     transport_model_for_provider,
 )
+from .retirement import OPENROUTER_RETIRED_REASON, provider_retirement_reason
 
 
 SUPPORTED_PROVIDER_KINDS = frozenset({"local", "ollama", "openrouter", "openai", "openai_compatible"})
+# The provider kinds whose structural contract this selector knows how to
+# admit. ADR-035 retires OpenRouter by policy, so membership here is not
+# activity: ``active_provider_exclusion_reason`` denies it with
+# ``openrouter_retired`` before the structural contract is consulted.
 ACTIVE_PROVIDER_KINDS = frozenset({OPENROUTER_PROVIDER_KIND})
 SYNTHETIC_PROBE_CAPABILITIES = frozenset({"health", "latency_ms"})
 
@@ -83,7 +88,19 @@ def active_provider_exclusion_reason(profile: ProviderProfile) -> str | None:
 
     ``SUPPORTED_PROVIDER_KINDS`` remains intentionally broader for legacy
     configuration/readback.  This function is the narrower active inference
-    policy used by route selection and operator status.
+    policy used by route selection and operator status. A retired provider
+    (ADR-035) is denied first with a stable reason code.
+    """
+    if reason := provider_retirement_reason(profile.provider_kind):
+        return reason
+    return openrouter_contract_exclusion_reason(profile)
+
+
+def openrouter_contract_exclusion_reason(profile: ProviderProfile) -> str | None:
+    """Structural OpenRouter profile contract, independent of retirement.
+
+    Used only to keep retained configuration readable and validated; it never
+    makes a profile routable.
     """
     family_reason = provider_family_exclusion_reason(profile.provider_kind)
     if family_reason is not None:
@@ -255,6 +272,10 @@ def preflight_candidate(
 ) -> tuple[TrustRequest | None, str | None, str | None]:
     checked_at = time.time() if now is None else float(now)
     profile = candidate.profile
+    # ADR-035: a retired provider is denied on every route before any other
+    # check, whatever the context's provider allowlist or compatibility flags.
+    if reason := provider_retirement_reason(profile.provider_kind):
+        return None, None, reason
     # Canonical caller contexts carry an explicit OpenRouter provider allowlist.
     # Apply the narrow active-phase contract at that boundary even when a
     # stale compatibility flag is false.  Standalone selector compatibility

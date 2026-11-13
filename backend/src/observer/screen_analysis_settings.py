@@ -12,6 +12,15 @@ from config.settings import settings
 # values are invalidated on read instead of remaining an executable escape
 # hatch to local VLM or Apple Vision routes.
 VALID_SCREEN_ANALYSIS_PROVIDERS = {"", "openrouter"}
+# ADR-035 retires OpenRouter by policy. A stored ``openrouter`` value is
+# projected as no cloud provider (with a stable reason) and cannot be newly
+# selected; NEAR TEE vision arrives in a later slice.
+RETIRED_SCREEN_ANALYSIS_PROVIDERS = {"openrouter"}
+
+
+def selectable_screen_analysis_providers() -> set[str]:
+    from src.model_fabric.retirement import openrouter_retired
+    return {""} if openrouter_retired() else set(VALID_SCREEN_ANALYSIS_PROVIDERS)
 OPENROUTER_SCREEN_MODEL_PREFIX = "openrouter/"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
 
@@ -98,6 +107,14 @@ def read_screen_analysis_settings() -> dict[str, object]:
         # The capture toggle stays independently owned; route identity is canonical.
         payload["provider"] = "openrouter" if route is not None and route.enabled else ""
         payload["model"] = route.model_id if route is not None and route.enabled else ""
+    from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+    payload["provider_blocked_reason"] = None
+    if openrouter_retired() and payload["provider"] in RETIRED_SCREEN_ANALYSIS_PROVIDERS:
+        # Tell every reader (the daemon included) that no cloud provider is
+        # active, instead of handing out a retired route.
+        payload["provider"] = ""
+        payload["model"] = ""
+        payload["provider_blocked_reason"] = OPENROUTER_RETIRED_REASON
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
 
     screenshot_folder = str(payload.get("screenshot_folder") or "").strip()
@@ -144,6 +161,9 @@ def effective_screen_analysis_enabled() -> bool:
 
 def effective_screen_analysis_model() -> str:
     """Return the model label Seraph should send/report for screenshot semantic analysis."""
+    from src.model_fabric.retirement import openrouter_retired
+    if openrouter_retired():
+        return ""
     v2, route = _saved_vision_route()
     if v2:
         return route.model_id if route is not None and route.enabled else ""

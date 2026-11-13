@@ -62,6 +62,11 @@ class LoopAgnosticLock:
 configuration_mutation_lock = LoopAgnosticLock()
 
 
+def _openrouter_retired() -> bool:
+    from .retirement import openrouter_retired
+    return openrouter_retired()
+
+
 def current_near_text_policy() -> tuple[object, str]:
     configured = read_model_fabric_configuration()
     setup = configured.near_text
@@ -113,14 +118,21 @@ async def effective_policy_grants(operator) -> list[dict[str, object]]:
             continue
         jobs.append({"job_id": row["job_id"], "state": job["status"], "kind": job.get("job_kind", "model_inference")})
     grants = []
+    from .configuration import effective_inference_lane
+    try:
+        lane = effective_inference_lane(configured)
+    except ValueError:
+        lane = None
+    # ADR-035: the provider-neutral lane owns the deployment ceiling.
+    lane_ceiling = lane.spend_ceiling_microusd if lane is not None else None
     if setup is not None:
         grants.append({"kind": "provider_policy", "grant_id": "provider_policy:openrouter", "record_id": "openrouter",
         "boundary": "inference_egress", "purpose": "governed model inference",
         "source": "explicitly consented current-root capability inputs", "destination": "https://openrouter.ai/api/v1",
-        "state": "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked or not setup.cloud_egress_acknowledged else "active",
+        "state": "retired" if _openrouter_retired() else "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked or not setup.cloud_egress_acknowledged else "active",
         "revision": configured.egress_revision, "expires_at": None,
         "origin": "deployment_policy", "limits": {"scope": "deployment", "request_timeout_seconds": setup.timeout_seconds,
-            "spend_ceiling_microusd": setup.spend_ceiling_microusd, "accounting_status": accounting["status"]},
+            "spend_ceiling_microusd": lane_ceiling, "accounting_status": accounting["status"]},
         "affected_jobs": jobs, "controls": ["revoke"], "authority_cache": False})
     near = configured.near_text
     if near is not None:
@@ -130,7 +142,7 @@ async def effective_policy_grants(operator) -> list[dict[str, object]]:
             "state": "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked else "disabled" if not near.enabled else "active" if near.plaintext_egress_consent_revision == configured.egress_revision else "blocked_consent",
             "revision": configured.egress_revision, "expires_at": None, "origin": "deployment_policy",
             "limits": {"scope": "deployment", "revoke_scope": "OpenRouter and NEAR",
-                "request_timeout_seconds": near.timeout_seconds, "spend_ceiling_microusd": near.spend_ceiling_microusd,
+                "request_timeout_seconds": near.timeout_seconds, "spend_ceiling_microusd": lane_ceiling,
                 "accounting_status": accounting["status"]}, "affected_jobs": jobs,
             "controls": ["revoke"], "authority_cache": False})
     return grants

@@ -23,6 +23,7 @@ from .contracts import (
     ModelCapability,
 )
 from .configuration import effective_workload_policy
+from .retirement import OpenRouterRetiredRouteError, ProviderRetiredError, openrouter_retired
 
 
 @dataclass(frozen=True)
@@ -231,6 +232,13 @@ def build_canonical_inference_context(
 ) -> InferenceRequestContext:
     """Build one fail-closed context from a registered production route."""
     spec = canonical_route_spec(runtime_path)
+    if openrouter_retired():
+        # ADR-035: every canonical route binds the OpenRouter provider
+        # allowlist below, and OpenRouter is retired by policy. Fail closed
+        # first, before identity, accounting, admission or transport, so every
+        # caller gets its existing route-denial handling with the same stable
+        # reason (``openrouter_retired``); no fallback.
+        raise OpenRouterRetiredRouteError() from ProviderRetiredError()
 
     effective_principal = principal or get_current_trust_principal()
     if effective_principal is None:

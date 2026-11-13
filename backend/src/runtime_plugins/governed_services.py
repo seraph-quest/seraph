@@ -342,6 +342,10 @@ async def _request_inference(jobs, run, candidate) -> dict:
         # The slot is taken inside the try and always released in its finally.
         _cordis_inflight[owner] = _cordis_inflight.get(owner, 0) + 1
         tokens = set_runtime_context(run.session_id, mode, trust_principal=principal)
+        from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+        if openrouter_retired():
+            # ADR-035: name the stable cause instead of a generic block.
+            raise NativeServiceBlocked(OPENROUTER_RETIRED_REASON)
         try:
             from dataclasses import replace
             from src.model_fabric.configuration import read_model_fabric_configuration

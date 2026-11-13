@@ -90,7 +90,7 @@ export interface OpenRouterRouteValue {
 }
 
 export interface OpenRouterSlotStatus {
-  status: "configuration_required" | "blocked" | "ready";
+  status: "configuration_required" | "blocked" | "ready" | "retired";
   error_code: string | null;
   proof_expires_at: string | null;
   /** First capability to (re-)prove, e.g. proof_expired:health. */
@@ -143,6 +143,57 @@ export interface OpenRouterSetupStatus {
   status: string;
   error_code: string | null;
   provider_calls: string;
+  /** ADR-035: retired by policy; retained state is readable, never activatable. */
+  retired: boolean;
+  retirement_label: string | null;
+  settlement_available: boolean;
+}
+
+export const OPENROUTER_RETIRED_LABEL = "Retired (ADR-035) — no new requests; existing costs can still be settled";
+
+/** Provider-neutral shared-lane limits and deployment ceiling (ADR-035). */
+export interface InferenceLaneValue {
+  spend_ceiling_microusd: number;
+  max_queued: number;
+  max_inflight: 1;
+  max_outstanding_per_owner: number;
+  max_retries: number;
+  /** Optional explicit reserve review that reviews an unreviewed overrun up to this bound. */
+  request_reserve_review_microusd?: number | null;
+}
+
+export interface InferenceLaneStatus extends InferenceLaneValue {
+  schema_version: "seraph.inference.lane.v1";
+  /** False until the migrated lane has been published by an explicit save. */
+  published: boolean;
+  status: string;
+}
+
+export function normalizeInferenceLane(value: unknown): InferenceLaneStatus | null {
+  const record = recordOf(value);
+  if (!record || record.schema_version !== "seraph.inference.lane.v1") return null;
+  const integer = (field: string, min: number, max: number) => {
+    const item = record[field];
+    return typeof item === "number" && Number.isSafeInteger(item) && item >= min && item <= max ? item : null;
+  };
+  const ceiling = integer("spend_ceiling_microusd", 1, 1_000_000_000);
+  const queued = integer("max_queued", 1, 64);
+  const owner = integer("max_outstanding_per_owner", 1, 16);
+  const retries = integer("max_retries", 0, 2);
+  if (ceiling === null || queued === null || owner === null || retries === null || record.max_inflight !== 1) return null;
+  const review = record.request_reserve_review_microusd;
+  if (review != null && !(typeof review === "number" && Number.isSafeInteger(review) && review >= 1 && review <= ceiling)) return null;
+  return {
+    schema_version: "seraph.inference.lane.v1",
+    spend_ceiling_microusd: ceiling,
+    max_queued: queued,
+    max_inflight: 1,
+    max_outstanding_per_owner: owner,
+    max_retries: retries,
+    request_reserve_review_microusd: typeof review === "number" ? review : null,
+    published: record.published === true,
+    status: typeof record.status === "string" ? record.status : "unknown",
+  };
 }
 
 export const NEAR_TEXT_PROFILE = "near.text";
@@ -206,6 +257,16 @@ export interface ModelFabricSettingsStatus {
   inference_accounting?: InferenceAccountingStatus | null;
   egress_revision?: number;
   egress_revoked?: boolean;
+  /** Provider-neutral lane; null when no governed provider was ever configured. */
+  inference_lane?: InferenceLaneStatus | null;
+  /** Reason the backend could not project a lane (e.g. inference_lane_unreadable). */
+  inference_lane_reason?: string | null;
+  /** NEAR text readiness, independent of the blocked canonical routes. */
+  near_text_ready?: boolean;
+  /** ADR-035: true unless the backend reports OpenRouter as active. */
+  openrouter_retired?: boolean;
+  /** Why inference routes are blocked, e.g. openrouter_retired / no_active_provider. */
+  inference_block_reason?: string | null;
 }
 
 export interface InferenceAccountingStatus {
@@ -400,7 +461,7 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
       ) || typeof route.zero_data_retention !== "boolean")) return null;
     const rawState = recordOf(rawStatuses?.[slot]) ?? route;
     const state: OpenRouterSlotStatus = {
-      status: rawState?.status === "ready" || rawState?.status === "configuration_required" ? rawState.status : "blocked",
+      status: rawState?.status === "ready" || rawState?.status === "configuration_required" || rawState?.status === "retired" ? rawState.status : "blocked",
       error_code: typeof rawState?.error_code === "string" ? rawState.error_code : rawState ? null : "slot_metadata_unavailable",
       proof_expires_at: typeof rawState?.proof_expires_at === "string" ? rawState.proof_expires_at : null,
       proof_reason: typeof rawState?.proof_reason === "string" ? rawState.proof_reason : null,
@@ -452,6 +513,9 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
     status: typeof record.status === "string" ? record.status : "configuration_required",
     error_code: typeof record.error_code === "string" ? record.error_code : null,
     provider_calls: typeof record.provider_calls === "string" ? record.provider_calls : "manual_canary_only",
+    retired: record.retired === true || record.status === "retired",
+    retirement_label: typeof record.retirement_label === "string" ? record.retirement_label : null,
+    settlement_available: record.settlement_available !== false,
   };
 }
 
@@ -621,6 +685,17 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     inference_accounting: normalizeInferenceAccounting(record.inference_accounting),
     egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
     egress_revoked: record.egress_revoked === true,
+    inference_lane: normalizeInferenceLane(record.inference_lane),
+    inference_lane_reason: (() => {
+      const raw = recordOf(record.inference_lane);
+      if (!raw) return null;
+      if (typeof raw.reason_code === "string") return raw.reason_code;
+      return normalizeInferenceLane(raw) ? null : "inference_lane_unreadable";
+    })(),
+    near_text_ready: record.near_text_ready === true,
+    // Fail closed: only an explicit "active" report un-retires the UI.
+    openrouter_retired: recordOf(recordOf(record.provider_retirement)?.openrouter)?.state !== "active",
+    inference_block_reason: typeof record.inference_block_reason === "string" ? record.inference_block_reason : null,
   };
 }
 

@@ -884,7 +884,10 @@ class InferenceAccountingRepositoryMixin:
                     from src.workflows.inference_ledger import shadow_compare_decisions
                     await shadow_compare_decisions(db, account, ledger.totals, period, row.owner_id)
                     period_status = period_state(owner_data, totals_period_rows(ledger.totals), period)
-                    denial = (opportunity_denial or ("provider_contact_denied" if _provider_contact_denied(row)
+                    from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+                    retired_denial = (OPENROUTER_RETIRED_REASON
+                        if row.runtime_path != "near_text_native" and openrouter_retired() else None)
+                    denial = (opportunity_denial or retired_denial or ("provider_contact_denied" if _provider_contact_denied(row)
                         else "provider_policy_revision_changed" if current_digest != policy_digest
                         else "accounting_settings_revision_unavailable" if (
                             account.ceiling_microusd != deployment_spend_ceiling(configured)

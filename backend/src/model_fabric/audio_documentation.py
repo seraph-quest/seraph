@@ -85,6 +85,13 @@ class DocumentationError(ValueError):
         super().__init__(code)
 
 
+def _assert_openrouter_not_retired():
+    """ADR-035: the OpenRouter metadata reads are provider contact; refuse them."""
+    from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+    if openrouter_retired():
+        raise DocumentationError(OPENROUTER_RETIRED_REASON, 409)
+
+
 class Closed(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True, frozen=True)
 
@@ -169,6 +176,7 @@ async def current_owner(repository, operator):
 
 
 def audio_profile(configuration):
+    _assert_openrouter_not_retired()
     from .configuration import OPENROUTER_SETUP_V3_SCHEMA_VERSION, openrouter_profiles_for_setup
     setup = configuration.openrouter_setup
     if (configuration.status != 'ready' or configuration.egress_revoked or setup is None
@@ -192,6 +200,7 @@ def access_readback(access):
 
 
 async def select_metadata(repository, operator, configuration, request):
+    _assert_openrouter_not_retired()
     from src.vault.repository import vault_repository
     from .configuration import OPENROUTER_SETUP_V3_SCHEMA_VERSION
     owner, root, cutoff = await current_owner(repository, operator)
@@ -256,6 +265,11 @@ async def current_access(repository, operator, request=None, expected=None):
 
 async def metadata_get(url, credential, maximum):
     """One fixed-host, public-IP-pinned TLS read, with no redirects or retry."""
+    from .retirement import OPENROUTER_RETIRED_REASON, ProviderRetiredError, assert_openrouter_contact_allowed
+    try:
+        assert_openrouter_contact_allowed(api_base=url)
+    except ProviderRetiredError:
+        raise DocumentationError(OPENROUTER_RETIRED_REASON, 409) from None
     if not re.fullmatch(r'https://openrouter\.ai/api/v1/(key|models/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/endpoints)', url):
         raise DocumentationError('audio_metadata_path_invalid')
     loop = asyncio.get_running_loop()
@@ -558,6 +572,7 @@ async def cleanup_settled(repository):
 
 
 async def stage(repository, operator, request):
+    _assert_openrouter_not_retired()
     configuration,profile,access,snapshot,cutoff=await current_access(repository,operator,request)
     model=profile.model
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', model):

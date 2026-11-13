@@ -49,8 +49,13 @@ def strict_json_object(raw: bytes) -> object:
 
 
 def near_http_client() -> httpx.AsyncClient:
-    """The one client shape every NEAR request uses."""
-    return httpx.AsyncClient(verify=True, trust_env=False, follow_redirects=False)
+    """The one client shape every NEAR request uses.
+
+    Bound to a name so the dispatch inventory sees the client's one reviewed
+    transfer in ``read_near_response``.
+    """
+    client = httpx.AsyncClient(verify=True, trust_env=False, follow_redirects=False)
+    return client
 
 
 def near_request_headers(*, key: str | None, no_aliasing: bool, json_body: bool) -> dict[str, str]:

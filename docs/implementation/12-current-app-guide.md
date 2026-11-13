@@ -1398,8 +1398,40 @@ end-to-end encryption". Seraph does not verify attestation and there is no
 end-to-end encryption. A missing NEAR billing record becomes an Unknown
 liability that blocks the whole lane, chat included, until it is settled under
 **Inference accounting**; a model echo mismatch or empty answer is settled and
-not adopted. Streaming chat, tools, vision and embeddings stay blocked until
-their slices land.
+not adopted. Streaming chat, tools and vision stay blocked until their slices
+land.
+
+### NEAR TEE embedding slot and memory re-index (ADR-035, #1147 PR3d)
+
+Status: **Partial and blocked.** The panel's **embedding slot** section shows
+"NEAR embeddings stay off until source evidence shows the embeddings and
+billing endpoints honour x-no-aliasing (ADR-035)" (`near_tee_embedding_evidence_required`).
+No setting, catalog check or capability check can clear this; it needs a
+reviewed ADR-035 amendment. Until then the capability check and re-index stay
+disabled, NEAR receives no memory text, and recall shows **Recall: lexical**.
+
+Once the gate is cleared, the operator flow is:
+
+1. In **Settings → NEAR TEE → embedding slot**, pick `Qwen/Qwen3-Embedding-0.6B`,
+   set maximum input tokens per request, inputs per request (1–64), timeout,
+   per-request reserve and catalog lifetime, acknowledge that memory text is
+   sent to NEAR in plaintext and save (saving never calls NEAR).
+2. **Run catalog check** (shared with the text slot), then **Run embedding
+   capability check**: three billed mechanics requests that also measure the
+   vector dimension.
+3. Enter a re-index budget and a maximum number of memories, acknowledge the
+   memory egress and press **Start re-index**. The run embeds canonical memory
+   in bounded batches at background priority below chat, shows progress
+   (indexed, already current, spent of budget), stops at the budget or on
+   **Cancel re-index** (a batch already sent finishes and is billed), and
+   **Resume re-index** continues from what is already indexed. Recall switches
+   to **semantic** only after a run covers every active canonical memory.
+
+Vectors are stored locally in a namespace for this provider, model and measured
+dimension; older OpenRouter vectors are never mixed in or queried. Changing the
+model or dimension needs a new re-index. A missing NEAR billing record during a
+run stops it as a cost liability and blocks the shared lane until settled under
+**Inference accounting**.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 
@@ -3760,7 +3792,11 @@ and external-account behavior remain explicitly unverified.
 **Shipped foundation:** Seraph owns canonical local memory and can augment
 retrieval through guarded provider integrations.
 
-On this branch, remote embedding is a separately admitted OpenRouter
+Since ADR-035 (#1147 PR3d) OpenRouter embeddings are retired; the NEAR TEE
+embedding slot replaces them but stays blocked by the ADR-035 evidence gate, so
+recall is lexical (see "NEAR TEE embedding slot and memory re-index" above).
+The paragraph below records the historical OpenRouter contract. On this branch,
+remote embedding is a separately admitted OpenRouter
 capability. Memory vector writes and vector search require an explicit
 enabled v2 embedding slot (or the existing explicit legacy
 `embedding_model=openrouter/...` configuration), exact-profile cost accounting,

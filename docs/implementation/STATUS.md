@@ -735,11 +735,51 @@ Checks that must hold when bytes would leave (the `x-no-aliasing` header,
 current policy, and a deadline that still leaves the billing window) run under
 the contact writer: a lease granted too late is a durable never-contacted
 denial, not an Unknown.
-Streaming, tools, vision and embeddings are not served (PR3c/PR3d/PR4).
+Streaming, tools and vision are not served (PR3c/PR4); embeddings: see below.
 Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
 plaintext; attestation not verified by Seraph; no end-to-end encryption".
 Evidence is intercepted-transport tests only: no live NEAR call, provider
 availability, price or model quality is established.
+
+## NEAR TEE embedding slot and memory re-index (ADR-035, #1147 PR3d)
+
+**Partial, blocked by default.** The `embedding` slot is implemented but
+**fails closed** with `near_tee_embedding_evidence_required`: ADR-035 requires
+source evidence that NEAR's `/v1/embeddings` endpoint and `/v1/billing/costs`
+honour `x-no-aliasing` before the slot may dispatch, and the repository holds
+none (the 2026-10-05 trust-boundary research and ADR-025's billing sources
+cover chat completions only). The gate is a code constant that only a reviewed
+ADR-035 amendment with dated source evidence may set; no setting, catalog
+receipt or capability check clears it. Until then memory recall stays lexical
+and NEAR receives no memory text.
+
+Implemented mechanics (proven with intercepted transport and the gate lifted
+in tests only): the slot takes `Qwen/Qwen3-Embedding-0.6B` from the closed
+allowlist, a per-request input-token bound (conservatively one token per UTF-8
+byte plus overhead) and batch size (1–64), a per-request reserve, and its own
+purpose consent acknowledging that memory text reaches NEAR in plaintext. The
+catalog check requires vllm, attested, verifiable, ready, text input and an
+embedding output modality, enough context and a reserve covering the input
+price (output is not billed); a stated dimension is recorded. The
+`embedding` capability check measures the vector dimension. Dispatch posts
+`/v1/embeddings` with the canonical id and `x-no-aliasing: true` on the
+`memory_embedding` route (background priority below chat) through the one
+broker with billing readback inside the lease; a response model or dimension
+that differs from the proof is settled and not adopted; a missing cost, or a
+response without a billing identity, is an Unknown liability that blocks the
+lane until fenced settlement.
+
+Vectors live in a namespace keyed by provider `near_tee`, model, measured
+dimension and schema, never mixed with older OpenRouter vectors. Recall uses it
+only with current proofs and a completed index; otherwise search returns the
+labelled lexical/degraded result without contact and new memories are not
+embedded. Re-indexing is never automatic: an authenticated settings action with
+a per-run consent and spend cap starts one durable job (existing workflow job
+ledger) that embeds canonical memory in bounded batches, checkpoints each
+batch, stops at the budget, can be cancelled, resumes idempotently from the
+namespace contents, removes rows of memories that are no longer active, and
+records a verified local readback before success. No live NEAR call, price,
+availability or embedding quality is established.
 
 ## Epic #736/#775 OpenRouter inference phase
 

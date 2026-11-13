@@ -106,7 +106,6 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
         model=None,
         preserve_captures=False,
         archive_dir=str(tmp_path / "fallback"),
-        openrouter_api_key=None,
         blocklist_file=None,
     )
     first_archive = tmp_path / "first"
@@ -170,7 +169,6 @@ def test_screen_analysis_runtime_budget_records_and_skips(tmp_path):
         model=None,
         preserve_captures=True,
         archive_dir=str(tmp_path),
-        openrouter_api_key=None,
         blocklist_file=None,
     )
     runtime._update_budget_settings(60, 1, 365, 0)
@@ -186,7 +184,7 @@ def test_screen_analysis_runtime_budget_records_and_skips(tmp_path):
 
 @pytest.mark.asyncio
 async def test_screen_analysis_runtime_pauses_on_unavailable_settings_provider(tmp_path):
-    providers = [_FakeProvider("codex-local"), _FakeProvider("openrouter", available=False)]
+    providers = [_FakeProvider("codex-local"), _FakeProvider("apple-vision", available=False)]
 
     def fake_create_provider(**_kwargs):
         return providers.pop(0)
@@ -197,7 +195,6 @@ async def test_screen_analysis_runtime_pauses_on_unavailable_settings_provider(t
         model=None,
         preserve_captures=True,
         archive_dir=str(tmp_path / "fallback"),
-        openrouter_api_key=None,
         blocklist_file=None,
     )
     first_client = _RuntimeSettingsClient(
@@ -212,8 +209,8 @@ async def test_screen_analysis_runtime_pauses_on_unavailable_settings_provider(t
     second_client = _RuntimeSettingsClient(
         {
             "enabled": True,
-            "provider": "openrouter",
-            "model": "google/gemini-2.5-flash-lite",
+            "provider": "apple-vision",
+            "model": "",
             "preserve_captures": True,
             "archive_dir": str(tmp_path / "second"),
         }
@@ -404,7 +401,6 @@ class TestPeriodicCaptureLoop:
             model=None,
             preserve_captures=True,
             archive_dir=str(tmp_path),
-            openrouter_api_key=None,
             blocklist_file=None,
         )
         runtime.provider = provider

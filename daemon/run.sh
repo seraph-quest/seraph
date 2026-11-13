@@ -14,10 +14,10 @@
 #   ./daemon/run.sh --interval 3        # Poll every 3 seconds
 #
 # Screen analysis (opt-in, captures on context switch, requires Screen Recording permission):
-#   ./daemon/run.sh --ocr --verbose                        # Local Apple Vision (free, offline, ~200ms)
-#   ./daemon/run.sh --ocr --ocr-provider openrouter        # Cloud via Gemini (structured JSON, ~$1.30/mo)
-#   ./daemon/run.sh --ocr --ocr-provider openrouter \
-#     --blocklist-file ~/blocklist.json --verbose           # Cloud with custom app blocklist
+#   ./daemon/run.sh --ocr --verbose                        # On-device Apple Vision OCR (no cloud call)
+#   ./daemon/run.sh --ocr --blocklist-file ~/blocklist.json  # With a custom app blocklist
+#   Set SERAPH_EDGE_DEVICE_ID, SERAPH_EDGE_PAIRING_ID and SERAPH_EDGE_CREDENTIAL_FILE
+#   to upload allowed captures to the local backend (ADR-035).
 #
 #   ./daemon/run.sh --help              # Show all options
 #
@@ -44,9 +44,6 @@ fi
 # Sync dependencies
 echo "Syncing dependencies..."
 uv pip install -q -r "$SCRIPT_DIR/requirements.txt" -p "$VENV_DIR/bin/python"
-
-# Forward OPENROUTER_API_KEY if set (used by --ocr-provider openrouter)
-export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
 
 # Run the daemon, passing through all arguments
 exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/seraph_daemon.py" "$@"

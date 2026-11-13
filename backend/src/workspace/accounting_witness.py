@@ -429,7 +429,7 @@ def revoke_restored_policy(*, active, target):
     candidate = target / "model-fabric-settings.json"
     if not existing.get("provider_policy", {}).get("revision", 0) and candidate.is_file() and not candidate.is_symlink():
         contents = json.loads(candidate.read_text())
-        if not isinstance(contents, dict) or not (contents.get("openrouter_setup") or contents.get("near_text")):
+        if not isinstance(contents, dict) or not (contents.get("openrouter_setup") or contents.get("near_text") or contents.get("inference_lane")):
             return {"state": "uninitialized"}
     with maintenance_accounting_lock(active) as workspace:
         receipt = read_lifecycle_receipt(workspace) or {}
@@ -439,7 +439,7 @@ def revoke_restored_policy(*, active, target):
                 raise ProductionWorkspaceReconciliationError("provider policy restore configuration unavailable")
             return {"state": "uninitialized"}
         payload = json.loads(path.read_text())
-        if not isinstance(payload, dict) or not (payload.get("openrouter_setup") or payload.get("near_text")):
+        if not isinstance(payload, dict) or not (payload.get("openrouter_setup") or payload.get("near_text") or payload.get("inference_lane")):
             if receipt.get("provider_policy", {}).get("revision", 0):
                 raise ProductionWorkspaceReconciliationError("provider policy restore configuration unavailable")
             return {"state": "uninitialized"}

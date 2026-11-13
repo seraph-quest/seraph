@@ -14,6 +14,7 @@ from .contracts import (
     ModelRouteProof,
     NoCompliantModelRouteError,
     RouteDecision,
+    RouteRejection,
     bind_final_inference_payload,
     finalized_openai_compatible_body,
 )
@@ -355,6 +356,12 @@ async def run_preflighted_adapter(
     admission_priority: GpuPriority | None = None,
 ) -> object:
     """Run a preflighted non-streaming adapter (for example VLM analyze-file)."""
+    from .retirement import provider_retirement_reason
+    if decision.allowed and decision.selected is not None and (
+            retired := provider_retirement_reason(decision.selected.profile.provider_kind)):
+        # A caller-built decision cannot carry a retired provider to contact.
+        decision = RouteDecision(None, None, None, (RouteRejection(decision.selected.profile.id, retired),),
+            None, None, decision.route_decision_id, ())
     if not decision.allowed or decision.selected is None:
         repository = getattr(hooks, "_repository", None)
         denied_kwargs = {

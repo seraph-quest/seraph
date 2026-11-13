@@ -80,6 +80,10 @@ def screenshot_semantic_analysis_enabled() -> bool:
     """
     if not effective_screen_analysis_enabled():
         return False
+    from src.model_fabric.retirement import openrouter_retired
+    if openrouter_retired():
+        # ADR-035: OpenRouter vision is retired; the NEAR vision slot lands in PR4.
+        return False
     provider = effective_screen_analysis_provider().lower()
     if provider != "openrouter":
         return False
@@ -428,6 +432,9 @@ async def _analyze_with_openrouter(image_path: Path, artifacts: dict[str, Any]) 
     governed request body.  Provider responses are treated as untrusted data
     and validated by the Seraph-owned screenshot contract before persistence.
     """
+    from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+    if openrouter_retired():
+        raise ScreenshotSemanticAnalysisError(f"remote_inference_blocked:{OPENROUTER_RETIRED_REASON}")
     metadata = {
         "captured_at": artifacts.get("created_at"),
         "source": "screenshot_folder",

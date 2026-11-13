@@ -484,6 +484,8 @@ def _request_embeddings(
     timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
 ) -> object:
     """Dispatch one bounded, idempotent embedding request to OpenRouter."""
+    from src.model_fabric.retirement import assert_openrouter_contact_allowed
+    assert_openrouter_contact_allowed(provider_kind="openrouter")
     payload = finalized_openai_compatible_embeddings_body(
         model_id=model,
         inputs=texts[0] if len(texts) == 1 else texts,
@@ -753,6 +755,11 @@ def _embed_texts(
     _validate_inputs(texts)
     if not texts:
         return []
+    from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+    if openrouter_retired():
+        # ADR-035: the OpenRouter embedding route is retired; no NEAR
+        # embedding slot exists yet (PR3d). Fail closed with no contact.
+        _raise_configuration(OPENROUTER_RETIRED_REASON, batch_size=len(texts))
     model = _configured_model(batch_size=len(texts))
     _validate_route_policy(batch_size=len(texts), model=model)
     effective_principal = principal or get_current_trust_principal()

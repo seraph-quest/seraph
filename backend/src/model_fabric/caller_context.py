@@ -23,6 +23,7 @@ from .contracts import (
     ModelCapability,
 )
 from .configuration import effective_workload_policy
+from .retirement import ProviderRetiredError, openrouter_retired
 
 
 @dataclass(frozen=True)
@@ -250,6 +251,11 @@ def build_canonical_inference_context(
     ):
         raise ValueError("inference principal must exactly match session and job identity")
 
+    if openrouter_retired():
+        # ADR-035: every canonical route binds the OpenRouter provider
+        # allowlist below, and OpenRouter is retired by policy. Fail closed
+        # before any accounting, admission or transport; no fallback.
+        raise ProviderRetiredError()
     data_digest = canonical_digest(payload)
     policy = effective_workload_policy(runtime_path)
     if bool(getattr(policy, "fallback_allowed", False)):

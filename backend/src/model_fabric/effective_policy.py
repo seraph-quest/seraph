@@ -62,6 +62,11 @@ class LoopAgnosticLock:
 configuration_mutation_lock = LoopAgnosticLock()
 
 
+def _openrouter_retired() -> bool:
+    from .retirement import openrouter_retired
+    return openrouter_retired()
+
+
 def current_near_text_policy() -> tuple[object, str]:
     configured = read_model_fabric_configuration()
     setup = configured.near_text
@@ -117,7 +122,7 @@ async def effective_policy_grants(operator) -> list[dict[str, object]]:
         grants.append({"kind": "provider_policy", "grant_id": "provider_policy:openrouter", "record_id": "openrouter",
         "boundary": "inference_egress", "purpose": "governed model inference",
         "source": "explicitly consented current-root capability inputs", "destination": "https://openrouter.ai/api/v1",
-        "state": "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked or not setup.cloud_egress_acknowledged else "active",
+        "state": "retired" if _openrouter_retired() else "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked or not setup.cloud_egress_acknowledged else "active",
         "revision": configured.egress_revision, "expires_at": None,
         "origin": "deployment_policy", "limits": {"scope": "deployment", "request_timeout_seconds": setup.timeout_seconds,
             "spend_ceiling_microusd": setup.spend_ceiling_microusd, "accounting_status": accounting["status"]},

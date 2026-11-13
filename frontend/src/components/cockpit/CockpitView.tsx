@@ -82,6 +82,7 @@ import {
 import { GuardianInboxPanel, type GuardianInboxPanelHandle } from "./GuardianInboxPanel";
 import { CockpitSectionNav } from "./CockpitSectionNav";
 import { CockpitHome } from "./CockpitHome";
+import { ReportsPanel } from "./ReportsPanel";
 import { GuardianCandidateInspector } from "./GuardianCandidateInspector";
 import { CanonicalMemoryPanel } from "./CanonicalMemoryPanel";
 import { ProcedureV2Review } from "./ProcedureV2Review";
@@ -16650,6 +16651,14 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           }}
         />
       </div>
+
+      {activeSection === "reports" ? (
+        <ReportsPanel
+          key={attentionOwner ? `${attentionOwner.principalId}:${attentionOwner.sessionId}` : "unconfirmed"}
+          active
+          authenticated={Boolean(attentionOwner)}
+        />
+      ) : null}
 
       {activeSection === "inbox" ? (
         <section className="cockpit-section-surface cockpit-inbox-surface" data-testid="cockpit-inbox-section">

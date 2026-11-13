@@ -9,6 +9,7 @@ export const COCKPIT_SECTIONS: Array<{ id: CockpitSection; label: string }> = [
   { id: "goals", label: "Goals" },
   { id: "library", label: "Library" },
   { id: "connections", label: "Connections" },
+  { id: "reports", label: "Reports" },
 ];
 
 export interface CockpitSectionNavProps {

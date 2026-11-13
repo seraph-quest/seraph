@@ -115,6 +115,37 @@ def _coerce_enum(
         raise ValueError(f"Invalid {enum_cls.__name__}: {value!r}") from exc
 
 
+END_OF_DAY_REPORT_SOURCE_TOOL = "end_of_day_goal_report"
+END_OF_DAY_REPORT_KIND = "end_of_day_goal_report"
+END_OF_DAY_REPORT_SCHEMA = "seraph.end_of_day_goal_report.v1"
+END_OF_DAY_REPORT_LIST_MAX = 100
+END_OF_DAY_REPORT_SCAN_CAP = 1_000
+
+
+def end_of_day_report_metadata(episode: MemoryEpisode) -> dict[str, Any]:
+    """Parse an episode's stored metadata JSON; malformed metadata is empty."""
+
+    try:
+        payload = json.loads(episode.metadata_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def is_end_of_day_report_episode(episode: MemoryEpisode) -> bool:
+    """True only for episodes written by ``store_end_of_day_goal_report``."""
+
+    if str(getattr(episode.episode_type, "value", episode.episode_type)) != MemoryEpisodeType.observer.value:
+        return False
+    if episode.source_tool_name != END_OF_DAY_REPORT_SOURCE_TOOL:
+        return False
+    metadata = end_of_day_report_metadata(episode)
+    return (
+        metadata.get("kind") == END_OF_DAY_REPORT_KIND
+        and metadata.get("artifact_schema") == END_OF_DAY_REPORT_SCHEMA
+    )
+
+
 _CANONICAL_MEMORY_DELETE_EXPORT_REASON = "operator_delete_export"
 _CANONICAL_MEMORY_REDACTED_STATE = "canonical_memory_redacted"
 _CANONICAL_MEMORY_DELETE_ACTIONS = {
@@ -7773,6 +7804,57 @@ class MemoryRepository:
             for episode in episodes:
                 db.expunge(episode)
             return list(episodes)
+
+    async def list_end_of_day_report_episodes(self, *, limit: int = 30) -> list[MemoryEpisode]:
+        """Return stored end-of-day goal report episodes, newest first.
+
+        SQL prefilters on the indexed ``episode_type`` and ``source_tool_name``
+        columns.  The report ``kind`` and ``artifact_schema`` live inside the
+        JSON ``metadata_json`` text, so they are checked in Python on bounded
+        pages.  At most ``END_OF_DAY_REPORT_SCAN_CAP`` candidate rows are read,
+        so a store polluted with look-alike rows cannot make this unbounded.
+        """
+
+        bounded_limit = max(1, min(int(limit), END_OF_DAY_REPORT_LIST_MAX))
+        page_size = max(bounded_limit, 25)
+        collected: list[MemoryEpisode] = []
+        scanned = 0
+        async with get_session() as db:
+            while len(collected) < bounded_limit and scanned < END_OF_DAY_REPORT_SCAN_CAP:
+                stmt = (
+                    select(MemoryEpisode)
+                    .where(MemoryEpisode.episode_type == MemoryEpisodeType.observer)
+                    .where(MemoryEpisode.source_tool_name == END_OF_DAY_REPORT_SOURCE_TOOL)
+                    .order_by(
+                        col(MemoryEpisode.observed_at).desc(),
+                        col(MemoryEpisode.created_at).desc(),
+                        col(MemoryEpisode.id).desc(),
+                    )
+                    .offset(scanned)
+                    .limit(min(page_size, END_OF_DAY_REPORT_SCAN_CAP - scanned))
+                )
+                page = list((await db.execute(stmt)).scalars().all())
+                if not page:
+                    break
+                scanned += len(page)
+                for episode in page:
+                    db.expunge(episode)
+                    if len(collected) < bounded_limit and is_end_of_day_report_episode(episode):
+                        collected.append(episode)
+        return collected
+
+    async def get_end_of_day_report_episode(self, episode_id: str) -> MemoryEpisode | None:
+        """Return one end-of-day report episode, or ``None`` if it is not one."""
+
+        normalized_id = str(episode_id or "").strip()
+        if not normalized_id:
+            return None
+        async with get_session() as db:
+            episode = await db.get(MemoryEpisode, normalized_id)
+            if episode is None:
+                return None
+            db.expunge(episode)
+        return episode if is_end_of_day_report_episode(episode) else None
 
     async def create_edge(
         self,

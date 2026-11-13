@@ -97,6 +97,16 @@ limitations. Verified with offline local GitHub fixtures and zero
 inference/provider spend. Live GitHub usefulness remains
 **external-unverified**.
 
+**Cockpit end-of-day report reader: Partial.** The cockpit **Reports**
+section and `GET /api/reports/end-of-day[/{episode_id}]` read stored
+end-of-day goal reports only; they cannot generate a report and make no model
+or external call. A report whose `analysis_provider` is `blocked:<reason>` is
+shown as blocked, not as a report. The mix breakdown is shown only when the
+report's archive verifies by path and SHA-256. Missing boundaries: no
+cockpit generation, no pagination past 100 reports, and the blocked-run
+scheduler receipt remains [#1140](https://github.com/seraph-quest/seraph/issues/1140).
+Verified with offline backend route tests and frontend component tests.
+
 **Cordis presets and unattended guardian turns: Partial (#1020, part 1).**
 - **Presets:** chat turns name a reviewed preset that both Python and the Cordis
   sequencer check.

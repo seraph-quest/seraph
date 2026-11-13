@@ -314,3 +314,20 @@ def test_mix_keys_truncate_by_utf16_and_merge_collisions():
     mix = _seconds_mix({emoji_key: 10, long_a: 5, long_b: 7})
     assert all(len(key.encode("utf-16-le")) // 2 <= _MIX_KEY_MAX for key in mix)
     assert mix["p" * _MIX_KEY_MAX] == 12
+
+
+async def test_non_local_requests_are_forbidden(app, async_db, archive_dir, monkeypatch):
+    # Same localhost guard as /api/observer/screen-artifacts: an authenticated
+    # but non-local client must not read screen-derived report content.
+    from httpx import ASGITransport, AsyncClient
+
+    episode_id = await _seed_report_episode(date="2026-11-02", observed_at=BASE)
+    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
+    transport = ASGITransport(app=app, client=("10.0.0.5", 50000))
+    async with AsyncClient(transport=transport, base_url="http://test") as remote:
+        listing = await remote.get("/api/reports/end-of-day")
+        detail = await remote.get(f"/api/reports/end-of-day/{episode_id}")
+    assert listing.status_code == 403
+    assert detail.status_code == 403
+    assert "Body 2026-11-02" not in detail.text

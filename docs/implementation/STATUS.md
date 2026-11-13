@@ -745,7 +745,15 @@ stream); reasoning deltas are never emitted. The stream is ended no later than
 16s before the original deadline and billing is read back after it in the same
 lease; deltas already delivered are never retracted, and a known-cost failure
 (echo mismatch, deadline cut, protocol error) settles and fails the turn. A
-missing cost is an Unknown liability that keeps the lane blocked. Chat-agent
+caller that stops reading or is cancelled once NEAR has answered (closed
+stream, WebSocket timeout, Cordis output cap) closes the provider stream, still
+reads billing back and settles with `near_tee_stream_cancelled`; the lane is
+released (tested). A missing cost is an Unknown liability that keeps the lane
+blocked. Lightweight REST/WebSocket chat turns on the slot set their inference
+deadline 2s inside the 60s (or lower) outer turn timeout, so the stream and
+its billing finish before the outer cut; `/api/runtime/status` reports this as
+`chat_turn_cap`, and a slot timeout above the turn deadline is reported and
+refused. Chat-agent
 tool turns send OpenAI-compatible `tools` with the existing forced
 `tool_choice: "required"`, non-streaming; only a model whose catalog receipt
 lists `tools` may serve them (`near_tee_model_tools_unsupported` otherwise),
@@ -755,7 +763,12 @@ and tool turns each need their own fresh `streaming` / `tool_use` capability
 check. `/api/runtime/status` `chat_agent` reports the NEAR TEE route, model and
 dated catalog label when the slot is the active provider, otherwise the slot's
 blocked reason with no provider. Chat-turn result adoption authenticates the
-operator's root session behind a conversation-scoped chat principal. Vision and
+operator root session captured at admission behind a conversation-scoped chat
+principal (a revoked root or a different owner is not adopted; the cost still
+settles). Cordis requests above the slot's output limit are refused with
+`inference_max_tokens_exceeds_route`. PR3c adds `streaming` and `tool_use` to
+the slot profile, which changes its hash: after upgrading, re-run the catalog
+check and every capability check. Vision and
 embeddings are not served (PR3d/PR4).
 Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
 plaintext; attestation not verified by Seraph; no end-to-end encryption".

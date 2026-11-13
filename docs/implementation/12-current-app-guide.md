@@ -1403,8 +1403,14 @@ only while the slot is the active chat provider, and lists the `streaming` and
 `tool_use` check state. A streamed reply is cut off at least 16 seconds before
 its deadline so billing can be read back; text already shown stays shown, but
 a cut-off, echo-mismatched or malformed stream fails the turn after its cost
-settles. Tool arguments must be strict JSON objects, and only offered tools may
-be called. Report labels read "TEE-hosted per NEAR catalog as of
+settles. Closing the chat or a timed-out turn ends the stream but still reads
+billing back, so the lane is not left blocked. A lightweight chat turn's
+deadline sits 2 seconds inside its outer timeout (60 seconds or the configured
+chat timeout if lower), shown as `chat_turn_cap` in `/api/runtime/status`; keep
+the slot timeout within that deadline. Tool arguments must be strict JSON
+objects, and only offered tools may be called. Upgrading to this version
+changes the slot's profile hash: re-run **Run catalog check** and each
+capability check before use. Report labels read "TEE-hosted per NEAR catalog as of
 <time>; NEAR gateway receives plaintext; attestation not verified by Seraph; no
 end-to-end encryption". Seraph does not verify attestation and there is no
 end-to-end encryption. A missing NEAR billing record becomes an Unknown

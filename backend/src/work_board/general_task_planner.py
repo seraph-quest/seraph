@@ -161,6 +161,12 @@ class GeneralTaskPlanner:
             raise BoardError("general_task_planning_budget_required", "Planning requires one call and a nonzero monetary ceiling", status_code=422)
         if not descriptors:
             raise BoardError("general_task_tools_unavailable", "No typed registered tools are available", status_code=409)
+        from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
+        if reason := inactive_route_reason("general_task_planner"):
+            # ADR-035: no active provider serves planning; name the cause
+            # (``openrouter_retired`` / ``no_active_provider``) before any
+            # group, job, reservation or contact exists.
+            raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason)
         try:
             configured, _policy_digest = current_inference_policy()
         except PermissionError as exc:
@@ -253,9 +259,17 @@ class GeneralTaskPlanner:
         if prior is not None:
             raise BoardError("general_task_planning_operation_exists",
                 "Original planning operation exists; inspect its accounting receipt before a new proposal", status_code=409)
-        context = build_canonical_inference_context("general_task_planner", payload=body,
-            output_tokens=body["max_tokens"], timeout_seconds=min(45, route.timeout_seconds, task_input.limits.wall_seconds),
-            principal=principal, session_id=owner.session_id, request_id=operation_id)
+        from src.model_fabric.contracts import NoCompliantModelRouteError
+        try:
+            context = build_canonical_inference_context("general_task_planner", payload=body,
+                output_tokens=body["max_tokens"], timeout_seconds=min(45, route.timeout_seconds, task_input.limits.wall_seconds),
+                principal=principal, session_id=owner.session_id, request_id=operation_id)
+        except NoCompliantModelRouteError as exc:
+            # A precontact route denial is an ordinary blocked planning
+            # outcome with its stable reason, never an unhandled error.
+            reasons = ", ".join(exc.reason_codes) or "route_unavailable"
+            raise BoardError("general_task_planning_route_denied", "Planning route denied: " + reasons,
+                status_code=409) from exc
         context = replace(context, deadline_at=min(context.deadline_at, group.original_deadline_at.timestamp()))
         if _specialist is not None:
             context = replace(context, deadline_at=min(context.deadline_at, _specialist["deadline_at"],

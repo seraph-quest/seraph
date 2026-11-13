@@ -236,6 +236,12 @@ def _route_binding() -> tuple[str, str]:
             "The governed OpenRouter workload policy is unavailable",
             status_code=409,
         ) from exc
+    from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
+    if not tuple(getattr(policy, "allowed_provider_kinds", ()) or ()) and (
+            reason := inactive_route_reason(_PROPOSAL_ROUTE)):
+        # ADR-035: the proposal route has no active provider; block with the
+        # stable cause before any proposal job, reservation or contact.
+        raise BoardError(reason, inactive_route_label(reason), status_code=409)
     if bool(getattr(policy, "fallback_allowed", False)):
         raise BoardError(
             "openrouter_fallback_forbidden",

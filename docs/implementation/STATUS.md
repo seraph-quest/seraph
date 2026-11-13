@@ -647,7 +647,13 @@ reasoning synthesis, streaming chat, chat-agent tool turns and Cordis
 configures it (#1147 PR3b/PR3c, **Partial**); screenshot vision resolves to the
 NEAR TEE vision slot (#1147 PR4, **Partial**); every other route (embeddings),
 and every route without a ready slot, reports blocked
-(`no_active_provider` or the slot's reason); the optional NEAR text Work
+(`no_active_provider` or the slot's reason). The Work verticals whose model
+step still uses the retired OpenRouter adapter (Work Board card proposals,
+general-task, repository-work and specialist planning, Mail reply, Calendar
+meeting prep, research and guardian opportunity assessment) block before any
+job, reservation or contact with `openrouter_retired` (retained OpenRouter
+configuration) or `no_active_provider` in the card or API reason (#1156); they
+have no NEAR TEE path yet. The optional NEAR text Work
 capability (ADR-025) is unchanged apart from the shared NEAR client. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
 native/companion boundaries named by each adapter. No paid model, real Google

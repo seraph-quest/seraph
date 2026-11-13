@@ -1370,6 +1370,16 @@ _STABLE_REASON_CODES = frozenset(
 )
 
 
+# Capabilities whose execution needs one model step on a canonical route
+# (ADR-035 inactive-route preflight). General tasks are checked by their
+# planner; their accepted native execution makes no model call.
+_CAPABILITY_MODEL_ROUTES = {
+    "work.mail-reply-draft.v1": "strategist_agent",
+    "calendar.meeting-prep.v1": "strategist_agent",
+    "work.research-dossier.v1": "readonly_research_child",
+}
+
+
 def _stable_reason_code(value: Any, *, fallback: str = "execution_blocked") -> str:
     """Map adapter/runtime failures to a closed, non-sensitive code set."""
 
@@ -2960,14 +2970,18 @@ class WorkBoardDispatcher:
                 # change between passes.  Close that gate before claim so no
                 # execution attempt is counted for a pre-admission denial.
                 if task.status is WorkBoardStatus.ready:
+                    # ADR-035 inactive-route causes keep their operator text
+                    # (which carries the stable code), like GoalSnapshot gates.
+                    keep_reason = readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS or readiness_error in {
+                        "openrouter_retired", "no_active_provider"}
                     block_kind = (
                         "capability"
-                        if readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        if keep_reason
                         else _stable_reason_code(readiness_error, fallback="capability")
                     )
                     block_reason = (
                         readiness_reason or readiness_error
-                        if readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        if keep_reason
                         else _stable_reason_code(readiness_error, fallback="capability")
                     )
                     async with self.session_provider() as db:
@@ -4455,6 +4469,13 @@ class WorkBoardDispatcher:
         with staged_captured_source_identity():
 
             capability = _text(task.capability_id)
+            model_route = _CAPABILITY_MODEL_ROUTES.get(capability)
+            if model_route is not None:
+                from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
+                if retired_reason := inactive_route_reason(model_route):
+                    # ADR-035: a capability whose model step has no active
+                    # provider stays blocked with the stable cause, before claim.
+                    return retired_reason, inactive_route_label(retired_reason)
             try:
                 if capability == "agent.task.v1":
                     from src.work_board.contracts import GeneralTaskEnvelope
@@ -6083,6 +6104,13 @@ class WorkBoardDispatcher:
             job_id = _text(expected.get("job_id"))
             projection = admitted_projection
         except BoardError as exc:
+            from src.model_fabric.retirement import INACTIVE_ROUTE_REASONS, inactive_route_label
+            if exc.code in INACTIVE_ROUTE_REASONS:
+                # ADR-035: no active provider; nothing was admitted. Close the
+                # claim with the stable, operator-visible cause.
+                await self._close_unadmitted_or_block(claim, inactive_route_label(exc.code), retryable_input=True)
+                result["blocked"] = True
+                return result
             if _text(task.capability_id) == "calendar.meeting-prep.v1" and exc.code in {
                 "calendar_model_route_unavailable",
                 "calendar_binding_unavailable",
@@ -7751,6 +7779,17 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
+            from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
+
+            if retired_reason := inactive_route_reason("strategist_agent"):
+                # ADR-035: name the cause before any durable admission.
+                raise BoardError(
+                    retired_reason,
+                    inactive_route_label(retired_reason),
+                    status_code=409,
+                    reason_code=retired_reason,
+                    recovery_action="restore_prerequisite",
+                )
             policy = effective_workload_policy("strategist_agent")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)
@@ -8166,6 +8205,17 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
+            from src.model_fabric.retirement import inactive_route_label, inactive_route_reason
+
+            if retired_reason := inactive_route_reason("strategist_agent"):
+                # ADR-035: name the cause before any durable admission.
+                raise BoardError(
+                    retired_reason,
+                    inactive_route_label(retired_reason),
+                    status_code=409,
+                    reason_code=retired_reason,
+                    recovery_action="restore_prerequisite",
+                )
             policy = effective_workload_policy("strategist_agent")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)

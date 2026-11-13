@@ -530,6 +530,11 @@ async def _completion(row, goal, evidence, *, fence):
     from src.model_fabric.gpu_admission import GpuPriority
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
+    from src.model_fabric.retirement import inactive_route_reason
+    if retired_reason := inactive_route_reason("strategist_agent"):
+        # ADR-035: no active provider; block with the stable cause before
+        # any route context, reservation or contact.
+        raise OpportunityError(retired_reason)
     messages, context = assessment_context(row, goal, evidence)
     await assert_known_vault_values_absent(json.loads(messages[1]["content"]))
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)

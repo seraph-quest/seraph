@@ -209,7 +209,8 @@ def _closed_block_kind(value: Any) -> str:
     # prerequisite, not an approval request. Keep it out of the generic
     # "input" -> needs_input mapping below so the cockpit offers the
     # prerequisite-recheck path instead of linking to an unrelated approval.
-    if code.startswith("typed_input_"):
+    if code.startswith("typed_input_") or code in {"openrouter_retired", "no_active_provider"}:
+        # ADR-035 inactive route: a capability prerequisite (configure a NEAR TEE slot).
         return "capability"
     if any(token in code for token in ("approval", "input", "consent", "review")):
         return "needs_input"

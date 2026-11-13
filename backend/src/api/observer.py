@@ -7,10 +7,10 @@ import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlmodel import col, select
 
@@ -552,6 +552,216 @@ async def post_screen_context(body: ScreenContextRequest):
             logger.exception("Failed to persist screen observation")
 
     return {"status": "ok"}
+
+
+class LocalCaptureAnalysis(BaseModel):
+    """Bounded on-device analysis the daemon produced (never image bytes)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["apple-vision", "codex-local"]
+    activity: str | None = Field(default=None, max_length=64)
+    project: str | None = Field(default=None, max_length=256)
+    summary: str | None = Field(default=None, max_length=512)
+    details: list[Annotated[str, Field(max_length=256)]] = Field(default_factory=list, max_length=16)
+    text: str | None = Field(default=None, max_length=8 * 1024)
+
+
+class LocalCaptureUploadRequest(BaseModel):
+    """One daemon capture: bytes are sniffed server-side, never trusted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capture_id: str = Field(min_length=8, max_length=128)
+    app_name: str = Field(min_length=1, max_length=512)
+    window_title: str = Field(default="", max_length=2048)
+    captured_at: datetime
+    content_base64: str = Field(min_length=1)
+    local_analysis: LocalCaptureAnalysis | None = None
+
+
+_CAPTURE_CAPABILITY = "media.ingest"
+_CAPTURE_DATA_PURPOSE = "screen_capture"
+
+
+async def _authenticate_capture_uploader(request: Request):
+    """Authenticate the daemon with its scoped paired-edge credential.
+
+    This reuses the paired-edge credential path (vault-held secret, owner
+    principal re-authentication, active pairing lifecycle); it never accepts
+    a browser cookie or a fingerprint as authentication.
+    """
+    from src.api.nodes import _edge_credential, _find_adapter, _node_inventory
+    from src.extensions.node_pairing import _scope_digest, _scope_key
+    from src.extensions.paired_edge import (
+        DEFAULT_NODE_EXTENSION_ID,
+        DEFAULT_NODE_REFERENCE,
+        _policy_from_entry,
+        verify_pairing_credential,
+    )
+    from src.observer.local_capture_upload import UploadPolicy
+    from src.extensions.state import load_extension_state_payload
+
+    presented = _edge_credential(request)
+    device_id = request.headers.get("x-seraph-node-device", "").strip()
+    pairing_id = request.headers.get("x-seraph-node-pairing", "").strip()
+    if not device_id or not pairing_id:
+        raise HTTPException(status_code=401, detail={"code": "pairing_identity_required"})
+    extension_id = request.headers.get("x-seraph-node-extension", "").strip() or DEFAULT_NODE_EXTENSION_ID
+    reference = request.headers.get("x-seraph-node-reference", "").strip() or DEFAULT_NODE_REFERENCE
+    state_payload = load_extension_state_payload()
+    try:
+        adapter = _find_adapter(_node_inventory(state_payload), extension_id=extension_id, reference=reference)
+    except HTTPException as exc:
+        raise HTTPException(status_code=401, detail={"code": "pairing_not_found"}) from exc
+    try:
+        entry, state = await verify_pairing_credential(
+            state_payload,
+            extension_id=adapter.extension_id,
+            reference=adapter.reference,
+            name=adapter.name,
+            presented_credential=presented,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        status_code = 503 if code in {"credential_unavailable", "credential_not_configured"} else 401
+        raise HTTPException(status_code=status_code, detail={"code": code}) from exc
+    if state.lifecycle.value != "paired":
+        raise HTTPException(status_code=403, detail={"code": f"pairing_{state.lifecycle.value}"})
+    if state.device_id != device_id or state.pairing_id != pairing_id:
+        raise HTTPException(status_code=403, detail={"code": "pairing_identity_mismatch"})
+    if state.expires_at is not None:
+        expires_at = state.expires_at if state.expires_at.tzinfo else state.expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires_at:
+            raise HTTPException(status_code=403, detail={"code": "pairing_expired"})
+    # Enforce the pairing's stored policy exactly like edge ingress does
+    # (node_pairing.validate_pairing_request): capability, data purpose and
+    # credential scope here; media type and size once the bytes are sniffed.
+    policy = _policy_from_entry(entry)
+    if policy.allow_action_authority:
+        raise HTTPException(status_code=403, detail={"code": "action_authority_forbidden"})
+    if _CAPTURE_CAPABILITY not in policy.allowed_capabilities:
+        raise HTTPException(status_code=403, detail={"code": "capability_scope_not_allowed"})
+    if _CAPTURE_DATA_PURPOSE not in policy.allowed_data_purposes:
+        raise HTTPException(status_code=403, detail={"code": "data_purpose_not_allowed"})
+    if state.credential_scope_digest is not None and state.credential_scope_digest != _scope_digest(
+        _scope_key(
+            device_id=device_id,
+            pairing_id=pairing_id,
+            capability_scope=_CAPTURE_CAPABILITY,
+            data_purpose=_CAPTURE_DATA_PURPOSE,
+        )
+    ):
+        raise HTTPException(status_code=403, detail={"code": "credential_scope_mismatch"})
+    uploader = {
+        "owner_principal_id": str(entry.get("owner_principal_id") or ""),
+        "device_id": device_id,
+        "pairing_id": pairing_id,
+    }
+    return uploader, UploadPolicy(
+        allowed_media_types=tuple(policy.allowed_media_types),
+        max_content_bytes=int(policy.max_content_bytes),
+    )
+
+
+async def _read_bounded_body(request: Request, *, limit: int) -> bytes:
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > limit:
+                raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "invalid_content_length"}) from exc
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > limit:
+            raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@router.post("/observer/captures")
+async def upload_local_capture(request: Request):
+    """Accept one allowed daemon capture over the authenticated local path (ADR-035).
+
+    The capture is stored privately (0700 dir / 0600 file, atomic rename) under
+    the governed screenshot folder and becomes a ScreenObservation through the
+    shared folder ingest/dedupe code, queued for governed vision analysis.
+    No inference happens here.
+    """
+    import base64
+    import binascii
+
+    from src.observer.local_capture_upload import (
+        MAX_REQUEST_BYTES,
+        LocalCaptureRejected,
+        ingest_local_capture,
+        upload_rate_limiter,
+    )
+    from src.observer.screen_analysis_settings import effective_screen_analysis_enabled
+
+    # Authenticate before reading or parsing any bytes.
+    uploader, policy = await _authenticate_capture_uploader(request)
+    if not effective_screen_analysis_enabled():
+        raise HTTPException(status_code=403, detail={"code": "screen_capture_disabled"})
+    if not upload_rate_limiter.allow(f"{uploader['device_id']}:{uploader['pairing_id']}"):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "capture_rate_limited"},
+            headers={"Retry-After": "60"},
+        )
+    raw = await _read_bounded_body(request, limit=MAX_REQUEST_BYTES)
+    try:
+        body = LocalCaptureUploadRequest.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_capture_request"}) from exc
+    try:
+        content = base64.b64decode(body.content_base64.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError, binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail={"code": "content_base64_invalid"}) from exc
+    try:
+        result = await ingest_local_capture(
+            content=content,
+            app_name=body.app_name,
+            window_title=body.window_title,
+            captured_at=body.captured_at,
+            capture_id=body.capture_id,
+            local_analysis=body.local_analysis.model_dump(exclude_none=True) if body.local_analysis else None,
+            uploader=uploader,
+            policy=policy,
+        )
+    except LocalCaptureRejected as exc:
+        await log_integration_event(
+            integration_type="observer_daemon",
+            name="local_capture_upload",
+            outcome="rejected",
+            details={"reason": exc.code, "device_id": uploader["device_id"]},
+        )
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    await log_integration_event(
+        integration_type="observer_daemon",
+        name="local_capture_upload",
+        outcome=result.status,
+        details={
+            "reason": result.reason,
+            "capture_id": result.capture_id,
+            "observation_id": result.observation_id,
+            "device_id": uploader["device_id"],
+        },
+    )
+    return JSONResponse(
+        {
+            "schema": "seraph.local_capture_upload.v1",
+            "status": result.status,
+            "reason_code": result.reason,
+            "capture_id": result.capture_id,
+            "observation_id": result.observation_id,
+            "content_hash": f"sha256:{result.image_sha256}",
+        },
+        status_code=201 if result.status == "accepted" else 200,
+    )
 
 
 def _screen_artifact_root() -> Path:

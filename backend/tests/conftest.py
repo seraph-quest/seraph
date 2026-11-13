@@ -61,6 +61,7 @@ _PATCH_TARGETS = [
     "src.scheduler.scheduled_jobs.get_session",
     "src.observer.insight_queue.get_session",
     "src.observer.screenshot_folder_source.get_session",
+    "src.observer.local_capture_upload.get_session",
     "src.guardian.feedback.get_session",
     "src.guardian.audio_worker.get_session",
     "src.vault.repository.get_session",

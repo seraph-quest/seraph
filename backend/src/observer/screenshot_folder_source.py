@@ -62,6 +62,15 @@ class ScreenshotFolderAnalysisResult:
 
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 SCREENSHOT_FOLDER_PROVIDER = "screenshot_folder"
+SCREENSHOT_FOLDER_APP_NAME = "Screenshot Folder"
+# Authenticated daemon uploads (ADR-035) live in this private subdirectory of
+# the governed screenshot folder. Folder scans skip it: uploads are ingested
+# only through the upload endpoint, with their real capture metadata.
+LOCAL_CAPTURE_UPLOAD_DIRNAME = ".seraph-daemon-captures"
+LOCAL_CAPTURE_SOURCE = "daemon_local_upload"
+LOCAL_CAPTURE_ID_PREFIX = "daemon_capture_id:"
+LOCAL_ANALYSIS_PREFIX = "local_analysis:"
+LOCAL_ANALYSIS_TEXT_MAX_CHARS = 8 * 1024
 SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
 SCREENSHOT_VISUAL_RUN_PREFIX = "screenshot_visual_run:"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
@@ -107,6 +116,54 @@ def resolve_screenshot_folder(configured: str | None = None) -> Path:
 def screenshot_folder_persistence_status() -> dict[str, int]:
     """Return process-local DB lock/backoff counters for operator-visible status."""
     return dict(_PERSISTENCE_STATS)
+
+
+def local_analysis_from_details(details: list[object]) -> dict[str, object] | None:
+    """Return the bounded on-device analysis a daemon upload carried, if any.
+
+    This is text the daemon produced locally (Apple Vision OCR or an
+    explicitly selected local provider); it never contains image bytes.
+    """
+    for item in details:
+        if not (isinstance(item, str) and item.startswith(LOCAL_ANALYSIS_PREFIX)):
+            continue
+        try:
+            payload = json.loads(item.removeprefix(LOCAL_ANALYSIS_PREFIX))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        bounded: dict[str, object] = {}
+        for key in ("provider", "activity", "project", "summary"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                bounded[key] = value[:512]
+        text = payload.get("text")
+        if isinstance(text, str) and text.strip():
+            bounded["text"] = text[:LOCAL_ANALYSIS_TEXT_MAX_CHARS]
+        raw_details = payload.get("details")
+        if isinstance(raw_details, list):
+            bounded["details"] = [str(entry)[:256] for entry in raw_details if isinstance(entry, str)][:16]
+        return bounded or None
+    return None
+
+
+def screenshot_pipeline_filter():
+    """SQL filter for rows owned by the screenshot pipeline.
+
+    Folder images carry the ``Screenshot Folder`` app name; authenticated
+    daemon uploads keep their real app name and are identified by their
+    capture-id marker instead.
+    """
+    return or_(
+        col(ScreenObservation.app_name) == SCREENSHOT_FOLDER_APP_NAME,
+        col(ScreenObservation.details_json).contains(f'"{LOCAL_CAPTURE_ID_PREFIX}', autoescape=True),
+    )
+
+
+def screenshot_ingest_lock() -> asyncio.Lock:
+    """Serialize folder scans and daemon uploads over the shared dedupe state."""
+    return _SCAN_LOCK
 
 
 async def scan_screenshot_folder(root: Path, *, limit: int = 100) -> ScreenshotFolderScanResult:
@@ -267,7 +324,7 @@ async def _select_analysis_candidates_with_retry(*, limit: int | None) -> list[S
             async with get_session() as db:
                 statement = (
                     select(ScreenObservation)
-                    .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+                    .where(screenshot_pipeline_filter())
                     .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
                     .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
                     .where(_analysis_candidate_status_filter())
@@ -353,18 +410,68 @@ def _dangerous_scan_roots() -> set[Path]:
 def _image_paths(root: Path) -> list[Path]:
     if not root.exists() or not root.is_dir():
         return []
+    upload_root = root / LOCAL_CAPTURE_UPLOAD_DIRNAME
     return sorted(
         (
             path
             for path in root.rglob("*")
-            if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+            if path.is_file()
+            and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+            and not path.is_relative_to(upload_root)
         ),
         key=lambda path: _capture_timestamp(path, root)[0].timestamp(),
         reverse=True,
     )
 
 
+@dataclass(frozen=True)
+class ImageObservationDecision:
+    """Outcome of the shared screenshot ingest/dedupe path.
+
+    ``observation`` is set only when a new representative observation should be
+    persisted.  Otherwise ``reason`` names why it was skipped: the same file was
+    already ingested, or it was suppressed as an exact-hash or near-visual
+    duplicate of an existing representative (whose visual run was extended).
+    """
+
+    observation: dict[str, object] | None
+    reason: str
+    image_sha256: str
+    existing_observation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ImageCaptureContext:
+    """Real capture metadata for images that did not come from folder scans."""
+
+    app_name: str
+    window_title: str
+    captured_at: datetime
+    source: str
+    extra_artifacts: dict[str, object]
+    extra_details: tuple[str, ...] = ()
+    summary: str | None = None
+
+
 async def _image_to_observation(image_path: Path, root: Path) -> dict[str, object] | None:
+    decision = await build_image_observation(image_path, root)
+    return decision.observation
+
+
+async def build_image_observation(
+    image_path: Path,
+    root: Path,
+    *,
+    capture: ImageCaptureContext | None = None,
+) -> ImageObservationDecision:
+    """Shared ingest/dedupe for folder images and authenticated daemon uploads.
+
+    Folder scans pass no ``capture`` and keep their historical identity
+    (``Screenshot Folder``, filename title, filename/mtime timestamp).  The
+    daemon upload passes the real app name, window title and capture time.
+    Both paths share exact-hash and near-visual dedupe and queue the same
+    pending marker for the governed vision analysis job.
+    """
     resolved = image_path.resolve()
     if not resolved.is_relative_to(root):
         raise ScreenshotFolderImageError("image is outside screenshot folder root")
@@ -375,7 +482,16 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
 
     stat = resolved.stat()
     metadata = await asyncio.to_thread(local_image_metadata, resolved)
-    captured_at, captured_at_source = _capture_timestamp(resolved, root)
+    if capture is None:
+        captured_at, captured_at_source = _capture_timestamp(resolved, root)
+        app_name = SCREENSHOT_FOLDER_APP_NAME
+        window_title = resolved.name
+        source = "local_image_directory"
+    else:
+        captured_at, captured_at_source = capture.captured_at, "capture_metadata"
+        app_name = capture.app_name
+        window_title = capture.window_title
+        source = capture.source
     relative_path = resolved.relative_to(root).as_posix()
 
     image_sha256 = await asyncio.to_thread(_sha256_file, resolved)
@@ -385,18 +501,29 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         duplicate_artifacts = _capture_artifacts_from_details(duplicate_details) or {}
         duplicate_path = Path(str(duplicate_artifacts.get("image_path") or "")).expanduser().resolve()
         if duplicate_path == resolved:
-            return None
+            return ImageObservationDecision(
+                observation=None,
+                reason="already_ingested",
+                image_sha256=image_sha256,
+                existing_observation_id=existing_duplicate.id,
+            )
         await _extend_visual_run(
             existing_duplicate,
             suppressed_path=resolved,
             suppressed_at=captured_at,
             reason="exact_hash_duplicate",
         )
-        return None
+        return ImageObservationDecision(
+            observation=None,
+            reason="exact_hash_duplicate",
+            image_sha256=image_sha256,
+            existing_observation_id=existing_duplicate.id,
+        )
 
     visual_fingerprint = await asyncio.to_thread(_visual_fingerprint, resolved)
     visual_duplicate = await _current_visual_duplicate(
         root=root,
+        app_name=app_name,
         captured_at=captured_at,
         image_path=resolved,
         metadata=metadata,
@@ -409,13 +536,18 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
             suppressed_at=captured_at,
             reason="near_visual_duplicate",
         )
-        return None
+        return ImageObservationDecision(
+            observation=None,
+            reason="near_visual_duplicate",
+            image_sha256=image_sha256,
+            existing_observation_id=visual_duplicate.id,
+        )
 
     capture_id = image_sha256[:16]
-    artifacts = {
+    artifacts: dict[str, object] = {
         "id": capture_id,
         "provider": SCREENSHOT_FOLDER_PROVIDER,
-        "source": "local_image_directory",
+        "source": source,
         "created_at": captured_at.isoformat(),
         "created_at_source": captured_at_source,
         "screenshot_folder": str(root),
@@ -427,6 +559,9 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         "width": metadata.get("width"),
         "height": metadata.get("height"),
     }
+    if capture is not None:
+        for key, value in capture.extra_artifacts.items():
+            artifacts.setdefault(key, value)
     if visual_fingerprint is not None:
         artifacts["visual_fingerprint"] = visual_fingerprint
         artifacts["visual_dedupe_version"] = _VISUAL_DEDUPE_VERSION
@@ -447,6 +582,8 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
             separators=(",", ":"),
         ),
     ]
+    if capture is not None:
+        details.extend(capture.extra_details)
     if screenshot_semantic_analysis_enabled():
         details.append(screenshot_analysis_status_detail("pending", reason="queued_for_analysis"))
     else:
@@ -455,16 +592,24 @@ async def _image_to_observation(image_path: Path, root: Path) -> dict[str, objec
         details.append(screenshot_analysis_status_detail("blocked", reason=blocked_reason))
     metadata_label = image_metadata_label(metadata)
     summary_suffix = f" ({metadata_label})" if metadata_label else ""
-    return {
-        "app_name": "Screenshot Folder",
-        "window_title": resolved.name,
-        "activity_type": "screen",
-        "project": None,
-        "summary": f"Screenshot image added from folder: {resolved.name}{summary_suffix}.",
-        "details": details,
-        "blocked": False,
-        "timestamp": captured_at,
-    }
+    if capture is not None and capture.summary:
+        summary = capture.summary
+    else:
+        summary = f"Screenshot image added from folder: {resolved.name}{summary_suffix}."
+    return ImageObservationDecision(
+        observation={
+            "app_name": app_name,
+            "window_title": window_title,
+            "activity_type": "screen",
+            "project": None,
+            "summary": summary,
+            "details": details,
+            "blocked": False,
+            "timestamp": captured_at,
+        },
+        reason="ingested",
+        image_sha256=image_sha256,
+    )
 
 
 def _capture_timestamp(image_path: Path, root: Path) -> tuple[datetime, str]:
@@ -505,6 +650,7 @@ async def _image_already_ingested(image_sha256: str) -> ScreenObservation | None
 async def _current_visual_duplicate(
     *,
     root: Path,
+    app_name: str = SCREENSHOT_FOLDER_APP_NAME,
     captured_at: datetime,
     image_path: Path,
     metadata: dict[str, object],
@@ -516,7 +662,7 @@ async def _current_visual_duplicate(
         base_query = (
             select(ScreenObservation)
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
-            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .where(col(ScreenObservation.app_name) == app_name)
             .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
             .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
         )

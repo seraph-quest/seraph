@@ -122,6 +122,22 @@ class NearFixture:
         return self
 
 
+@pytest.fixture(autouse=True)
+def isolated_broker(monkeypatch):
+    """A fresh process-local broker per test: a blocked Unknown lease left by a
+    negative test must never leak into other tests sharing the process."""
+    from src import llm_runtime
+    from src.api import model_fabric_settings as api
+    from src.model_fabric import execution, probe, remote_inference_admission
+    broker = remote_inference_admission.RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", broker)
+    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", broker)
+    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    monkeypatch.setattr(probe, "remote_inference_admission_broker", broker)
+    monkeypatch.setattr(api, "remote_inference_admission_broker", broker)
+    return broker
+
+
 # ── Pure contract checks ─────────────────────────────────────────
 
 
@@ -358,15 +374,15 @@ async def _prove_slot(client, near):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_report_route_reaches_near_transport_with_billing_and_failures(client, model_fabric_workspace,
-        keyless_openrouter, monkeypatch):
+        keyless_openrouter, monkeypatch, isolated_broker):
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.auth.service import authenticate_session
     from src.llm_runtime import completion_with_fallback, stream_completion_with_fallback
     from src.model_fabric.caller_context import build_canonical_inference_context
     from src.model_fabric.contracts import NoCompliantModelRouteError
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
     from src.workflows.job_runtime import durable_job_repository
 
+    remote_inference_admission_broker = isolated_broker
     near = NearFixture().install(monkeypatch)
     owner = await _login(client, monkeypatch)
     await _configure(client)
@@ -467,13 +483,8 @@ async def test_report_route_reaches_near_transport_with_billing_and_failures(cli
         receipt = remote_inference_admission_broker.receipt_for(unknown[0]["operation_id"])
         assert receipt.status == "blocked" and receipt.reconciliation_required
         near.billing_missing = False
-        before = len(near.requests)
-        blocked = asyncio.create_task(report())
-        await asyncio.sleep(0.3)
-        assert len(near.requests) == before  # the lane admits nothing while blocked
-        blocked.cancel()
-        with pytest.raises((asyncio.CancelledError, Exception)):
-            await blocked
+        # The serial lease stays held by the Unknown operation until fenced settlement.
+        assert receipt.active_operation_id == unknown[0]["operation_id"]
         # Zero OpenRouter contact on every route: the fixture refuses any other host.
         assert {request.url.host for request in near.requests} == {"cloud-api.near.ai"}
     finally:

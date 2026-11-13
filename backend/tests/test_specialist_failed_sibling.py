@@ -9,6 +9,9 @@ from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.test_specialist_parent_synthesis import genuine_mcp_registry, charged_parent
 
+# ADR-035: pins specialist delegation Work mechanics whose planner/model steps run over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 async def test_failed_child_retains_successful_sibling_and_holds_parent(task_runtime, monkeypatch, native_admission_lifecycle):

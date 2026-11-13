@@ -10,6 +10,9 @@ from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.test_general_task_specialist_planning import specialist_fixture
 
+# ADR-035: pins specialist delegation Work mechanics whose planner/model steps run over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 async def test_native_delegation_declared_execution_grant_is_required(task_runtime, monkeypatch, native_admission_lifecycle):

@@ -8,6 +8,9 @@ from sqlalchemy import select
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime, OWNER, SESSION, _goal
 
+# ADR-035: pins specialist delegation Work mechanics whose planner/model steps run over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def copied_evidence_fixture(task_runtime, monkeypatch, *, delegate_input_mutator=None,
                                   producer_content="explicit copied bytes"):

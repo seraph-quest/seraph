@@ -217,6 +217,7 @@ async def test_run_strategist_decision_completion_uses_bounded_runtime_path(mock
     assert call["request_context"].data_digest == canonical_digest(call["messages"])
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: strategist turn builds its canonical context on the historical OpenRouter route
 @pytest.mark.asyncio
 async def test_run_strategist_decision_completion_binds_durable_admission_receipts():
     response = MagicMock()

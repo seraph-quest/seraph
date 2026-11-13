@@ -653,7 +653,10 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
             capture=capture_near_billing_evidence)
         # Shielded: a further cancellation cannot abandon the readback; if it
         # interrupts this await anyway, the outcome stays an Unknown liability.
-        evidence = await asyncio.shield(billing) if state.caller_cancelled else await billing
+        # Shield the readback whenever the caller stopped or cancelled: a second
+        # cancel (e.g. task cleanup after a WS send failure) must not leave an
+        # Unknown liability that blocks the whole lane.
+        evidence = (await asyncio.shield(billing)) if (state.caller_cancelled or state.stop_requested) else await billing
     if evidence is None:
         raise NearTeeError("near_tee_cost_liability")
     if failure is None and not state.delivered:

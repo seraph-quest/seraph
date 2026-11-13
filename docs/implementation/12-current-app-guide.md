@@ -3558,6 +3558,36 @@ the portable core remains usable. Pairing alone grants neither execution nor
 data egress, and protected-surface checks cannot identify every sensitive page.
 Availability follows the reviewed installed revision described above.
 
+### Reading stored end-of-day reports
+
+**Partial.** The cockpit **Reports** section (under **More** on narrow
+screens, and **Open Reports** on Home) lists the end-of-day goal reports that
+the scheduled job already stored, newest first, and shows one selected report.
+It is read-only: it cannot generate a report and starts no model call.
+
+- `GET /api/reports/end-of-day?limit=1..100` (default 30) lists each report's
+  date, timezone, stored time, status, stored `analysis_provider` label, goal
+  counts and tracked minutes.
+- `GET /api/reports/end-of-day/{episode_id}` adds the stored body, the
+  activity/project/source mix, switch count and the archive SHA-256 values.
+  Unknown ids and episodes that are not end-of-day reports return 404.
+- Only `observer` memory episodes from `end_of_day_goal_report` whose metadata
+  has kind `end_of_day_goal_report` and schema
+  `seraph.end_of_day_goal_report.v1` are listed. The repository reads at most
+  1,000 candidate rows per listing.
+- **Blocked reports.** A report whose `analysis_provider` is `blocked:<reason>`
+  is shown as **Blocked** with its reason, and its body appears as a blocked
+  notice rather than a report. Report generation, storage and email are
+  unchanged; the scheduler receipt for such a run is tracked in
+  [#1140](https://github.com/seraph-quest/seraph/issues/1140).
+- **Mix breakdown.** The mixes come from the report's own JSON archive, used
+  only when its path is inside the report archive and its SHA-256 matches the
+  stored value. Otherwise the detail falls back to the episode's stored minutes
+  and observation count and says the breakdown is unavailable.
+- **Privacy.** Responses never include archive or receipt paths, raw screen
+  samples or per-app names. The routes sit under `/api/*` and need the
+  operator session.
+
 ### Portable selected browser text profile (#926) {#portable-selected-browser-text-926-branch-local-target}
 
 [ADR-022](./decisions/022-portable-selected-text-context.md) accepts one optional

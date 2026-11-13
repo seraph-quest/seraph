@@ -1266,9 +1266,22 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > topology below remains documented as pre-#775 `develop` evidence and rollback
 > diagnostics, not a startup dependency. Named missing platform/provider receipts
 > remain unverified; integration does not establish them.
-> Shipped route: OpenRouter (#775). Accepted target: [ADR-035](./decisions/035-near-tee-hosted-inference-only.md) (Planned).
+> Accepted target: [ADR-035](./decisions/035-near-tee-hosted-inference-only.md) (Planned).
 > [ADR-025](./decisions/025-near-https-text-inference.md) permits only the separate
 > optional NEAR HTTPS text capability described above.
+
+> **OpenRouter retired (ADR-035, #1147 PR3a):** OpenRouter is retired by policy.
+> No route makes new OpenRouter contact: chat, agent and guardian turns, reports,
+> Cordis `inference.request`, screenshot vision, embeddings, capability checks
+> and screen-analysis provider selection all fail closed with the stable reason
+> `openrouter_retired`, with no fallback. Until the NEAR TEE slots land
+> (PR3b–PR4), ordinary inference routes report **blocked**
+> (`openrouter_retired`, `no_active_provider`) in `/api/runtime/status` and
+> Settings; this is expected and not a crash. The optional NEAR text Work
+> capability (ADR-025) is unchanged. Retained OpenRouter configuration,
+> credential, receipts, ledger rows and Unknown liabilities stay readable and
+> settleable through Inference accounting. The OpenRouter sections below
+> describe the retained configuration and historical mechanics, not a live route.
 
 This is the short operator-facing description of the current application. For
 the target product and locked decisions, read the
@@ -1328,7 +1341,27 @@ container can read `/proc/self/mountinfo`. Compose sets the mount-check flag,
 and the container preflight fails closed before startup when the bind evidence
 is missing.
 
+### Shared inference lane (ADR-035)
+
+The deployment spend ceiling and the shared lane bounds (max queued, one
+in-flight request, per-owner outstanding, retries) belong to a
+provider-neutral `inference_lane` object, edited in **Settings → Shared
+inference lane**. A deployment saved before this change reads the lane through
+a pure migration of the retained OpenRouter (or NEAR text) values and shows
+"migration pending" until an explicit save publishes it. That save uses the
+same witnessed revoke→accounting→activate publication and revision CAS as other
+provider settings, preserves the ledger, reservations and Unknown liabilities,
+and also publishes a route-scoped revoke of the stored OpenRouter routes
+(routes disabled, purpose consents and cloud acknowledgement withdrawn) without
+fencing NEAR. NEAR text mirrors the lane ceiling and never funds its own.
+
 ### Configure the OpenRouter route (Epic #736/#775)
+
+OpenRouter is retired (ADR-035): the settings panel shows "Retired (ADR-035) —
+no new requests; existing costs can still be settled", every control that could
+activate it is disabled, and the settings API refuses OpenRouter saves and
+capability checks with `openrouter_retired`. The text below records the
+historical setup contract for retained configuration.
 
 Open **Settings → Models & OpenRouter** (formerly the Screenshot/VLM tab) and
 use its **OpenRouter setup** section to save the fixed

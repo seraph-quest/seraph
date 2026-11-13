@@ -630,9 +630,10 @@ the Constitution and ADRs remain the target authority.
 
 Readiness remains specific to the selected profile. The CPU core, canonical
 workspace and operator controls work without a local model, GPU, VLM service or
-optional companion. Ordinary remote inference uses the governed OpenRouter route and
-stays configuration-required without explicit credentials, upstream policy,
-consent, verified capability and budget. Linux optional isolation proof does not
+optional companion. OpenRouter is retired by policy (ADR-035, #1147 PR3a): no
+route makes new OpenRouter contact, and ordinary remote inference routes report
+blocked (`openrouter_retired` / `no_active_provider`) until the NEAR TEE slots
+land; the optional NEAR text Work capability (ADR-025) is unchanged. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
 native/companion boundaries named by each adapter. No paid model, real Google
 account or Mac host is a prerequisite for local implementation acceptance.
@@ -692,6 +693,21 @@ Unknown cost discards the withheld answer, and debt reconciliation cannot recove
 it or resend inference. Every outcome records `no_learning`.
 
 ## Epic #736/#775 OpenRouter inference phase
+
+**Retired (ADR-035, #1147 PR3a).** OpenRouter is retired by policy: selector,
+caller context, effective policy, admission, contact-time accounting, the
+governed transports, embeddings, screenshot vision, the capability-check
+endpoint and screen-analysis provider selection deny new OpenRouter contact with
+`openrouter_retired` and no fallback. Retained configuration, credential,
+receipts, ledger rows, billing readback and manual settlement stay readable so
+contacted liabilities reconcile. Lane limits and the deployment ceiling moved to
+a provider-neutral, versioned `inference_lane` (pure migration of retained
+values; explicit witnessed publication that preserves the ledger and publishes a
+route-scoped revoke of stored OpenRouter routes). Until NEAR TEE slots ship,
+inference routes are blocked and say so in runtime status and Settings.
+Provider-intercepted tests assert zero OpenRouter contact on representative
+routes; this is **Partial** pending the NEAR slices. The text below records the
+historical phase.
 
 This section records the accepted ordinary OpenRouter inference phase and its
 provider-free implementation contract. The ordinary route is the governed

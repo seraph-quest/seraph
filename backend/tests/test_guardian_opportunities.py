@@ -13,6 +13,9 @@ from src.guardian.opportunity_contracts import OpportunityError, OpportunityCanc
 from src.guardian.opportunities import cancel_opportunity, publish_verified_packet, save_policy
 from src.auth.service import authenticate_session
 
+# ADR-035: pins guardian opportunity readback whose setup saves the historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def test_silent_history_feedback_is_409_and_foreign_inbox_is_hidden(isolated_runtime, monkeypatch):
     from src.guardian import feedback, inbox

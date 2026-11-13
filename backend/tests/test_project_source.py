@@ -208,6 +208,7 @@ def test_malformed_provider_items_are_refused_and_bodies_are_bounded():
     assert len(long["body"].encode()) == 6000 and long["body_truncated"] is True
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: finding-to-triage step runs over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_finding_becomes_an_inert_triage_task_quoting_the_source_as_data(
         accounting_db, monkeypatch, repository_admission_signer):

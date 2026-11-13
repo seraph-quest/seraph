@@ -6,6 +6,7 @@ import {
   dollarsToMicrousd,
   microusdToDollars,
   normalizeModelFabricSettings,
+  OPENROUTER_RETIRED_LABEL,
   type ModelFabricSettingsStatus,
   type OpenRouterOptionalPurpose,
   type OpenRouterRouteValue,
@@ -69,6 +70,12 @@ interface OpenRouterSetupPanelProps {
   onSave: (payload: Record<string, unknown>) => Promise<ModelFabricSettingsStatus>;
   policyRevision?: number;
   policyRevoked?: boolean;
+  /**
+   * ADR-035: OpenRouter is retired by policy. Retained routes stay readable
+   * but every control that could activate them is disabled; existing costs
+   * are settled under Inference accounting.
+   */
+  retired?: boolean;
 }
 function routeDraft(route: OpenRouterRouteValue | null | undefined, slot: OpenRouterOptionalPurpose): RouteDraft {
   return {
@@ -194,7 +201,7 @@ function unchangedRoute(draft: RouteDraft, route: OpenRouterRouteValue | null | 
 }
 const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-40";
 
-export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, policyRevoked }: OpenRouterSetupPanelProps) {
+export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, policyRevoked, retired = true }: OpenRouterSetupPanelProps) {
   const [metadata, setMetadata] = useState(setup);
   const [revision, setRevision] = useState(policyRevision);
   const [revoked, setRevoked] = useState(policyRevoked ?? false);
@@ -280,7 +287,9 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
       if (mounted.current && lifecycle.current === generation && refreshController.current === controller) setRefreshing(false);
     }
   }
+  const isRetired = retired || metadata?.retired === true;
   async function save() {
+    if (isRetired) { setError(OPENROUTER_RETIRED_LABEL); return; }
     const generation = lifecycle.current;
     const current = () => mounted.current && lifecycle.current === generation;
     setSaving(true);
@@ -328,13 +337,20 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
       {metadata?.schema_version === "seraph.openrouter.setup.v3" && <AudioDocumentationControls />}
       <div className="flex items-center justify-between gap-2 mb-1">
         <div className="text-[10px] text-retro-text">OpenRouter setup</div>
-        <div className="text-[9px] text-retro-text/60">{metadataRetained ? "stale retained" : (metadata?.status ?? "configuration_required").replace(/_/g, " ")}</div>
+        <div className="text-[9px] text-retro-text/60">{metadataRetained ? "stale retained" : isRetired ? "retired" : (metadata?.status ?? "configuration_required").replace(/_/g, " ")}</div>
       </div>
-      <div className="mb-2 text-[9px] text-retro-text/50">
-        Fixed route https://openrouter.ai/api/v1 · save and status never call a provider. Proving a route runs explicit, billed canaries.
-        All purposes share one deployment ceiling and one in-flight request. Readiness reflects capability proof only.
-      </div>
-      {metadata?.error_code && <div className="mb-1 text-[9px] text-red-400">{metadata.error_code}</div>}
+      {isRetired ? (
+        <div role="note" data-testid="openrouter-retired-banner" className="mb-2 border border-yellow-400/40 px-2 py-1 text-[9px] text-yellow-400">
+          {OPENROUTER_RETIRED_LABEL}. Retained routes are shown read-only. Settle any remaining OpenRouter costs under Inference accounting.
+        </div>
+      ) : (
+        <div className="mb-2 text-[9px] text-retro-text/50">
+          Fixed route https://openrouter.ai/api/v1 · save and status never call a provider. Proving a route runs explicit, billed canaries.
+          All purposes share one deployment ceiling and one in-flight request. Readiness reflects capability proof only.
+        </div>
+      )}
+      {metadata?.error_code && !isRetired && <div className="mb-1 text-[9px] text-red-400">{metadata.error_code}</div>}
+      <fieldset disabled={isRetired} aria-label="OpenRouter route controls" className="m-0 min-w-0 border-0 p-0">
       <label className="flex items-center gap-1 mb-2 text-[9px] text-retro-text/70">
         <input type="checkbox" aria-label="Configure optional OpenRouter audio slot" checked={draft.audioSetup} disabled={metadata?.schema_version === "seraph.openrouter.setup.v3"} onChange={(event) => update("audioSetup", event.target.checked)} />
         Configure optional audio slot (disabled until explicitly enabled; separate source consent and proof required)
@@ -426,8 +442,9 @@ export function OpenRouterSetupPanel({ setup, stale, onSave, policyRevision, pol
         <label htmlFor="openrouter-api-key" className="text-retro-text/40">Shared API key</label>
         <input id="openrouter-api-key" aria-label="OpenRouter API key (write-only)" type="password" autoComplete="new-password" value={credential} onChange={(event) => { dirty.current = true; setCredential(event.target.value); }} className={inputClass} placeholder={metadata?.credential_configured ? "leave blank to keep existing" : "write-only · optional until later"} />
       </div>
+      </fieldset>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[9px]">
-        <button type="button" disabled={saving || refreshing} onClick={() => void save()} className="border border-retro-text/20 px-2 py-1 text-retro-text/70 disabled:opacity-40">{saving ? "Saving" : revoked ? "Review and re-grant OpenRouter egress" : "Save OpenRouter setup"}</button>
+        <button type="button" disabled={isRetired || saving || refreshing} onClick={() => void save()} className="border border-retro-text/20 px-2 py-1 text-retro-text/70 disabled:opacity-40">{isRetired ? "OpenRouter retired · no new requests" : saving ? "Saving" : revoked ? "Review and re-grant OpenRouter egress" : "Save OpenRouter setup"}</button>
         <button type="button" disabled={saving || refreshing} onClick={() => void refresh()} className="border border-retro-text/20 px-2 py-1 text-retro-text/70 disabled:opacity-40">{refreshing ? "Refreshing" : "Refresh current OpenRouter settings"}</button>
         <span className="text-retro-text/40">{metadata?.credential_configured ? "key configured · fingerprint " + (metadata.credential_fingerprint ?? "unavailable") : "configuration required · no key stored"} · revision {revision ?? "unavailable"}</span>
       </div>

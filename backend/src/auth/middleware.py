@@ -24,6 +24,9 @@ _PAIRED_EDGE_INGRESS_PATHS = {
     "/api/nodes/edge/heartbeat",
     "/api/nodes/edge/upload",
     "/api/nodes/edge/ingest",
+    # Daemon local capture upload (ADR-035): the handler authenticates the
+    # same scoped paired-edge credential before reading any bytes.
+    "/api/observer/captures",
 }
 
 

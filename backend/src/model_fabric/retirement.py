@@ -16,6 +16,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 
+from .contracts import NoCompliantModelRouteError
+
 OPENROUTER_RETIRED_REASON = "openrouter_retired"
 NO_ACTIVE_PROVIDER_REASON = "no_active_provider"
 OPENROUTER_RETIRED_LABEL = "Retired (ADR-035) — no new requests; existing costs can still be settled"
@@ -39,14 +41,27 @@ class ProviderRetiredError(PermissionError):
         self.reason_codes = (code,)
 
 
+class OpenRouterRetiredRouteError(NoCompliantModelRouteError):
+    """The canonical no-contact route denial for retired OpenRouter.
+
+    A ``NoCompliantModelRouteError`` so every existing route-denial handler
+    applies; its ``str`` and ``reason_codes`` carry ``openrouter_retired`` so
+    callers that only log ``str(exc)`` still record the stable reason.
+    """
+
+    code = OPENROUTER_RETIRED_REASON
+
+    def __init__(self, reason_codes: tuple[str, ...] = (OPENROUTER_RETIRED_REASON,)) -> None:
+        super().__init__(reason_codes)
+
+
 @contextmanager
 def retired_as_route_error():
     """Re-raise a retirement denial as the canonical no-contact route error."""
-    from .contracts import NoCompliantModelRouteError
     try:
         yield
     except ProviderRetiredError as exc:
-        raise NoCompliantModelRouteError((exc.code,)) from exc
+        raise OpenRouterRetiredRouteError((exc.code,)) from exc
 
 
 def openrouter_retired() -> bool:

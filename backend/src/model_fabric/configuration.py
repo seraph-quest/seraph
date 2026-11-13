@@ -512,13 +512,62 @@ def _retired_openrouter_profiles(profiles: tuple[ProviderProfile, ...]) -> tuple
         for profile in profiles)
 
 
+BOOT_ROUTE_REVOKE_KEY_PREFIX = "boot:openrouter_route_revoke:"
+
+
+def _boot_revoke_plan(configured: "ModelFabricConfiguration") -> tuple[str, "ModelFabricConfiguration | None", int]:
+    """Classify the stored configuration for the boot revoke.
+
+    Returns ("noop" | "publish" | "complete" | "degraded:<code>", final, base).
+    ``complete`` finishes an interrupted boot publication whose revoked
+    intermediate (r+1) carries this publication's own revocation key.
+    """
+    if configured.status == "missing":
+        return "noop", None, 0
+    if configured.status != "ready":
+        return "degraded:" + (configured.error_code or "configuration_unavailable"), None, 0
+    key = configured.egress_revocation_key or ""
+    if configured.egress_revoked and key.startswith(BOOT_ROUTE_REVOKE_KEY_PREFIX):
+        prior = key.removeprefix(BOOT_ROUTE_REVOKE_KEY_PREFIX)
+        if (prior not in {"active", "revoked"} or not openrouter_setup_is_retired(configured.openrouter_setup)
+                or _retired_openrouter_profiles(configured.profiles) != configured.profiles
+                or configured.inference_lane is None):
+            return "degraded:openrouter_route_revoke_interrupted", None, 0
+        # The intermediate already holds the final values (NEAR consent was
+        # carried to r+2 under the existing rule); only the revoke flag and
+        # this publication's key are restored.
+        final = replace(configured, egress_revision=configured.egress_revision + 1,
+            egress_revoked=prior == "revoked", egress_revocation_key=None,
+            updated_at=datetime.now(timezone.utc).isoformat())
+        return "complete", final, configured.egress_revision
+    setup = configured.openrouter_setup
+    profiles = _retired_openrouter_profiles(configured.profiles)
+    if profiles == configured.profiles and (setup is None or openrouter_setup_is_retired(setup)):
+        return "noop", None, 0
+    revision = configured.egress_revision
+    final_revision = revision + 2
+    near = configured.near_text
+    if (near is not None and near.enabled and not configured.egress_revoked
+            and near.plaintext_egress_consent_revision == revision):
+        near = replace(near, plaintext_egress_consent_revision=final_revision)
+    final = replace(configured, openrouter_setup=retire_openrouter_setup(setup), profiles=profiles,
+        near_text=near, inference_lane=effective_inference_lane(configured),
+        egress_revision=final_revision, egress_revocation_key=None,
+        updated_at=datetime.now(timezone.utc).isoformat())
+    return "publish", final, revision
+
+
 def publish_openrouter_route_revoke() -> dict[str, object]:
     """One-shot, idempotent, witnessed boot publication of the ADR-035 revoke.
 
     Disables the stored OpenRouter routes and profiles and withdraws their
     consents so an older binary cannot resume contact, without waiting for an
-    operator save. Publishes revoked (r+1) then final (r+2) under the
-    maintenance accounting lock with revision CAS. It never touches the
+    operator save. Publishes revoked (r+1, keyed as this publication) then
+    final (r+2) under the maintenance accounting lock with revision CAS, and
+    re-reads the configuration under that lock so concurrent workers no-op.
+    A crash between r+1 and r+2 is completed on the next boot when the
+    witnessed intermediate carries this publication's key; anything else is
+    reported as ``openrouter_route_revoke_interrupted``. It never touches the
     ledger; when no lane is published yet, the migrated lane (identical
     ceiling and bounds) is published with it so the retained, unconsented
     OpenRouter object stays a valid readable configuration. Global egress
@@ -530,32 +579,27 @@ def publish_openrouter_route_revoke() -> dict[str, object]:
         result = {"status": "skipped", "reason_code": "openrouter_not_retired"}
     else:
         path = model_fabric_configuration_path()
-        configured = read_model_fabric_configuration() if path.exists() else ModelFabricConfiguration()
-        setup = configured.openrouter_setup
-        profiles = _retired_openrouter_profiles(configured.profiles)
-        if configured.status == "missing" or setup is None and profiles == configured.profiles:
-            result = {"status": "noop", "reason_code": None}
-        elif configured.status != "ready":
-            result = {"status": "degraded", "reason_code": configured.error_code or "configuration_unavailable"}
-        elif openrouter_setup_is_retired(setup) and profiles == configured.profiles:
+        if not path.exists():
             result = {"status": "noop", "reason_code": None}
         else:
-            revision = configured.egress_revision
-            final_revision = revision + 2
-            near = configured.near_text
-            if (near is not None and near.enabled and not configured.egress_revoked
-                    and near.plaintext_egress_consent_revision == revision):
-                near = replace(near, plaintext_egress_consent_revision=final_revision)
-            target = replace(configured, openrouter_setup=retire_openrouter_setup(setup), profiles=profiles,
-                near_text=near, inference_lane=effective_inference_lane(configured),
-                egress_revision=final_revision, egress_revocation_key=None, updated_at=None)
             from src.workspace.accounting_witness import maintenance_accounting_lock
             with maintenance_accounting_lock(path.parent) as workspace:
-                write_model_fabric_configuration(replace(target, egress_revision=revision + 1, egress_revoked=True),
-                    expected_revision=revision, publication_workspace=workspace)
-                write_model_fabric_configuration(target, expected_revision=revision + 1,
-                    publication_workspace=workspace)
-            result = {"status": "published", "reason_code": None, "revision": final_revision}
+                plan, final, base = _boot_revoke_plan(read_model_fabric_configuration())
+                if plan == "publish":
+                    marker = BOOT_ROUTE_REVOKE_KEY_PREFIX + ("revoked" if final.egress_revoked else "active")
+                    write_model_fabric_configuration(replace(final, egress_revision=base + 1, egress_revoked=True,
+                        egress_revocation_key=marker), expected_revision=base, publication_workspace=workspace)
+                    write_model_fabric_configuration(final, expected_revision=base + 1,
+                        publication_workspace=workspace)
+                elif plan == "complete":
+                    write_model_fabric_configuration(final, expected_revision=base, publication_workspace=workspace)
+            if plan in {"publish", "complete"}:
+                result = {"status": "published" if plan == "publish" else "completed", "reason_code": None,
+                    "revision": final.egress_revision}
+            elif plan.startswith("degraded:"):
+                result = {"status": "degraded", "reason_code": plan.removeprefix("degraded:")}
+            else:
+                result = {"status": "noop", "reason_code": None}
     _openrouter_route_revoke_status = result
     return dict(result)
 

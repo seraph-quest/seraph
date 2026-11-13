@@ -111,6 +111,105 @@ async def read_near_response(
         raise error(prefix + "_transport_uncertain") from None
 
 
+STREAM_LINE_CAP = 65536
+
+
+async def stream_near_events(
+    client: httpx.AsyncClient,
+    path: str,
+    *,
+    body: bytes,
+    key: str,
+    stream_deadline: float,
+    cap: int,
+    error: Callable[[str], Exception],
+    prefix: str,
+    on_open: Callable[[Any], None],
+):
+    """Bounded server-sent-events read from the pinned base (ADR-035 streaming).
+
+    Yields each ``data:`` payload parsed as strict JSON (duplicate keys and
+    non-finite constants rejected) and returns normally only at ``[DONE]``.
+    ``stream_deadline`` is an event-loop time: every network read is bounded
+    by it, never the caller's work while this generator is suspended at a
+    yield, so a stalled provider is cut off before the caller's billing
+    window. Identity encoding, HTTP 200 and ``text/event-stream`` are
+    required; redirects are never followed; raw bytes and line length are
+    capped. Every failure is a content-safe ``error(code)``; ``on_open``
+    receives the response headers once the response exists (contact).
+    """
+    loop = asyncio.get_running_loop()
+
+    def remaining() -> float:
+        value = stream_deadline - loop.time()
+        if value <= 0:
+            raise error(prefix + "_stream_deadline")
+        return value
+
+    headers = near_request_headers(key=key, no_aliasing=True, json_body=True)
+    headers["Accept"] = "text/event-stream"
+    request = client.build_request("POST", NEAR_API_BASE + path, content=body, headers=headers,
+        timeout=remaining())
+    try:
+        async with asyncio.timeout(remaining()):
+            response = await client.send(request, stream=True, follow_redirects=False)
+    except (httpx.HTTPError, TimeoutError):
+        raise error(prefix + "_transport_uncertain") from None
+    try:
+        on_open(response.headers)
+        if response.headers.get("content-encoding", "identity").lower() != "identity":
+            raise error(prefix + "_response_encoding_invalid")
+        if response.status_code != 200:
+            raise error(prefix + "_http_error")
+        if response.headers.get("content-type", "").split(";")[0].strip().lower() != "text/event-stream":
+            raise error(prefix + "_stream_content_type_invalid")
+        iterator = response.aiter_raw().__aiter__()
+        total = 0
+        buffer = bytearray()
+        data_lines: list[bytes] = []
+        while True:
+            try:
+                async with asyncio.timeout(remaining()):
+                    chunk = await iterator.__anext__()
+            except StopAsyncIteration:
+                break
+            except TimeoutError:
+                raise error(prefix + "_stream_deadline") from None
+            except httpx.HTTPError:
+                raise error(prefix + "_stream_interrupted") from None
+            total += len(chunk)
+            if total > cap:
+                raise error(prefix + "_response_too_large")
+            buffer.extend(chunk)
+            while (index := buffer.find(b"\n")) >= 0:
+                line = bytes(buffer[:index]).rstrip(b"\r")
+                del buffer[:index + 1]
+                if line:
+                    if line.startswith(b"data:"):
+                        data_lines.append(line[5:].removeprefix(b" "))
+                    # Comments and other SSE fields carry no answer data.
+                    continue
+                if not data_lines:
+                    continue
+                data = b"\n".join(data_lines)
+                data_lines = []
+                if data.strip() == b"[DONE]":
+                    return
+                try:
+                    payload = strict_json_object(data)
+                except (ValueError, UnicodeDecodeError, RecursionError):
+                    raise error(prefix + "_stream_invalid") from None
+                yield payload
+            if len(buffer) > STREAM_LINE_CAP:
+                raise error(prefix + "_stream_line_too_large")
+        if data_lines and b"\n".join(data_lines).strip() == b"[DONE]":
+            return
+        # The provider closed without the terminal marker.
+        raise error(prefix + "_stream_incomplete")
+    finally:
+        await response.aclose()
+
+
 async def read_near_billing(
     client: httpx.AsyncClient,
     *,

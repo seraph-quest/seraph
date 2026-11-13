@@ -635,6 +635,15 @@ def _carry_near_consent(setup, persisted, revision):
     return replace(setup, plaintext_egress_consent_revision=revision if setup.enabled and unchanged and current else None)
 
 
+def _consented_near_tee_slots(setup, revision):
+    """Enabled NEAR TEE slots whose purpose consent is current at ``revision``;
+    only these can contact NEAR, so only they count toward reserve review."""
+    if setup is None:
+        return []
+    return [slot for slot in (setup.slots or {}).values()
+        if slot is not None and slot.enabled and slot.purpose_consent_revision == revision]
+
+
 def _carry_near_tee_consents(setup, persisted, revision):
     """Carry a current, unchanged slot consent to the final revision; never resurrect."""
     if setup is None:
@@ -670,6 +679,7 @@ async def _put_near_tee(body, persisted):
     prior = persisted.near_tee
     slots: dict[str, NearTeeSlot | None] = {}
     acknowledged: dict[str, bool] = {}
+    screenshot_withdrawn = False
     for name in NEAR_TEE_IMPLEMENTED_SLOTS:
         if name not in incoming.slots.model_fields_set:
             # Omitted: keep the stored slot. Its consent carries only when it
@@ -693,6 +703,11 @@ async def _put_near_tee(body, persisted):
         slots[name] = NearTeeSlot(**fields)
         acknowledged[name] = slot_input.plaintext_provider_egress_acknowledged and (
             name != "vision" or slot_input.screenshot_plaintext_egress_acknowledged)
+        if (name == "vision" and "screenshot_plaintext_egress_acknowledged" in slot_input.model_fields_set
+                and not slot_input.screenshot_plaintext_egress_acknowledged):
+            # An explicit false withdraws the screenshot consent, even on an
+            # otherwise unchanged slot whose consent would carry.
+            screenshot_withdrawn = True
     setup = NearTeeSetup(credential_fingerprint=prior.credential_fingerprint if prior else None, slots=slots)
     raw_key = incoming.api_key.get_secret_value() if incoming.api_key is not None else ""
     if raw_key.strip():
@@ -707,6 +722,10 @@ async def _put_near_tee(body, persisted):
     setup = _carry_near_tee_consents(setup, persisted, final_revision)
     consented = {}
     for name, slot in (setup.slots or {}).items():
+        if name == "vision" and screenshot_withdrawn and slot is not None and slot.purpose_consent_revision is not None:
+            # Saved, but blocked on near_tee_purpose_consent_required.
+            consented[name] = replace(slot, purpose_consent_revision=None)
+            continue
         if slot is not None and slot.enabled and slot.purpose_consent_revision is None:
             if acknowledged.get(name) is None and name in acknowledged:
                 # A kept (omitted) slot whose consent is no longer current
@@ -719,7 +738,11 @@ async def _put_near_tee(body, persisted):
             slot = replace(slot, purpose_consent_revision=final_revision)
         consented[name] = slot
     setup = replace(setup, slots=consented)
-    any_enabled = any(slot is not None and slot.enabled for slot in consented.values())
+    # Only enabled slots with current consent can contact NEAR: they alone
+    # lift a revocation and count toward the reserve review.
+    usable = [slot for slot in consented.values() if slot is not None and slot.enabled
+        and slot.purpose_consent_revision == final_revision]
+    any_enabled = bool(usable)
     near_text = _carry_near_consent(persisted.near_text, persisted, final_revision)
     old_or = retire_openrouter_setup(persisted.openrouter_setup) if openrouter_retired() else persisted.openrouter_setup
     target = replace(persisted, near_tee=setup, near_text=near_text, openrouter_setup=old_or,
@@ -730,7 +753,7 @@ async def _put_near_tee(body, persisted):
         validate_active_model_fabric_configuration(target)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    bounds = [slot.request_cost_bound_microusd for slot in consented.values() if slot is not None and slot.enabled]
+    bounds = [slot.request_cost_bound_microusd for slot in usable]
     if near_text is not None and near_text.enabled:
         bounds.append(near_text.request_cost_bound_microusd)
     review = max(bounds, default=None)
@@ -825,7 +848,7 @@ async def _put_near_text(body, persisted):
         egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
     validate_active_model_fabric_configuration(target)
     planned_bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
-    planned_bounds.extend(slot.request_cost_bound_microusd for slot in ((persisted.near_tee.slots or {}).values() if persisted.near_tee else ()) if slot is not None and slot.enabled)
+    planned_bounds.extend(slot.request_cost_bound_microusd for slot in _consented_near_tee_slots(target.near_tee, final_revision))
     if old_or is not None:
         planned_bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
         if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
@@ -843,7 +866,7 @@ async def _put_near_text(body, persisted):
                     mutated = True
                     await vault_repository.store("near_text_api_key", raw_key, description="Seraph NEAR key (write-only settings input)")
                 bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
-                bounds.extend(slot.request_cost_bound_microusd for slot in ((persisted.near_tee.slots or {}).values() if persisted.near_tee else ()) if slot is not None and slot.enabled)
+                bounds.extend(slot.request_cost_bound_microusd for slot in _consented_near_tee_slots(target.near_tee, final_revision))
                 if old_or is not None:
                     bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
                     if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
@@ -927,8 +950,7 @@ async def _put_inference_lane(body, persisted):
     if lane.request_reserve_review_microusd is not None:
         review = max(review or 0, lane.request_reserve_review_microusd)
     if target.near_tee is not None:
-        tee_bounds = [slot.request_cost_bound_microusd for slot in (target.near_tee.slots or {}).values()
-            if slot is not None and slot.enabled]
+        tee_bounds = [slot.request_cost_bound_microusd for slot in _consented_near_tee_slots(target.near_tee, final_revision)]
         review = max([*tee_bounds, *([review] if review else [])], default=None)
     if old_or is not None and not openrouter_retired():
         bounds = [route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled]
@@ -1432,6 +1454,11 @@ _NEAR_TEE_STATUS_PROOFS = {"text": ("health", "latency_ms", "text"),
     "vision": ("health", "latency_ms", "vision", "structured_output")}
 
 
+def _vision_max_timeout_seconds() -> float:
+    from src.observer.screenshot_semantic_analysis import near_tee_vision_max_timeout_seconds
+    return near_tee_vision_max_timeout_seconds()
+
+
 async def _near_tee_setup_status(configured, accounting):
     """Local-only NEAR TEE status; never reads the catalog or calls NEAR."""
     from src.model_fabric.near_tee_catalog import (
@@ -1446,6 +1473,7 @@ async def _near_tee_setup_status(configured, accounting):
         "allowlist": allowlists, "implemented_slots": list(NEAR_TEE_IMPLEMENTED_SLOTS),
         "tee_verified": False, "e2ee": False, "disclosure": disclosure,
         "screenshot_disclosure": _NEAR_TEE_SCREENSHOT_DISCLOSURE,
+        "vision_max_timeout_seconds": _vision_max_timeout_seconds(),
         "check_capabilities": {slot: sorted(items) for slot, items in NEAR_TEE_SLOT_CHECK_CAPABILITIES.items()},
         "catalog_check_endpoint": "/api/settings/model-fabric/near-tee/catalog-check"}
     if setup is None:
@@ -1494,6 +1522,12 @@ async def _near_tee_setup_status(configured, accounting):
                         expired = proof is not None and proof.outcome == "passed" and proof.expires_at <= time.time()
                         proof_reason = f"{'proof_expired' if expired else 'proof_missing'}:{capability}"
                         break
+                    if name == "vision" and capability == "structured_output":
+                        from src.model_fabric.near_tee_catalog import receipt_structured_outputs
+                        from src.model_fabric.near_tee_vision import structured_mode
+                        if proof.proven_value != structured_mode(receipt_structured_outputs("vision", receipts=receipts)):
+                            proof_reason = "proof_mode_mismatch:structured_output"
+                            break
             except Exception:
                 proof_reason = "proof_metadata_unavailable"
             reason = proof_reason
@@ -1724,6 +1758,14 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
 
 def _canary_fixture(profile: ProviderProfile, capability: str) -> dict[str, object]:
     """Finalize the exact transport body whose digest is bound into trust."""
+    if profile.id == "near_tee.vision" and capability == ModelCapability.STRUCTURED_OUTPUT.value:
+        # The vision structured_output check runs the runtime's request mode
+        # for the current catalog receipt (json_schema or prompt-JSON).
+        from src.model_fabric.near_tee_catalog import receipt_structured_outputs
+        from src.model_fabric.near_tee_vision import structured_check_body
+        payload = structured_check_body(model=profile.model, structured=receipt_structured_outputs("vision"),
+            max_tokens=64)
+        return {"json": payload, "digest_payload": payload, "output_tokens": payload["max_tokens"]}
     if profile.transport_adapter == "vlm_analyze_file":
         prompt = "Describe whether this fixed canary image is readable."
         if capability == ModelCapability.STRUCTURED_OUTPUT.value:

@@ -43,6 +43,52 @@ IMAGE_TOKEN_PATCH_PX = 28
 IMAGE_TOKEN_OVERHEAD = 64
 MAX_IMAGE_SIDE_PX = 32768
 STRUCTURED_SCHEMA_NAME = "seraph_screenshot_analysis_v1"
+# The structured_output capability proof of the vision slot is bound to the
+# request mode the runtime uses; dispatch requires the mode of the current
+# catalog receipt (json_schema when it lists structured_outputs).
+STRUCTURED_MODE_JSON_SCHEMA = "vision_json_schema"
+STRUCTURED_MODE_PROMPT_JSON = "vision_prompt_json"
+_CHECK_SCHEMA_NAME = "seraph_capability_check_v1"
+_CHECK_SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
+    "additionalProperties": False}
+_ONE_PIXEL_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nGQAAAAASUVORK5CYII="
+
+
+def structured_mode(structured: bool) -> str:
+    return STRUCTURED_MODE_JSON_SCHEMA if structured else STRUCTURED_MODE_PROMPT_JSON
+
+
+def structured_check_body(*, model: str, structured: bool, max_tokens: int) -> dict[str, object]:
+    """The vision ``structured_output`` capability-check body, in the runtime's mode:
+    one image part plus json_schema (strict) or the prompt-JSON instruction."""
+    body: dict[str, object] = {
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": 'Return strict JSON only: {"ok": true}.'},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + _ONE_PIXEL_PNG_B64}},
+        ]}],
+        "max_tokens": max_tokens,
+    }
+    if structured:
+        body["response_format"] = {"type": "json_schema", "json_schema": {"name": _CHECK_SCHEMA_NAME,
+            "strict": True, "schema": _CHECK_SCHEMA}}
+    return body
+
+
+def structured_check_mode(body: dict[str, object]) -> str | None:
+    """The mode a structured_output check body exercises, or None when it is
+    not a vision mode body (text-only or another response format)."""
+    messages = body.get("messages")
+    content = messages[0].get("content") if isinstance(messages, list) and messages and isinstance(messages[0], dict) else None
+    if not isinstance(content, list) or not any(isinstance(part, dict) and part.get("type") == "image_url" for part in content):
+        return None
+    response_format = body.get("response_format")
+    if response_format is None:
+        return STRUCTURED_MODE_PROMPT_JSON
+    if isinstance(response_format, dict) and response_format.get("type") == "json_schema" \
+            and (response_format.get("json_schema") or {}).get("strict") is True:
+        return STRUCTURED_MODE_JSON_SCHEMA
+    return None
 
 
 def estimate_image_tokens(width: int, height: int) -> int:
@@ -149,6 +195,11 @@ async def prepare_near_tee_vision_call(
             endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
         if proof is not None:
             proofs.append(proof)
+    mode = structured_mode(structured)
+    structured_proof = next((proof for proof in proofs if proof.capability == "structured_output"), None)
+    if structured_proof is not None and structured_proof.proven_value != mode:
+        # The proof exercised another request mode than this receipt implies.
+        raise _denied("near_tee_vision_structured_proof_mode_mismatch", context)
     decision = select_route(context, (candidate,), tuple(proofs), now=now,
         target_model_id=slot.model_id, target_api_key=key)
     if not decision.allowed:

@@ -3585,8 +3585,10 @@ It is read-only: it cannot generate a report and starts no model call.
   stored value. Otherwise the detail falls back to the episode's stored minutes
   and observation count and says the breakdown is unavailable.
 - **Privacy.** Responses never include archive or receipt paths, raw screen
-  samples or per-app names. The routes sit under `/api/*` and need the
-  operator session.
+  samples or a structured per-app breakdown; the stored report text is returned
+  as written and may mention apps. The routes sit under `/api/*`, need the
+  operator session and, like `/api/observer/screen-artifacts`, only answer
+  localhost requests.
 
 ### Portable selected browser text profile (#926) {#portable-selected-browser-text-926-branch-local-target}
 

@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from src.api.observer import _require_local_artifact_request
 from src.db.models import MemoryEpisode
 from src.memory.repository import (
     END_OF_DAY_REPORT_LIST_MAX,
@@ -54,13 +57,28 @@ def _non_negative_int(value: Any) -> int:
     return 0
 
 
-def _optional_str(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
+def _optional_str(value: Any, max_len: int = 256) -> str | None:
+    # Bounded so one oversized stored label can never make a client reject
+    # the whole list (critic finding 1).
+    return value[:max_len] if isinstance(value, str) and value else None
+
+
+def _utf16_prefix(value: str, max_units: int) -> str:
+    """Truncate by UTF-16 code units, matching the cockpit's ``length`` check."""
+    out: list[str] = []
+    units = 0
+    for char in value:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if units + width > max_units:
+            break
+        out.append(char)
+        units += width
+    return "".join(out)
 
 
 def _status(analysis_provider: str | None) -> tuple[str, str | None]:
     if analysis_provider and analysis_provider.startswith(_BLOCKED_PROVIDER_PREFIX):
-        reason = analysis_provider[len(_BLOCKED_PROVIDER_PREFIX):] or "unspecified"
+        reason = analysis_provider[len(_BLOCKED_PROVIDER_PREFIX):][:256] or "unspecified"
         return "blocked", reason
     return "ready", None
 
@@ -71,8 +89,8 @@ def _list_item(episode: MemoryEpisode) -> dict[str, Any]:
     status, blocked_reason = _status(provider)
     return {
         "episode_id": episode.id,
-        "date": _optional_str(metadata.get("date")),
-        "timezone": _optional_str(metadata.get("timezone")),
+        "date": _optional_str(metadata.get("date"), 32),
+        "timezone": _optional_str(metadata.get("timezone"), 64),
         "created_at": _iso(episode.created_at),
         "observed_at": _iso(episode.observed_at),
         "status": status,
@@ -87,12 +105,14 @@ def _list_item(episode: MemoryEpisode) -> dict[str, Any]:
 def _seconds_mix(value: Any) -> dict[str, int]:
     if not isinstance(value, dict):
         return {}
-    items = [
-        (str(key)[:_MIX_KEY_MAX], _non_negative_int(seconds))
-        for key, seconds in value.items()
-        if isinstance(key, str) and key
-    ]
-    items.sort(key=lambda item: (-item[1], item[0]))
+    merged: dict[str, int] = {}
+    for key, seconds in value.items():
+        if not isinstance(key, str) or not key:
+            continue
+        short = _utf16_prefix(key, _MIX_KEY_MAX)
+        # Keys that collide after truncation add up instead of overwriting.
+        merged[short] = merged.get(short, 0) + _non_negative_int(seconds)
+    items = sorted(merged.items(), key=lambda item: (-item[1], item[0]))
     return dict(items[:_MIX_MAX_ENTRIES])
 
 
@@ -114,11 +134,20 @@ def _archived_summary(metadata: dict[str, Any]) -> dict[str, Any] | None:
     try:
         allowed_root = (_report_archive_root() / "end-of-day").resolve()
         path = Path(raw_path).resolve()
-        if not path.is_relative_to(allowed_root) or not path.is_file():
+        if not path.is_relative_to(allowed_root):
             return None
-        if path.stat().st_size > _ARCHIVE_MAX_BYTES:
+        # Open without following a final symlink, check the opened file itself,
+        # and read at most the cap + 1 byte so growth after a stat cannot bypass it.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                payload_bytes = handle.read(_ARCHIVE_MAX_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(payload_bytes) > _ARCHIVE_MAX_BYTES:
             return None
-        payload_bytes = path.read_bytes()
     except (OSError, ValueError):
         return None
     if hashlib.sha256(payload_bytes).hexdigest() != expected_sha:
@@ -158,13 +187,17 @@ def _public_summary(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("/reports/end-of-day")
-async def list_end_of_day_reports(limit: int = Query(30, ge=1, le=END_OF_DAY_REPORT_LIST_MAX)):
+async def list_end_of_day_reports(request: Request, limit: int = Query(30, ge=1, le=END_OF_DAY_REPORT_LIST_MAX)):
+    # Screen-derived content: same authenticated-operator + localhost guard as
+    # /api/observer/screen-artifacts.
+    _require_local_artifact_request(request)
     episodes = await memory_repository.list_end_of_day_report_episodes(limit=limit)
     return {"items": [_list_item(episode) for episode in episodes], "limit": limit}
 
 
 @router.get("/reports/end-of-day/{episode_id}")
-async def get_end_of_day_report(episode_id: str):
+async def get_end_of_day_report(request: Request, episode_id: str):
+    _require_local_artifact_request(request)
     episode = await memory_repository.get_end_of_day_report_episode(episode_id)
     if episode is None:
         raise HTTPException(status_code=404, detail="End-of-day report not found")

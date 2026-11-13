@@ -282,3 +282,35 @@ async def test_unauthenticated_requests_are_denied(client, archive_dir, monkeypa
     assert listing.status_code == 401
     assert detail.status_code == 401
     assert "Body 2026-11-01" not in detail.text
+
+
+async def test_oversized_stored_labels_are_bounded_not_rejected(client, archive_dir):
+    # Critic finding 1: one long stored label must not make the cockpit reject
+    # the whole list; the API bounds every string it projects.
+    await _seed_report_episode(
+        date="2026-11-09" + "x" * 100,
+        observed_at=BASE,
+        provider="llm:" + "m" * 1000,
+        metadata={"timezone": "Z" * 500},
+    )
+    await _seed_report_episode(date="2026-11-08", observed_at=BASE - timedelta(days=1), provider="blocked:" + "r" * 1000)
+    response = await client.get("/api/reports/end-of-day")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 2
+    assert len(items[0]["analysis_provider"]) <= 256
+    assert len(items[0]["date"]) <= 32
+    assert len(items[0]["timezone"]) <= 64
+    assert items[1]["status"] == "blocked"
+    assert len(items[1]["blocked_reason"]) <= 256
+
+
+def test_mix_keys_truncate_by_utf16_and_merge_collisions():
+    from src.api.reports import _MIX_KEY_MAX, _seconds_mix
+
+    emoji_key = "\U0001F600" * 100  # 200 UTF-16 units
+    long_a = "p" * 130 + "a"
+    long_b = "p" * 130 + "b"
+    mix = _seconds_mix({emoji_key: 10, long_a: 5, long_b: 7})
+    assert all(len(key.encode("utf-16-le")) // 2 <= _MIX_KEY_MAX for key in mix)
+    assert mix["p" * _MIX_KEY_MAX] == 12

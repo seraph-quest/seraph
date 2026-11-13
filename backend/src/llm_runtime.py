@@ -43,6 +43,7 @@ from src.model_fabric.contracts import (
     ProviderProfile,
     SUPPORTED_SECRET_REFS,
     finalized_openai_compatible_body,
+    provider_uncertain_on_error,
     transport_model_for_provider,
 )
 from src.model_fabric.remote_inference_admission import (
@@ -3288,6 +3289,89 @@ def _openrouter_retired_target(target: dict[str, Any]) -> bool:
     return is_openrouter_destination(api_base=target.get("api_base"), model_id=target.get("model_id"))
 
 
+def _near_tee_context(request_context: Any | None) -> bool:
+    """True when the caller's canonical context resolved to a NEAR TEE slot."""
+    from src.model_fabric.contracts import NEAR_TEE_PROVIDER_KIND
+
+    return tuple(getattr(request_context, "allowed_provider_kinds", ()) or ()) == (NEAR_TEE_PROVIDER_KIND,)
+
+
+def _near_tee_completion_sync(
+    *,
+    messages: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int,
+    request_context: Any,
+    request_id: str | None,
+    runtime_path: str,
+) -> SimpleNamespace:
+    """ADR-035 NEAR TEE text slot through the existing governed sync path.
+
+    Precontact gates (slot policy, consent, catalog receipt, credential,
+    selector and capability proofs) run before admission; the transport runs
+    inside the one shared broker lease with its accounting reservation; no
+    fallback to another slot, model or provider exists.
+    """
+    from src.model_fabric.near_tee import NearTeeDenied, NearTeeError, near_tee_transport, prepare_near_tee_call
+    from src.model_fabric.execution import _run_awaitable_sync
+
+    assert_runtime_not_revoked()
+    receipt_session = _new_route_receipt_session(request_context)
+    try:
+        call = _run_receipt_hook_sync(prepare_near_tee_call(
+            context=request_context, messages=messages, temperature=temperature, max_tokens=max_tokens))
+    except NearTeeDenied as denied:
+        _persist_denied_route_sync(request_context, denied.decision, (denied.code,))
+        if _can_log_request(request_id):
+            _log_llm_runtime_event_sync(event_type="llm_target_policy_denied",
+                summary="NEAR TEE route denied before contact",
+                details={"runtime_path": runtime_path, "provider": "near_tee", "reason": denied.code},
+                request_id=request_id)
+        raise
+    started = False
+
+    def operation():
+        nonlocal started
+        receipt_session.attempt_started(call.decision, capability_proof_hashes=call.proof_hashes)
+        started = True
+        _note_provider_contact()
+        return _run_awaitable_sync(near_tee_transport(call))
+
+    try:
+        outcome = _execute_sync_with_gpu_admission(
+            context=call.context,
+            decision=call.decision,
+            operation_id=str(call.decision.attempt_id or f"{call.context.request_id}:near_tee"),
+            operation=operation,
+        )
+    except BaseException as error:
+        if started:
+            code = getattr(error, "code", None) if isinstance(error, NearTeeError) else "transport_failed"
+            receipt_session.attempt_finished(outcome="failed", error_code=code or "transport_failed",
+                decision=call.decision, degradation_code="transport_failed")
+            _finalize_route_receipt_sync(receipt_session, outcome="failed", request_id=request_id,
+                degradation_codes=("near_tee_transport_failed",))
+        raise
+    if outcome.failure_code is not None or outcome.text is None:
+        code = outcome.failure_code or "near_tee_empty_output"
+        receipt_session.attempt_finished(outcome="failed", error_code=code, decision=call.decision,
+            degradation_code="near_tee_output_not_adopted")
+        _finalize_route_receipt_sync(receipt_session, outcome="failed", request_id=request_id,
+            degradation_codes=(code,))
+        # Contact happened and its cost was settled; no output is adopted.
+        raise NearTeeError(code)
+    receipt_session.attempt_finished(outcome="succeeded", error_code=None, decision=call.decision)
+    _finalize_route_receipt_sync(receipt_session, outcome="succeeded", request_id=request_id)
+    if _can_log_request(request_id):
+        _log_llm_runtime_event_sync(event_type="llm_primary_success",
+            summary=f"NEAR TEE completion succeeded via {call.body['model']}",
+            details={"runtime_path": runtime_path, "runtime_profile": call.decision.selected.profile.id,
+                "primary_model": str(call.body["model"]), "used_fallback": False, "provider": "near_tee"},
+            request_id=request_id)
+    message = ChatMessage.from_dict({"role": "assistant", "content": outcome.text})
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)], model=str(call.body["model"]))
+
+
 def _governed_preflight_target(
     target: dict[str, Any],
     request_context: Any | None,
@@ -3470,9 +3554,8 @@ def _execute_sync_with_gpu_admission(
         request = GpuAdmissionRequest.from_inference_context(
             context,
             operation_id=effective_operation_id,
-            uncertain_on_error=(
+            uncertain_on_error=provider_uncertain_on_error(
                 getattr(getattr(getattr(decision, "selected", None), "profile", None), "provider_kind", "")
-                == "openrouter"
             ),
         )
         bind_accounting_profile(request.operation_id, profile_id)
@@ -4453,6 +4536,20 @@ def completion_with_fallback_sync(
                     "active OpenRouter-only inference requires a registered canonical runtime path"
                 )
 
+    if _near_tee_context(request_context):
+        try:
+            return _near_tee_completion_sync(
+                messages=messages,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens),
+                request_context=request_context,
+                request_id=request_id,
+                runtime_path=runtime_path,
+            )
+        finally:
+            if request_id is not None:
+                _finish_request(request_id)
+
     try:
         primary_kwargs = build_completion_kwargs(
             messages=messages,
@@ -4995,6 +5092,13 @@ async def stream_completion_with_fallback(
         raise ProviderProfileConfigurationError("governed streaming requires explicit request context")
     if request_id is not None and request_id != request_context.request_id:
         raise ProviderProfileConfigurationError("request id does not match inference context")
+    if _near_tee_context(request_context):
+        # ADR-035 PR3b is non-streaming; NEAR TEE streaming lands in PR3c.
+        from src.model_fabric import persist_denied_route
+
+        await persist_denied_route(context=request_context, decision=None,
+            reason_codes=("near_tee_streaming_unavailable",))
+        raise NoCompliantModelRouteError(("near_tee_streaming_unavailable",))
 
     profile_ids = (
         [request_context.requested_profile_id]

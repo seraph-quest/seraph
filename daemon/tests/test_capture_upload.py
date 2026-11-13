@@ -143,7 +143,7 @@ def test_openrouter_ocr_provider_is_removed():
 
 def test_codex_local_ocr_provider_is_removed_and_never_spawns_a_subprocess():
     # ADR-035: codex-local drove a cloud-backed Codex CLI; the operator
-    # acknowledged its removal on 2026-11-14. Selecting it is refused and
+    # acknowledged its removal on 2026-11-13. Selecting it is refused and
     # never starts a process.
     with patch("asyncio.create_subprocess_exec") as async_spawn, \
          patch("subprocess.Popen") as popen:
@@ -318,7 +318,7 @@ async def test_poll_loop_uploads_locally_and_never_calls_the_cloud(tmp_path, bac
                             screen_runtime=runtime, worker_id="test-worker")
 
     # Backend "openrouter" names its governed route and "codex-local" was
-    # removed (operator decision, 2026-11-14); either way the daemon stays local.
+    # removed (operator decision, 2026-11-13); either way the daemon stays local.
     assert create.call_args.kwargs["name"] == "apple-vision"
     assert "api_key" not in create.call_args.kwargs
     assert provider.calls == 1

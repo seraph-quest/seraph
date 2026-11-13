@@ -4,7 +4,7 @@ ADR-035 (#1147): the daemon makes no cloud model call. The remote OpenRouter
 provider was removed; Apple Vision stays as on-device OCR and captures reach
 the backend over the authenticated local upload endpoint instead. The
 cloud-backed `codex-local` provider was removed by operator decision on
-2026-11-14.
+2026-11-13.
 """
 
 from ocr.base import OCRProvider
@@ -27,7 +27,7 @@ def create_provider(
     Raises:
         ValueError: Unknown or removed provider. ``codex-local`` (a
         cloud-backed Codex CLI) was removed by operator decision on
-        2026-11-14 (ADR-035) and is refused here, never spawned.
+        2026-11-13 (ADR-035) and is refused here, never spawned.
     """
     if name == "apple-vision":
         from ocr.apple_vision import AppleVisionProvider

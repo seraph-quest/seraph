@@ -1364,7 +1364,7 @@ async def main() -> None:
     )
     parser.add_argument(
         "--ocr-provider",
-        # ADR-035: codex-local was removed by operator decision (2026-11-14);
+        # ADR-035: codex-local was removed by operator decision (2026-11-13);
         # argparse refuses any other value.
         choices=["apple-vision"],
         default="apple-vision",

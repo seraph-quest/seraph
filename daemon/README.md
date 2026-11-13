@@ -117,7 +117,7 @@ Screen analysis is opt-in and runs **on context switch** (not a timer). The daem
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--ocr` | off | Enable screen capture on context switch |
-| `--ocr-provider` | `apple-vision` | Local OCR provider: `apple-vision` (on-device) is the only choice. The cloud-backed `codex-local` provider was removed by operator decision on 2026-11-14 (ADR-035); the CLI refuses it, and a `codex-local` value from backend settings falls back to `apple-vision` |
+| `--ocr-provider` | `apple-vision` | Local OCR provider: `apple-vision` (on-device) is the only choice. The cloud-backed `codex-local` provider was removed by operator decision on 2026-11-13 (ADR-035); the CLI refuses it, and a `codex-local` value from backend settings falls back to `apple-vision` |
 | `--ocr-model` | — | Deprecated and ignored (`apple-vision` takes no model) |
 | `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted provider output, and normalized JSON artifacts for future re-analysis |
 | `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local directory for preserved artifacts |

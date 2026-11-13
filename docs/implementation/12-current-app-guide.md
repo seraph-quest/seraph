@@ -3668,7 +3668,7 @@ stages and expose separate failures.
 **Daemon capture handoff (ADR-035, #1147, Partial):** the native daemon makes
 no cloud model call; its OpenRouter OCR provider is removed and Apple Vision
 OCR stays on-device as the daemon's only OCR provider (the cloud-backed
-`codex-local` provider was removed by operator decision on 2026-11-14; a
+`codex-local` provider was removed by operator decision on 2026-11-13; a
 `codex-local` setting falls back to Apple Vision and the CLI refuses it). When screen analysis is enabled and this
 Mac is paired, the daemon uploads each allowed capture to the loopback backend
 at `POST /api/observer/captures`, authenticated with the scoped paired-edge

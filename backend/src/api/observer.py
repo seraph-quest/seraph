@@ -558,7 +558,7 @@ class LocalCaptureAnalysis(BaseModel):
     """Bounded on-device analysis the daemon produced (never image bytes).
 
     Only on-device Apple Vision is accepted: the cloud-backed ``codex-local``
-    daemon provider was removed by operator decision (ADR-035, 2026-11-14).
+    daemon provider was removed by operator decision (ADR-035, 2026-11-13).
     """
 
     model_config = ConfigDict(extra="forbid")

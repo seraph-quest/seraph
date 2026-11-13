@@ -216,7 +216,7 @@ automatic. Until it completes, recall degrades to clearly labeled lexical search
 Daemon OCR providers that call a remote model (`openrouter`, and `codex-local`,
 which drives a cloud-backed Codex CLI) are removed. Removing `codex-local`
 drops its no-API-price Codex path; the operator must acknowledge that loss
-before PR4 lands. The operator acknowledged the removal on 2026-11-14
+before PR4 lands. The operator acknowledged the removal on 2026-11-13
 ("codex-local goes away"); PR4 removes it. Apple Vision on-device OCR
 stays. Captures reach the backend over an authenticated local upload endpoint
 that keeps app name, window title, capture time and content hash, with atomic

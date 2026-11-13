@@ -358,7 +358,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "observer/screenshot_semantic_analysis.py",
-        515,
+        597,
         "_analyze_with_openrouter._transport",
         "client.post",
         "canonical_adapter",
@@ -461,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2285,
+        2358,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -470,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2298,
+        2371,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -479,7 +479,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2313,
+        2386,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

@@ -134,7 +134,7 @@ class RepoSandboxSettingsRequest(BaseModel):
 
 # Active screenshot semantic analysis is OpenRouter-only. Retained settings
 # from the historical local/Apple routes are normalized away by the reader.
-_VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter"})
+_VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter", "near_tee"})
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
@@ -511,6 +511,21 @@ def _read_screen_analysis_settings() -> dict[str, object]:
     return read_screen_analysis_settings()
 
 
+def _strip_derived_screen_fields(payload: dict[str, object], *, explicit_provider: bool = False) -> None:
+    """Drop read-time projections before persisting. Only the operator's
+    provider choice is stored; the NEAR TEE model is canonical model-fabric
+    state and is never persisted here."""
+    selected = payload.pop("provider_selected", None)
+    for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff",
+            "near_tee_vision_available"):
+        payload.pop(derived, None)
+    if payload.get("provider") in {"", None} and selected == "near_tee" and not explicit_provider:
+        # Keep the operator's NEAR TEE choice across a temporarily unavailable slot.
+        payload["provider"] = "near_tee"
+    if payload.get("provider") == "near_tee":
+        payload["model"] = ""
+
+
 def _write_screen_analysis_settings(payload: dict[str, object]) -> None:
     write_screen_analysis_settings(payload)
 
@@ -755,12 +770,15 @@ def _classify_screenshot_observation(
 
 
 async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[str, object]:
-    from src.observer.screenshot_folder_source import screenshot_folder_persistence_status
+    from src.observer.screenshot_folder_source import (
+        screenshot_folder_persistence_status,
+        screenshot_pipeline_filter,
+    )
 
     async with get_db() as db:
         base_filters = [
             col(ScreenObservation.blocked) == False,  # noqa: E712
-            col(ScreenObservation.app_name) == "Screenshot Folder",
+            screenshot_pipeline_filter(),
         ]
 
         status_counts: dict[str, int] = {
@@ -1111,6 +1129,9 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
     if body.provider is not None:
         from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
         from src.observer.screen_analysis_settings import selectable_screen_analysis_providers
+        if body.provider == "near_tee" and body.provider not in selectable_screen_analysis_providers():
+            raise HTTPException(status_code=422, detail={"code": "near_tee_vision_slot_required",
+                "message": "Configure and consent to the NEAR TEE vision slot in model settings first."})
         if body.provider in _VALID_SCREEN_ANALYSIS_PROVIDERS and body.provider not in selectable_screen_analysis_providers():
             raise HTTPException(status_code=422, detail={"code": OPENROUTER_RETIRED_REASON,
                 "message": "OpenRouter is retired (ADR-035); no cloud screenshot provider can be selected."})
@@ -1164,7 +1185,7 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
         payload["archive_retention_days"] = body.archive_retention_days
-    payload.pop("provider_blocked_reason", None)
+    _strip_derived_screen_fields(payload, explicit_provider=body.provider is not None)
     _write_screen_analysis_settings(payload)
     return await get_screen_analysis_settings()
 
@@ -1181,7 +1202,7 @@ async def pick_screenshot_folder(request: Request):
     payload = _read_screen_analysis_settings()
     payload["screenshot_folder"] = normalized
     payload["screenshot_folder_source"] = "screen-analysis-settings"
-    payload.pop("provider_blocked_reason", None)
+    _strip_derived_screen_fields(payload)
     _write_screen_analysis_settings(payload)
     return ScreenshotFolderPickResponse(
         screenshot_folder=normalized,
@@ -1194,12 +1215,14 @@ async def clear_stale_screenshot_folder_observations(request: Request):
     """Archive stale incomplete screenshot-folder rows without deleting analyzed history."""
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Screenshot folder cleanup is only available from localhost")
+    from src.observer.screenshot_folder_source import screenshot_pipeline_filter
+
     screenshot_folder, _ = _screenshot_folder()
     async with get_db() as db:
         result = await db.execute(
             select(ScreenObservation)
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
-            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .where(screenshot_pipeline_filter())
             .order_by(col(ScreenObservation.timestamp).desc())
         )
         stale_ids: list[str] = []

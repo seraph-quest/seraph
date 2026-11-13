@@ -192,8 +192,13 @@ def test_setup_is_closed_disabled_by_default_and_allowlisted():
             "openrouter/z-ai/glm-5.3-flash", "z-ai/GLM-5.3-flash"):
         with pytest.raises(ValueError, match="near_tee_model_not_allowlisted"):
             validate_near_tee_setup(NearTeeSetup(slots={"text": _slot(model_id=model)}))
-    with pytest.raises(ValueError, match="near_tee_slot_not_implemented"):
-        validate_near_tee_setup(NearTeeSetup(slots={"vision": _slot()}))
+    # Vision (PR4) and embedding (PR3d) are implemented with their own
+    # allowlists: a text model is refused on either; unknown slots stay closed.
+    for other in ("vision", "embedding"):
+        with pytest.raises(ValueError, match="near_tee_model_not_allowlisted"):
+            validate_near_tee_setup(NearTeeSetup(slots={other: _slot(model_id="Qwen/Qwen3.6-35B-A3B-FP8")}))
+    with pytest.raises(ValueError, match="unsupported NEAR TEE slot"):
+        validate_near_tee_setup(NearTeeSetup(slots={"audio": _slot()}))
     with pytest.raises(ValueError):
         validate_near_tee_setup(NearTeeSetup(slots={"text": _slot(max_input_tokens=262_145)}))
     with pytest.raises(ValueError):

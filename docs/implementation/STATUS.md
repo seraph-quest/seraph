@@ -644,8 +644,9 @@ optional companion. OpenRouter is retired by policy (ADR-035, #1147 PR3a): no
 route makes new OpenRouter contact. Text routes (report, memory and agent
 reasoning synthesis, streaming chat, chat-agent tool turns and Cordis
 `inference.request`) resolve to the NEAR TEE text slot when the operator
-configures it (#1147 PR3b/PR3c, **Partial**); every other route (vision,
-embeddings), and every text route without a ready slot, reports blocked
+configures it (#1147 PR3b/PR3c, **Partial**); screenshot vision resolves to the
+NEAR TEE vision slot (#1147 PR4, **Partial**); every other route (embeddings),
+and every route without a ready slot, reports blocked
 (`no_active_provider` or the slot's reason); the optional NEAR text Work
 capability (ADR-025) is unchanged apart from the shared NEAR client. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
@@ -778,12 +779,71 @@ principal (a revoked root or a different owner is not adopted; the cost still
 settles). Cordis requests above the slot's output limit are refused with
 `inference_max_tokens_exceeds_route`. PR3c adds `streaming` and `tool_use` to
 the slot profile, which changes its hash: after upgrading, re-run the catalog
-check and every capability check. Vision is not served
+check and every capability check. Vision is the separate slot below
 (PR4); embeddings: see below.
 Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
 plaintext; attestation not verified by Seraph; no end-to-end encryption".
 Evidence is intercepted-transport tests only: no live NEAR call, provider
 availability, price or model quality is established.
+
+## NEAR TEE vision slot and screen pipeline (ADR-035, #1147 PR4)
+
+**Partial** until live operator use. The vision slot of the same `near_tee`
+adapter analyses screenshots, disabled by default. The operator picks one
+model from the closed ADR-035 vision allowlist (`z-ai/glm-5.3-flash`,
+`Qwen/Qwen3.8-27B`, `Qwen/Qwen3-VL-30B-A3B-Instruct`,
+`deepseek-ai/DeepSeek-V4.1-Flash-1017`; DeepSeek fails the catalog check while
+its readiness is absent), sets limits and a per-request reserve, and grants a
+**separate screenshot purpose consent**: enabling or changing the slot needs
+both the plaintext-to-NEAR acknowledgement and an explicit acknowledgement
+that screenshots reach the NEAR gateway in plaintext; the text slot's consent
+never implies it, and an explicit `screenshot_plaintext_egress_acknowledged:
+false` withdraws it (the slot stays saved and blocked). Saves use the same
+witnessed CAS publication; a save that omits a slot keeps it. Only enabled
+slots with current consent lift a revocation or count toward reserve review.
+
+The catalog check requires the image input modality for the vision slot,
+records NEAR's `structured_outputs` feature and adds a listed per-image price
+to the cost bound. Capability checks for the slot are `vision`,
+`structured_output`, `health` and `latency_ms` (mechanics only). The
+`structured_output` check sends an image in the runtime's request mode for the
+current receipt (strict json_schema or prompt-JSON) and its proof records that
+mode; dispatch with a proof of another mode is blocked
+(`near_tee_vision_structured_proof_mode_mismatch`). Each
+screenshot is one request of at most 8 MiB: the canonical id with
+`x-no-aliasing: true`, the image as a base64 data URL `image_url` part, and
+`response_format` json_schema when the current receipt lists
+`structured_outputs`, otherwise the prompt's strict-JSON instruction; both are
+parsed by the strict `seraph.screenshot_analysis.v1` contract, and reasoning
+fields are never parsed as the answer; parsing runs inside the lease so the
+route receipt records an invalid answer as failed. An image larger than 2048 px
+on its long side or 4 MiB is re-encoded for NEAR as metadata-free JPEG
+(quality 85, long side 2048); the stored capture is unchanged and the status
+records original and sent dimensions only. Input is estimated conservatively
+on the sent image (one token per 28×28 pixel patch plus the prompt) and a
+request over `max_input_tokens` is blocked before contact, as is a slot
+timeout above the background job budget minus the billing window and a 10 s
+margin (94 s by default). It runs on the
+shared broker at screenshot-background priority (below chat, serial bound one)
+with NEAR billing inside the lease; a missing cost is an Unknown liability that
+blocks the lane until fenced settlement. Invalid output, an echo mismatch or an
+empty answer settle the cost and record a failed analysis; policy, consent,
+receipt, size and proof denials record a blocked analysis with no contact.
+
+Uploaded daemon captures and screenshot-folder images share the path: pending
+→ NEAR vision analysis by the existing background job → digest record →
+end-of-day report, whose model label comes from the effective route and catalog
+receipt. Background analysis starts only when the operator chooses provider
+`near_tee` in the screen-analysis settings (`""` keeps it off while the slot
+stays configured; `near_tee_vision_available` says whether it can be chosen).
+Screen-analysis settings then report `provider: near_tee` with the slot
+model, `daemon_cloud_provider: null` and `daemon_capture_handoff:
+local_upload`; the daemon makes no cloud call. The cloud-backed `codex-local`
+daemon OCR provider is removed (operator acknowledged on 2026-11-13, ADR-035):
+Apple Vision is the daemon's only OCR provider, a `codex-local` setting falls
+back to it, the CLI refuses the value and uploads reject it as
+`local_analysis.provider` (422). Evidence is intercepted-transport tests only: no live NEAR call,
+provider availability, price or analysis quality is established.
 
 ## NEAR TEE embedding slot and memory re-index (ADR-035, #1147 PR3d)
 

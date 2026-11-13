@@ -1231,7 +1231,8 @@ export function ArtifactStoragePanel() {
                 onChange={(event) => void updateScreenAnalysis({ provider: event.target.value })}
                 className="min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text"
               >
-                <option value="">not set</option>
+                <option value="">off · no screenshot analysis</option>
+                <option value="near_tee">NEAR TEE vision slot</option>
                 <option value="openrouter">openrouter</option>
               </select>
             </div>

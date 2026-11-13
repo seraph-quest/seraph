@@ -220,6 +220,10 @@
    "category": "capability_owned",
    "count": 1
   },
+  "model_fabric/near_tee_vision.py::prepare_near_tee_vision_call::build_canonical_inference_context": {
+   "category": "capability_owned",
+   "count": 1
+  },
   "observer/screenshot_semantic_analysis.py::_analyze_with_openrouter::build_canonical_inference_context:screenshot_image_analysis": {
    "category": "capability_owned",
    "count": 1

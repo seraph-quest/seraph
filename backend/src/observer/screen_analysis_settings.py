@@ -12,6 +12,13 @@ from config.settings import settings
 # values are invalidated on read instead of remaining an executable escape
 # hatch to local VLM or Apple Vision routes.
 VALID_SCREEN_ANALYSIS_PROVIDERS = {"", "openrouter"}
+# ADR-035 (PR4): the NEAR TEE vision slot. The operator opts in by choosing
+# provider ``near_tee`` here (an explicit ``""`` keeps background screenshot
+# analysis off even while the slot stays configured); the model and its
+# availability always come from the canonical model-fabric route.
+NEAR_TEE_SCREEN_ANALYSIS_PROVIDER = "near_tee"
+NEAR_TEE_VISION_UNAVAILABLE_REASON = "near_tee_vision_slot_unavailable"
+NEAR_TEE_VISION_PROFILE_ID = "near_tee.vision"
 # ADR-035 retires OpenRouter by policy. A stored ``openrouter`` value is
 # projected as no cloud provider (with a stable reason) and cannot be newly
 # selected; NEAR TEE vision arrives in a later slice.
@@ -20,7 +27,37 @@ RETIRED_SCREEN_ANALYSIS_PROVIDERS = {"openrouter"}
 
 def selectable_screen_analysis_providers() -> set[str]:
     from src.model_fabric.retirement import openrouter_retired
-    return {""} if openrouter_retired() else set(VALID_SCREEN_ANALYSIS_PROVIDERS)
+    selectable = {""} if openrouter_retired() else set(VALID_SCREEN_ANALYSIS_PROVIDERS)
+    if near_tee_vision_route() is not None:
+        selectable.add(NEAR_TEE_SCREEN_ANALYSIS_PROVIDER)
+    return selectable
+
+
+def near_tee_vision_route() -> tuple[str, str] | None:
+    """(profile id, canonical model) when the canonical screenshot route policy
+    resolves to the NEAR TEE vision slot, else None.
+
+    That policy exists only while the configuration is readable and not
+    revoked and the slot is configured, enabled, has current purpose consent,
+    a credential fingerprint and a reserve within the inference-lane ceiling.
+    It does not look at the screen-analysis provider choice or enablement,
+    the vault key itself, the catalog receipt or capability proofs; those are
+    checked at dispatch, where a failure becomes a visible blocked status.
+    Local only; never contacts NEAR."""
+    try:
+        from src.model_fabric.configuration import (
+            effective_workload_policy, near_tee_slot, read_model_fabric_configuration,
+        )
+        policy = effective_workload_policy("screenshot_image_analysis")
+        if (tuple(policy.allowed_provider_kinds) != (NEAR_TEE_SCREEN_ANALYSIS_PROVIDER,)
+                or tuple(policy.allowed_profile_ids) != (NEAR_TEE_VISION_PROFILE_ID,)):
+            return None
+        slot = near_tee_slot(read_model_fabric_configuration(), "vision")
+    except Exception:
+        return None
+    if slot is None or not slot.enabled:
+        return None
+    return NEAR_TEE_VISION_PROFILE_ID, slot.model_id
 OPENROUTER_SCREEN_MODEL_PREFIX = "openrouter/"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
 
@@ -96,8 +133,9 @@ def read_screen_analysis_settings() -> dict[str, object]:
         payload["screenshot_folder_source"] = SCREENSHOT_FOLDER_ENV
 
     provider = str(payload.get("provider") or "")
-    if provider not in VALID_SCREEN_ANALYSIS_PROVIDERS:
+    if provider not in VALID_SCREEN_ANALYSIS_PROVIDERS | {NEAR_TEE_SCREEN_ANALYSIS_PROVIDER}:
         provider = ""
+    selected_near = provider == NEAR_TEE_SCREEN_ANALYSIS_PROVIDER
     payload["provider"] = provider
     payload["enabled"] = bool(payload.get("enabled"))
     payload["preserve_captures"] = bool(payload.get("preserve_captures"))
@@ -115,6 +153,25 @@ def read_screen_analysis_settings() -> dict[str, object]:
         payload["provider"] = ""
         payload["model"] = ""
         payload["provider_blocked_reason"] = OPENROUTER_RETIRED_REASON
+    near_route = near_tee_vision_route()
+    payload["near_tee_vision_available"] = near_route is not None
+    if selected_near:
+        if near_route is not None:
+            # The operator chose the NEAR TEE vision slot and it is usable.
+            payload["provider"] = NEAR_TEE_SCREEN_ANALYSIS_PROVIDER
+            payload["model"] = near_route[1]
+            payload["provider_blocked_reason"] = None
+        else:
+            payload["provider"] = ""
+            payload["model"] = ""
+            payload["provider_blocked_reason"] = NEAR_TEE_VISION_UNAVAILABLE_REASON
+    # The stored choice survives a temporarily unavailable slot; a retired
+    # OpenRouter value is still rewritten to empty on the next save.
+    payload["provider_selected"] = NEAR_TEE_SCREEN_ANALYSIS_PROVIDER if selected_near else payload["provider"]
+    # The daemon makes no cloud call: it uploads captures to this backend,
+    # which analyses them on the governed route named by ``provider``.
+    payload["daemon_cloud_provider"] = None
+    payload["daemon_capture_handoff"] = "local_upload"
     payload["archive_dir"] = str(Path(str(payload.get("archive_dir") or "")).expanduser().resolve())
 
     screenshot_folder = str(payload.get("screenshot_folder") or "").strip()
@@ -161,6 +218,9 @@ def effective_screen_analysis_enabled() -> bool:
 
 def effective_screen_analysis_model() -> str:
     """Return the model label Seraph should send/report for screenshot semantic analysis."""
+    current = read_screen_analysis_settings()
+    if current.get("provider") == NEAR_TEE_SCREEN_ANALYSIS_PROVIDER:
+        return str(current.get("model") or "")
     from src.model_fabric.retirement import openrouter_retired
     if openrouter_retired():
         return ""

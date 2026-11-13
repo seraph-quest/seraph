@@ -1276,8 +1276,9 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > and screen-analysis provider selection all fail closed with the stable reason
 > `openrouter_retired`, with no fallback. Text routes, including streaming
 > chat, chat-agent tool turns and Cordis `inference.request`, run on the NEAR
-> TEE text slot once the operator configures it (see below); routes without a
-> ready slot, and vision and embedding routes (PR3d–PR4), report **blocked**
+> TEE text slot and screenshot vision on the NEAR TEE vision slot once the
+> operator configures them (see below); routes without a ready slot, and
+> embedding routes (PR3d, evidence-gated), report **blocked**
 > (`no_active_provider` or the slot reason) in
 > `/api/runtime/status` and Settings; this is expected and not a crash. The optional NEAR text Work
 > capability (ADR-025) is unchanged. Retained OpenRouter configuration,
@@ -1285,9 +1286,10 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > settleable through Inference accounting. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.
 > Chat reports the block as `route_reason: openrouter_retired`; Cordis
-> `inference.request` reports `openrouter_retired`. Screen analysis reports no
-> cloud provider (`provider: ""`, `provider_blocked_reason: openrouter_retired`)
-> and refuses `openrouter`; the next screen-analysis settings save rewrites a
+> `inference.request` reports `openrouter_retired`. Without a NEAR TEE vision
+> slot, screen analysis reports no cloud provider (`provider: ""`,
+> `provider_blocked_reason: openrouter_retired`); with one it reports
+> `provider: near_tee` once the operator chooses it (#1147 PR4). It always refuses `openrouter`; the next screen-analysis settings save rewrites a
 > stored `openrouter` provider and model to empty.
 
 This is the short operator-facing description of the current application. For
@@ -1416,8 +1418,47 @@ end-to-end encryption". Seraph does not verify attestation and there is no
 end-to-end encryption. A missing NEAR billing record becomes an Unknown
 liability that blocks the whole lane, chat included, until it is settled under
 **Inference accounting**; a model echo mismatch or empty answer is settled and
-not adopted. Vision stays blocked until its slice lands; embeddings are
-described below.
+not adopted. Vision and embeddings are described below.
+
+### Configure the NEAR TEE vision slot (ADR-035, #1147 PR4)
+
+Status: **Partial** until live operator use; disabled by default. In
+**Settings → NEAR TEE · vision slot · screenshots** (same panel and key):
+
+1. Pick a vision model (`z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`,
+   `Qwen/Qwen3-VL-30B-A3B-Instruct`, `deepseek-ai/DeepSeek-V4.1-Flash-1017`;
+   DeepSeek fails the catalog check while NEAR omits its readiness), set
+   limits and the per-request reserve, tick **both** the plaintext
+   acknowledgement and the separate screenshot consent ("screenshots are sent
+   to the NEAR gateway in plaintext"), and press **Save NEAR TEE vision slot**.
+   Saving one slot keeps the others.
+2. Press **Run catalog check**: the vision slot passes only with image input,
+   and the receipt records whether NEAR lists structured outputs (JSON schema
+   requests) or not (strict prompt-JSON).
+3. Press **Run vision capability check**: four billed, mechanics-only requests
+   (vision, structured output, health, latency).
+
+Then choose **NEAR TEE vision slot** as the screen-analysis provider (choosing
+"off" keeps background analysis off while the slot stays configured). The vision
+timeout is capped at the background job budget minus the billing window and a
+10 s margin (94 s by default). Changing NEAR's structured-output listing needs a
+new structured output capability check, because that proof records the request
+mode; **Withdraw screenshot consent** blocks the slot without removing it.
+Screen analysis must stay enabled under the screen settings. Large captures are
+re-encoded for NEAR (long side 2048 px, JPEG) without changing the stored file.
+Daemon uploads and
+screenshot-folder images then queue as **pending**, the existing background
+analysis job sends one screenshot at a time (at most 8 MiB, image counted
+conservatively against the input limit) below chat priority, and the validated
+analysis feeds the screenshot digest and the end-of-day report. Until it
+succeeds, a daemon upload's on-device text is the digest content. An invalid
+answer, echo mismatch or empty output is recorded as **failed** (cost
+settled); a missing consent, stale receipt, missing proof or oversized input is
+**blocked** with its reason and makes no NEAR contact; a missing billing record
+is an Unknown liability that blocks the whole lane until settled. The daemon
+makes no cloud call; it reads `daemon_cloud_provider: null` from the screen
+settings and only uploads. Screenshots are plaintext to the NEAR gateway; the
+TEE label is NEAR's dated catalog claim, not Seraph-verified confidentiality.
 
 ### NEAR TEE embedding slot and memory re-index (ADR-035, #1147 PR3d)
 
@@ -1437,7 +1478,7 @@ Once the gate is cleared, the operator flow is:
    set maximum input tokens per request, inputs per request (1–64), timeout,
    per-request reserve and catalog lifetime, acknowledge that memory text is
    sent to NEAR in plaintext and save (saving never calls NEAR).
-2. **Run catalog check** (shared with the text slot), then **Run embedding
+2. **Run catalog check** (shared with the text and vision slots), then **Run embedding
    capability check**: three billed mechanics requests that also measure the
    vector dimension.
 3. Enter a re-index budget and a maximum number of memories, acknowledge the
@@ -3683,6 +3724,27 @@ artifacts, route screenshot analysis through the governed OpenRouter vision
 adapter when cloud consent and capability configuration are present, and feed
 report infrastructure. Capture, analysis, and report synthesis are separate
 stages and expose separate failures.
+
+**Daemon capture handoff (ADR-035, #1147, Partial):** the native daemon makes
+no cloud model call; its OpenRouter OCR provider is removed and Apple Vision
+OCR stays on-device as the daemon's only OCR provider (the cloud-backed
+`codex-local` provider was removed by operator decision on 2026-11-13; a
+`codex-local` setting falls back to Apple Vision and the CLI refuses it). When screen analysis is enabled and this
+Mac is paired, the daemon uploads each allowed capture to the loopback backend
+at `POST /api/observer/captures`, authenticated with the scoped paired-edge
+credential and its stored pairing policy (not a browser cookie; the daemon
+sends no Origin). The backend rejects built-in blocklisted apps, non-PNG/JPEG
+bytes, captures over 8 MiB or 50 MP and bursts over 30 per minute,
+stores the image privately (0700/0600, atomic rename) under the screenshot
+folder's `.seraph-daemon-captures/`, and creates the observation through the
+folder ingest/dedupe path with the real app name, window title and capture
+time, queued for the governed vision job. The daemon's bounded local
+analysis (Apple Vision text; any other `local_analysis.provider` is rejected
+with 422) becomes the
+observation's summary/activity/project and digest content until governed
+analysis exists. A repeated `capture_id` is idempotent. `screen_cleanup` removes uploaded files after the observation
+retention; these files are not backed up
+([#1141](https://github.com/seraph-quest/seraph/issues/1141)).
 
 The optional [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 implements ADR-022's ordinary top-frame Chromium text profile within

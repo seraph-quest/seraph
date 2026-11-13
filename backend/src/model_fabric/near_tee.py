@@ -351,7 +351,8 @@ async def prepare_near_tee_call(
     if slot_name not in NEAR_TEE_IMPLEMENTED_SLOTS:
         raise NearTeeDenied("near_tee_slot_not_implemented")
     if slot_name != "text":
-        # Chat completions serve the text slot only; embeddings use their own adapter.
+        # Chat completions serve the text slot only; the vision slot has its
+        # own image adapter (near_tee_vision.py) and embeddings use theirs.
         raise NearTeeDenied("near_tee_slot_adapter_mismatch")
     capabilities = set(context.requirements.capabilities)
     if (ModelCapability.STREAMING.value in capabilities) != bool(stream):
@@ -673,7 +674,14 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
     state.cost_microusd = evidence.cost_microusd
 
 
+# Capability checks each chat-completions slot may run (mechanics only,
+# never evals). The embedding slot's set lives in near_tee_embeddings.
 NEAR_TEE_CHECK_CAPABILITIES = frozenset({"text", "structured_output", "streaming", "tool_use", "health", "latency_ms"})
+NEAR_TEE_VISION_CHECK_CAPABILITIES = frozenset({"vision", "structured_output", "health", "latency_ms"})
+NEAR_TEE_SLOT_CHECK_CAPABILITIES = {
+    "text": NEAR_TEE_CHECK_CAPABILITIES,
+    "vision": NEAR_TEE_VISION_CHECK_CAPABILITIES,
+}
 
 
 async def near_tee_capability_check_transport(*, profile, capability: str, body: dict[str, object],
@@ -691,7 +699,8 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
     from .probe import CapabilityProbeObservation
 
     streaming = capability == "streaming"
-    if (capability not in NEAR_TEE_CHECK_CAPABILITIES or body.get("model") != profile.model
+    allowed = NEAR_TEE_VISION_CHECK_CAPABILITIES if profile.id == "near_tee.vision" else NEAR_TEE_CHECK_CAPABILITIES
+    if (capability not in allowed or body.get("model") != profile.model
             or bool(body.get("stream")) != streaming or bool(body.get("tools")) != (capability == "tool_use")):
         raise NearTeeError("near_tee_capability_check_unsupported")
     # Header, policy and billing-window checks run as the precontact guard
@@ -753,11 +762,23 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
         raise NearTeeError("near_tee_cost_liability")
     if failure is not None:
         return CapabilityProbeObservation(False, error_code=failure)
+    vision_mode = None
+    if capability == "structured_output" and profile.id == "near_tee.vision":
+        from .near_tee_vision import structured_check_mode
+        vision_mode = structured_check_mode(body)
+        if vision_mode is None:
+            return CapabilityProbeObservation(False, error_code="near_tee_vision_check_mode_invalid")
     if capability == "structured_output":
         try:
-            if not isinstance(json.loads(text), dict):
+            candidate_text = text
+            if vision_mode == "vision_prompt_json":
+                # Same fence tolerance as the runtime's strict contract parser.
+                from src.observer.screenshot_analysis_contract import _strip_json_fence
+                candidate_text = _strip_json_fence(text)
+            if not isinstance(json.loads(candidate_text), dict):
                 return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
         except (TypeError, ValueError):
             return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
-    value = {"latency_ms": elapsed_ms, "health": "healthy"}.get(capability, "verified")
+    # A vision structured_output proof is bound to the request mode it exercised.
+    value = vision_mode or {"latency_ms": elapsed_ms, "health": "healthy"}.get(capability, "verified")
     return CapabilityProbeObservation(True, proven_value=value)

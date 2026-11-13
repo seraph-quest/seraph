@@ -250,6 +250,7 @@ class TestSchedulerEngine:
         assert observed[0].job_id != observed[1].job_id
         assert get_current_trust_principal() is None
 
+    @pytest.mark.openrouter_legacy  # ADR-035: the grant check sits behind the retired-route denial in canonical context
     @pytest.mark.asyncio
     async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self):
         from src.approval.runtime import get_current_trust_principal

@@ -17,6 +17,9 @@ from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.general_task_test_transport import prepare_literal_planner
 
+# ADR-035: pins specialist planning reserve/contact mechanics over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def specialist_fixture(task_runtime, monkeypatch):
     monkeypatch.setattr(settings, "use_delegation", True)

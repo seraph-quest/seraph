@@ -936,6 +936,7 @@ async def test_missing_openrouter_route_blocks_without_provider_call(async_db, m
     admit_call.assert_not_awaited()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: OpenRouter credential/timeout proposal outcomes on the intercepted historical route
 @pytest.mark.asyncio
 async def test_missing_openrouter_credential_blocks_before_admission(async_db, monkeypatch):
     async with async_db() as db:
@@ -995,6 +996,7 @@ async def test_missing_openrouter_credential_blocks_before_admission(async_db, m
         assert stored.provider_contact_state == "not_started"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: OpenRouter credential/timeout proposal outcomes on the intercepted historical route
 @pytest.mark.asyncio
 async def test_post_marker_provider_timeout_remains_unknown(async_db, monkeypatch):
     async with async_db() as db:

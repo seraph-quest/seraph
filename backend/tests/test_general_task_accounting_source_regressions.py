@@ -10,6 +10,9 @@ from tests.test_general_task_persistence import task_runtime
 from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
+# ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 async def test_recovered_group_row_requires_original_role_and_current_parent(task_runtime, monkeypatch, native_admission_lifecycle):

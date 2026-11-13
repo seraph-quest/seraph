@@ -13,6 +13,9 @@ from src.work_board.contracts import WorkBoardOwner
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
+# ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def test_stable_group_identity_and_original_deadline_are_not_mutable_intent_authority():
     owner = WorkBoardOwner(principal_id="operator:fixture", session_id="root-original")

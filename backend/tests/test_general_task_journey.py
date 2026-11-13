@@ -16,6 +16,9 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 from tests.test_work_board_m6_provider_free_journey import _goal
 from tests.test_document_build_native_capacity import build_admission_lifecycle
 
+# ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 async def test_http_governed_intent_plan_accept_native_readback_and_restart(accounting_db, monkeypatch, build_admission_lifecycle):

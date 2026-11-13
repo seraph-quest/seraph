@@ -17,6 +17,9 @@ from src.db.models import GuardianOpportunity, GuardianIntervention, InferenceCo
 from src.guardian.opportunity_runtime import execute_assessment, admit_assessment, assessment_context, read_snapshot
 from src.workflows.job_runtime import durable_job_repository
 
+# ADR-035: pins the guardian opportunity vertical whose setup saves the historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 class OpportunityHttpBoundary(httpx.AsyncBaseTransport):
     def __init__(self, calls, controls):

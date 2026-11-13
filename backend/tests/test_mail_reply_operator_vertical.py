@@ -25,6 +25,9 @@ from src.vault import crypto
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
 
+# ADR-035: pins the operator mail-reply vertical whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def encoded(value):
     return base64.urlsafe_b64encode(value).decode().rstrip("=")

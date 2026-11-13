@@ -1486,6 +1486,7 @@ async def test_operator_benchmark_proof_does_not_block_event_loop(client):
     assert response.json()["summary"]["benchmark_posture"] == "test"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: the deterministic memory suite behind benchmark proof runs consolidation over the scripted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_operator_benchmark_proof_surfaces_suite_coverage_and_evolution_gates(client):
     with ExitStack() as stack:

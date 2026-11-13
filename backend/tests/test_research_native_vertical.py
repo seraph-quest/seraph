@@ -25,6 +25,9 @@ from src.goals.repository import serialize_admission_budget
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
 
+# ADR-035: pins the native research vertical whose setup saves the historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.fixture
 def real_auth(monkeypatch):

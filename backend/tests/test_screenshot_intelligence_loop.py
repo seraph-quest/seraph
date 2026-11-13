@@ -15,6 +15,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: screenshot analysis loop over the intercepted historical OpenRouter vision route
 @pytest.mark.asyncio
 async def test_screenshot_folder_analysis_digest_report_and_status_loop(
     async_db,

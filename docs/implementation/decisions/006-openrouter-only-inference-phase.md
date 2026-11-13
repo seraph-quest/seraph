@@ -4,7 +4,7 @@ title: "ADR-006: OpenRouter-only inference phase"
 
 # ADR-006: OpenRouter-only inference phase
 
-**Status:** Accepted for Epic #736 target; effective on merge to `develop`
+**Status:** Accepted for Epic #736 target; effective on merge to `develop`. Superseded by [ADR-035](./035-near-tee-hosted-inference-only.md) for new inference; retained for historical/liability readers (existing OpenRouter configuration, receipts and liability reconciliation). Its accounting continuity (#909), admission and dispatch-gate principles remain in force.
 
 **Decision class:** Superseding phase target
 

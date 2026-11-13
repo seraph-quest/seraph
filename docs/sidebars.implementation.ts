@@ -25,6 +25,7 @@ const sidebars: SidebarsConfig = {
             'decisions/all-plugin-cordis-architecture',
             'decisions/bounded-iterative-repository-work',
             'decisions/repository-crash-recovery-evidence',
+            'decisions/near-tee-hosted-inference-only',
           ],
         },
         'docs-contract',

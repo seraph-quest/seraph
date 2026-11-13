@@ -190,10 +190,12 @@ HTTP `local` stack is development-only.
   transaction, lifecycle-lock and artifact-adoption seams; preserve their lock
   ordering and current-authority checks. A storage/plugin adapter does not
   authorize a second canonical store or migration framework.
-- Ordinary text, vision and embedding inference uses governed OpenRouter.
-  [ADR-025](docs/implementation/decisions/025-near-https-text-inference.md) permits
-  only the separate optional NEAR HTTPS text capability, not a general route or
-  fallback. Providers remain inference-only; no coding-agent runtime may replace
+- All inference targets NEAR AI TEE-hosted models from a closed per-slot
+  allowlist under
+  [ADR-035](docs/implementation/decisions/035-near-tee-hosted-inference-only.md)
+  (runtime Planned; Development Status owns the effective route). OpenRouter is
+  retired by policy: no new contact, liabilities stay reconcilable. No fallback.
+  Providers remain inference-only; no coding-agent runtime may replace
   Seraph authority.
 - Preserve one shared bounded remote-inference lane, highest-priority ready
   admission, original deadlines/cancellation/idempotency, durable reservations,
@@ -326,7 +328,7 @@ every check; an effective-route receipt uses intercepted inference transport.
 | Streaming UI | Backend frames, frontend reducer/render test, live or mocked delta/final receipt |
 | Settings/UI truth | Endpoint payload and frontend binding/component test |
 | Scheduling/inference admission | Priority/non-starvation, shared serial bound and relevant durable recovery tests |
-| Screenshot/OpenRouter vision | Policy/admission/ingestion tests and operator-visible state; no local wrapper readiness prerequisite |
+| Screenshot/vision route | Policy/admission/ingestion tests and operator-visible state; no local wrapper readiness prerequisite |
 | Docs/workflow/architecture | Owning-doc links, path/command and contradiction checks, both docs scripts and docs typecheck/build; no runtime-change claim |
 | GitHub/Project | Duplicate search, issue/PR/item IDs and post-mutation field readback |
 | Security/privacy/trust | Focused negative/fail-closed proof and explicit residual risk |

@@ -5,9 +5,9 @@ title: "ADR-024: Purpose-specific OpenRouter routes"
 
 # ADR-024: Purpose-specific OpenRouter routes
 
-**Status:** Accepted under [#954](https://github.com/seraph-quest/seraph/issues/954), effective on the reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merge to `develop` on October 5, 2026. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits.
+**Status:** Accepted under [#954](https://github.com/seraph-quest/seraph/issues/954), effective on the reviewed [PR #960](https://github.com/seraph-quest/seraph/pull/960) merge to `develop` on October 5, 2026. [Development Status](../STATUS.md) owns the implemented capability scope and validation limits. Superseded by [ADR-035](./035-near-tee-hosted-inference-only.md) for new inference; retained for historical/liability readers. Its slot mapping, witnessed publication, proof-key and embedding-namespace mechanics are reused by ADR-035.
 
-**Decision class:** Additive model-fabric setup contract. ADR-006 remains the active provider boundary.
+**Decision class:** Additive model-fabric setup contract. ADR-006 was the active provider boundary until ADR-035.
 
 [ADR-033](./033-governed-optional-audio-route.md) narrowly supersedes the
 exactly-three-slot restriction only for explicit setup.v3, adding an optional

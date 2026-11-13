@@ -307,9 +307,10 @@ def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProf
     return ProviderProfile(id=near_tee_profile_id(slot_name), provider_kind=NEAR_TEE_PROVIDER_KIND,
         model=slot.model_id, routing_model=slot.model_id, api_base=NEAR_TEE_API_BASE,
         secret_env=NEAR_TEE_SECRET_REF, options={"_seraph_near_tee": controls},
-        # Callers needing structured output still need that capability's
-        # fresh proof on this exact profile (ADR-035); tools/streaming: PR3c.
-        capabilities=("text", "structured_output"), task_class=tasks[0], task_classes=tasks, budget_class="medium",
+        # Callers needing structured output, streaming or tool use still need
+        # that capability's fresh proof on this exact profile (ADR-035); tool
+        # use also needs ``tools`` in the slot's current catalog receipt.
+        capabilities=("text", "structured_output", "streaming", "tool_use"), task_class=tasks[0], task_classes=tasks, budget_class="medium",
         enabled=slot.enabled, keyless=False, transport_adapter="openai_compatible_chat",
         context_window_tokens=slot.max_input_tokens, max_output_tokens=slot.max_output_tokens,
         cost_microusd=slot.request_cost_bound_microusd, cost_source="near_tee_catalog_receipt",

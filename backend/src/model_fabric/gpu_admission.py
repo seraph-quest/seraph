@@ -173,6 +173,10 @@ class GpuAdmissionRequest:
     # Immutable payload binding for the durable accounting boundary. Model
     # contents remain outside both the broker and the accounting ledger.
     data_digest: str = ""
+    # The authenticated operator root session behind a conversation-scoped
+    # principal, captured once at admission; durable result adoption
+    # authenticates this immutable value, never ambient runtime state.
+    operator_session_id: str = ""
 
     def __post_init__(self) -> None:
         for field_name in ("operation_id", "job_id", "owner_id"):
@@ -194,7 +198,7 @@ class GpuAdmissionRequest:
         if len(runtime_path) > 128:
             raise ValueError("runtime_path must be <= 128 characters")
         object.__setattr__(self, "runtime_path", runtime_path)
-        for field_name in ("session_id", "capability_version"):
+        for field_name in ("session_id", "capability_version", "operator_session_id"):
             value = str(getattr(self, field_name) or "").strip()
             if len(value) > 256:
                 raise ValueError(f"{field_name} must be <= 256 characters")
@@ -249,6 +253,7 @@ class GpuAdmissionRequest:
                 else getattr(context, "uncertain_on_error", None)
             ),
             data_digest=str(getattr(context, "data_digest", "") or ""),
+            operator_session_id=str(getattr(principal, "operator_session_id", "") or ""),
         )
 
 

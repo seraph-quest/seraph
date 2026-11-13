@@ -112,37 +112,43 @@ python seraph_daemon.py --url http://localhost:8004 --interval 3 --idle-timeout 
 
 ### Screen Analysis Options
 
-Screen analysis is opt-in and runs **on context switch** (not a timer). When you switch apps, the daemon captures and analyzes the screen to produce structured activity data (activity type, project, summary). Blocked apps (password managers, banking, etc.) are never screenshotted.
+Screen analysis is opt-in and runs **on context switch** (not a timer). The daemon makes **no cloud model call** ([ADR-035](../docs/implementation/decisions/035-near-tee-hosted-inference-only.md)): it captures the screen, runs on-device Apple Vision OCR, and uploads the allowed capture to the local backend, which runs the governed vision analysis. Blocked apps (password managers, banking, etc.) are never screenshotted or uploaded.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--ocr` | off | Enable screenshot analysis on context switch |
-| `--ocr-provider` | `apple-vision` | Provider: `apple-vision` (local), `codex-local` (local Codex CLI), or `openrouter` (cloud, structured JSON) |
-| `--ocr-model` | provider default | Model for OpenRouter or local Codex provider |
+| `--ocr` | off | Enable screen capture on context switch |
+| `--ocr-provider` | `apple-vision` | Local OCR provider: `apple-vision` (on-device). `codex-local` (local Codex CLI, which is cloud-backed) stays available only when selected explicitly and is slated for removal under ADR-035/#1147 |
+| `--ocr-model` | provider default | Model for the `codex-local` provider |
 | `--preserve-captures` | `$SERAPH_PRESERVE_SCREEN_CAPTURES` | Preserve allowed screenshots, redacted provider output, and normalized JSON artifacts for future re-analysis |
 | `--capture-archive-dir` | `$SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR` or `~/Library/Application Support/Seraph/artifacts/screen-captures` | Durable local directory for preserved artifacts |
-| `--openrouter-api-key` | `$OPENROUTER_API_KEY` | API key for OpenRouter provider |
+| `--edge-device-id` | `$SERAPH_EDGE_DEVICE_ID` | Paired edge device id used to authenticate capture uploads |
+| `--edge-pairing-id` | `$SERAPH_EDGE_PAIRING_ID` | Paired edge pairing id used to authenticate capture uploads |
+| `--edge-credential-file` | `$SERAPH_EDGE_CREDENTIAL_FILE` | Private (`0600`) file holding the paired edge credential. `SERAPH_EDGE_CREDENTIAL` also works; there is deliberately no flag for the raw credential |
 | `--blocklist-file` | (none) | Path to JSON blocklist config (extends built-in defaults) |
 | `--ocr-interval` | (deprecated) | Ignored — OCR now runs on context switch |
 
 Examples:
 
 ```bash
-# Local analysis — Apple Vision framework (free, offline, ~200ms per capture)
+# On-device OCR only (captures stay local; no upload configured)
 ./daemon/run.sh --ocr --verbose
 
-# Local structured analysis — Codex CLI on this machine
-./daemon/run.sh --ocr --ocr-provider codex-local --verbose
-
-# Local Codex analysis with inspectable artifacts
-./daemon/run.sh --ocr --ocr-provider codex-local --preserve-captures --verbose
-
-# Cloud analysis — OpenRouter with Gemini (structured JSON, ~$1.30/mo at ~150 switches/day)
-OPENROUTER_API_KEY=<openrouter_api_key> ./daemon/run.sh --ocr --ocr-provider openrouter --verbose
-
-# With custom blocklist
-./daemon/run.sh --ocr --ocr-provider openrouter --blocklist-file ~/blocklist.json --verbose
+# On-device OCR plus authenticated local capture upload
+SERAPH_EDGE_DEVICE_ID=<device_id> SERAPH_EDGE_PAIRING_ID=<pairing_id> \
+  SERAPH_EDGE_CREDENTIAL_FILE=~/.seraph/edge-credential \
+  ./daemon/run.sh --ocr --blocklist-file ~/blocklist.json --verbose
 ```
+
+### Local capture upload
+
+When screen analysis is enabled and the upload is configured, each allowed capture is sent to `POST /api/observer/captures` on the **loopback** backend (`--url` must be `localhost`, `127.0.0.1` or `::1`; any other host is refused). The request carries the PNG, app name, window title, capture time, a unique `capture_id` and the on-device Apple Vision text.
+
+- **Authentication:** the scoped paired-edge credential returned once by node pairing (`POST /api/nodes/pairings/pair`; the same credential the paired edge transport uses), sent as `Authorization: Bearer` with `X-Seraph-Node-Device` / `X-Seraph-Node-Pairing`. Requests also carry `Origin: <backend url>`, so add the backend origin (for example `http://localhost:8004`) to `OPERATOR_AUTH_ALLOWED_ORIGINS`. A browser session cookie is not accepted.
+- **Backend checks:** screen analysis must be enabled; built-in blocklisted apps are rejected (a local `allowed_apps` override does not apply to uploads); only real PNG/JPEG bytes up to 8 MiB; at most 30 uploads per minute per pairing; a repeated `capture_id` is idempotent.
+- **Storage:** private (`0700` directory, `0600` file, atomic rename) under the screenshot folder's `.seraph-daemon-captures/`. The observation goes through the same dedupe as folder images and is queued for the governed vision analysis job. `screen_cleanup` deletes uploaded files after the observation retention period. These files are not backed up (see #1141).
+- **Bounded retries:** at most two attempts per capture (only on network or 5xx errors), then a cool-down that doubles from 30 s up to 10 min (or the server's `Retry-After`) during which captures are not uploaded. There is no upload queue or poll loop.
+
+When an upload is stored, the context post carries only `active_window`, so the same moment is not recorded twice. Without upload configuration, the daemon keeps posting the on-device OCR observation as JSON.
 
 ### App Blocklist
 
@@ -209,7 +215,7 @@ OCR mode captures screenshots to extract visible text. This requires the Screen 
 | Window title | `main.py — seraph` | AppleScript (Accessibility) |
 | Idle duration | `312.5` seconds | `CGEventSource` (no permission) |
 
-**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots are captured only to produce a structured activity observation. `apple-vision` keeps analysis local. `codex-local` invokes the local `codex exec` command and writes a temporary PNG for that command, then deletes it after analysis or failure unless capture preservation is enabled. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir` for future re-analysis by better models. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured. `openrouter` sends the image to the configured OpenRouter model and should only be used when that external provider is acceptable.
+**Not captured:** keystrokes, clipboard, file contents. When `--ocr` is enabled, screenshots of allowed apps are captured only on context switch (or the periodic capture mode). `apple-vision` OCR runs on this Mac. Captures are uploaded only to the loopback backend described above; the daemon contacts no model provider. `codex-local` invokes the local `codex exec` command and writes a temporary PNG for that command, then deletes it after analysis or failure unless capture preservation is enabled. With `--preserve-captures`, allowed screenshots, redacted provider output, and normalized JSON are archived under `--capture-archive-dir`. The backend uses the same durable archive root by default, or `SCREEN_CAPTURE_ARCHIVE_DIR` when explicitly configured.
 
 Preserved local Codex artifacts can be inspected through the backend from localhost only:
 
@@ -219,7 +225,7 @@ curl http://localhost:8004/api/observer/screen-artifacts/{observation_id}/codex-
 open http://localhost:8004/api/observer/screen-artifacts/{observation_id}/image
 ```
 
-The daemon posts to `POST /api/observer/context`:
+The daemon posts context to `POST /api/observer/context` (the `observation` is omitted when the capture upload was stored):
 ```json
 {
   "active_window": "VS Code — main.py",

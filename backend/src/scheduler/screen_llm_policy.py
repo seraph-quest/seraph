@@ -26,6 +26,11 @@ class ScreenDerivedLlmDecision:
 
 async def _openrouter_profile_ready(runtime_path: str, profile_id: str) -> tuple[bool, str]:
     """Check the same persisted profile/proof contract used at dispatch."""
+    return await _profile_ready(runtime_path, profile_id)
+
+
+async def _profile_ready(runtime_path: str, profile_id: str) -> tuple[bool, str]:
+    """Provider-generic readiness of the effective route's profile and proofs."""
     from src.llm_runtime import provider_profiles
 
     profile = provider_profiles().get(profile_id)
@@ -116,6 +121,9 @@ async def screen_derived_llm_decision(runtime_path: str) -> ScreenDerivedLlmDeci
             runtime_profile="",
         )
 
+    policy = effective_workload_policy(runtime_path)
+    if tuple(policy.allowed_provider_kinds) == ("near_tee",):
+        return await _near_tee_decision(runtime_path, policy)
     runtime_profile = resolve_runtime_profile(runtime_path=runtime_path)
     # Screen-derived prompts have one active route in this phase. A stale
     # compatibility flag or local preference must not revive the retired VLM
@@ -162,3 +170,39 @@ async def screen_derived_llm_decision(runtime_path: str) -> ScreenDerivedLlmDeci
         runtime_path=runtime_path,
         runtime_profile=runtime_profile,
     )
+
+
+async def _near_tee_decision(runtime_path: str, policy) -> ScreenDerivedLlmDecision:
+    """ADR-035: the effective route is a NEAR TEE slot; check it locally.
+
+    Same no-contact gates the dispatch path applies before admission: slot
+    policy/consent, catalog receipt freshness and the profile's proofs.
+    """
+    from src.model_fabric.configuration import (
+        near_tee_slot_for_profile, near_tee_slot_block_reason, read_model_fabric_configuration,
+    )
+    from src.model_fabric.near_tee_catalog import catalog_receipt_block_reason
+
+    profile_id = policy.allowed_profile_ids[0] if len(policy.allowed_profile_ids) == 1 else ""
+    slot = near_tee_slot_for_profile(profile_id)
+
+    def blocked(reason: str) -> ScreenDerivedLlmDecision:
+        return ScreenDerivedLlmDecision(allowed=False, reason=reason, runtime_path=runtime_path,
+            runtime_profile=profile_id)
+
+    if (slot is None or policy.egress_class is not EgressClass.CLOUD_ALLOWED_FULL
+            or not policy.cloud_egress_acknowledged or policy.fallback_allowed or policy.max_cost_microusd is None):
+        return blocked("near_tee_cloud_policy_missing")
+    if reason := near_tee_slot_block_reason(read_model_fabric_configuration(), slot):
+        return blocked(reason)
+    from src.llm_runtime import provider_profiles
+    profile = provider_profiles().get(profile_id)
+    if profile is None:
+        return blocked("model_fabric_profile_missing")
+    if reason := catalog_receipt_block_reason(slot, profile):
+        return blocked(reason)
+    ready, readiness_reason = await _profile_ready(runtime_path, profile_id)
+    if not ready:
+        return blocked(readiness_reason)
+    return ScreenDerivedLlmDecision(allowed=True, reason=readiness_reason, runtime_path=runtime_path,
+        runtime_profile=profile_id)

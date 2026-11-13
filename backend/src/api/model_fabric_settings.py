@@ -51,6 +51,15 @@ from src.model_fabric.configuration import (
     OpenRouterSetup,
     OpenRouterRoute,
     NearTextSetup,
+    NearTeeSetup,
+    NearTeeSlot,
+    NEAR_TEE_IMPLEMENTED_SLOTS,
+    NEAR_TEE_SLOT_ALLOWLISTS,
+    NEAR_TEE_VAULT_KEY,
+    near_tee_profile_for_slot,
+    near_tee_slot_block_reason,
+    near_tee_policy_for_runtime,
+    validate_near_tee_setup,
     InferenceLaneConfig,
     INFERENCE_LANE_SCHEMA_VERSION,
     effective_inference_lane,
@@ -301,6 +310,49 @@ class NearTextSetupInput(BaseModel):
         return value
 
 
+class NearTeeSlotInput(BaseModel):
+    """One NEAR TEE slot (ADR-035); the model comes from the closed allowlist."""
+
+    model_config = ConfigDict(extra="forbid")
+    model_id: str = Field(min_length=1, max_length=128)
+    enabled: bool = Field(default=False, strict=True)
+    max_input_tokens: int = Field(strict=True, ge=1, le=1_048_576)
+    max_output_tokens: int = Field(strict=True, ge=1, le=65_536)
+    timeout_seconds: float = Field(default=30, ge=1, le=120, allow_inf_nan=False)
+    temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    request_cost_bound_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    catalog_ttl_hours: int = Field(default=24, strict=True, ge=1, le=24)
+    plaintext_provider_egress_acknowledged: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def literal_numbers(cls, value):
+        if isinstance(value, dict):
+            for key in ("timeout_seconds", "temperature"):
+                if key in value and value[key] is not None and type(value[key]) not in (int, float):
+                    raise ValueError("NEAR TEE numbers must be numeric")
+        return value
+
+
+class NearTeeSlotsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Typed room for vision/embedding (PR3d/PR4); only text is accepted now.
+    text: NearTeeSlotInput | None = None
+
+
+class NearTeeSetupInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["seraph.near.tee.setup.v1"] = "seraph.near.tee.setup.v1"
+    api_base: Literal["https://cloud-api.near.ai/v1"] = "https://cloud-api.near.ai/v1"
+    slots: NearTeeSlotsInput = Field(default_factory=NearTeeSlotsInput)
+    api_key: SecretStr | None = Field(default=None, repr=False)
+
+
+class NearTeeCatalogCheckInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_policy_revision: int = Field(ge=1, strict=True)
+
+
 class InferenceLaneInput(BaseModel):
     """Provider-neutral shared-lane limits and deployment ceiling (ADR-035)."""
 
@@ -322,6 +374,7 @@ class ModelFabricConfigurationRequest(BaseModel):
     openrouter: OpenRouterSetupInput | None = None
     openrouter_setup: OpenRouterSetupInput | None = None
     near_text: NearTextSetupInput | None = None
+    near_tee: NearTeeSetupInput | None = None
     inference_lane: InferenceLaneInput | None = None
     expected_policy_revision: int | None = Field(default=None, ge=1, strict=True)
     audio_metadata_access: MetadataSelection | None = None
@@ -335,6 +388,11 @@ class ModelFabricConfigurationRequest(BaseModel):
                 raise ValueError("disable NEAR with enabled=false, not null")
             if self.openrouter is not None or self.openrouter_setup is not None:
                 raise ValueError("send only one provider setup mutation")
+        if "near_tee" in self.model_fields_set:
+            if self.near_tee is None:
+                raise ValueError("disable NEAR TEE slots with enabled=false, not null")
+            if {"openrouter", "openrouter_setup", "near_text", "inference_lane", "profiles", "workload_policies"}.intersection(self.model_fields_set):
+                raise ValueError("send NEAR TEE as its own mutation")
         if "inference_lane" in self.model_fields_set:
             if self.inference_lane is None:
                 raise ValueError("the inference lane cannot be deleted")
@@ -572,6 +630,129 @@ def _carry_near_consent(setup, persisted, revision):
     return replace(setup, plaintext_egress_consent_revision=revision if setup.enabled and unchanged and current else None)
 
 
+def _carry_near_tee_consents(setup, persisted, revision):
+    """Carry a current, unchanged slot consent to the final revision; never resurrect."""
+    if setup is None:
+        return None
+    prior_setup = persisted.near_tee
+    slots = {}
+    for name, slot in (setup.slots or {}).items():
+        prior = (prior_setup.slots or {}).get(name) if prior_setup is not None else None
+        if slot is None:
+            slots[name] = None
+            continue
+        unchanged = prior is not None and replace(prior, purpose_consent_revision=None) == replace(slot, purpose_consent_revision=None)
+        current = (prior is not None and prior.enabled and not persisted.egress_revoked
+            and prior.purpose_consent_revision == persisted.egress_revision)
+        slots[name] = replace(slot, purpose_consent_revision=revision if slot.enabled and unchanged and current else None)
+    return replace(setup, slots=slots)
+
+
+async def _put_near_tee(body, persisted):
+    """Witnessed revoke (r+1) -> credential/accounting -> activate (r+2), with CAS."""
+    from src.workspace.accounting_witness import maintenance_accounting_lock, PolicyRevisionConflict, configuration_digest, policy_continuity
+    from src.workspace.production import read_lifecycle_receipt
+    from src.workflows.job_runtime import durable_job_repository
+    revision = persisted.egress_revision
+    if body.expected_policy_revision != revision or persisted.status == "degraded":
+        raise HTTPException(status_code=409, detail="provider_policy_revision_changed")
+    if {"profiles", "workload_policies"}.intersection(body.model_fields_set):
+        raise HTTPException(status_code=422, detail="NEAR TEE owns its slot routes")
+    lane = persisted.inference_lane
+    if lane is None:
+        raise HTTPException(status_code=409, detail="inference_lane_required")
+    incoming = body.near_tee
+    prior = persisted.near_tee
+    slot_inputs = {"text": incoming.slots.text}
+    slots: dict[str, NearTeeSlot | None] = {}
+    acknowledged: dict[str, bool] = {}
+    for name, slot_input in slot_inputs.items():
+        if slot_input is None:
+            slots[name] = None
+            continue
+        if slot_input.model_id not in NEAR_TEE_SLOT_ALLOWLISTS[name]:
+            raise HTTPException(status_code=422, detail="near_tee_model_not_allowlisted")
+        fields = slot_input.model_dump(exclude={"plaintext_provider_egress_acknowledged"})
+        slots[name] = NearTeeSlot(**fields)
+        acknowledged[name] = slot_input.plaintext_provider_egress_acknowledged
+    setup = NearTeeSetup(credential_fingerprint=prior.credential_fingerprint if prior else None, slots=slots)
+    raw_key = incoming.api_key.get_secret_value() if incoming.api_key is not None else ""
+    if raw_key.strip():
+        if len(raw_key) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in raw_key):
+            raise HTTPException(status_code=422, detail="NEAR API key contains unsafe characters")
+        setup = replace(setup, credential_fingerprint=_fingerprint_secret(raw_key))
+    try:
+        validate_near_tee_setup(setup)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    final_revision = revision + 2
+    setup = _carry_near_tee_consents(setup, persisted, final_revision)
+    consented = {}
+    for name, slot in (setup.slots or {}).items():
+        if slot is not None and slot.enabled and slot.purpose_consent_revision is None:
+            if not acknowledged.get(name):
+                raise HTTPException(status_code=403, detail="near_tee_plaintext_acknowledgement_required")
+            slot = replace(slot, purpose_consent_revision=final_revision)
+        consented[name] = slot
+    setup = replace(setup, slots=consented)
+    any_enabled = any(slot is not None and slot.enabled for slot in consented.values())
+    near_text = _carry_near_consent(persisted.near_text, persisted, final_revision)
+    old_or = retire_openrouter_setup(persisted.openrouter_setup) if openrouter_retired() else persisted.openrouter_setup
+    target = replace(persisted, near_tee=setup, near_text=near_text, openrouter_setup=old_or,
+        profiles=_retired_profiles(persisted.profiles), status="ready", error_code=None,
+        egress_revision=final_revision, egress_revoked=persisted.egress_revoked and not any_enabled,
+        egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
+    try:
+        validate_active_model_fabric_configuration(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    bounds = [slot.request_cost_bound_microusd for slot in consented.values() if slot is not None and slot.enabled]
+    if near_text is not None and near_text.enabled:
+        bounds.append(near_text.request_cost_bound_microusd)
+    review = max(bounds, default=None)
+    await _require_review_covers_overrun(review)
+    previous_key = await vault_repository.get(NEAR_TEE_VAULT_KEY) if raw_key.strip() else None
+    mutated = False
+    root = Path(settings.workspace_dir).resolve()
+    try:
+        with maintenance_accounting_lock(root) as workspace:
+            write_model_fabric_configuration(replace(target, egress_revision=revision + 1, egress_revoked=True),
+                expected_revision=revision, publication_workspace=workspace)
+            try:
+                if raw_key.strip():
+                    mutated = True
+                    await vault_repository.store(NEAR_TEE_VAULT_KEY, raw_key,
+                        description="Seraph NEAR TEE key (write-only settings input)")
+                ceiling = deployment_spend_ceiling(target)
+                configured = await durable_job_repository.configure_inference_accounting(ceiling,
+                    reserve_review_microusd=review, continuity_workspace=workspace)
+                accounting = await durable_job_repository.inference_accounting_snapshot(continuity_workspace=workspace)
+                retained_review = accounting.get("request_reserve_review")
+                exact_review = review is None or isinstance(retained_review, dict) and retained_review.get("bound_microusd") == review and retained_review.get("settings_revision") == accounting.get("settings_revision") and retained_review.get("accounting_revision") == configured.get("revision", 0) - 1
+                if (accounting.get("status") != "ready" or accounting.get("ceiling_microusd") != ceiling
+                        or accounting.get("overrun_max_cost_microusd", 0) or not exact_review
+                        or any(accounting.get(field) != configured.get(field) for field in ("deployment_id", "revision", "ledger_digest"))):
+                    raise RuntimeError("accounting_settings_revision_unavailable")
+                write_model_fabric_configuration(target, expected_revision=revision + 1, publication_workspace=workspace)
+            except Exception:
+                if mutated:
+                    path = root / "model-fabric-settings.json"
+                    actual = json.loads(path.read_text()) if path.is_file() else None
+                    witness = read_lifecycle_receipt(workspace) or {}
+                    active = isinstance(actual, dict) and configuration_digest(actual) == configuration_digest(_configuration_payload(target)) and policy_continuity(workspace, actual)[0]
+                    if not active and isinstance(actual, dict) and actual.get("egress_revoked") is True and witness.get("provider_policy", {}).get("state") == "revoked":
+                        if previous_key is None:
+                            await vault_repository.delete(NEAR_TEE_VAULT_KEY)
+                        else:
+                            await vault_repository.store(NEAR_TEE_VAULT_KEY, previous_key)
+                raise
+    except PolicyRevisionConflict as exc:
+        raise HTTPException(status_code=409, detail="provider_policy_revision_changed") from exc
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="provider_policy_publication_unavailable") from exc
+    return await model_fabric_settings_payload()
+
+
 async def _put_near_text(body, persisted):
     from src.workspace.accounting_witness import maintenance_accounting_lock, PolicyRevisionConflict, configuration_digest, policy_continuity
     from src.workspace.production import read_lifecycle_receipt
@@ -614,11 +795,13 @@ async def _put_near_text(body, persisted):
         old_or = replace(old_or, purpose_consents=consents if old_or.routes is not None else old_or.purpose_consents,
             cloud_egress_acknowledged=old_or.cloud_egress_acknowledged and not persisted.egress_revoked)
     target = replace(persisted, near_text=setup, openrouter_setup=old_or, inference_lane=lane,
+        near_tee=_carry_near_tee_consents(persisted.near_tee, persisted, final_revision),
         profiles=_retired_profiles(persisted.profiles), status="ready", error_code=None,
         egress_revision=final_revision, egress_revoked=persisted.egress_revoked and not setup.enabled,
         egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
     validate_active_model_fabric_configuration(target)
     planned_bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
+    planned_bounds.extend(slot.request_cost_bound_microusd for slot in ((persisted.near_tee.slots or {}).values() if persisted.near_tee else ()) if slot is not None and slot.enabled)
     if old_or is not None:
         planned_bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
         if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
@@ -636,6 +819,7 @@ async def _put_near_text(body, persisted):
                     mutated = True
                     await vault_repository.store("near_text_api_key", raw_key, description="Seraph NEAR key (write-only settings input)")
                 bounds = [setup.request_cost_bound_microusd] if setup.enabled else []
+                bounds.extend(slot.request_cost_bound_microusd for slot in ((persisted.near_tee.slots or {}).values() if persisted.near_tee else ()) if slot is not None and slot.enabled)
                 if old_or is not None:
                     bounds.extend(route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled)
                     if old_or.routes is None and old_or.request_cost_bound_microusd is not None:
@@ -707,6 +891,7 @@ async def _put_inference_lane(body, persisted):
         near = _carry_near_consent(near, persisted, final_revision)
     old_or = retire_openrouter_setup(persisted.openrouter_setup) if openrouter_retired() else persisted.openrouter_setup
     target = replace(persisted, inference_lane=lane, near_text=near, openrouter_setup=old_or,
+        near_tee=_carry_near_tee_consents(persisted.near_tee, persisted, final_revision),
         profiles=_retired_profiles(persisted.profiles), status="ready", error_code=None,
         egress_revision=final_revision, egress_revoked=persisted.egress_revoked,
         egress_revocation_key=None, updated_at=datetime.now(timezone.utc).isoformat())
@@ -717,6 +902,10 @@ async def _put_inference_lane(body, persisted):
     review = near.request_cost_bound_microusd if near is not None and near.enabled else None
     if lane.request_reserve_review_microusd is not None:
         review = max(review or 0, lane.request_reserve_review_microusd)
+    if target.near_tee is not None:
+        tee_bounds = [slot.request_cost_bound_microusd for slot in (target.near_tee.slots or {}).values()
+            if slot is not None and slot.enabled]
+        review = max([*tee_bounds, *([review] if review else [])], default=None)
     if old_or is not None and not openrouter_retired():
         bounds = [route.request_cost_bound_microusd for route in (old_or.routes or {}).values() if route is not None and route.enabled]
         review = max([*bounds, *([review] if review else [])], default=None)
@@ -856,13 +1045,15 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
             return await _put_inference_lane(body, persisted)
         if body.near_text is not None:
             return await _put_near_text(body, persisted)
+        if body.near_tee is not None:
+            return await _put_near_tee(body, persisted)
         if openrouter_retired() and (setup_input is not None or any(
                 item.provider_kind == OPENROUTER_PROVIDER_KIND for item in body.profiles)):
             # ADR-035: no save may activate OpenRouter. Retained state stays
             # readable; settlement uses the accounting endpoints.
             raise HTTPException(status_code=409, detail={"code": OPENROUTER_RETIRED_REASON,
                 "message": OPENROUTER_RETIRED_LABEL})
-        if setup_input is None and persisted.near_text is not None:
+        if setup_input is None and (persisted.near_text is not None or persisted.near_tee is not None):
             if {"profiles", "workload_policies"}.intersection(body.model_fields_set):
                 raise HTTPException(status_code=422, detail="provider setups own their fixed routes")
             # An omitted optional setup is preservation, never deletion/regrant.
@@ -1145,7 +1336,9 @@ async def settle_inference_accounting(body: InferenceSettlementInput, request: R
         raise HTTPException(status_code=409, detail=exc.code) from exc
     result = {"status": row["state"], "operation": row, "memory_status": "no_learning",
         "authority_scope": "deployment_accounting", "job_authority_changed": False}
-    if row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text":
+    from src.model_fabric.accounting import near_tee_profile_slot
+    if (row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text"
+            or near_tee_profile_slot(row.get("runtime_path"), row.get("profile_id")) is not None):
         try:
             result["lane_recovery"] = await remote_inference_admission_broker.reconcile_settled_near_operation(
                 operation_id=row["operation_id"], job_id=row["job_id"],
@@ -1155,6 +1348,138 @@ async def settle_inference_accounting(body: InferenceSettlementInput, request: R
             # Debt settlement already committed; local lane recovery cannot undo it.
             result["lane_recovery"] = {"status": "deferred", "reason_code": "lane_recovery_unavailable"}
     return result
+
+
+@router.post("/settings/model-fabric/near-tee/catalog-check")
+async def run_near_tee_catalog_check(body: NearTeeCatalogCheckInput, request: Request):
+    """Explicit operator action: read the NEAR catalog record of each enabled
+    slot model (no inference, no operator content) and store content-safe
+    receipts bound to the slot's complete profile hash."""
+    from src.auth.service import authenticate_principal
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    from src.model_fabric.near_tee_catalog import read_catalog_receipts, run_catalog_check, write_catalog_receipts
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="NEAR TEE catalog check requires a loopback request or an authenticated operator")
+    principal = getattr(getattr(request.state, "operator", None), "principal", None) or get_current_trust_principal()
+    if principal is None or not principal.authenticated:
+        raise HTTPException(status_code=403, detail="authenticated operator required")
+    await authenticate_principal(principal.principal_id)
+    async with configuration_mutation_lock:
+        configured = read_model_fabric_configuration()
+        if configured.status != "ready" or body.expected_policy_revision != configured.egress_revision:
+            raise HTTPException(status_code=409, detail="provider_policy_revision_changed")
+        if configured.near_tee is None or not any(slot is not None and slot.enabled
+                for slot in (configured.near_tee.slots or {}).values()):
+            raise HTTPException(status_code=409, detail="near_tee_slot_unconfigured")
+        receipts = await run_catalog_check(configured)
+        current = read_model_fabric_configuration()
+        if current.egress_revision != configured.egress_revision:
+            raise HTTPException(status_code=409, detail="provider_policy_revision_changed")
+        stored = read_catalog_receipts()
+        stored.update(receipts)
+        try:
+            write_catalog_receipts(stored)
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="near_tee_catalog_receipt_unavailable") from exc
+    payload = await model_fabric_settings_payload()
+    payload["catalog_check"] = {slot: _catalog_receipt_summary(item) for slot, item in receipts.items()}
+    return payload
+
+
+def _catalog_receipt_summary(receipt):
+    if not isinstance(receipt, dict):
+        return None
+    keys = ("slot", "model_id", "profile_hash", "checked_at_iso", "expires_at", "ttl_hours", "outcome",
+        "reason_code", "provider_type", "attestation_supported", "verifiable", "is_ready", "input_modalities",
+        "output_modalities", "features", "input_price_usd_per_million", "output_price_usd_per_million",
+        "context_length", "max_output_tokens", "required_cost_microusd", "response_sha256",
+        "tee_hosted_per_catalog", "tee_verified", "e2ee")
+    summary = {key: receipt.get(key) for key in keys}
+    if isinstance(summary.get("expires_at"), (int, float)):
+        summary["expires_at"] = datetime.fromtimestamp(summary["expires_at"], timezone.utc).isoformat()
+    return summary
+
+
+async def _near_tee_setup_status(configured, accounting):
+    """Local-only NEAR TEE status; never reads the catalog or calls NEAR."""
+    from src.model_fabric.near_tee_catalog import (
+        TEE_LABEL_TEMPLATE, catalog_receipt_block_reason, read_catalog_receipts,
+    )
+    setup = configured.near_tee
+    allowlists = {slot: sorted(models) for slot, models in NEAR_TEE_SLOT_ALLOWLISTS.items()}
+    disclosure = ("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in "
+        "plaintext; no end-to-end encryption.")
+    base = {"schema_version": "seraph.near.tee.setup.v1", "api_base": "https://cloud-api.near.ai/v1",
+        "allowlist": allowlists, "implemented_slots": list(NEAR_TEE_IMPLEMENTED_SLOTS),
+        "tee_verified": False, "e2ee": False, "disclosure": disclosure,
+        "catalog_check_endpoint": "/api/settings/model-fabric/near-tee/catalog-check"}
+    if setup is None:
+        return {**base, "configured": False, "status": "disabled", "reason_code": None, "key_present": False,
+            "credential_fingerprint": None, "slots": {"text": None}}
+    key_present = False
+    key_unavailable = False
+    try:
+        key = await vault_repository.get(NEAR_TEE_VAULT_KEY)
+        key_present = isinstance(key, str) and bool(key) and _fingerprint_secret(key) == setup.credential_fingerprint
+    except Exception:
+        key_unavailable = True
+    try:
+        receipts = read_catalog_receipts()
+    except Exception:
+        receipts = {}
+    slots = {}
+    for name in ("text",):
+        slot = (setup.slots or {}).get(name)
+        if slot is None:
+            slots[name] = None
+            continue
+        profile = near_tee_profile_for_slot(name, slot)
+        reason = near_tee_slot_block_reason(configured, name)
+        if reason is None and not key_present:
+            reason = "near_tee_credential_unavailable" if key_unavailable else "near_tee_credential_required"
+        if reason is None and (accounting.get("status") != "ready"
+                or configured.inference_lane is None
+                or accounting.get("ceiling_microusd") != configured.inference_lane.spend_ceiling_microusd):
+            reason = accounting.get("reason_code") or "inference_accounting_unavailable"
+        receipt = receipts.get(name)
+        catalog_reason = catalog_receipt_block_reason(name, profile, receipts=receipts)
+        if reason is None and catalog_reason is not None:
+            reason = catalog_reason
+        proof_reason = None
+        if reason is None:
+            candidate = candidate_from_profile(profile)
+            try:
+                for capability in ("health", "latency_ms", "text"):
+                    proof = await model_fabric_repository.latest_capability_proof(
+                        profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
+                        profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
+                        endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
+                    if proof is None or not proof_is_fresh(proof):
+                        expired = proof is not None and proof.outcome == "passed" and proof.expires_at <= time.time()
+                        proof_reason = f"{'proof_expired' if expired else 'proof_missing'}:{capability}"
+                        break
+            except Exception:
+                proof_reason = "proof_metadata_unavailable"
+            reason = proof_reason
+        status = ("disabled" if not slot.enabled else "ready" if reason is None
+            else "configuration_required" if reason in {"near_tee_credential_required", "near_tee_catalog_receipt_missing"}
+            or (reason or "").startswith("proof_missing") else "blocked")
+        passed = isinstance(receipt, dict) and receipt.get("outcome") == "passed" and catalog_reason is None
+        slots[name] = {**slot.__dict__, "profile_id": profile.id, "profile_hash": profile.contract_hash,
+            "consent_current": slot.enabled and not configured.egress_revoked
+                and slot.purpose_consent_revision == configured.egress_revision,
+            "status": status, "reason_code": None if status == "ready" else reason,
+            "catalog_receipt": _catalog_receipt_summary(receipt),
+            "catalog_receipt_current": catalog_reason is None,
+            "tee_hosted_per_catalog": passed,
+            "tee_hosting_label": TEE_LABEL_TEMPLATE.format(as_of=receipt.get("checked_at_iso")) if passed else None,
+            "capability_check_timeout_seconds": min(180, int(slot.timeout_seconds) + 16)}
+    statuses = [item["status"] for item in slots.values() if item is not None]
+    status = ("ready" if "ready" in statuses else "disabled" if not statuses or set(statuses) == {"disabled"}
+        else "blocked" if "blocked" in statuses else "configuration_required")
+    return {**base, "configured": True, "status": status,
+        "reason_code": next((item["reason_code"] for item in slots.values() if item and item["reason_code"]), None),
+        "key_present": key_present, "credential_fingerprint": setup.credential_fingerprint, "slots": slots}
 
 
 @router.post("/settings/model-fabric/canary")
@@ -1189,7 +1514,28 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
             "message": OPENROUTER_RETIRED_LABEL})
     configured = read_model_fabric_configuration()
     setup = configured.openrouter_setup
-    if setup is not None and setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
+    near_tee_key = None
+    if profile.provider_kind == "near_tee":
+        from src.model_fabric.near_tee import NEAR_TEE_CHECK_CAPABILITIES
+        from src.model_fabric.near_tee_catalog import catalog_receipt_block_reason
+        from src.model_fabric.configuration import capture_near_tee_credential, near_tee_slot_for_profile
+        slot_name = near_tee_slot_for_profile(profile.id)
+        if slot_name is None:
+            raise HTTPException(status_code=403, detail="canary_exact_slot_required")
+        if body.capability not in NEAR_TEE_CHECK_CAPABILITIES:
+            # Streaming and tool-use checks arrive with PR3c.
+            raise HTTPException(status_code=422, detail="near_tee_capability_check_unsupported")
+        if reason := near_tee_slot_block_reason(configured, slot_name):
+            raise HTTPException(status_code=409, detail=reason)
+        if reason := catalog_receipt_block_reason(slot_name, profile):
+            raise HTTPException(status_code=409, detail=reason)
+        try:
+            near_tee_key = await capture_near_tee_credential(expected_revision=configured.egress_revision,
+                expected_fingerprint=configured.near_tee.credential_fingerprint)
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc) or "near_tee_credential_unavailable") from exc
+        policy = near_tee_policy_for_runtime(configured, "chat_agent") or WorkloadPolicy(runtime_path="capability_probe")
+    elif setup is not None and setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         # This existing proof generator is an explicit target exception, never
         # an ordinary task-class mapping or an unknown-to-text fallback.
         slot = next((slot for slot in OPENROUTER_ROUTE_SLOTS if profile.id == f"openrouter.{slot}"), None)
@@ -1220,6 +1566,7 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
         capability=body.capability,
         policy=policy,
         timeout_seconds=body.timeout_seconds,
+        credential_present=near_tee_key is not None if profile.provider_kind == "near_tee" else None,
     )
     if static_reasons:
         raise HTTPException(status_code=422, detail={"non_routable_reasons": static_reasons})
@@ -1227,12 +1574,13 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
     if not _MANUAL_CANARY_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Another manual model canary is already running")
     try:
-        return await _run_model_fabric_canary_locked(body, profile, policy, candidate, principal, fixture)
+        return await _run_model_fabric_canary_locked(body, profile, policy, candidate, principal, fixture,
+            near_tee_key=near_tee_key)
     finally:
         _MANUAL_CANARY_LOCK.release()
 
 
-async def _run_model_fabric_canary_locked(body, profile, policy, candidate, principal, fixture):
+async def _run_model_fabric_canary_locked(body, profile, policy, candidate, principal, fixture, near_tee_key=None):
 
     now = time.time()
     data_digest = canonical_digest(fixture["digest_payload"])
@@ -1271,6 +1619,11 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
     )
 
     async def transport(candidate, _trust_request, requirements):
+        if candidate.profile.provider_kind == "near_tee":
+            from src.model_fabric.near_tee import near_tee_capability_check_transport
+            return await near_tee_capability_check_transport(profile=candidate.profile,
+                capability=body.capability, body=fixture["json"], key=near_tee_key,
+                deadline_at=context.deadline_at)
         return await _execute_canary_transport(
             candidate.profile,
             capability=body.capability,
@@ -1368,6 +1721,7 @@ def _static_profile_route_reasons(
     policy: WorkloadPolicy,
     timeout_seconds: float,
     now: float | None = None,
+    credential_present: bool | None = None,
 ) -> list[str]:
     """Return non-proof guardrail failures that a bootstrap probe may not bypass."""
     checked_at = time.time() if now is None else now
@@ -1378,6 +1732,9 @@ def _static_profile_route_reasons(
         reasons.append(reason)
     if not credential_ref_allowed(profile):
         reasons.append("credential_ref_not_allowed")
+    elif credential_present is not None:
+        if not credential_present:
+            reasons.append("credential_missing")
     elif not profile.keyless and not profile.api_key:
         reasons.append("credential_missing")
     if not profile.enabled:
@@ -1409,7 +1766,11 @@ def _static_profile_route_reasons(
             reasons.append("profile_cost_unknown")
         elif profile.cost_microusd > policy.max_cost_microusd:
             reasons.append("profile_cost_noncompliant")
-        if (
+        if profile.provider_kind == "near_tee":
+            # Price freshness is the catalog receipt, checked by the caller.
+            if profile.cost_source != "near_tee_catalog_receipt":
+                reasons.append("profile_cost_source_missing_or_stale")
+        elif (
             not profile.cost_source
             or profile.cost_source_updated_at is None
             or profile.cost_source_updated_at < checked_at - 2_592_000
@@ -1442,13 +1803,15 @@ async def model_fabric_settings_payload() -> dict[str, object]:
     from src.workflows.job_runtime import durable_job_repository
     accounting = await durable_job_repository.inference_accounting_snapshot()
     near_status = await _near_text_setup_status(configured, accounting)
+    near_tee_status = await _near_tee_setup_status(configured, accounting)
+    tee_active = near_tee_status.get("status") == "ready"
     if openrouter_setup_status is not None and (configured.egress_revoked or not configured.openrouter_setup.cloud_egress_acknowledged or accounting["status"] != "ready"):
         openrouter_setup_status["status"] = "blocked"
         openrouter_setup_status["error_code"] = configured.error_code or "provider_policy_revoked" if configured.egress_revoked else "openrouter_egress_acknowledgement_required" if not configured.openrouter_setup.cloud_egress_acknowledged else accounting.get("reason_code")
         status = "blocked"
         _block_setup_slots(openrouter_setup_status, openrouter_setup_status["error_code"])
-    if openrouter_retired() and status not in {"degraded"}:
-        # No canonical route has an active provider until NEAR TEE slots land.
+    if openrouter_retired() and status not in {"degraded"} and not tee_active:
+        # No canonical route has an active provider without a ready NEAR TEE slot.
         status = "blocked"
     _apply_openrouter_retirement(openrouter_setup_status)
     return {
@@ -1466,11 +1829,13 @@ async def model_fabric_settings_payload() -> dict[str, object]:
         "canary_proof_ttl": {"default_seconds": _DEFAULT_PROOF_TTL_SECONDS, "max_seconds": _MAX_PROOF_TTL_SECONDS},
         "openrouter_setup": openrouter_setup_status,
         "near_text": near_status,
+        "near_tee": near_tee_status,
         "inference_lane": _inference_lane_status(configured),
         "provider_retirement": _provider_retirement_status(),
-        "active_inference_provider": None if openrouter_retired() else OPENROUTER_PROVIDER_KIND,
-        "inference_block_reason": (OPENROUTER_RETIRED_REASON if configured.openrouter_setup is not None
-            else NO_ACTIVE_PROVIDER_REASON) if openrouter_retired() else None,
+        "active_inference_provider": "near_tee" if tee_active else None if openrouter_retired() else OPENROUTER_PROVIDER_KIND,
+        "inference_block_reason": None if tee_active else (near_tee_status.get("reason_code")
+            or (OPENROUTER_RETIRED_REASON if configured.openrouter_setup is not None else NO_ACTIVE_PROVIDER_REASON)
+            ) if openrouter_retired() else None,
         # "blocked" above is scoped to the canonical inference routes; the
         # separate NEAR text Work capability reports its own readiness here.
         "status_scope": "canonical_inference_routes",

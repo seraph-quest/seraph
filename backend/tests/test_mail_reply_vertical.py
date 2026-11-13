@@ -48,6 +48,9 @@ from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
 
+# ADR-035: pins the mail-reply vertical whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 OWNER = "operator:single"
 SESSION = "mail-reply-vertical-session"

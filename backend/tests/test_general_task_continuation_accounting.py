@@ -16,6 +16,9 @@ from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.general_task_test_transport import prepare_literal_planner
 
+# ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def continuation_fixture(task_runtime, monkeypatch, *, max_calls=2):
     creation = request()

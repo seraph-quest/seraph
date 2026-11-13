@@ -13,6 +13,9 @@ from tests.test_inference_accounting import accounting_db
 from tests import test_mail_reply_vertical as mail
 from tests.connected_source_native_fixture import synchronized_related_source
 
+# ADR-035: pins connected-source task fences whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('change', ['item_before','grant_before','goal_before','root_before','runtime_missing','grant_after_model','item_terminal'])
 async def test_selected_related_source_native_fences(accounting_db, monkeypatch, change):

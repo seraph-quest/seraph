@@ -3551,13 +3551,16 @@ OCR stays on-device (`codex-local` remains only behind explicit selection
 pending operator acknowledgement). When screen analysis is enabled and this
 Mac is paired, the daemon uploads each allowed capture to the loopback backend
 at `POST /api/observer/captures`, authenticated with the scoped paired-edge
-credential (not a browser cookie). The backend rejects built-in blocklisted
-apps, non-PNG/JPEG bytes, captures over 8 MiB and bursts over 30 per minute,
+credential and its stored pairing policy (not a browser cookie; the daemon
+sends no Origin). The backend rejects built-in blocklisted apps, non-PNG/JPEG
+bytes, captures over 8 MiB or 50 MP and bursts over 30 per minute,
 stores the image privately (0700/0600, atomic rename) under the screenshot
 folder's `.seraph-daemon-captures/`, and creates the observation through the
 folder ingest/dedupe path with the real app name, window title and capture
-time, queued for the governed vision job. A repeated `capture_id` is
-idempotent. `screen_cleanup` removes uploaded files after the observation
+time, queued for the governed vision job. The daemon's bounded local
+analysis (Apple Vision text or the explicit `codex-local` result) becomes the
+observation's summary/activity/project and digest content until governed
+analysis exists. A repeated `capture_id` is idempotent. `screen_cleanup` removes uploaded files after the observation
 retention; these files are not backed up
 ([#1141](https://github.com/seraph-quest/seraph/issues/1141)).
 

@@ -338,9 +338,10 @@ def _assert_credential_free_configuration(payload):
     if not isinstance(payload, dict):
         raise ProductionWorkspaceReconciliationError("provider policy configuration unavailable")
     inspect(payload)
-    near = payload.get("near_text")
-    if near is not None and (not isinstance(near, dict) or near.get("api_base") != "https://cloud-api.near.ai/v1"):
-        raise ProductionWorkspaceReconciliationError("provider policy endpoint unavailable")
+    for key in ("near_text", "near_tee"):
+        near = payload.get(key)
+        if near is not None and (not isinstance(near, dict) or near.get("api_base") != "https://cloud-api.near.ai/v1"):
+            raise ProductionWorkspaceReconciliationError("provider policy endpoint unavailable")
 
 
 def policy_continuity(workspace, payload):
@@ -429,7 +430,7 @@ def revoke_restored_policy(*, active, target):
     candidate = target / "model-fabric-settings.json"
     if not existing.get("provider_policy", {}).get("revision", 0) and candidate.is_file() and not candidate.is_symlink():
         contents = json.loads(candidate.read_text())
-        if not isinstance(contents, dict) or not (contents.get("openrouter_setup") or contents.get("near_text") or contents.get("inference_lane")):
+        if not isinstance(contents, dict) or not (contents.get("openrouter_setup") or contents.get("near_text") or contents.get("inference_lane") or contents.get("near_tee")):
             return {"state": "uninitialized"}
     with maintenance_accounting_lock(active) as workspace:
         receipt = read_lifecycle_receipt(workspace) or {}
@@ -439,7 +440,7 @@ def revoke_restored_policy(*, active, target):
                 raise ProductionWorkspaceReconciliationError("provider policy restore configuration unavailable")
             return {"state": "uninitialized"}
         payload = json.loads(path.read_text())
-        if not isinstance(payload, dict) or not (payload.get("openrouter_setup") or payload.get("near_text") or payload.get("inference_lane")):
+        if not isinstance(payload, dict) or not (payload.get("openrouter_setup") or payload.get("near_text") or payload.get("inference_lane") or payload.get("near_tee")):
             if receipt.get("provider_policy", {}).get("revision", 0):
                 raise ProductionWorkspaceReconciliationError("provider policy restore configuration unavailable")
             return {"state": "uninitialized"}

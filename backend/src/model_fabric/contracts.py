@@ -37,17 +37,32 @@ SUPPORTED_SECRET_REFS = frozenset(
         "LLM_API_KEY",
         "LOCAL_LLM_API_KEY",
         "SERAPH_VLM_API_KEY",
+        "NEAR_API_KEY",
     }
 )
+NEAR_TEE_PROVIDER_KIND = "near_tee"
+NEAR_TEE_API_BASE = "https://cloud-api.near.ai/v1"
 PROVIDER_CREDENTIAL_REFS: dict[str, frozenset[str]] = {
     "local": frozenset({"LOCAL_LLM_API_KEY", "SERAPH_VLM_API_KEY"}),
     "ollama": frozenset({"LOCAL_LLM_API_KEY"}),
     "openai": frozenset({"OPENAI_API_KEY"}),
     "openrouter": frozenset({"OPENROUTER_API_KEY"}),
+    # ADR-035: the write-only vault key, captured per request by the caller;
+    # never read from settings or the environment.
+    "near_tee": frozenset({"NEAR_API_KEY"}),
     "openai_compatible": frozenset(
         {"LLM_API_KEY", "LOCAL_LLM_API_KEY", "SERAPH_VLM_API_KEY"}
     ),
 }
+
+
+# Paid remote provider kinds whose callback failure after contact is an
+# uncertain outcome (Unknown liability; the serial lease stays blocked).
+UNCERTAIN_ON_ERROR_PROVIDER_KINDS = frozenset({"openrouter", NEAR_TEE_PROVIDER_KIND})
+
+
+def provider_uncertain_on_error(provider_kind: object) -> bool:
+    return provider_kind in UNCERTAIN_ON_ERROR_PROVIDER_KINDS
 
 
 class NoCompliantModelRouteError(RuntimeError):
@@ -122,6 +137,10 @@ class ProviderProfile:
     def api_key(self) -> str:
         if self.secret_env and self.secret_env not in SUPPORTED_SECRET_REFS:
             raise ValueError("provider profile references an unsupported secret")
+        if self.secret_env == "NEAR_API_KEY":
+            # No environment or settings fallback (ADR-035); the NEAR TEE
+            # caller captures the vault key with a fingerprint fence.
+            return ""
         configured = {
             "OPENAI_API_KEY": settings.openai_api_key,
             "OPENROUTER_API_KEY": settings.openrouter_api_key,

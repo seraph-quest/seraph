@@ -38,17 +38,21 @@ from .contracts import (
     credential_ref_allowed,
     OPENROUTER_API_BASE,
     OPENROUTER_PROVIDER_KIND,
+    NEAR_TEE_API_BASE,
+    NEAR_TEE_PROVIDER_KIND,
     transport_model_for_provider,
 )
 from .retirement import OPENROUTER_RETIRED_REASON, provider_retirement_reason
 
 
-SUPPORTED_PROVIDER_KINDS = frozenset({"local", "ollama", "openrouter", "openai", "openai_compatible"})
+SUPPORTED_PROVIDER_KINDS = frozenset({"local", "ollama", "openrouter", "openai", "openai_compatible", NEAR_TEE_PROVIDER_KIND})
 # The provider kinds whose structural contract this selector knows how to
 # admit. ADR-035 retires OpenRouter by policy, so membership here is not
 # activity: ``active_provider_exclusion_reason`` denies it with
 # ``openrouter_retired`` before the structural contract is consulted.
 ACTIVE_PROVIDER_KINDS = frozenset({OPENROUTER_PROVIDER_KIND})
+# ADR-035: NEAR TEE is active only for exact NEAR TEE slot profiles.
+ACTIVE_CONTEXT_PROVIDER_KINDS = frozenset({OPENROUTER_PROVIDER_KIND, NEAR_TEE_PROVIDER_KIND})
 SYNTHETIC_PROBE_CAPABILITIES = frozenset({"health", "latency_ms"})
 
 OPENROUTER_POLICY_REASON = "provider_kind_not_allowed"
@@ -93,7 +97,35 @@ def active_provider_exclusion_reason(profile: ProviderProfile) -> str | None:
     """
     if reason := provider_retirement_reason(profile.provider_kind):
         return reason
+    if profile.provider_kind == NEAR_TEE_PROVIDER_KIND:
+        return near_tee_contract_exclusion_reason(profile)
     return openrouter_contract_exclusion_reason(profile)
+
+
+def near_tee_contract_exclusion_reason(profile: ProviderProfile) -> str | None:
+    """Structural NEAR TEE slot profile contract (ADR-035): pinned endpoint,
+    allowlisted canonical model, vault credential reference, no fallback."""
+    from .configuration import NEAR_TEE_SLOT_ALLOWLISTS, near_tee_slot_for_profile
+    if profile.provider_kind != NEAR_TEE_PROVIDER_KIND:
+        return OPENROUTER_POLICY_REASON
+    slot = near_tee_slot_for_profile(profile.id)
+    if slot is None:
+        return "near_tee_profile_not_slot"
+    if profile.api_base != NEAR_TEE_API_BASE:
+        return "near_tee_endpoint_not_canonical"
+    if profile.follow_redirects:
+        return "redirects_forbidden"
+    if profile.transport_adapter != "openai_compatible_chat":
+        return "near_tee_transport_adapter_not_allowed"
+    if profile.secret_env != "NEAR_API_KEY" or profile.keyless:
+        return "near_tee_credential_required"
+    if profile.fallback_models:
+        return "near_tee_fallbacks_forbidden"
+    if profile.model not in NEAR_TEE_SLOT_ALLOWLISTS.get(slot, {}) or profile.routing_model not in ("", profile.model):
+        return "near_tee_model_not_allowlisted"
+    if set((profile.options or {})) - {"_seraph_near_tee"}:
+        return "near_tee_options_forbidden"
+    return None
 
 
 def openrouter_contract_exclusion_reason(profile: ProviderProfile) -> str | None:
@@ -245,6 +277,8 @@ def _credential_destination_reason(candidate: ModelRouteCandidate) -> str | None
     host = (urlparse(candidate.endpoint).hostname or "").lower()
     if secret_ref == "OPENAI_API_KEY":
         return None if profile.provider_kind == "openai" and host == "api.openai.com" else "credential_destination_mismatch"
+    if secret_ref == "NEAR_API_KEY":
+        return None if profile.provider_kind == NEAR_TEE_PROVIDER_KIND and host == "cloud-api.near.ai" else "credential_destination_mismatch"
     if secret_ref == "OPENROUTER_API_KEY":
         trusted_host = host == "openrouter.ai" or host.endswith(".openrouter.ai")
         return None if profile.provider_kind == "openrouter" and trusted_host else "credential_destination_mismatch"
@@ -281,7 +315,10 @@ def preflight_candidate(
     # stale compatibility flag is false.  Standalone selector compatibility
     # tests/readback can still exercise the broad provider contract without
     # creating an executable production route.
-    active_context = "openrouter" in context.allowed_provider_kinds
+    active_context = bool(ACTIVE_CONTEXT_PROVIDER_KINDS.intersection(context.allowed_provider_kinds))
+    near_tee = profile.provider_kind == NEAR_TEE_PROVIDER_KIND
+    if near_tee and NEAR_TEE_PROVIDER_KIND not in context.allowed_provider_kinds:
+        return None, None, "provider_kind_not_allowed"
     exclusion = active_provider_exclusion_reason if active_context else profile_exclusion_reason
     if reason := exclusion(profile):
         return None, None, reason
@@ -293,7 +330,7 @@ def preflight_candidate(
             )
             if requested_model != profile.model:
                 return None, None, OPENROUTER_TARGET_MODEL_REASON
-        if target_api_key is not _TARGET_API_KEY_UNSET:
+        if target_api_key is not _TARGET_API_KEY_UNSET and not near_tee:
             configured_key = profile.api_key if not profile.keyless else ""
             supplied_key = "" if target_api_key is None else str(target_api_key)
             if supplied_key != configured_key:
@@ -316,7 +353,15 @@ def preflight_candidate(
         return None, None, "credential_ref_not_allowed"
     if credential_reason := _credential_destination_reason(candidate):
         return None, None, credential_reason
-    if not profile.keyless and not profile.api_key:
+    if near_tee:
+        # The caller captured the fingerprint-fenced vault key before admission
+        # (the capability-check endpoint does so before building its probe).
+        if target_api_key is _TARGET_API_KEY_UNSET:
+            if context.workload is not InferenceWorkload.CAPABILITY_PROBE:
+                return None, None, "credential_missing"
+        elif not target_api_key:
+            return None, None, "credential_missing"
+    elif not profile.keyless and not profile.api_key:
         return None, None, "credential_missing"
     if profile.schema_version != "seraph.model-fabric.v1":
         return None, None, "profile_schema_unknown"
@@ -488,7 +533,12 @@ def _proof_reason(
     if candidate.endpoint_class is EndpointClass.REMOTE:
         if context.requirements.max_cost_microusd is None or candidate.profile.cost_microusd is None:
             return "profile_cost_unknown"
-        if (
+        if candidate.profile.provider_kind == NEAR_TEE_PROVIDER_KIND:
+            # Price freshness is the NEAR catalog receipt (TTL 1-24h), which
+            # the NEAR TEE caller re-validates locally before admission.
+            if candidate.profile.cost_source != "near_tee_catalog_receipt":
+                return "profile_cost_source_missing_or_stale"
+        elif (
             not candidate.profile.cost_source
             or candidate.profile.cost_source_updated_at is None
             or candidate.profile.cost_source_updated_at < now - 2_592_000

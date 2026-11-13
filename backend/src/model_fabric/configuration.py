@@ -46,6 +46,26 @@ NEAR_TEXT_MODEL_ID = "z-ai/glm-5.3-flash"
 NEAR_TEXT_API_BASE = "https://cloud-api.near.ai/v1"
 NEAR_TEXT_CREDENTIAL_REF = "vault:near_text_api_key"
 INFERENCE_LANE_SCHEMA_VERSION = "seraph.inference.lane.v1"
+NEAR_TEE_SCHEMA_VERSION = "seraph.near.tee.setup.v1"
+NEAR_TEE_PROVIDER_KIND = "near_tee"
+NEAR_TEE_API_BASE = "https://cloud-api.near.ai/v1"
+NEAR_TEE_CREDENTIAL_REF = "vault:near_api_key"
+NEAR_TEE_VAULT_KEY = "near_api_key"
+NEAR_TEE_SECRET_REF = "NEAR_API_KEY"
+# Typed room for the ADR-035 slots; only ``text`` is implemented (PR3b).
+NEAR_TEE_SLOTS = ("text", "vision", "embedding")
+NEAR_TEE_IMPLEMENTED_SLOTS = ("text",)
+# ADR-035 closed allowlist (catalog read 2026-11-13): canonical id ->
+# design-basis context window. The catalog check decides dispatch.
+NEAR_TEE_TEXT_ALLOWLIST: dict[str, int] = {
+    "z-ai/glm-5.3-flash": 1_048_576,
+    "Qwen/Qwen3.8-27B": 262_144,
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": 1_048_576,
+    "Qwen/Qwen3.6-35B-A3B-FP8": 262_144,
+}
+NEAR_TEE_SLOT_ALLOWLISTS: dict[str, dict[str, int]] = {"text": NEAR_TEE_TEXT_ALLOWLIST}
+_MAX_NEAR_TEE_OUTPUT_TOKENS = 65_536
+_MAX_NEAR_TEE_TIMEOUT_SECONDS = 120.0
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_UPSTREAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
@@ -172,6 +192,226 @@ class InferenceLaneConfig:
     # no provider route is enabled (for example an OpenRouter-only install).
     request_reserve_review_microusd: int | None = None
     schema_version: str = INFERENCE_LANE_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class NearTeeSlot:
+    """One operator-chosen NEAR TEE-hosted model slot (ADR-035).
+
+    ``temperature`` None keeps the caller's sampling temperature (Cordis
+    presets stay unchanged). ``purpose_consent_revision`` is the revision-bound
+    purpose consent, granted only with an explicit plaintext-to-NEAR
+    acknowledgement.
+    """
+
+    model_id: str
+    max_input_tokens: int
+    max_output_tokens: int
+    request_cost_bound_microusd: int
+    enabled: bool = False
+    timeout_seconds: float = 30.0
+    temperature: float | None = None
+    catalog_ttl_hours: int = 24
+    purpose_consent_revision: int | None = None
+
+
+@dataclass(frozen=True)
+class NearTeeSetup:
+    """Closed, versioned NEAR TEE configuration. Disabled with no slot by default.
+
+    The credential itself is absent: ``credential_ref`` names the write-only
+    vault entry and ``credential_fingerprint`` is a short comparison value.
+    The lane ceiling is the provider-neutral ``inference_lane``; NEAR TEE never
+    funds its own.
+    """
+
+    schema_version: str = NEAR_TEE_SCHEMA_VERSION
+    api_base: str = NEAR_TEE_API_BASE
+    credential_ref: str = NEAR_TEE_CREDENTIAL_REF
+    credential_fingerprint: str | None = None
+    slots: dict[str, NearTeeSlot | None] | None = None
+
+
+def near_tee_profile_id(slot: str) -> str:
+    return f"near_tee.{slot}"
+
+
+def near_tee_slot_for_profile(profile_id: object) -> str | None:
+    if not isinstance(profile_id, str) or not profile_id.startswith("near_tee."):
+        return None
+    slot = profile_id.removeprefix("near_tee.")
+    return slot if slot in NEAR_TEE_IMPLEMENTED_SLOTS else None
+
+
+def validate_near_tee_slot(slot_name: str, slot: NearTeeSlot) -> None:
+    if slot_name not in NEAR_TEE_IMPLEMENTED_SLOTS:
+        raise ValueError("near_tee_slot_not_implemented")
+    if not isinstance(slot, NearTeeSlot):
+        raise ValueError("invalid NEAR TEE slot")
+    allowlist = NEAR_TEE_SLOT_ALLOWLISTS[slot_name]
+    if not isinstance(slot.model_id, str) or slot.model_id not in allowlist:
+        raise ValueError("near_tee_model_not_allowlisted")
+    if type(slot.enabled) is not bool:
+        raise ValueError("invalid NEAR TEE enabled")
+    for field, upper in (("max_input_tokens", allowlist[slot.model_id]),
+            ("max_output_tokens", _MAX_NEAR_TEE_OUTPUT_TOKENS),
+            ("request_cost_bound_microusd", 1_000_000_000), ("catalog_ttl_hours", 24)):
+        value = getattr(slot, field)
+        if type(value) is not int or not 1 <= value <= upper:
+            raise ValueError(f"invalid NEAR TEE {field}")
+    timeout = slot.timeout_seconds
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= _MAX_NEAR_TEE_TIMEOUT_SECONDS:
+        raise ValueError("invalid NEAR TEE timeout_seconds")
+    temperature = slot.temperature
+    if temperature is not None and (type(temperature) not in (int, float) or not math.isfinite(temperature) or not 0 <= temperature <= 2):
+        raise ValueError("invalid NEAR TEE temperature")
+    revision = slot.purpose_consent_revision
+    if revision is not None and (type(revision) is not int or revision < 1):
+        raise ValueError("invalid NEAR TEE consent revision")
+    if not slot.enabled and revision is not None:
+        raise ValueError("disabled NEAR TEE slot has consent")
+
+
+def validate_near_tee_setup(setup: NearTeeSetup) -> None:
+    if not isinstance(setup, NearTeeSetup):
+        raise ValueError("invalid NEAR TEE setup")
+    for field, expected in (("schema_version", NEAR_TEE_SCHEMA_VERSION),
+            ("api_base", NEAR_TEE_API_BASE), ("credential_ref", NEAR_TEE_CREDENTIAL_REF)):
+        if getattr(setup, field) != expected:
+            raise ValueError(f"invalid NEAR TEE {field}")
+    if setup.credential_fingerprint is not None and (not isinstance(setup.credential_fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{12}", setup.credential_fingerprint) is None):
+        raise ValueError("invalid NEAR TEE credential fingerprint")
+    slots = setup.slots or {}
+    if not isinstance(slots, dict) or set(slots) - set(NEAR_TEE_SLOTS):
+        raise ValueError("unsupported NEAR TEE slot")
+    for name, slot in slots.items():
+        if slot is not None:
+            validate_near_tee_slot(name, slot)
+
+
+def near_tee_slot(configuration: "ModelFabricConfiguration", slot: str) -> NearTeeSlot | None:
+    setup = configuration.near_tee
+    return None if setup is None else (setup.slots or {}).get(slot)
+
+
+def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProfile:
+    """Deterministic profile; its contract hash binds proofs and catalog receipts."""
+    validate_near_tee_slot(slot_name, slot)
+    tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis")
+        if route_slot_for_task_class(task) == slot_name)
+    controls = {"temperature": slot.temperature, "output_limit": slot.max_output_tokens,
+        "timeout_seconds": float(slot.timeout_seconds), "input_limit": slot.max_input_tokens,
+        "request_cost_bound_microusd": slot.request_cost_bound_microusd,
+        "catalog_ttl_hours": slot.catalog_ttl_hours}
+    return ProviderProfile(id=near_tee_profile_id(slot_name), provider_kind=NEAR_TEE_PROVIDER_KIND,
+        model=slot.model_id, routing_model=slot.model_id, api_base=NEAR_TEE_API_BASE,
+        secret_env=NEAR_TEE_SECRET_REF, options={"_seraph_near_tee": controls},
+        # Callers needing structured output still need that capability's
+        # fresh proof on this exact profile (ADR-035); tools/streaming: PR3c.
+        capabilities=("text", "structured_output"), task_class=tasks[0], task_classes=tasks, budget_class="medium",
+        enabled=slot.enabled, keyless=False, transport_adapter="openai_compatible_chat",
+        context_window_tokens=slot.max_input_tokens, max_output_tokens=slot.max_output_tokens,
+        cost_microusd=slot.request_cost_bound_microusd, cost_source="near_tee_catalog_receipt",
+        # Price freshness is the catalog receipt's TTL (1-24h), checked at dispatch.
+        cost_source_updated_at=0.0, max_latency_ms=int(slot.timeout_seconds * 1000),
+        safety_notes=("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives "
+            "requests in plaintext; no end-to-end encryption."))
+
+
+def near_tee_profiles(configuration: "ModelFabricConfiguration") -> tuple[ProviderProfile, ...]:
+    setup = configuration.near_tee
+    if setup is None:
+        return ()
+    return tuple(near_tee_profile_for_slot(name, slot) for name, slot in sorted((setup.slots or {}).items())
+        if slot is not None and name in NEAR_TEE_IMPLEMENTED_SLOTS)
+
+
+def near_tee_slot_block_reason(configuration: "ModelFabricConfiguration", slot_name: str) -> str | None:
+    """Local (no-contact) reason the slot cannot dispatch, or None."""
+    if configuration.status != "ready":
+        return configuration.error_code or "configuration_unreadable"
+    if configuration.egress_revoked:
+        return "provider_policy_revoked"
+    setup = configuration.near_tee
+    slot = near_tee_slot(configuration, slot_name)
+    if setup is None or slot is None:
+        return "near_tee_slot_unconfigured"
+    if not slot.enabled:
+        return "near_tee_slot_disabled"
+    if slot.purpose_consent_revision != configuration.egress_revision:
+        return "near_tee_purpose_consent_required"
+    if not setup.credential_fingerprint:
+        return "near_tee_credential_required"
+    if configuration.inference_lane is None:
+        return "inference_lane_required"
+    if slot.request_cost_bound_microusd > configuration.inference_lane.spend_ceiling_microusd:
+        return "near_tee_request_reserve_exceeds_lane_ceiling"
+    return None
+
+
+def near_tee_policy_for_runtime(configuration: "ModelFabricConfiguration", runtime_path: str) -> WorkloadPolicy | None:
+    """The NEAR TEE route for a canonical runtime path, when usable."""
+    from .caller_context import canonical_route_spec
+    try:
+        slot_name = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+    except ValueError:
+        return None
+    if slot_name not in NEAR_TEE_IMPLEMENTED_SLOTS or near_tee_slot_block_reason(configuration, slot_name):
+        return None
+    return WorkloadPolicy(runtime_path=runtime_path, egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True, allowed_profile_ids=(near_tee_profile_id(slot_name),),
+        allowed_provider_kinds=(NEAR_TEE_PROVIDER_KIND,), fallback_allowed=False,
+        max_cost_microusd=configuration.inference_lane.spend_ceiling_microusd)
+
+
+async def capture_near_tee_credential(*, expected_revision: int, expected_fingerprint: str) -> str:
+    """Read the write-only vault key with a fingerprint/revision fence; no env fallback."""
+    from src.vault.repository import vault_repository
+    configured = read_model_fabric_configuration()
+    if (configured.egress_revision != expected_revision or configured.near_tee is None
+            or configured.near_tee.credential_fingerprint != expected_fingerprint):
+        raise PermissionError("near_tee_credential_revision_changed")
+    value = await vault_repository.get(NEAR_TEE_VAULT_KEY)
+    if not isinstance(value, str) or not value or len(value) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PermissionError("near_tee_credential_unavailable")
+    current = read_model_fabric_configuration()
+    if (current.egress_revision != expected_revision or current.near_tee is None
+            or _near_credential_fingerprint(value) != expected_fingerprint):
+        raise PermissionError("near_tee_credential_revision_changed")
+    return value
+
+
+def _near_tee_slot_from_payload(raw: object) -> NearTeeSlot:
+    declared = set(NearTeeSlot.__dataclass_fields__)
+    required = {"model_id", "max_input_tokens", "max_output_tokens", "request_cost_bound_microusd"}
+    if not isinstance(raw, dict) or not required <= set(raw) <= declared:
+        raise ValueError("NEAR TEE slot must contain exactly the declared fields")
+    return NearTeeSlot(**raw)
+
+
+def _near_tee_from_payload(raw: object) -> NearTeeSetup:
+    if not isinstance(raw, dict) or set(raw) - set(NearTeeSetup.__dataclass_fields__):
+        raise ValueError("invalid NEAR TEE setup fields")
+    values = dict(raw)
+    slots = values.get("slots")
+    if slots is not None:
+        if not isinstance(slots, dict):
+            raise ValueError("invalid NEAR TEE slots")
+        values["slots"] = {name: (None if item is None else _near_tee_slot_from_payload(item))
+            for name, item in slots.items()}
+    try:
+        setup = NearTeeSetup(**values)
+    except TypeError as exc:
+        raise ValueError("invalid NEAR TEE setup") from exc
+    validate_near_tee_setup(setup)
+    return setup
+
+
+def _near_tee_payload(setup: NearTeeSetup) -> dict[str, object]:
+    payload = asdict(setup)
+    payload["slots"] = {name: (None if slot is None else asdict(slot)) for name, slot in (setup.slots or {}).items()}
+    return payload
 
 
 def validate_inference_lane(lane: InferenceLaneConfig) -> None:
@@ -344,6 +584,7 @@ class ModelFabricConfiguration:
     v1_rollback_snapshot: dict[str, object] | None = None
     audio_metadata_access: dict[str, object] | None = None
     inference_lane: InferenceLaneConfig | None = None
+    near_tee: NearTeeSetup | None = None
 
 
 def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
@@ -385,7 +626,7 @@ def read_model_fabric_configuration() -> ModelFabricConfiguration:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         configured = _configuration_from_payload(payload)
-        if configured.openrouter_setup is not None or configured.near_text is not None or configured.inference_lane is not None:
+        if configured.openrouter_setup is not None or configured.near_text is not None or configured.inference_lane is not None or configured.near_tee is not None:
             from src.workspace.accounting_witness import policy_continuity
             from src.workspace.production import ProductionWorkspace
             try:
@@ -451,7 +692,7 @@ def write_model_fabric_configuration(configuration: ModelFabricConfiguration, *,
             generation = home_projection.begin_policy_publication()
             publication()
             home_projection.finish_policy_publication(generation,validated)
-    if validated.openrouter_setup is not None or validated.near_text is not None or validated.inference_lane is not None:
+    if validated.openrouter_setup is not None or validated.near_text is not None or validated.inference_lane is not None or validated.near_tee is not None:
         from src.workspace.accounting_witness import _publish_policy_locked, maintenance_accounting_lock
         if publication_workspace is None:
             with maintenance_accounting_lock(path.parent) as workspace:
@@ -488,7 +729,7 @@ def validate_active_model_fabric_configuration(
         if policy.fallback_allowed:
             raise ValueError("active model-fabric policies must disable fallback")
         if policy.allowed_provider_kinds and set(policy.allowed_provider_kinds) != {"openrouter"}:
-            raise ValueError("active model-fabric policies may allow only openrouter")
+            raise ValueError("stored model-fabric policies may allow only openrouter; NEAR TEE routes derive from near_tee")
     if validated.openrouter_setup is not None:
         validate_openrouter_setup(validated.openrouter_setup,
             allow_unconsented=validated.near_text is not None or validated.inference_lane is not None)
@@ -496,6 +737,8 @@ def validate_active_model_fabric_configuration(
         validate_near_text_setup(validated.near_text)
     if validated.inference_lane is not None:
         validate_inference_lane(validated.inference_lane)
+    if validated.near_tee is not None:
+        _validate_near_tee_against_lane(validated)
     if validated.near_text is not None or validated.inference_lane is not None:
         deployment_spend_ceiling(validated)
 
@@ -623,6 +866,7 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
     profiles = dict(legacy_profiles)
     if configured.status == "ready":
         profiles.update({profile.id: profile for profile in configured.profiles})
+        profiles.update({profile.id: profile for profile in near_tee_profiles(configured)})
         lane = effective_inference_lane(configured)
         if lane is not None:
             # The admission broker is process-local by design, but its limits
@@ -649,10 +893,15 @@ def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
     configured = read_model_fabric_configuration()
     if configured.egress_revoked:
         return WorkloadPolicy(runtime_path=runtime_path)
+    if configured.near_tee is not None:
+        # ADR-035: a configured NEAR TEE slot is the only active provider of
+        # its canonical routes. Unusable slots fail closed, never fall back.
+        policy = near_tee_policy_for_runtime(configured, runtime_path)
+        if policy is not None or openrouter_retired():
+            return policy or WorkloadPolicy(runtime_path=runtime_path)
     if openrouter_retired():
-        # ADR-035: OpenRouter is the only provider the canonical routes have
-        # ever carried; retired by policy, no canonical route has an active
-        # provider until NEAR TEE slots land. Fail closed, never fall back.
+        # Retired by policy and no NEAR TEE slot: no canonical route has an
+        # active provider. Fail closed, never fall back.
         return WorkloadPolicy(runtime_path=runtime_path)
     if configured.status == "ready":
         if configured.openrouter_setup is not None:
@@ -697,6 +946,8 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         validate_near_text_setup(near)
     raw_lane = payload.get("inference_lane")
     lane = _inference_lane_from_payload(raw_lane) if raw_lane is not None else None
+    raw_tee = payload.get("near_tee")
+    tee = _near_tee_from_payload(raw_tee) if raw_tee is not None else None
     raw_setup = payload.get("openrouter_setup")
     setup = (_openrouter_setup_from_payload(raw_setup, allow_unconsented=near is not None or lane is not None)
         if raw_setup is not None else None)
@@ -713,7 +964,10 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         v1_rollback_snapshot=payload.get("v1_rollback_snapshot"),
         audio_metadata_access=payload.get("audio_metadata_access"),
         inference_lane=lane,
+        near_tee=tee,
     )
+    if tee is not None:
+        _validate_near_tee_against_lane(configuration)
     if configuration.audio_metadata_access is not None:
         from .audio_documentation import AudioMetadataAccessV1
         AudioMetadataAccessV1.model_validate(configuration.audio_metadata_access)
@@ -835,7 +1089,20 @@ def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str,
         payload["near_text"] = asdict(configuration.near_text)
     if configuration.inference_lane is not None:
         payload["inference_lane"] = asdict(configuration.inference_lane)
+    if configuration.near_tee is not None:
+        payload["near_tee"] = _near_tee_payload(configuration.near_tee)
     return payload
+
+
+def _validate_near_tee_against_lane(configuration: ModelFabricConfiguration) -> None:
+    """NEAR TEE mirrors the provider-neutral lane ceiling; it never funds its own."""
+    validate_near_tee_setup(configuration.near_tee)
+    enabled = [slot for slot in (configuration.near_tee.slots or {}).values() if slot is not None and slot.enabled]
+    if enabled and configuration.inference_lane is None:
+        raise ValueError("inference_lane_required")
+    for slot in enabled:
+        if slot.request_cost_bound_microusd > configuration.inference_lane.spend_ceiling_microusd:
+            raise ValueError("NEAR TEE request reserve exceeds shared ceiling")
 
 
 def _profile_payload(profile: ProviderProfile) -> dict[str, object]:

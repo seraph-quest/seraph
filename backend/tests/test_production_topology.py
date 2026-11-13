@@ -262,6 +262,32 @@ def test_prod_local_up_rejects_plain_http_before_start(tmp_path):
     assert not started.exists()
 
 
+def test_local_tmp_defaults_resolve_symlinked_temp_base(tmp_path):
+    real_tmp = tmp_path / "private" / "tmp dir"
+    real_tmp.mkdir(parents=True)
+    linked_tmp = tmp_path / "tmp"
+    linked_tmp.symlink_to(real_tmp, target_is_directory=True)
+    script = "\n".join(
+        (
+            "set -u",
+            "export SERAPH_MANAGE_SOURCE_ONLY=true",
+            f"source {shlex.quote(str(ROOT / 'manage.sh'))}",
+            f"default_tmp_root {shlex.quote(str(linked_tmp))}",
+            f"default_tmp_root {shlex.quote(str(tmp_path / 'missing'))}",
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [os.path.realpath(real_tmp), str(tmp_path / "missing")]
+
+    manage = (ROOT / "manage.sh").read_text()
+    assert 'SERAPH_DEFAULT_TMP_ROOT="$(default_tmp_root /tmp)"' in manage
+    assert 'LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}"' in manage
+    assert 'LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-logs}"' in manage
+    assert ":-/tmp/seraph-dev" not in manage
+
+
 def test_preflight_script_is_dependency_free_and_does_not_open_provider_sockets():
     source = (BACKEND / "production_preflight.py").read_text()
     assert "urllib.request" not in source

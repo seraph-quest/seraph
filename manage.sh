@@ -887,6 +887,20 @@ function local_run() {
     local_logs all
 }
 
+# Physical path of the system temp base.  On macOS /tmp is a symlink to
+# /private/tmp and the backend rejects symlinked runtime roots, so built-in
+# defaults are derived from the resolved directory.  Explicitly configured
+# values are never rewritten.
+function default_tmp_root() {
+    local base="${1:-/tmp}"
+    local resolved
+    if resolved="$(cd -P -- "$base" 2>/dev/null && pwd -P)" && [ -n "$resolved" ]; then
+        printf '%s\n' "$resolved"
+    else
+        printf '%s\n' "$base"
+    fi
+}
+
 if [ "${SERAPH_MANAGE_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -967,16 +981,17 @@ fi
 
 LOCAL_BACKEND_PORT="${LOCAL_BACKEND_PORT:-8004}"
 LOCAL_FRONTEND_PORT="${LOCAL_FRONTEND_PORT:-3001}"
+SERAPH_DEFAULT_TMP_ROOT="$(default_tmp_root /tmp)"
 if [ "$COMMAND" = "local" ]; then
-    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-/tmp/seraph-dev-data}"
+    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}"
 else
-    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-${BACKEND_DATA_PATH_DEV:-/tmp/seraph-dev-data}}"
+    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-${BACKEND_DATA_PATH_DEV:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}}"
 fi
 if [[ "$LOCAL_WORKSPACE_DIR" != /* ]]; then
     LOCAL_WORKSPACE_DIR="$SCRIPT_DIR/$LOCAL_WORKSPACE_DIR"
 fi
-LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-/tmp/seraph-dev-logs}"
-LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-/tmp/uv-cache}"
+LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-logs}"
+LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/uv-cache}"
 LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}}"
 SCREEN_CAPTURE_ARCHIVE_DIR="${SCREEN_CAPTURE_ARCHIVE_DIR:-$LOCAL_WORKSPACE_DIR/artifacts/screen-captures}"
 SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR="${SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR:-$SCREEN_CAPTURE_ARCHIVE_DIR}"

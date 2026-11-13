@@ -129,13 +129,86 @@ def _get_or_create_table(*, metadata: EmbeddingMetadata | None = None):
     return db.create_table(table_name, schema=_schema_for_embedding(metadata))
 
 
+def _near_tee_mode() -> bool:
+    """ADR-035: with OpenRouter retired, a configured NEAR TEE embedding slot
+    owns the only active vector namespace."""
+    from src.memory.embedder import near_tee_embedding_configured
+    from src.model_fabric.retirement import openrouter_retired
+    return openrouter_retired() and near_tee_embedding_configured()
+
+
+def _near_tee_index_metadata() -> EmbeddingMetadata:
+    """The NEAR namespace when its proof and completed index both exist.
+
+    Raises a typed, content-safe reason otherwise; callers degrade to lexical
+    recall and nothing is embedded or re-embedded automatically.
+    """
+    from src.memory.near_embedding_reindex import namespace_complete
+    metadata = embedding_metadata()
+    if metadata is None or metadata.provider != "near_tee":
+        raise EmbeddingUnavailableError("embedding_proof_required", stage="metadata")
+    if not namespace_complete(metadata.namespace):
+        raise EmbeddingUnavailableError("embedding_target_index_required", stage="metadata")
+    return metadata
+
+
+def namespace_row_texts(metadata: EmbeddingMetadata) -> dict[str, str]:
+    """Existing (id -> text) rows of one namespace table; the re-index checkpoint."""
+    db = _get_db()
+    table_name = _table_name(metadata)
+    if table_name not in db.table_names():
+        return {}
+    table = db.open_table(table_name)
+    if table.schema.field("vector").type.list_size != metadata.dimension:
+        raise EmbeddingUnavailableError("embedding_target_index_unusable", stage="metadata")
+    data = table.to_arrow().select(["id", "text"]).to_pylist()
+    return {str(row["id"]): str(row["text"]) for row in data}
+
+
+def _quoted_ids(ids: list[str]) -> str:
+    if any(not isinstance(item, str) or not item or not item.replace("-", "").replace("_", "").isalnum() for item in ids):
+        raise EmbeddingUnavailableError("embedding_row_id_invalid", stage="metadata")
+    return ", ".join(f"'{item}'" for item in ids)
+
+
+def delete_namespace_rows(metadata: EmbeddingMetadata, ids: list[str]) -> None:
+    """Remove derived rows whose canonical memory is no longer active."""
+    db = _get_db()
+    table_name = _table_name(metadata)
+    if ids and table_name in db.table_names():
+        db.open_table(table_name).delete(f"id IN ({_quoted_ids(ids)})")
+
+
+def write_namespace_rows(metadata: EmbeddingMetadata, rows: list[dict]) -> int:
+    """Idempotent upsert of re-indexed canonical memories into one namespace."""
+    if any(len(row["vector"]) != metadata.dimension for row in rows):
+        raise EmbeddingUnavailableError("embedding_dimension_mismatch", stage="metadata")
+    table = _get_or_create_table(metadata=metadata)
+    ids = [row["id"] for row in rows]
+    if not ids:
+        return 0
+    table.delete(f"id IN ({_quoted_ids(ids)})")
+    now = datetime.now(timezone.utc).isoformat()
+    table.add([{"id": row["id"], "text": row["text"], "category": row["category"], "source_session_id": "",
+        "vector": row["vector"], "created_at": now, "embedding_namespace": metadata.namespace,
+        "embedding_model": metadata.model, "embedding_schema_version": metadata.schema_version,
+        "embedding_dimension": metadata.dimension} for row in rows])
+    return len(rows)
+
+
 def add_memory(
     text: str,
     category: str = "fact",
     source_session_id: str = "",
 ) -> str:
     """Embed text and store as a memory. Returns the memory ID or empty string on failure."""
+    near_metadata = None
     try:
+        if _near_tee_mode():
+            # Only a proven, fully re-indexed NEAR namespace accepts new
+            # vectors; otherwise the canonical memory is picked up by the
+            # next operator-started re-index (no contact here).
+            near_metadata = _near_tee_index_metadata()
         vector = embed(text)
         metadata = _active_embedding_metadata()
         table = _get_or_create_table(metadata=metadata)
@@ -198,6 +271,14 @@ def add_memory(
         )
         return memory_id
     except Exception as exc:
+        if near_metadata is not None:
+            # A canonical memory now lacks its vector: the namespace is no
+            # longer complete and recall degrades to lexical until a re-index.
+            try:
+                from src.memory.near_embedding_reindex import mark_namespace_incomplete
+                mark_namespace_incomplete(near_metadata, "near_tee_index_vector_missing")
+            except Exception:
+                logger.warning("could not mark the NEAR namespace incomplete", exc_info=True)
         logger.exception("Failed to add memory")
         _log_vector_store_event(
             "failed",
@@ -255,7 +336,20 @@ def _search_with_status(
 
         setup = read_model_fabric_configuration().openrouter_setup
         v2 = setup is not None and setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION
-        if v2:
+        if _near_tee_mode():
+            # ADR-035: never query a non-NEAR namespace with a NEAR model.
+            metadata = _near_tee_index_metadata()
+            db = _get_db()
+            table_name = _table_name(metadata)
+            if table_name not in db.table_names():
+                raise EmbeddingUnavailableError("embedding_target_index_required", stage="metadata")
+            table = db.open_table(table_name)
+            if table.schema.field("vector").type.list_size != metadata.dimension:
+                raise EmbeddingUnavailableError("embedding_target_index_unusable", stage="metadata")
+            query_vector = embed(query)
+            if _active_embedding_metadata() != metadata or len(query_vector) != metadata.dimension:
+                raise EmbeddingUnavailableError("embedding_binding_changed", stage="metadata")
+        elif v2:
             metadata = _active_embedding_metadata()
             db = _get_db()
             table_name = _table_name(metadata)

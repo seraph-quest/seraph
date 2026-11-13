@@ -312,6 +312,15 @@ _CANONICAL_ADAPTERS = (
         "Retain as the one NEAR transfer leaf; new NEAR slots (streaming, vision, embedding) must keep shared serial admission, policy rechecks and accounting ownership before reusing it.",
     ),
     _review(
+        "model_fabric/near_client.py",
+        161,
+        "stream_near_events",
+        "client.send",
+        "canonical_adapter",
+        "Shared ADR-035 NEAR TEE streaming leaf (PR3c) for the pinned cloud-api.near.ai/v1 base, reached only from the NEAR TEE text slot's stream transport and streaming capability check, after the same precontact gates, inside the shared serial broker lease with durable accounting and the sealed precontact guard. Same client shape as read_near_response (TLS verification, trust_env=False, redirects disabled), x-no-aliasing, identity encoding, text/event-stream, raw-byte and line caps, strict JSON events, and per-read deadlines that end the stream before the reserved billing window.",
+        "Retain beside read_near_response as the NEAR streaming leaf; billing readback stays in the same lease and new callers must keep shared serial admission, policy rechecks and accounting ownership.",
+    ),
+    _review(
         "llm_runtime.py",
         1747,
         "_governed_bounded_chat_transfer",
@@ -331,7 +340,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        5163,
+        5364,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -340,7 +349,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "memory/embedder.py",
-        510,
+        517,
         "_request_embeddings",
         "client.post",
         "canonical_adapter",
@@ -416,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4201,
+        4397,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -425,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4281,
+        4477,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -434,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4763,
+        4959,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -443,7 +452,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4842,
+        5038,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -452,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2237,
+        2358,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -461,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2250,
+        2371,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -470,7 +479,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2265,
+        2386,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

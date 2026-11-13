@@ -129,7 +129,7 @@ def test_vision_allowlist_profile_and_catalog_rules():
     assert profile.task_classes == ("vision_analysis",) and profile.api_base == "https://cloud-api.near.ai/v1"
     text = near_tee_profile_for_slot("text", NearTeeSlot(model_id=TEXT_MODEL, max_input_tokens=8192,
         max_output_tokens=1024, request_cost_bound_microusd=20000))
-    assert text.capabilities == ("text", "structured_output") and "vision_analysis" not in text.task_classes
+    assert text.capabilities == ("text", "structured_output", "streaming", "tool_use") and "vision_analysis" not in text.task_classes
 
     slot = _vision_slot(enabled=True)
     facts = parse_catalog_record(json.dumps(vision_catalog()).encode(), model_id=VISION_MODEL)

@@ -52,10 +52,10 @@ NEAR_TEE_API_BASE = "https://cloud-api.near.ai/v1"
 NEAR_TEE_CREDENTIAL_REF = "vault:near_api_key"
 NEAR_TEE_VAULT_KEY = "near_api_key"
 NEAR_TEE_SECRET_REF = "NEAR_API_KEY"
-# Typed room for the ADR-035 slots; ``text`` (PR3b) and ``vision`` (PR4) are
-# implemented; ``embedding`` stays typed room until PR3d.
+# Typed room for the ADR-035 slots; ``text`` (PR3b), ``embedding`` (PR3d) and
+# ``vision`` (PR4) are implemented.
 NEAR_TEE_SLOTS = ("text", "vision", "embedding")
-NEAR_TEE_IMPLEMENTED_SLOTS = ("text", "vision")
+NEAR_TEE_IMPLEMENTED_SLOTS = ("text", "vision", "embedding")
 # ADR-035 closed allowlist (catalog read 2026-11-13): canonical id ->
 # design-basis context window. The catalog check decides dispatch.
 NEAR_TEE_TEXT_ALLOWLIST: dict[str, int] = {
@@ -73,15 +73,41 @@ NEAR_TEE_VISION_ALLOWLIST: dict[str, int] = {
     "Qwen/Qwen3-VL-30B-A3B-Instruct": 16_384,
     "deepseek-ai/DeepSeek-V4.1-Flash-1017": 1_048_576,
 }
+# ADR-035 embedding row (catalog list read 2026-11-13): canonical id -> design-
+# basis input window per request. Per-model fields are re-read by the catalog
+# check, which decides dispatch.
+NEAR_TEE_EMBEDDING_ALLOWLIST: dict[str, int] = {
+    "Qwen/Qwen3-Embedding-0.6B": 32_768,
+}
 NEAR_TEE_SLOT_ALLOWLISTS: dict[str, dict[str, int]] = {
-    "text": NEAR_TEE_TEXT_ALLOWLIST, "vision": NEAR_TEE_VISION_ALLOWLIST}
+    "text": NEAR_TEE_TEXT_ALLOWLIST,
+    "vision": NEAR_TEE_VISION_ALLOWLIST,
+    "embedding": NEAR_TEE_EMBEDDING_ALLOWLIST,
+}
 # Capabilities each implemented slot profile declares; the canonical caller
 # still needs a fresh capability proof for each one it requires.
 NEAR_TEE_SLOT_CAPABILITIES: dict[str, tuple[str, ...]] = {
-    "text": ("text", "structured_output"), "vision": ("vision", "structured_output")}
+    "text": ("text", "structured_output", "streaming", "tool_use"),
+    "vision": ("vision", "structured_output"),
+    "embedding": ("embedding",),
+}
 # One screenshot per vision request; the image counts against the input and
 # cost bounds (ADR-035 "images counted per the provider's pricing").
 NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST = 1
+# ADR-035 gate for the embedding slot: before it may dispatch, source
+# evidence must show that NEAR's ``/v1/embeddings`` endpoint and
+# ``/v1/billing/costs`` honour ``x-no-aliasing``. The repository holds no such
+# evidence (docs/research/near-ai-trust-boundary-2026-10-05.md and ADR-025's
+# billing sources cover chat completions only), so this stays ``None`` and
+# the slot fails closed with ``near_tee_embedding_evidence_required``. Only a
+# reviewed ADR-035 amendment citing dated source evidence may set it; no
+# setting, catalog receipt or capability check can clear it.
+NEAR_TEE_EMBEDDING_ALIASING_EVIDENCE: str | None = None
+NEAR_TEE_EMBEDDING_EVIDENCE_REQUIRED = "near_tee_embedding_evidence_required"
+# The embedding endpoint returns vectors, not generated tokens: the slot's
+# output bound is the fixed accounting floor of one token.
+NEAR_TEE_EMBEDDING_OUTPUT_TOKENS = 1
+NEAR_TEE_EMBEDDING_MAX_BATCH = 64
 _MAX_NEAR_TEE_OUTPUT_TOKENS = 65_536
 _MAX_NEAR_TEE_TIMEOUT_SECONDS = 120.0
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -231,6 +257,9 @@ class NearTeeSlot:
     temperature: float | None = None
     catalog_ttl_hours: int = 24
     purpose_consent_revision: int | None = None
+    # Embedding slot only: inputs per request (1-64). ``max_input_tokens`` is
+    # then the conservative token bound of the whole batch.
+    max_batch_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +317,16 @@ def validate_near_tee_slot(slot_name: str, slot: NearTeeSlot) -> None:
         raise ValueError("invalid NEAR TEE consent revision")
     if not slot.enabled and revision is not None:
         raise ValueError("disabled NEAR TEE slot has consent")
+    batch = slot.max_batch_size
+    if slot_name == "embedding":
+        if type(batch) is not int or not 1 <= batch <= NEAR_TEE_EMBEDDING_MAX_BATCH:
+            raise ValueError("invalid NEAR TEE max_batch_size")
+        if slot.max_output_tokens != NEAR_TEE_EMBEDDING_OUTPUT_TOKENS:
+            raise ValueError("invalid NEAR TEE embedding max_output_tokens")
+        if temperature is not None:
+            raise ValueError("NEAR TEE embedding slot has no temperature")
+    elif batch is not None:
+        raise ValueError("max_batch_size is embedding-only")
 
 
 def validate_near_tee_setup(setup: NearTeeSetup) -> None:
@@ -317,22 +356,27 @@ def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProf
     """Deterministic profile; its contract hash binds proofs and catalog receipts."""
     validate_near_tee_slot(slot_name, slot)
     tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis",
-        "vision_analysis") if route_slot_for_task_class(task) == slot_name)
+        "vision_analysis", "memory_embedding") if route_slot_for_task_class(task) == slot_name)
     controls = {"temperature": slot.temperature, "output_limit": slot.max_output_tokens,
         "timeout_seconds": float(slot.timeout_seconds), "input_limit": slot.max_input_tokens,
         "request_cost_bound_microusd": slot.request_cost_bound_microusd,
         "catalog_ttl_hours": slot.catalog_ttl_hours}
+    embedding = slot_name == "embedding"
+    if embedding:
+        controls["max_batch_size"] = slot.max_batch_size
     if slot_name == "vision":
         controls["max_images_per_request"] = NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST
     return ProviderProfile(id=near_tee_profile_id(slot_name), provider_kind=NEAR_TEE_PROVIDER_KIND,
         model=slot.model_id, routing_model=slot.model_id, api_base=NEAR_TEE_API_BASE,
         secret_env=NEAR_TEE_SECRET_REF, options={"_seraph_near_tee": controls},
-        # Callers needing structured output (or vision) still need that
-        # capability's fresh proof on this exact profile (ADR-035);
-        # tools/streaming: PR3c.
-        capabilities=NEAR_TEE_SLOT_CAPABILITIES[slot_name], task_class=tasks[0], task_classes=tasks,
-        budget_class="medium",
-        enabled=slot.enabled, keyless=False, transport_adapter="openai_compatible_chat",
+        # Callers needing structured output, streaming, tool use or vision
+        # still need that capability's fresh proof on this exact profile
+        # (ADR-035); tool use also needs ``tools`` in the slot's current
+        # catalog receipt. The vision slot declares no streaming/tool use.
+        capabilities=NEAR_TEE_SLOT_CAPABILITIES[slot_name],
+        task_class=tasks[0], task_classes=tasks, budget_class="medium",
+        enabled=slot.enabled, keyless=False,
+        transport_adapter="openai_compatible_embeddings" if embedding else "openai_compatible_chat",
         context_window_tokens=slot.max_input_tokens, max_output_tokens=slot.max_output_tokens,
         cost_microusd=slot.request_cost_bound_microusd, cost_source="near_tee_catalog_receipt",
         # Price freshness is the catalog receipt's TTL (1-24h), checked at dispatch.
@@ -361,6 +405,9 @@ def near_tee_slot_block_reason(configuration: "ModelFabricConfiguration", slot_n
         return "near_tee_slot_unconfigured"
     if not slot.enabled:
         return "near_tee_slot_disabled"
+    if slot_name == "embedding" and NEAR_TEE_EMBEDDING_ALIASING_EVIDENCE is None:
+        # ADR-035 evidence gate; nothing local or catalog-derived clears it.
+        return NEAR_TEE_EMBEDDING_EVIDENCE_REQUIRED
     if slot.purpose_consent_revision != configuration.egress_revision:
         return "near_tee_purpose_consent_required"
     if not setup.credential_fingerprint:

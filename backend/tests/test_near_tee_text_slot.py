@@ -192,9 +192,13 @@ def test_setup_is_closed_disabled_by_default_and_allowlisted():
             "openrouter/z-ai/glm-5.3-flash", "z-ai/GLM-5.3-flash"):
         with pytest.raises(ValueError, match="near_tee_model_not_allowlisted"):
             validate_near_tee_setup(NearTeeSetup(slots={"text": _slot(model_id=model)}))
-    # Vision is implemented by PR4 (own allowlist); embedding stays typed room.
-    with pytest.raises(ValueError, match="near_tee_slot_not_implemented"):
-        validate_near_tee_setup(NearTeeSetup(slots={"embedding": _slot()}))
+    # Vision (PR4) and embedding (PR3d) are implemented with their own
+    # allowlists: a text model is refused on either; unknown slots stay closed.
+    for other in ("vision", "embedding"):
+        with pytest.raises(ValueError, match="near_tee_model_not_allowlisted"):
+            validate_near_tee_setup(NearTeeSetup(slots={other: _slot(model_id="Qwen/Qwen3.6-35B-A3B-FP8")}))
+    with pytest.raises(ValueError, match="unsupported NEAR TEE slot"):
+        validate_near_tee_setup(NearTeeSetup(slots={"audio": _slot()}))
     with pytest.raises(ValueError):
         validate_near_tee_setup(NearTeeSetup(slots={"text": _slot(max_input_tokens=262_145)}))
     with pytest.raises(ValueError):
@@ -419,8 +423,9 @@ async def _prove_slot(client, near):
             "capability": capability, "timeout_seconds": 40, "proof_ttl_seconds": 600})
         assert response.status_code == 200, response.text
         assert response.json()["outcome"] == "passed", response.text
+    # The text slot has no vision capability check (vision is its own slot).
     unsupported = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "near_tee.text",
-        "capability": "streaming", "timeout_seconds": 40, "proof_ttl_seconds": 600})
+        "capability": "vision", "timeout_seconds": 40, "proof_ttl_seconds": 600})
     assert unsupported.status_code == 422
 
 
@@ -511,14 +516,15 @@ async def test_report_route_reaches_near_transport_with_billing_and_failures(cli
         assert "PRIVATE-REASONING" not in str(raised.value)
         near.answer = {"role": "assistant", "content": "ok"}
 
-        # Streaming is cleanly blocked in PR3b, before any contact.
+        # Streaming (PR3c) still needs its own capability check: without a
+        # streaming proof it is blocked before any contact.
         before = len(near.requests)
         stream_context = build_canonical_inference_context("chat_agent", payload=messages, output_tokens=64,
             timeout_seconds=60, principal=operator.principal, session_id=operator.session_id, streaming=True)
         with pytest.raises(NoCompliantModelRouteError) as streamed:
             async for _delta in stream_completion_with_fallback(messages, 0.2, 64, "chat_agent", stream_context):
                 pass
-        assert streamed.value.reason_codes == ("near_tee_streaming_unavailable",)
+        assert streamed.value.reason_codes == ("proof_missing:streaming",)
         assert len(near.requests) == before
 
         # Missing billing becomes an Unknown liability and the serial lease stays blocked.

@@ -322,6 +322,8 @@ class NearTeeSlotInput(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     request_cost_bound_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
     catalog_ttl_hours: int = Field(default=24, strict=True, ge=1, le=24)
+    # Embedding slot only (1-64 inputs per request).
+    max_batch_size: int | None = Field(default=None, strict=True, ge=1, le=64)
     plaintext_provider_egress_acknowledged: bool = Field(default=False, strict=True)
     # Vision only: the separate screenshot purpose consent. Screenshots reach
     # the NEAR gateway in plaintext (ADR-035); never implied by the text slot.
@@ -339,10 +341,11 @@ class NearTeeSlotInput(BaseModel):
 
 class NearTeeSlotsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # Typed room for embedding (PR3d); text (PR3b) and vision (PR4) are
-    # accepted. An omitted slot keeps its stored value; null removes it.
+    # Text (PR3b), embedding (PR3d) and vision (PR4) are accepted. An omitted
+    # slot keeps its stored value; an explicit null removes it.
     text: NearTeeSlotInput | None = None
     vision: NearTeeSlotInput | None = None
+    embedding: NearTeeSlotInput | None = None
 
 
 class NearTeeSetupInput(BaseModel):
@@ -677,18 +680,20 @@ async def _put_near_tee(body, persisted):
         raise HTTPException(status_code=409, detail="inference_lane_required")
     incoming = body.near_tee
     prior = persisted.near_tee
+    sent = incoming.slots.model_fields_set
     slots: dict[str, NearTeeSlot | None] = {}
     acknowledged: dict[str, bool] = {}
+    omitted: set[str] = set()
     screenshot_withdrawn = False
     for name in NEAR_TEE_IMPLEMENTED_SLOTS:
-        if name not in incoming.slots.model_fields_set:
-            # Omitted: keep the stored slot. Its consent carries only when it
-            # is still current; it is never newly granted without a fresh
-            # acknowledgement (fail closed, no resurrection).
+        if name not in sent:
+            omitted.add(name)
+            # Additive slot mutations: an omitted slot keeps its stored value.
+            # Its consent carries only when it is still current; it is never
+            # newly granted without a fresh acknowledgement (no resurrection).
             prior_slot = (prior.slots or {}).get(name) if prior is not None else None
             if prior_slot is not None:
                 slots[name] = prior_slot
-                acknowledged[name] = None
             continue
         slot_input = getattr(incoming.slots, name)
         if slot_input is None:
@@ -727,9 +732,10 @@ async def _put_near_tee(body, persisted):
             consented[name] = replace(slot, purpose_consent_revision=None)
             continue
         if slot is not None and slot.enabled and slot.purpose_consent_revision is None:
-            if acknowledged.get(name) is None and name in acknowledged:
-                # A kept (omitted) slot whose consent is no longer current
-                # stays blocked on near_tee_purpose_consent_required.
+            if name in omitted:
+                # An omitted slot whose consent cannot be carried stays as
+                # stored but blocked (near_tee_purpose_consent_required); it
+                # never blocks saving another slot.
                 consented[name] = slot
                 continue
             if not acknowledged.get(name):
@@ -1432,6 +1438,61 @@ async def run_near_tee_catalog_check(body: NearTeeCatalogCheckInput, request: Re
     return payload
 
 
+async def _reindex_principal(request: Request):
+    from src.auth.service import authenticate_principal
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="NEAR re-index requires a loopback request or an authenticated operator")
+    principal = getattr(getattr(request.state, "operator", None), "principal", None) or get_current_trust_principal()
+    if principal is None or not principal.authenticated:
+        raise HTTPException(status_code=403, detail="authenticated operator required")
+    if AuthorityGrant.MODEL_INFERENCE not in principal.grants or not principal.session_id:
+        raise HTTPException(status_code=403, detail="Principal lacks model-inference authority")
+    await authenticate_principal(principal.principal_id)
+    return principal
+
+
+@router.get("/settings/model-fabric/near-tee/embedding-reindex")
+async def near_tee_embedding_reindex_status():
+    """Local-only re-index and recall-mode projection; never contacts NEAR."""
+    from src.memory.near_embedding_reindex import reindex_status
+    return await reindex_status()
+
+
+@router.post("/settings/model-fabric/near-tee/embedding-reindex")
+async def start_near_tee_embedding_reindex(request: Request):
+    """Explicit operator action: one finite, budgeted re-index run of canonical
+    memory into the NEAR TEE embedding namespace (memory text egresses to NEAR
+    in plaintext; consent is required per run)."""
+    from pydantic import ValidationError
+    from src.memory.near_embedding_reindex import ReindexRefused, ReindexStartRequest, start_reindex
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    try:
+        body = ReindexStartRequest.model_validate(await request.json())
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid re-index request") from exc
+    principal = await _reindex_principal(request)
+    async with configuration_mutation_lock:
+        try:
+            return await start_reindex(principal, body)
+        except ReindexRefused as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.code) from None
+
+
+@router.post("/settings/model-fabric/near-tee/embedding-reindex/cancel")
+async def cancel_near_tee_embedding_reindex(request: Request):
+    from pydantic import ValidationError
+    from src.memory.near_embedding_reindex import ReindexCancelRequest, ReindexRefused, cancel_reindex
+    try:
+        body = ReindexCancelRequest.model_validate(await request.json())
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid re-index cancel request") from exc
+    await _reindex_principal(request)
+    try:
+        return await cancel_reindex(body)
+    except ReindexRefused as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.code) from None
+
+
 def _catalog_receipt_summary(receipt):
     if not isinstance(receipt, dict):
         return None
@@ -1439,7 +1500,7 @@ def _catalog_receipt_summary(receipt):
         "reason_code", "provider_type", "attestation_supported", "verifiable", "is_ready", "input_modalities",
         "output_modalities", "features", "structured_outputs", "input_price_usd_per_million",
         "output_price_usd_per_million", "image_price_usd",
-        "context_length", "max_output_tokens", "required_cost_microusd", "response_sha256",
+        "context_length", "max_output_tokens", "catalog_embedding_dimension", "required_cost_microusd", "response_sha256",
         "tee_hosted_per_catalog", "tee_verified", "e2ee")
     summary = {key: receipt.get(key) for key in keys}
     if isinstance(summary.get("expires_at"), (int, float)):
@@ -1451,7 +1512,8 @@ _NEAR_TEE_SCREENSHOT_DISCLOSURE = ("Screenshots are sent to the NEAR gateway in 
     "TEE-hosted per NEAR catalog, not verified by Seraph; no end-to-end encryption.")
 # Proofs each slot's dispatch requires, in status order.
 _NEAR_TEE_STATUS_PROOFS = {"text": ("health", "latency_ms", "text"),
-    "vision": ("health", "latency_ms", "vision", "structured_output")}
+    "vision": ("health", "latency_ms", "vision", "structured_output"),
+    "embedding": ("health", "latency_ms", "embedding")}
 
 
 def _vision_max_timeout_seconds() -> float:
@@ -1469,12 +1531,14 @@ async def _near_tee_setup_status(configured, accounting):
     disclosure = ("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in "
         "plaintext; no end-to-end encryption.")
     from src.model_fabric.near_tee import NEAR_TEE_SLOT_CHECK_CAPABILITIES
+    from src.model_fabric.near_tee_embeddings import NEAR_TEE_EMBEDDING_CHECK_CAPABILITIES
     base = {"schema_version": "seraph.near.tee.setup.v1", "api_base": "https://cloud-api.near.ai/v1",
         "allowlist": allowlists, "implemented_slots": list(NEAR_TEE_IMPLEMENTED_SLOTS),
         "tee_verified": False, "e2ee": False, "disclosure": disclosure,
         "screenshot_disclosure": _NEAR_TEE_SCREENSHOT_DISCLOSURE,
         "vision_max_timeout_seconds": _vision_max_timeout_seconds(),
-        "check_capabilities": {slot: sorted(items) for slot, items in NEAR_TEE_SLOT_CHECK_CAPABILITIES.items()},
+        "check_capabilities": {**{slot: sorted(items) for slot, items in NEAR_TEE_SLOT_CHECK_CAPABILITIES.items()},
+            "embedding": sorted(NEAR_TEE_EMBEDDING_CHECK_CAPABILITIES)},
         "catalog_check_endpoint": "/api/settings/model-fabric/near-tee/catalog-check"}
     if setup is None:
         return {**base, "configured": False, "status": "disabled", "reason_code": None, "key_present": False,
@@ -1535,7 +1599,30 @@ async def _near_tee_setup_status(configured, accounting):
             else "configuration_required" if reason in {"near_tee_credential_required", "near_tee_catalog_receipt_missing"}
             or (reason or "").startswith("proof_missing") else "blocked")
         passed = isinstance(receipt, dict) and receipt.get("outcome") == "passed" and catalog_reason is None
+        # PR3c: chat streaming and agent tool turns each need their own fresh
+        # capability check (and tools in the catalog receipt) on this profile.
+        # Only the text profile declares streaming and tool use.
+        chat_capabilities = {}
+        if catalog_reason is None and name == "text":
+            from src.model_fabric.near_tee_catalog import catalog_receipt_feature_block_reason
+            candidate = candidate_from_profile(profile)
+            for capability in ("streaming", "tool_use"):
+                if capability == "tool_use" and (feature_reason := catalog_receipt_feature_block_reason(
+                        name, "tools", receipts=receipts)):
+                    chat_capabilities[capability] = feature_reason
+                    continue
+                try:
+                    proof = await model_fabric_repository.latest_capability_proof(
+                        profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
+                        profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
+                        endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
+                except Exception:
+                    chat_capabilities[capability] = "proof_metadata_unavailable"
+                    continue
+                chat_capabilities[capability] = ("ready" if proof is not None and proof_is_fresh(proof)
+                    else f"proof_missing:{capability}")
         slots[name] = {**slot.__dict__, "profile_id": profile.id, "profile_hash": profile.contract_hash,
+            "chat_capabilities": chat_capabilities,
             "consent_current": slot.enabled and not configured.egress_revoked
                 and slot.purpose_consent_revision == configured.egress_revision,
             "status": status, "reason_code": None if status == "ready" else reason,
@@ -1544,10 +1631,24 @@ async def _near_tee_setup_status(configured, accounting):
             "tee_hosted_per_catalog": passed,
             "tee_hosting_label": TEE_LABEL_TEMPLATE.format(as_of=receipt.get("checked_at_iso")) if passed else None,
             "capability_check_timeout_seconds": min(180, int(slot.timeout_seconds) + 16)}
+        if name == "embedding":
+            from src.model_fabric.configuration import NEAR_TEE_EMBEDDING_EVIDENCE_REQUIRED
+            slots[name].update({"check_capabilities": ["embedding", "health", "latency_ms"],
+                "evidence_required": near_tee_slot_block_reason(configured, name) == NEAR_TEE_EMBEDDING_EVIDENCE_REQUIRED,
+                "catalog_embedding_dimension": (receipt or {}).get("catalog_embedding_dimension") if isinstance(receipt, dict) else None})
+        elif name == "vision":
+            slots[name]["check_capabilities"] = ["vision", "structured_output", "health", "latency_ms"]
+        else:
+            slots[name]["check_capabilities"] = ["text", "health", "latency_ms"]
     statuses = [item["status"] for item in slots.values() if item is not None]
     status = ("ready" if "ready" in statuses else "disabled" if not statuses or set(statuses) == {"disabled"}
         else "blocked" if "blocked" in statuses else "configuration_required")
-    return {**base, "configured": True, "status": status,
+    try:
+        from src.memory.near_embedding_reindex import reindex_status
+        embedding_index = await reindex_status() if slots.get("embedding") is not None else None
+    except Exception:
+        embedding_index = {"recall_mode": "lexical", "slot_reason_code": "near_tee_embedding_index_unavailable"}
+    return {**base, "configured": True, "status": status, "embedding_index": embedding_index,
         "reason_code": next((item["reason_code"] for item in slots.values() if item and item["reason_code"]), None),
         "key_present": key_present, "credential_fingerprint": setup.credential_fingerprint, "slots": slots}
 
@@ -1592,19 +1693,28 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
         slot_name = near_tee_slot_for_profile(profile.id)
         if slot_name is None:
             raise HTTPException(status_code=403, detail="canary_exact_slot_required")
-        if body.capability not in NEAR_TEE_SLOT_CHECK_CAPABILITIES.get(slot_name, ()):
-            # Streaming and tool-use checks arrive with PR3c.
+        from src.model_fabric.near_tee_embeddings import NEAR_TEE_EMBEDDING_CHECK_CAPABILITIES
+        allowed_checks = (NEAR_TEE_EMBEDDING_CHECK_CAPABILITIES if slot_name == "embedding"
+            else NEAR_TEE_SLOT_CHECK_CAPABILITIES[slot_name])
+        if body.capability not in allowed_checks:
             raise HTTPException(status_code=422, detail="near_tee_capability_check_unsupported")
         if reason := near_tee_slot_block_reason(configured, slot_name):
             raise HTTPException(status_code=409, detail=reason)
         if reason := catalog_receipt_block_reason(slot_name, profile, revision=configured.egress_revision):
             raise HTTPException(status_code=409, detail=reason)
+        if body.capability == ModelCapability.TOOL_USE.value:
+            # Only a model whose catalog supportedFeatures include tools may
+            # serve (or be checked for) tool requests.
+            from src.model_fabric.near_tee_catalog import catalog_receipt_feature_block_reason
+            if reason := catalog_receipt_feature_block_reason(slot_name, "tools"):
+                raise HTTPException(status_code=409, detail=reason)
         try:
             near_tee_key = await capture_near_tee_credential(expected_revision=configured.egress_revision,
                 expected_fingerprint=configured.near_tee.credential_fingerprint)
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc) or "near_tee_credential_unavailable") from exc
-        slot_runtime_path = {"text": "chat_agent", "vision": "screenshot_image_analysis"}[slot_name]
+        slot_runtime_path = {"text": "chat_agent", "vision": "screenshot_image_analysis",
+            "embedding": "memory_embedding"}[slot_name]
         policy = (near_tee_policy_for_runtime(configured, slot_runtime_path)
             or WorkloadPolicy(runtime_path="capability_probe"))
     elif setup is not None and setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
@@ -1691,6 +1801,11 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
     )
 
     async def transport(candidate, _trust_request, requirements):
+        if candidate.profile.provider_kind == "near_tee" and candidate.profile.id == "near_tee.embedding":
+            from src.model_fabric.near_tee_embeddings import near_tee_embedding_capability_check_transport
+            return await near_tee_embedding_capability_check_transport(profile=candidate.profile,
+                capability=body.capability, body=fixture["json"], key=near_tee_key,
+                deadline_at=context.deadline_at)
         if candidate.profile.provider_kind == "near_tee":
             from src.model_fabric.near_tee import near_tee_capability_check_transport
             return await near_tee_capability_check_transport(profile=candidate.profile,
@@ -2127,6 +2242,11 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         inference_readiness = {**inference_readiness, "status": "blocked",
             "reasons": list(dict.fromkeys([*inference_readiness["reasons"], accounting_reason]))}
     _apply_openrouter_retirement(openrouter_setup_status)
+    try:
+        near_tee_status = await _near_tee_setup_status(configured, accounting)
+    except Exception:
+        near_tee_status = None
+        degraded = True
     return {
         "status": (
             "degraded"
@@ -2145,6 +2265,7 @@ async def model_fabric_runtime_status(active_profile: str | None) -> dict[str, o
         "excluded_profiles": [item for item in all_profiles if not item["model_fabric_eligible"]],
         "workload_policies": [_policy_payload(policy) for policy in configured.workload_policies],
         "openrouter_setup": openrouter_setup_status,
+        "near_tee": near_tee_status,
         "inference_lane": _inference_lane_status(configured),
         "provider_retirement": _provider_retirement_status(),
         "proofs": proof_statuses,

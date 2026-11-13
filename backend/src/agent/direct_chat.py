@@ -33,6 +33,31 @@ _MID_TURN = (
     "and any tool actions they took stand; the reply is incomplete. Check the result before resending."
 )
 PROVIDER_OVERRUN_CODE = "provider_charge_exceeded_reservation"
+# REST and WebSocket cut a lightweight turn at this outer bound.
+DIRECT_CHAT_TURN_CAP_SECONDS = 60.0
+# ADR-035: a NEAR TEE turn's own deadline ends this much before the outer cut,
+# so the stream (ended 16s before that deadline) and its billing readback
+# both finish while the turn is still alive.
+NEAR_TEE_OUTER_MARGIN_SECONDS = 2.0
+
+
+def direct_chat_turn_timeout() -> float:
+    """The outer REST/WebSocket timeout of one lightweight chat turn."""
+    return float(min(settings.agent_chat_timeout, DIRECT_CHAT_TURN_CAP_SECONDS))
+
+
+def direct_chat_context_timeout(runtime_path: str) -> float:
+    """Inference deadline of a lightweight turn's governed context.
+
+    On the NEAR TEE text slot the deadline sits inside the outer cut, so a
+    caller timeout never lands during the stream or billing window; other
+    routes keep the agent chat timeout.
+    """
+    from src.llm_runtime import _near_tee_runtime_controls
+
+    if _near_tee_runtime_controls(runtime_path) is not None:
+        return max(direct_chat_turn_timeout() - NEAR_TEE_OUTER_MARGIN_SECONDS, 0.1)
+    return float(settings.agent_chat_timeout)
 
 
 def _retired_safe_context(runtime_path: str, **kwargs):
@@ -368,7 +393,7 @@ async def run_direct_local_chat(
             runtime_path,
             payload=messages,
             output_tokens=min(settings.model_max_tokens, 512),
-            timeout_seconds=settings.agent_chat_timeout,
+            timeout_seconds=direct_chat_context_timeout(runtime_path),
             session_id=session_id,
             request_id=request_id or "",
         ),
@@ -399,22 +424,26 @@ async def stream_direct_local_chat(
         runtime_path,
         payload=messages,
         output_tokens=min(settings.model_max_tokens, 512),
-        timeout_seconds=settings.agent_chat_timeout,
+        timeout_seconds=direct_chat_context_timeout(runtime_path),
         session_id=session_id,
         streaming=True,
     )
     parts: list[str] = []
+    from contextlib import aclosing
     try:
-        async for delta in stream_completion_with_fallback(
+        # aclosing: a turn that stops early closes the provider stream in
+        # this task (a NEAR TEE stream then still settles its billing).
+        async with aclosing(stream_completion_with_fallback(
             messages=messages,
             temperature=settings.model_temperature,
             max_tokens=min(settings.model_max_tokens, 512),
             runtime_path=runtime_path,
             request_context=context,
             request_id=context.request_id,
-        ):
-            parts.append(delta)
-            yield delta
+        )) as stream:
+            async for delta in stream:
+                parts.append(delta)
+                yield delta
     except InferenceAccountingError as exc:
         # An unreviewed overrun is refused at reservation, before the
         # transport runs; report it as the no-contact block it is.

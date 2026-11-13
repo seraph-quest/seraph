@@ -59,8 +59,16 @@ RECEIPT_MISSING = "near_tee_catalog_receipt_missing"
 TEE_LABEL_TEMPLATE = ("TEE-hosted per NEAR catalog as of {as_of}; NEAR gateway receives plaintext; "
     "attestation not verified by Seraph; no end-to-end encryption")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
-# The modalities each implemented slot needs from the catalog record.
+# The modalities each implemented slot needs from the catalog record. The
+# embedding row's per-model output modality was not read by the lead
+# (ADR-035): either spelling of the embedding modality is accepted; anything
+# else fails closed with ``near_tee_catalog_modality_missing``.
 _SLOT_MODALITIES = {"text": ({"text"}, {"text"}), "vision": ({"text", "image"}, {"text"})}
+_EMBEDDING_OUTPUT_MODALITIES = frozenset({"embedding", "embeddings"})
+# Optional catalog fields that may state a vector dimension. Recorded when
+# present (a strict integer); the capability check measures the dimension in
+# every case and a disagreement blocks the namespace.
+_EMBEDDING_DIMENSION_FIELDS = ("embeddingDimension", "embeddingDimensions", "dimensions", "outputDimension")
 # Conservative output bound when the catalog omits maxOutputLength.
 UNKNOWN_OUTPUT_LIMIT_CAP = 8192
 
@@ -87,6 +95,7 @@ class CatalogFacts:
     output_price: tuple[int, int] | None
     image_price: tuple[int, int] | None = None
     image_price_invalid: bool = False
+    embedding_dimension: int | None = None
 
 
 def _store_path() -> Path:
@@ -157,7 +166,14 @@ def parse_catalog_record(raw: bytes, *, model_id: str) -> CatalogFacts:
     except NearTeeCatalogError:
         # Only the vision slot prices images; it fails closed on this flag.
         image_price, image_price_invalid = None, True
-    return CatalogFacts(model_id=model_id, provider_type=provider_type,
+    dimension = None
+    for name in _EMBEDDING_DIMENSION_FIELDS:
+        if metadata.get(name) is not None:
+            value = _optional_int(metadata.get(name))
+            if value > 65_536 or dimension not in (None, value):
+                raise NearTeeCatalogError("near_tee_catalog_response_invalid")
+            dimension = value
+    return CatalogFacts(model_id=model_id, provider_type=provider_type, embedding_dimension=dimension,
         attestation_supported=_optional_bool(metadata.get("attestationSupported")),
         verifiable=_optional_bool(metadata.get("verifiable")), is_ready=_optional_bool(metadata.get("isReady")),
         context_length=_optional_int(metadata.get("contextLength")),
@@ -186,8 +202,40 @@ def required_cost_microusd(facts: CatalogFacts, *, max_input_tokens: int, max_ou
     return math.ceil(total)
 
 
+def _evaluate_embedding(facts: CatalogFacts, *, slot) -> tuple[str | None, int | None]:
+    """Embedding slot catalog rules.
+
+    The catalog lists an output price for the embedding model, but no source
+    states how NEAR bills embedding output (per vector, per dimension or not
+    at all). The bound therefore includes ``max_output_tokens`` (fixed at 1)
+    x the output price as well as the input; the reserve is a local admission
+    hold and an over-bound genuine charge still goes to overrun review.
+    """
+    required = required_cost_microusd(facts, max_input_tokens=slot.max_input_tokens,
+        max_output_tokens=slot.max_output_tokens)
+    if facts.provider_type != "vllm":
+        return "near_tee_catalog_provider_not_vllm", required
+    if facts.attestation_supported is not True:
+        return "near_tee_catalog_not_attested", required
+    if facts.verifiable is not True:
+        return "near_tee_catalog_not_verifiable", required
+    if facts.is_ready is not True:
+        return "near_tee_catalog_not_ready", required
+    if "text" not in facts.input_modalities or not _EMBEDDING_OUTPUT_MODALITIES.intersection(facts.output_modalities):
+        return "near_tee_catalog_modality_missing", required
+    if facts.context_length is None or facts.context_length < slot.max_input_tokens:
+        return "near_tee_catalog_context_too_small", required
+    if required is None:
+        return "near_tee_catalog_price_missing", required
+    if slot.request_cost_bound_microusd < required:
+        return "near_tee_catalog_cost_bound_too_small", required
+    return None, required
+
+
 def evaluate_catalog(facts: CatalogFacts, *, slot_name: str, slot) -> tuple[str | None, int | None]:
     """Return (failure reason or None, required cost microUSD)."""
+    if slot_name == "embedding":
+        return _evaluate_embedding(facts, slot=slot)
     needed_in, needed_out = _SLOT_MODALITIES[slot_name]
     images = 0
     if slot_name == "vision":
@@ -270,6 +318,7 @@ def build_receipt(*, slot_name: str, slot, profile, facts: CatalogFacts | None, 
         "structured_outputs": bool(facts and "structured_outputs" in facts.features),
         "context_length": facts.context_length if facts else None,
         "max_output_tokens": facts.max_output_tokens if facts else None,
+        "catalog_embedding_dimension": facts.embedding_dimension if facts else None,
         "required_cost_microusd": required,
         "request_cost_bound_microusd": slot.request_cost_bound_microusd,
         "response_sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
@@ -334,6 +383,21 @@ def catalog_receipt_block_reason(slot_name: str, profile, *, now: float | None =
         return RECEIPT_STALE
     if receipt.get("outcome") != "passed":
         return str(receipt.get("reason_code") or "near_tee_catalog_check_failed")
+    return None
+
+
+FEATURE_BLOCK_REASONS = {"tools": "near_tee_model_tools_unsupported"}
+
+
+def catalog_receipt_feature_block_reason(slot_name: str, feature: str, *,
+                                         receipts: dict[str, dict[str, object]] | None = None) -> str | None:
+    """A caller needing ``feature`` (e.g. ``tools``) requires it in the receipt's
+    catalog ``supportedFeatures``; run after ``catalog_receipt_block_reason``
+    has accepted the receipt. Fails closed with a stable reason."""
+    receipt = (read_catalog_receipts() if receipts is None else receipts).get(slot_name) or {}
+    features = receipt.get("features")
+    if receipt.get("outcome") != "passed" or not isinstance(features, list) or feature not in features:
+        return FEATURE_BLOCK_REASONS.get(feature, "near_tee_model_feature_unsupported")
     return None
 
 

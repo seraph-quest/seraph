@@ -1274,10 +1274,12 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > No route makes new OpenRouter contact: chat, agent and guardian turns, reports,
 > Cordis `inference.request`, screenshot vision, embeddings, capability checks
 > and screen-analysis provider selection all fail closed with the stable reason
-> `openrouter_retired`, with no fallback. Non-streaming text routes run on the
-> NEAR TEE text slot and screenshot vision on the NEAR TEE vision slot once the
+> `openrouter_retired`, with no fallback. Text routes, including streaming
+> chat, chat-agent tool turns and Cordis `inference.request`, run on the NEAR
+> TEE text slot and screenshot vision on the NEAR TEE vision slot once the
 > operator configures them (see below); routes without a ready slot, and
-> streaming, tool and embedding routes (PR3c–PR3d), report **blocked** (`no_active_provider` or the slot reason) in
+> embedding routes (PR3d, evidence-gated), report **blocked**
+> (`no_active_provider` or the slot reason) in
 > `/api/runtime/status` and Settings; this is expected and not a crash. The optional NEAR text Work
 > capability (ADR-025) is unchanged. Retained OpenRouter configuration,
 > credential, receipts, ledger rows and Unknown liabilities stay readable and
@@ -1367,7 +1369,7 @@ the lane. Independently of any save, startup publishes the same route-scoped
 revoke once (witnessed, revision CAS, no ledger change, idempotent); a failure
 is shown as `route_revoke: degraded` under Settings and never stops startup.
 
-### Configure the NEAR TEE text slot (ADR-035, #1147 PR3b)
+### Configure the NEAR TEE text slot (ADR-035, #1147 PR3b/PR3c)
 
 Status: **Partial** until live operator use; nothing is enabled by default.
 In **Settings → NEAR TEE · text slot**:
@@ -1389,18 +1391,34 @@ In **Settings → NEAR TEE · text slot**:
    after saving.
 4. Press **Run capability check**: three billed, mechanics-only requests
    (text, health, latency) through the shared lane, producing the proofs that
-   dispatch requires.
+   dispatch requires. Streaming chat and agent tool turns need their own
+   `streaming` and `tool_use` checks (the same endpoint); a tool check is
+   refused with `near_tee_model_tools_unsupported` unless the catalog receipt
+   lists `tools`.
 
-The slot then serves non-streaming text routes such as the end-of-day report,
-the screenshot observation digest and the daily briefing, behind the one serial
-broker with chat priority. Report labels read "TEE-hosted per NEAR catalog as of
+The slot then serves text routes such as the end-of-day report, the screenshot
+observation digest, the daily briefing, chat (streamed over the WebSocket),
+chat-agent tool turns and Cordis `inference.request`, behind the one serial
+broker with chat priority over background work. `/api/runtime/status`
+`effective_runtime` names `near_tee`, the model and the dated catalog label
+only while the slot is the active chat provider, and lists the `streaming` and
+`tool_use` check state. A streamed reply is cut off at least 16 seconds before
+its deadline so billing can be read back; text already shown stays shown, but
+a cut-off, echo-mismatched or malformed stream fails the turn after its cost
+settles. Closing the chat or a timed-out turn ends the stream but still reads
+billing back, so the lane is not left blocked. A lightweight chat turn's
+deadline sits 2 seconds inside its outer timeout (60 seconds or the configured
+chat timeout if lower), shown as `chat_turn_cap` in `/api/runtime/status`; keep
+the slot timeout within that deadline. Tool arguments must be strict JSON
+objects, and only offered tools may be called. Upgrading to this version
+changes the slot's profile hash: re-run **Run catalog check** and each
+capability check before use. Report labels read "TEE-hosted per NEAR catalog as of
 <time>; NEAR gateway receives plaintext; attestation not verified by Seraph; no
 end-to-end encryption". Seraph does not verify attestation and there is no
 end-to-end encryption. A missing NEAR billing record becomes an Unknown
 liability that blocks the whole lane, chat included, until it is settled under
 **Inference accounting**; a model echo mismatch or empty answer is settled and
-not adopted. Streaming chat, tools and embeddings stay blocked until their
-slices land.
+not adopted. Vision and embeddings are described below.
 
 ### Configure the NEAR TEE vision slot (ADR-035, #1147 PR4)
 
@@ -1413,7 +1431,7 @@ Status: **Partial** until live operator use; disabled by default. In
    limits and the per-request reserve, tick **both** the plaintext
    acknowledgement and the separate screenshot consent ("screenshots are sent
    to the NEAR gateway in plaintext"), and press **Save NEAR TEE vision slot**.
-   Saving one slot keeps the other.
+   Saving one slot keeps the others.
 2. Press **Run catalog check**: the vision slot passes only with image input,
    and the receipt records whether NEAR lists structured outputs (JSON schema
    requests) or not (strict prompt-JSON).
@@ -1441,6 +1459,48 @@ is an Unknown liability that blocks the whole lane until settled. The daemon
 makes no cloud call; it reads `daemon_cloud_provider: null` from the screen
 settings and only uploads. Screenshots are plaintext to the NEAR gateway; the
 TEE label is NEAR's dated catalog claim, not Seraph-verified confidentiality.
+
+### NEAR TEE embedding slot and memory re-index (ADR-035, #1147 PR3d)
+
+Status: **Partial and blocked.** The panel's **embedding slot** section shows
+"NEAR embeddings stay off until source evidence shows the embeddings and
+billing endpoints honour x-no-aliasing (ADR-035)" (`near_tee_embedding_evidence_required`).
+No setting, catalog check or capability check can clear this; it needs a
+reviewed ADR-035 amendment. Until then the capability check and re-index stay
+disabled, NEAR receives no memory text, and recall shows **Recall: lexical**.
+NEAR's current catalog record for the model also has no readiness flag, so the
+catalog check reports the slot **not ready** even after an evidence amendment;
+that amendment must also decide how readiness is handled.
+
+Once the gate is cleared, the operator flow is:
+
+1. In **Settings → NEAR TEE → embedding slot**, pick `Qwen/Qwen3-Embedding-0.6B`,
+   set maximum input tokens per request, inputs per request (1–64), timeout,
+   per-request reserve and catalog lifetime, acknowledge that memory text is
+   sent to NEAR in plaintext and save (saving never calls NEAR).
+2. **Run catalog check** (shared with the text and vision slots), then **Run embedding
+   capability check**: three billed mechanics requests that also measure the
+   vector dimension.
+3. Enter a re-index budget and a maximum number of memories, acknowledge the
+   memory egress and press **Start re-index**. The run embeds canonical memory
+   in bounded batches at background priority below chat, shows progress
+   (indexed, already current, spent of budget), stops at the budget or on
+   **Cancel re-index** (a batch already sent finishes and is billed), and
+   **Resume re-index** continues from what is already indexed. Recall switches
+   to **semantic** only after a run covers every active canonical memory.
+
+After indexing, new memories and recall queries are sent to NEAR. If a new
+memory's vector cannot be written, or a memory is created or edited without
+one, recall returns to lexical with the reason shown until another run. More
+than 10,000 memories cannot be covered by one run, so recall stays lexical
+(`near_tee_reindex_over_cap`). Saving one slot never fails because another
+slot's consent has lapsed; that slot just shows as blocked.
+
+Vectors are stored locally in a namespace for this provider, model and measured
+dimension; older OpenRouter vectors are never mixed in or queried. Changing the
+model or dimension needs a new re-index. A missing NEAR billing record during a
+run stops it as a cost liability and blocks the shared lane until settled under
+**Inference accounting**.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 
@@ -3699,6 +3759,38 @@ the portable core remains usable. Pairing alone grants neither execution nor
 data egress, and protected-surface checks cannot identify every sensitive page.
 Availability follows the reviewed installed revision described above.
 
+### Reading stored end-of-day reports
+
+**Partial.** The cockpit **Reports** section (under **More** on narrow
+screens, and **Open Reports** on Home) lists the end-of-day goal reports that
+the scheduled job already stored, newest first, and shows one selected report.
+It is read-only: it cannot generate a report and starts no model call.
+
+- `GET /api/reports/end-of-day?limit=1..100` (default 30) lists each report's
+  date, timezone, stored time, status, stored `analysis_provider` label, goal
+  counts and tracked minutes.
+- `GET /api/reports/end-of-day/{episode_id}` adds the stored body, the
+  activity/project/source mix, switch count and the archive SHA-256 values.
+  Unknown ids and episodes that are not end-of-day reports return 404.
+- Only `observer` memory episodes from `end_of_day_goal_report` whose metadata
+  has kind `end_of_day_goal_report` and schema
+  `seraph.end_of_day_goal_report.v1` are listed. The repository reads at most
+  1,000 candidate rows per listing.
+- **Blocked reports.** A report whose `analysis_provider` is `blocked:<reason>`
+  is shown as **Blocked** with its reason, and its body appears as a blocked
+  notice rather than a report. Report generation, storage and email are
+  unchanged; the scheduler receipt for such a run is tracked in
+  [#1140](https://github.com/seraph-quest/seraph/issues/1140).
+- **Mix breakdown.** The mixes come from the report's own JSON archive, used
+  only when its path is inside the report archive and its SHA-256 matches the
+  stored value. Otherwise the detail falls back to the episode's stored minutes
+  and observation count and says the breakdown is unavailable.
+- **Privacy.** Responses never include archive or receipt paths, raw screen
+  samples or a structured per-app breakdown; the stored report text is returned
+  as written and may mention apps. The routes sit under `/api/*`, need the
+  operator session and, like `/api/observer/screen-artifacts`, only answer
+  localhost requests.
+
 ### Portable selected browser text profile (#926) {#portable-selected-browser-text-926-branch-local-target}
 
 [ADR-022](./decisions/022-portable-selected-text-context.md) accepts one optional
@@ -3822,7 +3914,11 @@ and external-account behavior remain explicitly unverified.
 **Shipped foundation:** Seraph owns canonical local memory and can augment
 retrieval through guarded provider integrations.
 
-On this branch, remote embedding is a separately admitted OpenRouter
+Since ADR-035 (#1147 PR3d) OpenRouter embeddings are retired; the NEAR TEE
+embedding slot replaces them but stays blocked by the ADR-035 evidence gate, so
+recall is lexical (see "NEAR TEE embedding slot and memory re-index" above).
+The paragraph below records the historical OpenRouter contract. On this branch,
+remote embedding is a separately admitted OpenRouter
 capability. Memory vector writes and vector search require an explicit
 enabled v2 embedding slot (or the existing explicit legacy
 `embedding_model=openrouter/...` configuration), exact-profile cost accounting,

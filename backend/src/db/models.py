@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Boolean, CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy import event as sa_event
+from sqlalchemy.orm import Session as OrmSession
 from sqlmodel import Field, SQLModel, Relationship
 from src.browser.forgejo_forms import EMPTY_FORM_PROFILES as _FORGEJO_EMPTY_FORM_PROFILES
 
@@ -2218,6 +2220,39 @@ class Memory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
     last_confirmed_at: Optional[datetime] = Field(default=None)
+
+
+def _memory_vector_index_hook(kind: str):
+    """ADR-035 (#1147 PR3d): every ORM write path of canonical memory reports
+    a missing or stale vector, so a completed NEAR embedding index decays to
+    lexical recall at write time. The handler is lazy and never raises."""
+    def handler(_mapper, _connection, target):
+        from src.memory.near_embedding_reindex import canonical_memory_written
+        canonical_memory_written(kind, target)
+    return handler
+
+
+def _memory_statement_hook(orm_execute_state):
+    # Core update(Memory)/insert(Memory) statements bypass the mapper hooks.
+    from src.memory.near_embedding_reindex import canonical_memory_statement
+    canonical_memory_statement(orm_execute_state)
+
+
+def _memory_commit_hook(session):
+    from src.memory.near_embedding_reindex import canonical_memory_commit
+    canonical_memory_commit(session)
+
+
+def _memory_rollback_hook(session):
+    from src.memory.near_embedding_reindex import canonical_memory_rollback
+    canonical_memory_rollback(session)
+
+
+sa_event.listen(Memory, "after_insert", _memory_vector_index_hook("insert"))
+sa_event.listen(Memory, "after_update", _memory_vector_index_hook("update"))
+sa_event.listen(OrmSession, "do_orm_execute", _memory_statement_hook)
+sa_event.listen(OrmSession, "after_commit", _memory_commit_hook)
+sa_event.listen(OrmSession, "after_rollback", _memory_rollback_hook)
 
 
 class MemoryTombstone(SQLModel, table=True):

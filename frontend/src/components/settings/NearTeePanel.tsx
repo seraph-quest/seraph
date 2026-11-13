@@ -6,6 +6,7 @@ import {
   normalizeModelFabricSettings,
 } from "../../lib/modelFabric";
 import type { ModelFabricSettingsStatus, NearTeeSetupInput, NearTeeSetupStatus, NearTeeSlotName, NearTeeSlotStatus } from "../../lib/modelFabric";
+import { NearTeeEmbeddingSection } from "./NearTeeEmbeddingSection";
 
 interface Props {
   setup?: NearTeeSetupStatus | null;
@@ -74,7 +75,7 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
     const text = reason instanceof Error ? reason.message : fallback;
     return (credential ? text.split(credential).join("[redacted]") : text).slice(0, 512);
   }
-  const anyEnabled = Boolean(setup?.slots.text?.enabled || setup?.slots.vision?.enabled);
+  const anyEnabled = Boolean(setup?.slots.text?.enabled || setup?.slots.vision?.enabled || setup?.slots.embedding?.enabled);
   async function catalogCheck() {
     setBusy("catalog"); setError(null); setMessage(null);
     try {
@@ -87,13 +88,13 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
       const next = normalizeModelFabricSettings(await response.json());
       if (!mounted.current) return;
       if (next) { onRefreshed?.(next); setRevision(next.egress_revision); }
-      const results = SLOTS.flatMap(spec => {
-        const slot = next?.near_tee?.slots[spec.name];
-        if (!slot?.enabled) return [];
-        const receipt = slot.catalog_receipt;
-        return [receipt?.outcome === "passed" ? `${spec.name} passed` : `${spec.name} failed (${readable(receipt?.reason_code ?? "unknown")}; slot stays blocked)`];
-      });
-      setMessage("Catalog check: " + (results.join("; ") || "no enabled slot") + ". This reads NEAR's catalog only; it is not a capability check.");
+      const slots = next?.near_tee?.slots;
+      const checked = ([["text", slots?.text], ["vision", slots?.vision], ["embedding", slots?.embedding]] as const)
+        .filter(([, item]) => item?.enabled && item.catalog_receipt);
+      setMessage(checked.length === 0 ? "Catalog check returned no receipt." : checked.map(([name, item]) =>
+        item?.catalog_receipt?.outcome === "passed" ? `${name} slot: catalog check passed.`
+          : `${name} slot: catalog check failed (${readable(item?.catalog_receipt?.reason_code ?? "unknown")}); the slot stays blocked.`,
+      ).join(" ") + " This reads NEAR's catalog only; it is not a capability check.");
     } catch (reason) { if (mounted.current) setError(safeError(reason, "Catalog check failed.")); }
     finally { if (mounted.current) setBusy(null); }
   }
@@ -115,6 +116,8 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
     <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
       <button type="button" disabled={busy !== null || !anyEnabled} onClick={() => void catalogCheck()}>{busy === "catalog" ? "Checking catalog…" : "Run catalog check"}</button>
     </div>
+    <NearTeeEmbeddingSection setup={setup} stale={stale} revision={revision} policyRevoked={policyRevoked}
+      laneCeilingMicrousd={laneCeilingMicrousd} onSave={onSave} onRefreshed={onRefreshed} />
   </section>;
 }
 

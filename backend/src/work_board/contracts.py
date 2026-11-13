@@ -617,7 +617,9 @@ class GeneralTaskToolClosureV1(ClosedTaskModel):
     child_fence: int = Field(ge=1)
     descriptor_digest: TaskDigest
     input_digest: TaskDigest
-    outcome: Literal["returned", "approval_precontact", "unknown"]
+    # ``route_precontact`` (#1159): the callback was refused at its route
+    # gate before any job, reservation or provider contact.
+    outcome: Literal["returned", "approval_precontact", "route_precontact", "unknown"]
     output_digest: TaskDigest | None = None
     approval_id: TaskIdentity | None = None
     approval_fingerprint: TaskDigest | None = None
@@ -629,7 +631,7 @@ class GeneralTaskToolClosureV1(ClosedTaskModel):
                 or self.approval_fingerprint is not None))
             or (self.outcome == "approval_precontact" and (self.approval_id is None
                 or self.approval_fingerprint is None or self.output_digest is not None))
-            or (self.outcome == "unknown" and (self.output_digest is not None or self.approval_id is not None
+            or (self.outcome in {"unknown", "route_precontact"} and (self.output_digest is not None or self.approval_id is not None
                 or self.approval_fingerprint is not None))):
             raise ValueError("closure outcome requires its exact callback evidence")
         return self

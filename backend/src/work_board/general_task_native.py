@@ -588,6 +588,16 @@ async def retain_native_failure(service, jobs, binding, *, child_owner):
     if child["status"] != "running" or child["lease"]["owner"] != child_owner:
         return
     invocation = service._native_invocations.get(binding.invocation_id)
+    precontact_reason = invocation.precontact_route_reason if invocation is not None else None
+    if precontact_reason is not None and not child.get("effects"):
+        # #1159: the original callback proved no contact (a route/precontact
+        # refusal before any job, reservation or provider call). Close it as
+        # blocked with its stable reason; no unknown effect is recorded. Any
+        # failure to publish that proof falls back to the conservative path.
+        retained = await _retain_precontact_failure(service, jobs, binding, child_owner=child_owner,
+            fence=fence, invocation=invocation, reason=precontact_reason)
+        if retained is not None:
+            return retained
     try:
         cleanup_digest = None
         if invocation is not None and invocation.closed:
@@ -628,6 +638,46 @@ async def retain_native_failure(service, jobs, binding, *, child_owner):
         return
 
 
+async def _retain_precontact_failure(service, jobs, binding, *, child_owner, fence, invocation, reason):
+    """Close a proven no-contact callback as blocked (#1159); never unknown."""
+    import json
+    from src.work_board.contracts import GeneralTaskStepReceiptV1
+    from src.work_board.general_task import digest
+    from src.workflows.general_task_guard import effective_child_phase
+    from src.workflows.job_runtime import _digest, DurableJobError
+    try:
+        parent = await jobs.get_job(binding.parent_job_id)
+        closure = await jobs.publish_general_task_tool_closure(binding.invocation_id,
+            owner=child_owner, fencing_token=fence, expected_parent_revision=parent["revision"],
+            producer_witness=invocation.witness)
+        async with jobs._session() as db:
+            row = await jobs._fetch(db, binding.invocation_id)
+            effects = json.loads(row.effect_receipts_json or "[]")
+            if effects:
+                return None
+            effective = await effective_child_phase(db, row)
+        staged = stage_task_artifact(parent_job_id=binding.parent_job_id, creation_digest=binding.creation_digest,
+            payload=GeneralTaskStepReceiptV1(step_id=binding.step_id, plan_revision=binding.plan_revision,
+                invocation_id=binding.invocation_id, input_digest=binding.input_digest,
+                contact_state="contact_denied", status="blocked", descriptor_digest=binding.descriptor_digest,
+                selected_grant_digest=binding.selected_grant_digest, task_id=binding.task_id,
+                attempt_id=binding.attempt_id, child_job_id=binding.invocation_id,
+                child_attempt_count=1, child_fence=fence, parent_creation_digest=binding.creation_digest,
+                phase_digest=effective.phase_digest, approval_binding_digest=effective.approval_binding_digest,
+                effect_receipt_digest=_digest(effects), cleanup_receipt_digest=digest(closure["closure"])))
+        parent = await jobs.get_job(binding.parent_job_id)
+        await jobs.publish_general_task_step_receipt(binding.parent_job_id, staged_artifact=staged,
+            child_id=binding.invocation_id, owner=child_owner, fencing_token=fence,
+            expected_parent_revision=parent["revision"])
+        await jobs.transition_job(binding.invocation_id, "blocked", owner=child_owner,
+            fencing_token=fence, reason=reason,
+            result_summary="Native step refused before provider contact; no_learning")
+        service.release_native_invocation(binding.invocation_id)
+        return reason
+    except (BoardError, DurableJobError):
+        return None
+
+
 async def _execute_interpreter_child(service, jobs, binding, *, child_owner, principal, approved_resume=False):
     try:
         return await run_native_step(service, jobs, binding, child_owner=child_owner,
@@ -638,7 +688,11 @@ async def _execute_interpreter_child(service, jobs, binding, *, child_owner, pri
             waiting = await queued_wait_result(jobs, binding, error)
             if waiting is not None:
                 return waiting, None, None
-        await retain_native_failure(service, jobs, binding, child_owner=child_owner)
+        retained = await retain_native_failure(service, jobs, binding, child_owner=child_owner)
+        if isinstance(retained, str):
+            # Proven no contact: a blocked step with its stable route reason.
+            return {"verified": False, "blocked": True, "reason": retained, "provider_contact_state": "not_started",
+                "no_learning": True, "native_execution": True}, None, None
         return {"verified": False, "unknown_effect": True, "reason": "general_task_native_unknown",
             "no_learning": True, "native_execution": True}, None, None
 
@@ -880,12 +934,21 @@ async def continue_verified_plan(service, jobs, parent, task, attempt, envelope,
             row.state == "settled" and row.actual_cost_microusd is None for row in members):
             raise InferenceAccountingError("general_task_group_unknown")
         spent = sum(row.actual_cost_microusd for row in members if row.state == "settled")
-        configured, _ = current_inference_policy()
-        setup = configured.openrouter_setup
-        route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
-        if route is None or not getattr(route, "enabled", True):
+        from src.model_fabric.near_tee_vertical import near_tee_vertical_route
+        from src.model_fabric.retirement import openrouter_retired
+        near_route = near_tee_vertical_route("general_task_planner")
+        if near_route is not None:
+            # #1159: continuation planning reserves the NEAR TEE slot bound.
+            bound = near_route.request_cost_bound_microusd
+        elif openrouter_retired():
             raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
-        bound = getattr(route, "request_cost_bound_microusd", None)
+        else:
+            configured, _ = current_inference_policy()
+            setup = configured.openrouter_setup
+            route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
+            if route is None or not getattr(route, "enabled", True):
+                raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
+            bound = getattr(route, "request_cost_bound_microusd", None)
         if type(bound) is not int or bound <= 0:
             raise BoardError("general_task_planning_budget_insufficient", "Original governed request bound required", status_code=409)
         exhausted = len(members) >= group.max_inference_calls or spent + bound > group.max_cost_microusd

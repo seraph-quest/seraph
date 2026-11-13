@@ -605,6 +605,40 @@ async def test_specialist_delegation_planning_blocks_with_retired_reason(task_ru
     assert len(before[0]) == 1
     assert (await dispatcher.jobs.inference_accounting_snapshot())["operations"] == []
 
+    # #1159: the native delegate_task callback records that refusal as proven
+    # no contact (route_precontact), never an unknown effect, and the step is
+    # retained blocked with its stable reason.
+    import asyncio
+    from types import SimpleNamespace as _Owner
+    from src.native_tools.task_adapters import ToolRegistry, TaskToolInvocation, verify_task_tool_closure
+    from src.work_board.general_task_native import retain_native_failure
+    from src.workflows.general_task_guard import child_binding
+    from src.workflows.specialist_delegation import current_delegation
+    async with sessions() as db:
+        callback = await dispatcher.jobs._fetch(db, invocation_id)
+        binding = child_binding(callback)
+        delegation = await current_delegation(db, invocation_id)
+    inputs = next(step.input for step in delegation.envelope.plan.steps if step.step_id == binding.step_id)
+    descriptor = next(item for item in service.snapshot()[0] if item.tool_id == "delegate_task")
+    adapter = _Owner(delegation_service=service)
+    with no_provider_contact():
+        invocation = TaskToolInvocation(asyncio.ensure_future(ToolRegistry._invoke_delegation_with_closure(
+            adapter, descriptor, inputs, principal, invocation_id,
+            accounting["parent_fence"])))
+        with pytest.raises(BoardError):
+            await invocation.wait()
+    assert invocation.witness.outcome == "route_precontact"
+    assert invocation.precontact_route_reason == OPENROUTER_RETIRED_REASON
+    assert verify_task_tool_closure(invocation.witness, binding=binding,
+        fencing_token=accounting["parent_fence"]).outcome == "route_precontact"
+    service._native_invocations[invocation_id] = invocation
+    retained = await retain_native_failure(service, dispatcher.jobs, binding, child_owner=accounting["parent_owner"])
+    assert retained == OPENROUTER_RETIRED_REASON
+    projection = await dispatcher.jobs.get_job(invocation_id)
+    assert projection["status"] == "blocked" and projection["effects"] == []
+    assert transport["contacts"] == []
+    assert (await dispatcher.jobs.inference_accounting_snapshot())["operations"] == []
+
 
 # ── One precedence for Settings and verticals ────────────────────
 

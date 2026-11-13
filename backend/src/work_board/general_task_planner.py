@@ -161,23 +161,37 @@ class GeneralTaskPlanner:
             raise BoardError("general_task_planning_budget_required", "Planning requires one call and a nonzero monetary ceiling", status_code=422)
         if not descriptors:
             raise BoardError("general_task_tools_unavailable", "No typed registered tools are available", status_code=409)
-        from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
-        if reason := openrouter_only_route_block("general_task_planner"):
+        from src.model_fabric.retirement import (NO_ACTIVE_PROVIDER_REASON, inactive_route_label,
+            inactive_route_reason, openrouter_retired)
+        if reason := inactive_route_reason("general_task_planner"):
             # ADR-035: planning has no usable route (no active provider, a
-            # NEAR TEE slot reason, or NEAR TEE serves it but planning has no
-            # NEAR adapter yet); name it before any group, job or contact.
+            # revoked egress or a NEAR TEE slot reason); name it before any
+            # group, job or contact.
             raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
-                route_block=True)
-        try:
-            configured, _policy_digest = current_inference_policy()
-        except PermissionError as exc:
-            raise BoardError("general_task_planning_policy_blocked", str(exc), status_code=409) from exc
-        setup = configured.openrouter_setup
-        route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
-        if route is None or not getattr(route, "enabled", True):
-            raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
-        bound = route.request_cost_bound_microusd
-        budget = min(task_input.limits.max_cost_microusd, setup.spend_ceiling_microusd or 0)
+                route_block=True, provider_contact="not_started")
+        from src.model_fabric.near_tee_vertical import near_tee_vertical_route
+        # #1159: the governed NEAR TEE text slot serves planning. OpenRouter
+        # is reachable only in the explicit legacy test mode; never a fallback.
+        near_route = near_tee_vertical_route("general_task_planner")
+        if near_route is None and openrouter_retired():
+            reason = NO_ACTIVE_PROVIDER_REASON
+            raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
+                route_block=True, provider_contact="not_started")
+        if near_route is not None:
+            setup = route = None
+            bound = near_route.request_cost_bound_microusd
+            budget = min(task_input.limits.max_cost_microusd, near_route.spend_ceiling_microusd)
+        else:
+            try:
+                configured, _policy_digest = current_inference_policy()
+            except PermissionError as exc:
+                raise BoardError("general_task_planning_policy_blocked", str(exc), status_code=409) from exc
+            setup = configured.openrouter_setup
+            route = (setup.routes or {}).get("text") if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup
+            if route is None or not getattr(route, "enabled", True):
+                raise BoardError("general_task_planning_route_unavailable", "Reviewed text route is unavailable", status_code=409)
+            bound = route.request_cost_bound_microusd
+            budget = min(task_input.limits.max_cost_microusd, setup.spend_ceiling_microusd or 0)
         if _specialist is not None:
             budget = min(budget, _specialist["max_cost_microusd"], _specialist["group"].max_cost_microusd)
         if type(bound) is not int or bound <= 0 or bound > budget:
@@ -194,13 +208,16 @@ class GeneralTaskPlanner:
             from src.workflows.general_task_accounting import validate_group_owner
             await validate_group_owner(db, group)
         principal = replace(operator.principal, session_id=owner.session_id, job_id="", operator_session_id=owner.session_id)
-        profile_id = "openrouter.text" if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup.profile_id
-        profile = _provider_profile(profile_id)
-        if profile is None or profile.provider_kind != "openrouter" or profile.transport_adapter != "openai_compatible_chat":
-            raise BoardError("general_task_planning_route_unavailable", "Planning requires the governed OpenRouter text adapter", status_code=409)
-        options = _profile_options(profile_id)
-        if set(options) - {"provider", "_seraph_openrouter"}:
-            raise BoardError("general_task_planning_options_invalid", "Unsupported provider request options", status_code=409)
+        if near_route is not None:
+            profile_id, profile, options = near_route.profile_id, None, {}
+        else:
+            profile_id = "openrouter.text" if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup.profile_id
+            profile = _provider_profile(profile_id)
+            if profile is None or profile.provider_kind != "openrouter" or profile.transport_adapter != "openai_compatible_chat":
+                raise BoardError("general_task_planning_route_unavailable", "Planning requires the governed OpenRouter text adapter", status_code=409)
+            options = _profile_options(profile_id)
+            if set(options) - {"provider", "_seraph_openrouter"}:
+                raise BoardError("general_task_planning_options_invalid", "Unsupported provider request options", status_code=409)
         constraints = None
         if strategy is not None:
             from src.work_board.general_task import method_constraints
@@ -242,10 +259,21 @@ class GeneralTaskPlanner:
         text = json.dumps(messages, ensure_ascii=False)
         if await redact_secrets_in_text_readonly(db, text, fail_closed=True) != text:
             raise BoardError("general_task_planning_secret_input", "Remove secret values from planning input; unavailable redaction blocks egress", status_code=422)
-        body = finalized_openai_compatible_body(model_id=profile.model,
-            messages=messages,
-            options={"provider": options["provider"]} if "provider" in options else {},
-            temperature=0, max_tokens=min(4096, route.max_output_tokens), stream=False)
+        # Planning asks for one JSON object; on NEAR TEE the slot's
+        # structured_output proof is required (route capability) and the
+        # request carries a JSON response format.
+        near_response_format = {"type": "json_object"}
+        if near_route is not None:
+            body = {"model": near_route.model_id, "messages": messages, "temperature": 0,
+                "max_tokens": min(4096, near_route.max_output_tokens), "stream": False,
+                "response_format": near_response_format}
+            timeout_seconds = min(45, near_route.timeout_seconds + 16, task_input.limits.wall_seconds)
+        else:
+            body = finalized_openai_compatible_body(model_id=profile.model,
+                messages=messages,
+                options={"provider": options["provider"]} if "provider" in options else {},
+                temperature=0, max_tokens=min(4096, route.max_output_tokens), stream=False)
+            timeout_seconds = min(45, route.timeout_seconds, task_input.limits.wall_seconds)
         operation_id = "planning:" + group_identity(owner, task_input.goal_ref, goal_revision, idempotency_key)[:48]
         if _continuation is not None:
             operation_id = "planning-continuation:" + digest([group.group_id, _continuation["task_id"],
@@ -263,14 +291,15 @@ class GeneralTaskPlanner:
         from src.model_fabric.contracts import NoCompliantModelRouteError
         try:
             context = build_canonical_inference_context("general_task_planner", payload=body,
-                output_tokens=body["max_tokens"], timeout_seconds=min(45, route.timeout_seconds, task_input.limits.wall_seconds),
+                output_tokens=body["max_tokens"], timeout_seconds=timeout_seconds,
                 principal=principal, session_id=owner.session_id, request_id=operation_id)
         except NoCompliantModelRouteError as exc:
             # A precontact route denial is an ordinary blocked planning
             # outcome with its stable reason, never an unhandled error.
             reasons = ", ".join(exc.reason_codes) or "route_unavailable"
             raise BoardError("general_task_planning_route_denied", "Planning route denied: " + reasons,
-                status_code=409) from exc
+                status_code=409, reason_code=(exc.reason_codes or ("route_unavailable",))[0],
+                provider_contact="not_started") from exc
         context = replace(context, deadline_at=min(context.deadline_at, group.original_deadline_at.timestamp()))
         if _specialist is not None:
             context = replace(context, deadline_at=min(context.deadline_at, _specialist["deadline_at"],
@@ -280,10 +309,24 @@ class GeneralTaskPlanner:
         # substituting it into route metadata would reject every legacy
         # profile whose cost tag describes the deployment ceiling instead.
         context = replace(context, owner_budget_microusd=budget, estimated_cost_microusd=bound)
-        target = {"profile": profile_id, "model_id": profile.model, "api_base": profile.api_base,
-            "api_key": profile.api_key, "source": "primary",
-            "options": {"provider": options["provider"]} if "provider" in options else {}}
-        decision, proofs = await _governed_preflight_target_async(target, context)
+        near_call = None
+        if near_route is not None:
+            from src.model_fabric.near_tee import NearTeeDenied
+            from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call
+            try:
+                near_call = await prepare_near_tee_vertical_call(context, messages=messages, temperature=0,
+                    max_tokens=body["max_tokens"], response_format=near_response_format)
+            except NearTeeDenied as exc:
+                # Sealed precontact denial: no job, reservation or contact.
+                raise BoardError("general_task_planning_route_denied", "Planning route denied: " + exc.code,
+                    status_code=409, reason_code=exc.code, provider_contact="not_started") from exc
+            context, decision, proofs = near_call.context, near_call.decision, near_call.proof_hashes
+            target = None
+        else:
+            target = {"profile": profile_id, "model_id": profile.model, "api_base": profile.api_base,
+                "api_key": profile.api_key, "source": "primary",
+                "options": {"provider": options["provider"]} if "provider" in options else {}}
+            decision, proofs = await _governed_preflight_target_async(target, context)
         hooks = RouteReceiptSession(context=context)
         if decision is None or not decision.allowed:
             if decision is not None:
@@ -306,15 +349,26 @@ class GeneralTaskPlanner:
         group_binding.__enter__()
         try:
             await prepare_bound_remote_inference(request, profile_id=profile_id)
-            async def invoke():
-                nonlocal started
-                hooks.attempt_started(decision, capability_proof_hashes=proofs)
-                started = True
-                return await _governed_research_chat_completion(decision=decision, context=context,
-                    body=body, api_key=target["api_key"])
-            response, payload = await broker.execute(request, invoke)
-            hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
-                usage=_token_usage_from_payload(payload))
+            if near_call is not None:
+                from src.model_fabric.near_tee_vertical import execute_near_tee_vertical_call
+
+                def mark_started():
+                    nonlocal started
+                    started = True
+                # NEAR billing is read back inside this lease and settles the
+                # planning reservation; known-cost failures raise NearTeeError.
+                response, _outcome = await execute_near_tee_vertical_call(near_call, request=request,
+                    broker=broker, hooks=hooks, on_started=mark_started)
+            else:
+                async def invoke():
+                    nonlocal started
+                    hooks.attempt_started(decision, capability_proof_hashes=proofs)
+                    started = True
+                    return await _governed_research_chat_completion(decision=decision, context=context,
+                        body=body, api_key=target["api_key"])
+                response, payload = await broker.execute(request, invoke)
+                hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
+                    usage=_token_usage_from_payload(payload))
             receipt = await hooks.finalize(outcome="succeeded")
             if not receipt.persisted:
                 raise RuntimeError("general_task_planning_receipt_unavailable")
@@ -328,6 +382,12 @@ class GeneralTaskPlanner:
             from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionError, RemoteInferenceBindingError
             if isinstance(exc, (RemoteInferenceAdmissionError, RemoteInferenceBindingError)):
                 raise BoardError("general_task_planning_admission_blocked", str(exc), status_code=409) from exc
+            from src.model_fabric.near_tee import NearTeeError
+            if isinstance(exc, NearTeeError) and exc.code != "near_tee_cost_liability":
+                # Contact happened and NEAR billing settled the known cost;
+                # no output is adopted and no task execution is admitted.
+                raise BoardError("general_task_planning_output_not_adopted",
+                    "Planner output was not adopted: " + exc.code, status_code=409, reason_code=exc.code) from exc
             raise
         finally:
             group_binding.__exit__(None, None, None)

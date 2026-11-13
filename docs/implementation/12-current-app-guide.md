@@ -1274,10 +1274,11 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > No route makes new OpenRouter contact: chat, agent and guardian turns, reports,
 > Cordis `inference.request`, screenshot vision, embeddings, capability checks
 > and screen-analysis provider selection all fail closed with the stable reason
-> `openrouter_retired`, with no fallback. Until the NEAR TEE slots land
-> (PR3b–PR4), ordinary inference routes report **blocked**
-> (`openrouter_retired`, `no_active_provider`) in `/api/runtime/status` and
-> Settings; this is expected and not a crash. The optional NEAR text Work
+> `openrouter_retired`, with no fallback. Non-streaming text routes run on the
+> NEAR TEE text slot once the operator configures it (see below); routes
+> without a ready slot, and streaming, tool, vision and embedding routes
+> (PR3c–PR4), report **blocked** (`no_active_provider` or the slot reason) in
+> `/api/runtime/status` and Settings; this is expected and not a crash. The optional NEAR text Work
 > capability (ADR-025) is unchanged. Retained OpenRouter configuration,
 > credential, receipts, ledger rows and Unknown liabilities stay readable and
 > settleable through Inference accounting. The OpenRouter sections below
@@ -1364,6 +1365,40 @@ amount, so a deployment with only retired OpenRouter routes can still publish
 the lane. Independently of any save, startup publishes the same route-scoped
 revoke once (witnessed, revision CAS, no ledger change, idempotent); a failure
 is shown as `route_revoke: degraded` under Settings and never stops startup.
+
+### Configure the NEAR TEE text slot (ADR-035, #1147 PR3b)
+
+Status: **Partial** until live operator use; nothing is enabled by default.
+In **Settings → NEAR TEE · text slot**:
+
+1. Publish the shared inference lane ceiling first; NEAR TEE never funds its
+   own budget.
+2. Enter the NEAR API key (write-only, stored as `vault:near_api_key`, separate
+   from the NEAR text key; only a fingerprint is shown), pick a text model from
+   the allowlist (`z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`,
+   `deepseek-ai/DeepSeek-V4.1-Flash-1017`, `Qwen/Qwen3.6-35B-A3B-FP8`), set
+   maximum input and output tokens, timeout, per-request reserve and catalog
+   receipt lifetime, tick the plaintext acknowledgement and save. Saving and
+   refreshing never call NEAR.
+3. Press **Run catalog check**. It reads NEAR's catalog record for the model
+   only (no inference) and passes only for `providerType=vllm`, attestation
+   supported, verifiable, ready, text in/out, enough context and a reserve that
+   covers maximum input and output at the catalog prices. The receipt expires
+   after its lifetime or when the slot changes.
+4. Press **Run capability check**: three billed, mechanics-only requests
+   (text, health, latency) through the shared lane, producing the proofs that
+   dispatch requires.
+
+The slot then serves non-streaming text routes such as the end-of-day report,
+the screenshot observation digest and the daily briefing, behind the one serial
+broker with chat priority. Report labels read "TEE-hosted per NEAR catalog as of
+<time>; NEAR gateway receives plaintext; attestation not verified by Seraph; no
+end-to-end encryption". Seraph does not verify attestation and there is no
+end-to-end encryption. A missing NEAR billing record becomes an Unknown
+liability that blocks the whole lane, chat included, until it is settled under
+**Inference accounting**; a model echo mismatch or empty answer is settled and
+not adopted. Streaming chat, tools, vision and embeddings stay blocked until
+their slices land.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 

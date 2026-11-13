@@ -104,6 +104,10 @@ const STATUS_LABELS: Record<WorkBoardStatus, string> = {
 const BLOCK_REASON_TEXT: Record<string, string> = {
   board_worker_runtime_unavailable: "board_worker_runtime_unavailable · The draft runtime is unavailable; nothing was contacted, so a retry is safe once it is ready.",
   board_worker_settlement_refused: "board_worker_settlement_refused · Inference was spent, no external effect was made; safe to retry.",
+  // ADR-035 route blocks (#1156): nothing was contacted; configure the route, then unblock.
+  openrouter_retired: "openrouter_retired · OpenRouter is retired (ADR-035); nothing was contacted. Configure the NEAR TEE slot in Settings.",
+  no_active_provider: "no_active_provider · No active inference provider; nothing was contacted. Configure the NEAR TEE slot in Settings.",
+  near_tee_route_unsupported: "near_tee_route_unsupported · This capability is not yet available on NEAR TEE (tracked in #1159); nothing was contacted.",
 };
 const blockReasonText = (reason: string | null | undefined) => (reason ? BLOCK_REASON_TEXT[reason] ?? reason : reason);
 
@@ -3814,7 +3818,7 @@ function WorkBoardPanel({
                       <span className="text-[10px] uppercase opacity-70">{proposalStatusLabel(proposal)} · revision {proposal.proposal_revision}</span>
                     </div>
                     {proposal.blocked_reason && <div className="mt-2 rounded border border-amber-500/40 p-2" role="status">
-                      Blocked: {proposal.blocked_reason}. {proposal.recovery_action === "reconcile_external_effect"
+                      Blocked: {blockReasonText(proposal.blocked_reason)}. {proposal.recovery_action === "reconcile_external_effect"
                         ? "Reconcile the durable provider receipt before any retry; this page will not replay a contacted request."
                         : proposal.recovery_action === "reconcile_admission_binding"
                           ? "The bounded durable admission needs operator reconciliation; this idempotency key cannot be retried. Resolve the receipt or create a new explicitly accepted request after recovery."

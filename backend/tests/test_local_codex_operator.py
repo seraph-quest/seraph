@@ -52,6 +52,7 @@ async def test_removed_adapter_never_invokes_subprocess():
     popen.assert_not_called()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: pins removed-codex rejection ordering on the historical OpenRouter primary/fallback chain
 def test_completion_rejects_legacy_primary_without_transport_or_fallback():
     tokens = set_runtime_context(
         "external-agent-migration-test",
@@ -86,6 +87,7 @@ def test_completion_rejects_legacy_primary_without_transport_or_fallback():
     completion.assert_not_called()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: pins removed-codex rejection ordering on the historical OpenRouter primary/fallback chain
 def test_completion_rejects_legacy_fallback_before_any_transport():
     tokens = set_runtime_context(
         "external-agent-fallback-test",

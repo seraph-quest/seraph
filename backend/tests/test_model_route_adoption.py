@@ -190,6 +190,7 @@ def test_registered_orchestrator_and_specialists_are_zero_transport_without_iden
     transport.assert_not_called()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical context and selector adoption over the historical OpenRouter route
 async def test_registered_agent_binds_tools_response_format_and_options_to_exact_transport_digest(accounting_db, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import MagicMock, patch
@@ -267,6 +268,7 @@ async def test_registered_agent_binds_tools_response_format_and_options_to_exact
     assert captured["context"].data_digest == canonical_digest(captured["body"])
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical context and selector adoption over the historical OpenRouter route
 def test_canonical_context_fails_closed_without_fabricating_principal_or_job_identity():
     from src.model_fabric.caller_context import build_canonical_inference_context
 
@@ -279,6 +281,7 @@ def test_canonical_context_fails_closed_without_fabricating_principal_or_job_ide
         )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical context and selector adoption over the historical OpenRouter route
 def test_canonical_context_requires_exact_caller_supplied_identity_and_defaults_local_only():
     from src.model_fabric.caller_context import build_canonical_inference_context
     from src.security.trust_contract import (
@@ -320,6 +323,7 @@ def test_canonical_context_requires_exact_caller_supplied_identity_and_defaults_
         )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical context and selector adoption over the historical OpenRouter route
 def test_canonical_context_preserves_bound_operator_and_scheduled_service_identity():
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.model_fabric.caller_context import build_canonical_inference_context
@@ -604,6 +608,7 @@ async def test_screenshot_vlm_no_compliant_route_persists_zero_attempt_denial(mo
     assert observation.error_code == "receipt_persistence_failed"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical context and selector adoption over the historical OpenRouter route
 def test_canonical_screenshot_vlm_profile_passes_real_selector_with_exact_proofs():
     import time
     from unittest.mock import patch

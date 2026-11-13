@@ -118,6 +118,7 @@ async def test_flush_session_memory_retries_same_fingerprint_after_partial_failu
     ]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: consolidation retry builds its canonical context on the historical OpenRouter route
 async def test_retry_after_snapshot_partial_does_not_double_strengthen(async_db):
     manager = SessionManager()
     await manager.get_or_create("flush-idempotent")

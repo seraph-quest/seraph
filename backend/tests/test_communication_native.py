@@ -11,6 +11,9 @@ from tests.test_inference_accounting import accounting_db
 from tests.general_task_method_lifecycle import native_admission_lifecycle
 from tests.test_document_build_native_capacity import build_admission_lifecycle
 
+# ADR-035: pins communication-preparation Work mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 async def test_actual_empty_inspection_native_encrypted_plan(task_runtime, monkeypatch, native_admission_lifecycle):

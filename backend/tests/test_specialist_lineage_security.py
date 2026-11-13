@@ -7,6 +7,9 @@ from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 from tests.test_specialist_evidence_runtime import copied_evidence_fixture,reserve_evidence_specialist
 
+# ADR-035: pins specialist delegation Work mechanics whose planner/model steps run over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 @pytest.mark.asyncio
 async def test_existing_lineage_key_collision_rolls_back_actual_child_publication(task_runtime,monkeypatch, native_admission_lifecycle):
     from src.db.models import WorkBoardEvent,WorkBoardTask,WorkBoardAttempt,WorkflowRunState

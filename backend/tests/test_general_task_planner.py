@@ -14,6 +14,9 @@ from src.work_board.contracts import GeneralTaskInput, TaskLimits, ToolDescripto
 from src.work_board.general_task_planner import GeneralTaskPlanner, planner_messages, public_schema
 from src.work_board.repository import BoardError
 
+# ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def descriptor():
     return ToolDescriptor(tool_id="fixture.read", version="1",

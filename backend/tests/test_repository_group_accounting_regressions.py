@@ -12,6 +12,9 @@ from tests.test_general_task_continuation_accounting import continuation_fixture
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
+# ADR-035: pins repository group accounting over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 async def test_released_precontact_calls_do_not_renew_original_group_allowance(task_runtime, monkeypatch, native_admission_lifecycle):

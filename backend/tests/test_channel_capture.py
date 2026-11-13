@@ -16,6 +16,9 @@ from tests.test_general_task_contract import Registry, request
 from tests.test_audio_native_execution import execution
 from tests.test_audio_worker import audio_worker_authority
 
+# ADR-035: pins channel-capture Work mechanics whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def reservation():
     owner = WorkBoardOwner(principal_id="operator:fixture", session_id="root-original")

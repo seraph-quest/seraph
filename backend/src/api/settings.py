@@ -755,12 +755,15 @@ def _classify_screenshot_observation(
 
 
 async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[str, object]:
-    from src.observer.screenshot_folder_source import screenshot_folder_persistence_status
+    from src.observer.screenshot_folder_source import (
+        screenshot_folder_persistence_status,
+        screenshot_pipeline_filter,
+    )
 
     async with get_db() as db:
         base_filters = [
             col(ScreenObservation.blocked) == False,  # noqa: E712
-            col(ScreenObservation.app_name) == "Screenshot Folder",
+            screenshot_pipeline_filter(),
         ]
 
         status_counts: dict[str, int] = {
@@ -1187,12 +1190,14 @@ async def clear_stale_screenshot_folder_observations(request: Request):
     """Archive stale incomplete screenshot-folder rows without deleting analyzed history."""
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Screenshot folder cleanup is only available from localhost")
+    from src.observer.screenshot_folder_source import screenshot_pipeline_filter
+
     screenshot_folder, _ = _screenshot_folder()
     async with get_db() as db:
         result = await db.execute(
             select(ScreenObservation)
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
-            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .where(screenshot_pipeline_filter())
             .order_by(col(ScreenObservation.timestamp).desc())
         )
         stale_ids: list[str] = []

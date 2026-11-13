@@ -69,6 +69,8 @@ SCREENSHOT_FOLDER_APP_NAME = "Screenshot Folder"
 LOCAL_CAPTURE_UPLOAD_DIRNAME = ".seraph-daemon-captures"
 LOCAL_CAPTURE_SOURCE = "daemon_local_upload"
 LOCAL_CAPTURE_ID_PREFIX = "daemon_capture_id:"
+LOCAL_ANALYSIS_PREFIX = "local_analysis:"
+LOCAL_ANALYSIS_TEXT_MAX_CHARS = 8 * 1024
 SCREENSHOT_FOLDER_HASH_PREFIX = "screenshot_folder_image_sha256"
 SCREENSHOT_VISUAL_RUN_PREFIX = "screenshot_visual_run:"
 SCREENSHOT_FOLDER_ENV = "SERAPH_SCREENSHOT_FOLDER"
@@ -114,6 +116,49 @@ def resolve_screenshot_folder(configured: str | None = None) -> Path:
 def screenshot_folder_persistence_status() -> dict[str, int]:
     """Return process-local DB lock/backoff counters for operator-visible status."""
     return dict(_PERSISTENCE_STATS)
+
+
+def local_analysis_from_details(details: list[object]) -> dict[str, object] | None:
+    """Return the bounded on-device analysis a daemon upload carried, if any.
+
+    This is text the daemon produced locally (Apple Vision OCR or an
+    explicitly selected local provider); it never contains image bytes.
+    """
+    for item in details:
+        if not (isinstance(item, str) and item.startswith(LOCAL_ANALYSIS_PREFIX)):
+            continue
+        try:
+            payload = json.loads(item.removeprefix(LOCAL_ANALYSIS_PREFIX))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        bounded: dict[str, object] = {}
+        for key in ("provider", "activity", "project", "summary"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                bounded[key] = value[:512]
+        text = payload.get("text")
+        if isinstance(text, str) and text.strip():
+            bounded["text"] = text[:LOCAL_ANALYSIS_TEXT_MAX_CHARS]
+        raw_details = payload.get("details")
+        if isinstance(raw_details, list):
+            bounded["details"] = [str(entry)[:256] for entry in raw_details if isinstance(entry, str)][:16]
+        return bounded or None
+    return None
+
+
+def screenshot_pipeline_filter():
+    """SQL filter for rows owned by the screenshot pipeline.
+
+    Folder images carry the ``Screenshot Folder`` app name; authenticated
+    daemon uploads keep their real app name and are identified by their
+    capture-id marker instead.
+    """
+    return or_(
+        col(ScreenObservation.app_name) == SCREENSHOT_FOLDER_APP_NAME,
+        col(ScreenObservation.details_json).contains(f'"{LOCAL_CAPTURE_ID_PREFIX}', autoescape=True),
+    )
 
 
 def screenshot_ingest_lock() -> asyncio.Lock:
@@ -279,12 +324,7 @@ async def _select_analysis_candidates_with_retry(*, limit: int | None) -> list[S
             async with get_session() as db:
                 statement = (
                     select(ScreenObservation)
-                    .where(
-                        or_(
-                            col(ScreenObservation.app_name) == SCREENSHOT_FOLDER_APP_NAME,
-                            col(ScreenObservation.details_json).contains(LOCAL_CAPTURE_ID_PREFIX),
-                        )
-                    )
+                    .where(screenshot_pipeline_filter())
                     .where(col(ScreenObservation.details_json).contains("capture_artifacts:"))
                     .where(col(ScreenObservation.details_json).contains(SCREENSHOT_FOLDER_PROVIDER))
                     .where(_analysis_candidate_status_filter())

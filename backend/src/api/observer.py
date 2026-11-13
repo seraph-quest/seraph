@@ -7,7 +7,7 @@ import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -554,6 +554,19 @@ async def post_screen_context(body: ScreenContextRequest):
     return {"status": "ok"}
 
 
+class LocalCaptureAnalysis(BaseModel):
+    """Bounded on-device analysis the daemon produced (never image bytes)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["apple-vision", "codex-local"]
+    activity: str | None = Field(default=None, max_length=64)
+    project: str | None = Field(default=None, max_length=256)
+    summary: str | None = Field(default=None, max_length=512)
+    details: list[Annotated[str, Field(max_length=256)]] = Field(default_factory=list, max_length=16)
+    text: str | None = Field(default=None, max_length=8 * 1024)
+
+
 class LocalCaptureUploadRequest(BaseModel):
     """One daemon capture: bytes are sniffed server-side, never trusted."""
 
@@ -564,10 +577,14 @@ class LocalCaptureUploadRequest(BaseModel):
     window_title: str = Field(default="", max_length=2048)
     captured_at: datetime
     content_base64: str = Field(min_length=1)
-    ocr_text: str | None = Field(default=None, max_length=64_000)
+    local_analysis: LocalCaptureAnalysis | None = None
 
 
-async def _authenticate_capture_uploader(request: Request) -> dict[str, str]:
+_CAPTURE_CAPABILITY = "media.ingest"
+_CAPTURE_DATA_PURPOSE = "screen_capture"
+
+
+async def _authenticate_capture_uploader(request: Request):
     """Authenticate the daemon with its scoped paired-edge credential.
 
     This reuses the paired-edge credential path (vault-held secret, owner
@@ -575,11 +592,14 @@ async def _authenticate_capture_uploader(request: Request) -> dict[str, str]:
     a browser cookie or a fingerprint as authentication.
     """
     from src.api.nodes import _edge_credential, _find_adapter, _node_inventory
+    from src.extensions.node_pairing import _scope_digest, _scope_key
     from src.extensions.paired_edge import (
         DEFAULT_NODE_EXTENSION_ID,
         DEFAULT_NODE_REFERENCE,
+        _policy_from_entry,
         verify_pairing_credential,
     )
+    from src.observer.local_capture_upload import UploadPolicy
     from src.extensions.state import load_extension_state_payload
 
     presented = _edge_credential(request)
@@ -614,11 +634,34 @@ async def _authenticate_capture_uploader(request: Request) -> dict[str, str]:
         expires_at = state.expires_at if state.expires_at.tzinfo else state.expires_at.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) >= expires_at:
             raise HTTPException(status_code=403, detail={"code": "pairing_expired"})
-    return {
+    # Enforce the pairing's stored policy exactly like edge ingress does
+    # (node_pairing.validate_pairing_request): capability, data purpose and
+    # credential scope here; media type and size once the bytes are sniffed.
+    policy = _policy_from_entry(entry)
+    if policy.allow_action_authority:
+        raise HTTPException(status_code=403, detail={"code": "action_authority_forbidden"})
+    if _CAPTURE_CAPABILITY not in policy.allowed_capabilities:
+        raise HTTPException(status_code=403, detail={"code": "capability_scope_not_allowed"})
+    if _CAPTURE_DATA_PURPOSE not in policy.allowed_data_purposes:
+        raise HTTPException(status_code=403, detail={"code": "data_purpose_not_allowed"})
+    if state.credential_scope_digest is not None and state.credential_scope_digest != _scope_digest(
+        _scope_key(
+            device_id=device_id,
+            pairing_id=pairing_id,
+            capability_scope=_CAPTURE_CAPABILITY,
+            data_purpose=_CAPTURE_DATA_PURPOSE,
+        )
+    ):
+        raise HTTPException(status_code=403, detail={"code": "credential_scope_mismatch"})
+    uploader = {
         "owner_principal_id": str(entry.get("owner_principal_id") or ""),
         "device_id": device_id,
         "pairing_id": pairing_id,
     }
+    return uploader, UploadPolicy(
+        allowed_media_types=tuple(policy.allowed_media_types),
+        max_content_bytes=int(policy.max_content_bytes),
+    )
 
 
 async def _read_bounded_body(request: Request, *, limit: int) -> bytes:
@@ -660,7 +703,7 @@ async def upload_local_capture(request: Request):
     from src.observer.screen_analysis_settings import effective_screen_analysis_enabled
 
     # Authenticate before reading or parsing any bytes.
-    uploader = await _authenticate_capture_uploader(request)
+    uploader, policy = await _authenticate_capture_uploader(request)
     if not effective_screen_analysis_enabled():
         raise HTTPException(status_code=403, detail={"code": "screen_capture_disabled"})
     if not upload_rate_limiter.allow(f"{uploader['device_id']}:{uploader['pairing_id']}"):
@@ -685,8 +728,9 @@ async def upload_local_capture(request: Request):
             window_title=body.window_title,
             captured_at=body.captured_at,
             capture_id=body.capture_id,
-            ocr_text=body.ocr_text,
+            local_analysis=body.local_analysis.model_dump(exclude_none=True) if body.local_analysis else None,
             uploader=uploader,
+            policy=policy,
         )
     except LocalCaptureRejected as exc:
         await log_integration_event(

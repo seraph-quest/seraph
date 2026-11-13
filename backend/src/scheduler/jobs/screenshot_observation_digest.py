@@ -22,7 +22,11 @@ from src.observer.screenshot_semantic_analysis import (
     semantic_analysis_from_details,
     semantic_analysis_status_from_details,
 )
-from src.observer.screenshot_folder_source import resolve_screenshot_folder
+from src.observer.screenshot_folder_source import (
+    local_analysis_from_details,
+    resolve_screenshot_folder,
+    screenshot_pipeline_filter,
+)
 from src.llm_runtime import completion_with_fallback
 from src.scheduler.guardian_runtime import GuardianBlocked, guardian_completion_fn, report_guardian_blocked, report_guardian_succeeded
 from src.model_fabric.caller_context import build_canonical_inference_context
@@ -229,7 +233,7 @@ async def _screenshot_observations(start: datetime, end: datetime) -> list[Scree
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
             .where(
                 or_(
-                    col(ScreenObservation.app_name) == "Screenshot Folder",
+                    screenshot_pipeline_filter(),
                     col(ScreenObservation.details_json).contains('"provider":"screenshot_folder"'),
                     col(ScreenObservation.details_json).contains('"provider": "screenshot_folder"'),
                 )
@@ -293,19 +297,24 @@ def _digest_payload(
         analysis = semantic_analysis_from_details(details) or {}
         status = semantic_analysis_status_from_details(details) or {}
         error = semantic_analysis_error_from_details(details) or {}
-        records.append(
-            {
-                "timestamp": _ensure_utc(obs.timestamp).isoformat(),
-                "app_name": obs.app_name,
-                "window_title": obs.window_title,
-                "activity_type": obs.activity_type,
-                "project": obs.project,
-                "summary": obs.summary,
-                "analysis_status": status,
-                "analysis_error": error,
-                "analysis": analysis,
-            }
-        )
+        record: dict[str, Any] = {
+            "timestamp": _ensure_utc(obs.timestamp).isoformat(),
+            "app_name": obs.app_name,
+            "window_title": obs.window_title,
+            "activity_type": obs.activity_type,
+            "project": obs.project,
+            "summary": obs.summary,
+            "analysis_status": status,
+            "analysis_error": error,
+            "analysis": analysis,
+        }
+        if not analysis:
+            # Daemon uploads (ADR-035) carry bounded on-device text; use it as
+            # content until governed vision analysis exists. Never image bytes.
+            local_analysis = local_analysis_from_details(details)
+            if local_analysis:
+                record["local_analysis"] = local_analysis
+        records.append(record)
 
     return {
         "artifact_schema": SCREENSHOT_DIGEST_SCHEMA_VERSION,

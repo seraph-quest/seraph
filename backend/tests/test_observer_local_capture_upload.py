@@ -146,7 +146,8 @@ async def capture_env(tmp_path, monkeypatch, async_db):
 
 
 def _headers(credential: str | None, **overrides: str) -> dict[str, str]:
-    headers = {"Origin": ORIGIN, "X-Seraph-Node-Device": DEVICE, "X-Seraph-Node-Pairing": PAIRING}
+    # Native daemon ingress: no Origin, no cookie.
+    headers = {"X-Seraph-Node-Device": DEVICE, "X-Seraph-Node-Pairing": PAIRING}
     if credential is not None:
         headers["Authorization"] = f"Bearer {credential}"
     headers.update(overrides)
@@ -154,7 +155,7 @@ def _headers(credential: str | None, **overrides: str) -> dict[str, str]:
 
 
 def _body(content: bytes, *, capture_id: str = "cap-0000000001", app: str = "Code", title: str = "main.py — seraph",
-          captured_at: datetime | None = None, ocr_text: str | None = None) -> dict[str, object]:
+          captured_at: datetime | None = None, local_analysis: dict | None = None) -> dict[str, object]:
     payload: dict[str, object] = {
         "capture_id": capture_id,
         "app_name": app,
@@ -162,8 +163,8 @@ def _body(content: bytes, *, capture_id: str = "cap-0000000001", app: str = "Cod
         "captured_at": (captured_at or datetime.now(timezone.utc)).isoformat(),
         "content_base64": base64.b64encode(content).decode("ascii"),
     }
-    if ocr_text is not None:
-        payload["ocr_text"] = ocr_text
+    if local_analysis is not None:
+        payload["local_analysis"] = local_analysis
     return payload
 
 
@@ -191,7 +192,7 @@ async def test_upload_requires_paired_edge_credential(capture_env):
     assert wrong.status_code == 401
     no_identity = await client.post(
         "/api/observer/captures",
-        headers={"Origin": ORIGIN, "Authorization": f"Bearer {capture_env['credential']}"},
+        headers={"Authorization": f"Bearer {capture_env['credential']}"},
         json=body,
     )
     assert no_identity.status_code == 401
@@ -222,7 +223,11 @@ async def test_accepted_capture_preserves_metadata_private_storage_and_pending_a
     response = await client.post(
         "/api/observer/captures",
         headers=_headers(capture_env["credential"]),
-        json=_body(content, captured_at=captured_at, ocr_text="def main():"),
+        json=_body(
+            content,
+            captured_at=captured_at,
+            local_analysis={"provider": "apple-vision", "summary": "def main():", "text": "def main():\n    pass"},
+        ),
     )
     assert response.status_code == 201, response.text
     payload = response.json()
@@ -237,7 +242,8 @@ async def test_accepted_capture_preserves_metadata_private_storage_and_pending_a
     assert abs((stored_ts - captured_at).total_seconds()) < 1
     details = json.loads(observation.details_json or "[]")
     assert "daemon_capture_id:cap-0000000001" in details
-    assert any(item.startswith("local_ocr:") and "def main()" in item for item in details)
+    assert any(item.startswith("local_analysis:") and "def main()" in item for item in details)
+    assert observation.summary == "def main():"
     assert any(item.startswith("screenshot_analysis_status:") and "pending" in item for item in details)
 
     artifacts = _artifacts(observation)
@@ -420,3 +426,168 @@ def test_backend_blocklist_mirrors_daemon_defaults():
     finally:
         sys.path.remove(str(DAEMON_DIR))
     assert set(DEFAULT_CAPTURE_BLOCKLIST) == set(DEFAULT_BLOCKLIST)
+
+
+async def _set_pairing_policy(**changes) -> None:
+    from src.extensions.state import load_extension_state_payload, save_extension_state_payload
+
+    payload = load_extension_state_payload()
+    entry = payload["extensions"]["seraph.openclaw-device-bridge"]["node_pairings"]["connectors/nodes/device.yaml"]
+    entry["policy"].update(changes)
+    save_extension_state_payload(payload, expected_revision=int(payload.get("revision") or 0))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "code"),
+    [
+        ({"allowed_capabilities": ["presence.read"]}, "capability_scope_not_allowed"),
+        ({"allowed_data_purposes": ["presence"]}, "data_purpose_not_allowed"),
+        ({"allowed_media_types": ["image/jpeg"]}, "media_type_not_allowed_by_pairing_policy"),
+        ({"max_content_bytes": 64}, "content_size_exceeds_pairing_policy"),
+    ],
+)
+async def test_pairing_policy_is_enforced(capture_env, changes, code):
+    await _set_pairing_policy(**changes)
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((3, 4, 5)))
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == code
+    assert await _observations(capture_env["db"]) == []
+
+
+@pytest.mark.asyncio
+async def test_origin_rules_for_native_ingress(capture_env):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+    # Native: no Origin, no cookie -> accepted on the bearer credential.
+    ok = await client.post("/api/observer/captures", headers=_headers(credential), json=_body(_png((11, 12, 13))))
+    assert ok.status_code == 201, ok.text
+    # Any Origin present must still be an allowed origin.
+    foreign = await client.post(
+        "/api/observer/captures",
+        headers=_headers(credential, Origin="http://evil"),
+        json=_body(_png((14, 12, 13)), capture_id="cap-origin-0002"),
+    )
+    assert foreign.status_code == 403
+    assert foreign.json()["detail"]["code"] == "origin_forbidden"
+    # A cookie-bearing request without Origin keeps the browser rule.
+    with_cookie = await client.post(
+        "/api/observer/captures",
+        headers=_headers(credential, Cookie="seraph_session=x"),
+        json=_body(_png((15, 12, 13)), capture_id="cap-origin-0003"),
+    )
+    assert with_cookie.status_code == 403
+    assert with_cookie.json()["detail"]["code"] == "mutation_origin_required"
+    # Missing credential is never waived by the Origin exemption.
+    no_credential = await client.post(
+        "/api/observer/captures", headers=_headers(None), json=_body(_png((16, 12, 13)), capture_id="cap-origin-0004")
+    )
+    assert no_credential.status_code == 401
+    # Host allow-list still applies.
+    bad_host = await client.post(
+        "/api/observer/captures",
+        headers=_headers(credential, Host="evil.example"),
+        json=_body(_png((17, 12, 13)), capture_id="cap-origin-0005"),
+    )
+    assert bad_host.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_pixel_limit_checked_from_header(capture_env, monkeypatch):
+    monkeypatch.setattr(local_capture_upload, "MAX_IMAGE_PIXELS", 100)
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((1, 1, 1)))
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "image_dimensions_too_large"
+    truncated = await capture_env["client"].post(
+        "/api/observer/captures",
+        headers=_headers(capture_env["credential"]),
+        json=_body(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, capture_id="cap-trunc-0001"),
+    )
+    assert truncated.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_idempotency_lookup_is_exact(capture_env):
+    client = capture_env["client"]
+    headers = _headers(capture_env["credential"])
+    longer = await client.post("/api/observer/captures", headers=headers,
+                               json=_body(_png((20, 0, 0)), capture_id="cap-00000000012"))
+    prefix = await client.post("/api/observer/captures", headers=headers,
+                               json=_body(_png((0, 200, 0)), capture_id="cap-0000000001"))
+    wildcard_seed = await client.post("/api/observer/captures", headers=headers,
+                                      json=_body(_png((0, 0, 220)), capture_id="capXwildcard01"))
+    wildcard = await client.post("/api/observer/captures", headers=headers,
+                                 json=_body(_png((120, 120, 0)), capture_id="cap_wildcard01"))
+    assert [r.status_code for r in (longer, prefix, wildcard_seed, wildcard)] == [201, 201, 201, 201]
+    assert len({r.json()["observation_id"] for r in (longer, prefix, wildcard_seed, wildcard)}) == 4
+
+
+@pytest.mark.asyncio
+async def test_symlinked_capture_store_is_refused_and_not_cleaned(capture_env, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    victim = elsewhere / "victim.png"
+    victim.write_bytes(b"x")
+    ancient = (datetime.now(timezone.utc) - timedelta(days=400)).timestamp()
+    os.utime(victim, (ancient, ancient))
+    capture_env["shots"].mkdir(parents=True, exist_ok=True)
+    (capture_env["shots"] / LOCAL_CAPTURE_UPLOAD_DIRNAME).symlink_to(elsewhere, target_is_directory=True)
+
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((30, 30, 30)))
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "capture_store_unsafe"
+    assert cleanup_local_capture_uploads(retention_days=1, screenshot_root=capture_env["shots"]) == 0
+    assert victim.exists()
+    assert [p.name for p in elsewhere.iterdir()] == ["victim.png"]
+
+
+@pytest.mark.asyncio
+async def test_uploaded_local_analysis_feeds_digest_report_and_status(capture_env):
+    from zoneinfo import ZoneInfo
+
+    from src.api.settings import _screenshot_folder_pipeline_summary
+    from src.scheduler.jobs import end_of_day_goal_report, screenshot_observation_digest as digest
+
+    captured_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    response = await capture_env["client"].post(
+        "/api/observer/captures",
+        headers=_headers(capture_env["credential"]),
+        json=_body(
+            _png((50, 60, 70)),
+            captured_at=captured_at,
+            local_analysis={
+                "provider": "codex-local",
+                "activity": "coding",
+                "project": "seraph",
+                "summary": "Reviewing the capture upload diff",
+                "details": ["file: local_capture_upload.py"],
+                "text": "def ingest_local_capture(",
+            },
+        ),
+    )
+    assert response.status_code == 201, response.text
+
+    start = captured_at - timedelta(minutes=5)
+    end = captured_at + timedelta(minutes=5)
+    observations = await digest._screenshot_observations(start, end)
+    assert [obs.id for obs in observations] == [response.json()["observation_id"]]
+    payload = digest._digest_payload(start, end, observations, digest_key="k")
+    [record] = payload["records"]
+    assert record["analysis"] == {}
+    assert record["activity_type"] == "coding" and record["project"] == "seraph"
+    assert record["local_analysis"]["text"] == "def ingest_local_capture("
+    assert record["local_analysis"]["summary"] == "Reviewing the capture upload diff"
+    assert "content_base64" not in json.dumps(payload)
+
+    summary = await end_of_day_goal_report._screen_summary_for_local_day(captured_at.date(), ZoneInfo("UTC"))
+    assert "Reviewing the capture upload diff" in summary["samples"]
+    assert summary["by_project"].get("seraph") is not None
+
+    status = await _screenshot_folder_pipeline_summary(capture_env["shots"])
+    assert status["total_observation_count"] == 1

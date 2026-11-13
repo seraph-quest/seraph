@@ -28,6 +28,11 @@ _PAIRED_EDGE_INGRESS_PATHS = {
     # same scoped paired-edge credential before reading any bytes.
     "/api/observer/captures",
 }
+# Native-client ingress that may omit Origin. Mirrors the PAIRED_PATHS
+# precedent: only when the request carries neither Origin nor a cookie, so no
+# browser ambient authority can ride it; the host allow-list still applies and
+# the handler's bearer credential is mandatory.
+_NATIVE_NO_ORIGIN_PATHS = {"/api/observer/captures"}
 
 
 def _csv(value: str) -> set[str]:
@@ -169,10 +174,18 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             if boundary_error or request.headers.get("origin") != COMPANION_ORIGIN or "cookie" in request.headers:
                 return JSONResponse({"detail": {"code": "selected_context_transport_denied"}}, status_code=403)
             return await call_next(request)
+        native_no_origin = (
+            request.method == "POST"
+            and request.url.path in _NATIVE_NO_ORIGIN_PATHS
+            and "origin" not in request.headers
+            and "cookie" not in request.headers
+        )
         boundary_error = validate_request_boundary(
             host=request.headers.get("host", ""),
             origin=request.headers.get("origin"),
-            method=request.method,
+            # A safe-method check validates the host without demanding an
+            # Origin a native daemon does not send.
+            method="GET" if native_no_origin else request.method,
         )
         if boundary_error:
             return JSONResponse({"detail": {"code": boundary_error}}, status_code=403)

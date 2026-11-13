@@ -16,9 +16,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import os
 import re
+import stat
 import tempfile
 import time
 from collections import deque
@@ -31,6 +33,8 @@ from sqlmodel import col, select
 from src.db.engine import get_session
 from src.db.models import ScreenObservation
 from src.observer.screenshot_folder_source import (
+    LOCAL_ANALYSIS_PREFIX,
+    LOCAL_ANALYSIS_TEXT_MAX_CHARS,
     LOCAL_CAPTURE_ID_PREFIX,
     LOCAL_CAPTURE_SOURCE,
     LOCAL_CAPTURE_UPLOAD_DIRNAME,
@@ -44,7 +48,7 @@ from src.observer.screenshot_folder_source import (
 MAX_CAPTURE_BYTES = 8 * 1024 * 1024
 # Base64 inflates by 4/3; leave headroom for metadata and OCR text.
 MAX_REQUEST_BYTES = (MAX_CAPTURE_BYTES * 4) // 3 + 256 * 1024
-MAX_OCR_TEXT_CHARS = 16_000
+MAX_IMAGE_PIXELS = 50_000_000
 MAX_METADATA_CHARS = 512
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 RATE_LIMIT_MAX_UPLOADS = 30
@@ -93,6 +97,14 @@ class LocalCaptureRejected(ValueError):
 
 
 @dataclass(frozen=True)
+class UploadPolicy:
+    """The pairing's stored media bounds that apply to this upload."""
+
+    allowed_media_types: tuple[str, ...]
+    max_content_bytes: int
+
+
+@dataclass(frozen=True)
 class LocalCaptureResult:
     status: str  # accepted | duplicate | suppressed
     reason: str
@@ -113,6 +125,30 @@ def sniff_image_type(content: bytes) -> tuple[str, str] | None:
     if content.startswith(_JPEG_MAGIC):
         return "image/jpeg", ".jpg"
     return None
+
+
+def image_pixel_count(content: bytes) -> int:
+    """Read declared dimensions from the header only (no full decode)."""
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            width, height = image.size
+    except Image.DecompressionBombError as exc:
+        raise LocalCaptureRejected("image_dimensions_too_large", status_code=413) from exc
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise LocalCaptureRejected("image_header_invalid", status_code=415) from exc
+    return int(width) * int(height)
+
+
+def _require_private_store(path: Path) -> None:
+    """Refuse a symlinked or foreign-owned capture store before writing."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise LocalCaptureRejected("capture_store_unsafe", status_code=503)
 
 
 def validate_capture_id(capture_id: str) -> str:
@@ -200,7 +236,9 @@ async def _observation_for_capture_id(capture_id: str) -> ScreenObservation | No
     async with get_session() as db:
         result = await db.execute(
             select(ScreenObservation)
-            .where(col(ScreenObservation.details_json).contains(marker))
+            # Quote the full marker and escape LIKE wildcards so ``_`` in an
+            # id cannot match a different capture or a longer prefix.
+            .where(col(ScreenObservation.details_json).contains(f'"{marker}"', autoescape=True))
             .limit(1)
         )
         return result.scalar_one_or_none()
@@ -223,8 +261,9 @@ async def ingest_local_capture(
     window_title: str,
     captured_at: datetime,
     capture_id: str,
-    ocr_text: str | None,
+    local_analysis: dict[str, object] | None,
     uploader: dict[str, str],
+    policy: UploadPolicy | None = None,
 ) -> LocalCaptureResult:
     """Store one capture privately and persist it via the shared ingest path."""
     capture_id = validate_capture_id(capture_id)
@@ -242,6 +281,16 @@ async def ingest_local_capture(
     if sniffed is None:
         raise LocalCaptureRejected("unsupported_media_type", status_code=415)
     media_type, suffix = sniffed
+    if policy is not None:
+        if media_type not in policy.allowed_media_types:
+            raise LocalCaptureRejected("media_type_not_allowed_by_pairing_policy", status_code=403)
+        if len(content) > policy.max_content_bytes:
+            raise LocalCaptureRejected("content_size_exceeds_pairing_policy", status_code=403)
+    pixels = await asyncio.to_thread(image_pixel_count, content)
+    if pixels <= 0:
+        raise LocalCaptureRejected("image_header_invalid", status_code=415)
+    if pixels > MAX_IMAGE_PIXELS:
+        raise LocalCaptureRejected("image_dimensions_too_large", status_code=413)
     captured = normalize_captured_at(captured_at)
     image_sha256 = _sha256(content)
 
@@ -250,6 +299,7 @@ async def ingest_local_capture(
     upload_root = local_capture_upload_root(screenshot_root)
 
     async with screenshot_ingest_lock():
+        _require_private_store(upload_root)
         existing = await _observation_for_capture_id(capture_id)
         existing_file = await asyncio.to_thread(_existing_capture_file, upload_root, capture_id)
         if existing_file is not None:
@@ -269,22 +319,20 @@ async def ingest_local_capture(
         # an existing operator-chosen folder; only the upload subtree is ours.
         screenshot_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         _ensure_private_dir(upload_root)
+        _require_private_store(upload_root)
         day_dir = upload_root / captured.strftime("%Y-%m-%d")
+        _require_private_store(day_dir)
         _ensure_private_dir(day_dir)
         final_path = existing_file or (day_dir / f"{capture_id}{suffix}")
         if existing_file is None:
             await asyncio.to_thread(_atomic_private_write, final_path, content)
 
-        clean_ocr = _clean_text(ocr_text, limit=MAX_OCR_TEXT_CHARS).strip() if ocr_text else ""
+        clean_analysis = _clean_local_analysis(local_analysis)
         extra_details = [f"{LOCAL_CAPTURE_ID_PREFIX}{capture_id}"]
-        if clean_ocr:
+        if clean_analysis:
             extra_details.append(
-                "local_ocr:"
-                + json.dumps(
-                    {"provider": "apple-vision", "text": clean_ocr},
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
+                LOCAL_ANALYSIS_PREFIX
+                + json.dumps(clean_analysis, sort_keys=True, separators=(",", ":"))
             )
         context = ImageCaptureContext(
             app_name=clean_app,
@@ -298,7 +346,8 @@ async def ingest_local_capture(
                 "uploader_pairing_id": uploader.get("pairing_id", ""),
             },
             extra_details=tuple(extra_details),
-            summary=f"Screen capture from {clean_app}" + (f": {clean_title}" if clean_title else "") + ".",
+            summary=_local_summary(clean_analysis)
+            or f"Screen capture from {clean_app}" + (f": {clean_title}" if clean_title else "") + ".",
         )
         try:
             decision = await build_image_observation(final_path, screenshot_root, capture=context)
@@ -322,8 +371,16 @@ async def ingest_local_capture(
 
         from src.observer.screen_repository import screen_observation_repo
 
+        observation_fields = dict(decision.observation)
+        # Non-semantic consumers (digest, end-of-day report) read these
+        # columns, so the bounded local analysis is their content until the
+        # governed vision analysis succeeds.
+        if clean_analysis.get("activity"):
+            observation_fields["activity_type"] = str(clean_analysis["activity"])[:64]
+        if clean_analysis.get("project"):
+            observation_fields["project"] = str(clean_analysis["project"])[:256]
         try:
-            observation = await screen_observation_repo.create(**decision.observation)
+            observation = await screen_observation_repo.create(**observation_fields)
         except Exception:
             with contextlib.suppress(OSError):
                 final_path.unlink()
@@ -335,6 +392,33 @@ async def ingest_local_capture(
             observation_id=observation.id,
             image_sha256=image_sha256,
         )
+
+
+def _clean_local_analysis(value: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, object] = {}
+    for key, limit in (("provider", 32), ("activity", 64), ("project", 256), ("summary", 512)):
+        text = _clean_text(value.get(key), limit=limit).strip()
+        if text:
+            cleaned[key] = text
+    text = _clean_text(value.get("text"), limit=LOCAL_ANALYSIS_TEXT_MAX_CHARS).strip()
+    if text:
+        cleaned["text"] = text
+    details = value.get("details")
+    if isinstance(details, list):
+        items = [_clean_text(item, limit=256).strip() for item in details if isinstance(item, str)]
+        items = [item for item in items if item][:16]
+        if items:
+            cleaned["details"] = items
+    return cleaned
+
+
+def _local_summary(analysis: dict[str, object]) -> str | None:
+    summary = str(analysis.get("summary") or "").strip()
+    if not summary:
+        summary = " ".join(str(analysis.get("text") or "").split())[:200]
+    return summary[:512] or None
 
 
 def cleanup_local_capture_uploads(
@@ -351,24 +435,31 @@ def cleanup_local_capture_uploads(
     from interrupted writes are removed on the same schedule.
     """
     upload_root = local_capture_upload_root(screenshot_root)
+    try:
+        _require_private_store(upload_root)
+    except LocalCaptureRejected:
+        return 0
     if not upload_root.is_dir():
         return 0
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=max(1, retention_days))
     cutoff_ts = cutoff.timestamp()
     deleted = 0
-    for path in sorted(upload_root.rglob("*")):
-        if deleted >= max_files:
-            break
-        if path.is_symlink() or not path.is_file():
-            continue
-        if path.suffix.lower() not in {".png", ".jpg", ".partial"}:
-            continue
-        try:
-            if path.stat().st_mtime < cutoff_ts:
-                path.unlink()
-                deleted += 1
-        except OSError:
-            continue
+    for dirpath, dirnames, filenames in os.walk(upload_root, followlinks=False):
+        # os.walk lists symlinked directories but never descends into them.
+        dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
+        for name in sorted(filenames):
+            if deleted >= max_files:
+                break
+            path = Path(dirpath) / name
+            if path.suffix.lower() not in {".png", ".jpg", ".partial"}:
+                continue
+            try:
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff_ts:
+                    path.unlink()
+                    deleted += 1
+            except OSError:
+                continue
     for directory in sorted((p for p in upload_root.iterdir() if p.is_dir() and not p.is_symlink()), reverse=True):
         with contextlib.suppress(OSError):
             directory.rmdir()  # only succeeds when empty

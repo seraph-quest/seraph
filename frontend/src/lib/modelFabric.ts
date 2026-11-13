@@ -158,6 +158,8 @@ export interface InferenceLaneValue {
   max_inflight: 1;
   max_outstanding_per_owner: number;
   max_retries: number;
+  /** Optional explicit reserve review that reviews an unreviewed overrun up to this bound. */
+  request_reserve_review_microusd?: number | null;
 }
 
 export interface InferenceLaneStatus extends InferenceLaneValue {
@@ -179,6 +181,8 @@ export function normalizeInferenceLane(value: unknown): InferenceLaneStatus | nu
   const owner = integer("max_outstanding_per_owner", 1, 16);
   const retries = integer("max_retries", 0, 2);
   if (ceiling === null || queued === null || owner === null || retries === null || record.max_inflight !== 1) return null;
+  const review = record.request_reserve_review_microusd;
+  if (review != null && !(typeof review === "number" && Number.isSafeInteger(review) && review >= 1 && review <= ceiling)) return null;
   return {
     schema_version: "seraph.inference.lane.v1",
     spend_ceiling_microusd: ceiling,
@@ -186,6 +190,7 @@ export function normalizeInferenceLane(value: unknown): InferenceLaneStatus | nu
     max_inflight: 1,
     max_outstanding_per_owner: owner,
     max_retries: retries,
+    request_reserve_review_microusd: typeof review === "number" ? review : null,
     published: record.published === true,
     status: typeof record.status === "string" ? record.status : "unknown",
   };
@@ -254,6 +259,10 @@ export interface ModelFabricSettingsStatus {
   egress_revoked?: boolean;
   /** Provider-neutral lane; null when no governed provider was ever configured. */
   inference_lane?: InferenceLaneStatus | null;
+  /** Reason the backend could not project a lane (e.g. inference_lane_unreadable). */
+  inference_lane_reason?: string | null;
+  /** NEAR text readiness, independent of the blocked canonical routes. */
+  near_text_ready?: boolean;
   /** ADR-035: true unless the backend reports OpenRouter as active. */
   openrouter_retired?: boolean;
   /** Why inference routes are blocked, e.g. openrouter_retired / no_active_provider. */
@@ -677,6 +686,13 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
     egress_revoked: record.egress_revoked === true,
     inference_lane: normalizeInferenceLane(record.inference_lane),
+    inference_lane_reason: (() => {
+      const raw = recordOf(record.inference_lane);
+      if (!raw) return null;
+      if (typeof raw.reason_code === "string") return raw.reason_code;
+      return normalizeInferenceLane(raw) ? null : "inference_lane_unreadable";
+    })(),
+    near_text_ready: record.near_text_ready === true,
     // Fail closed: only an explicit "active" report un-retires the UI.
     openrouter_retired: recordOf(recordOf(record.provider_retirement)?.openrouter)?.state !== "active",
     inference_block_reason: typeof record.inference_block_reason === "string" ? record.inference_block_reason : null,

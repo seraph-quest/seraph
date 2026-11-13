@@ -1282,6 +1282,11 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > credential, receipts, ledger rows and Unknown liabilities stay readable and
 > settleable through Inference accounting. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.
+> Chat reports the block as `route_reason: openrouter_retired`; Cordis
+> `inference.request` reports `openrouter_retired`. Screen analysis reports no
+> cloud provider (`provider: ""`, `provider_blocked_reason: openrouter_retired`)
+> and refuses `openrouter`; the next screen-analysis settings save rewrites a
+> stored `openrouter` provider and model to empty.
 
 This is the short operator-facing description of the current application. For
 the target product and locked decisions, read the
@@ -1353,7 +1358,12 @@ same witnessed revoke→accounting→activate publication and revision CAS as ot
 provider settings, preserves the ledger, reservations and Unknown liabilities,
 and also publishes a route-scoped revoke of the stored OpenRouter routes
 (routes disabled, purpose consents and cloud acknowledgement withdrawn) without
-fencing NEAR. NEAR text mirrors the lane ceiling and never funds its own.
+fencing NEAR. NEAR text mirrors the lane ceiling and never funds its own. An
+optional reserve review on the lane reviews an unreviewed overrun up to that
+amount, so a deployment with only retired OpenRouter routes can still publish
+the lane. Independently of any save, startup publishes the same route-scoped
+revoke once (witnessed, revision CAS, no ledger change, idempotent); a failure
+is shown as `route_revoke: degraded` under Settings and never stops startup.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 

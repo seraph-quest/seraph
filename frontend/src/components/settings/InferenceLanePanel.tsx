@@ -8,14 +8,17 @@ interface Props {
   policyRevision?: number;
   /** Fallback ceiling when no lane exists yet (fresh deployment). */
   ledgerCeilingMicrousd?: number | null;
+  /** Backend reason when the lane could not be projected, e.g. inference_lane_unreadable. */
+  laneReason?: string | null;
   onSave: (payload: Record<string, unknown>) => Promise<ModelFabricSettingsStatus>;
 }
-interface Draft { ceilingUsd: string; maxQueued: string; maxOutstanding: string; maxRetries: string }
+interface Draft { ceilingUsd: string; maxQueued: string; maxOutstanding: string; maxRetries: string; reviewUsd: string }
 
 function draftFrom(lane?: InferenceLaneStatus | null, ledgerCeiling?: number | null): Draft {
   const ceiling = lane?.spend_ceiling_microusd ?? ledgerCeiling ?? null;
   return { ceilingUsd: ceiling ? microusdToDollars(ceiling) : "", maxQueued: String(lane?.max_queued ?? 64),
-    maxOutstanding: String(lane?.max_outstanding_per_owner ?? 16), maxRetries: String(lane?.max_retries ?? 2) };
+    maxOutstanding: String(lane?.max_outstanding_per_owner ?? 16), maxRetries: String(lane?.max_retries ?? 2),
+    reviewUsd: lane?.request_reserve_review_microusd ? microusdToDollars(lane.request_reserve_review_microusd) : "" };
 }
 function whole(value: string, label: string, min: number, max: number): number {
   const parsed = Number(value);
@@ -29,7 +32,7 @@ const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 
  * one serial lane for every provider. Saving never contacts a provider and
  * never resets the ledger or existing liabilities.
  */
-export function InferenceLanePanel({ lane, stale, policyRevision, ledgerCeilingMicrousd, onSave }: Props) {
+export function InferenceLanePanel({ lane, stale, policyRevision, ledgerCeilingMicrousd, laneReason, onSave }: Props) {
   const [draft, setDraft] = useState(() => draftFrom(lane, ledgerCeilingMicrousd));
   const [revision, setRevision] = useState(policyRevision);
   const [busy, setBusy] = useState(false);
@@ -61,6 +64,11 @@ export function InferenceLanePanel({ lane, stale, policyRevision, ledgerCeilingM
         max_outstanding_per_owner: whole(draft.maxOutstanding, "Max outstanding per owner", 1, 16),
         max_retries: whole(draft.maxRetries, "Max retries", 0, 2),
       };
+      if (draft.reviewUsd.trim()) {
+        const review = dollarsToMicrousd(draft.reviewUsd);
+        if (review === null || review < 1 || review > ceiling) throw new Error("Reserve review must be a dollar amount between $0.000001 and the shared ceiling.");
+        value.request_reserve_review_microusd = review;
+      }
       const next = await onSave({ expected_policy_revision: revision, inference_lane: value });
       if (!mounted.current) return;
       dirty.current = false;
@@ -73,7 +81,7 @@ export function InferenceLanePanel({ lane, stale, policyRevision, ledgerCeilingM
       if (mounted.current) setBusy(false);
     }
   }
-  const state = stale ? "stale retained" : !lane ? "not configured" : lane.published ? "published" : "migration pending · save to publish";
+  const state = stale ? "stale retained" : !lane && laneReason ? "blocked · " + laneReason.replace(/_/g, " ") : !lane ? "not configured" : lane.published ? "published" : "migration pending · save to publish";
   return (
     <section className="mt-2 border border-retro-text/10 px-2 py-2" aria-label="Shared inference lane" data-testid="inference-lane-panel">
       <div className="flex justify-between gap-2 text-[10px]"><span>Shared inference lane</span><span>{state}</span></div>
@@ -90,6 +98,8 @@ export function InferenceLanePanel({ lane, stale, policyRevision, ledgerCeilingM
           <input aria-label="Shared lane max outstanding per owner" title="owner outstanding" type="number" min="1" max="16" value={draft.maxOutstanding} onChange={(event) => update("maxOutstanding", event.target.value)} className={inputClass} />
           <input aria-label="Shared lane max retries" title="max retries" type="number" min="0" max="2" value={draft.maxRetries} onChange={(event) => update("maxRetries", event.target.value)} className={inputClass} />
         </div>
+        <label htmlFor="inference-lane-review" className="text-retro-text/40">Reserve review ($)</label>
+        <input id="inference-lane-review" aria-label="Shared lane reserve review (USD)" inputMode="decimal" value={draft.reviewUsd} onChange={(event) => update("reviewUsd", event.target.value)} className={inputClass + " w-24"} placeholder="optional · reviews an overrun up to this amount" />
       </fieldset>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[9px]">
         <button type="button" disabled={busy} onClick={() => void save()} className="border border-retro-text/20 px-2 py-1 text-retro-text/70 disabled:opacity-40">{busy ? "Saving" : "Save shared lane"}</button>

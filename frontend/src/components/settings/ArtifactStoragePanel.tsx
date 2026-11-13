@@ -1359,6 +1359,7 @@ export function ArtifactStoragePanel() {
                 onSave={saveOpenRouterSetup}
                 policyRevision={modelFabric?.egress_revision}
                 ledgerCeilingMicrousd={modelFabric?.inference_accounting?.ceiling_microusd}
+                laneReason={modelFabric?.inference_lane_reason}
               />
               <OpenRouterSetupPanel
                 setup={modelFabric?.openrouter_setup}

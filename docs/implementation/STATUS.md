@@ -754,21 +754,33 @@ its readiness is absent), sets limits and a per-request reserve, and grants a
 **separate screenshot purpose consent**: enabling or changing the slot needs
 both the plaintext-to-NEAR acknowledgement and an explicit acknowledgement
 that screenshots reach the NEAR gateway in plaintext; the text slot's consent
-never implies it. Saves use the same witnessed CAS publication; a save that
-omits a slot keeps it.
+never implies it, and an explicit `screenshot_plaintext_egress_acknowledged:
+false` withdraws it (the slot stays saved and blocked). Saves use the same
+witnessed CAS publication; a save that omits a slot keeps it. Only enabled
+slots with current consent lift a revocation or count toward reserve review.
 
 The catalog check requires the image input modality for the vision slot,
 records NEAR's `structured_outputs` feature and adds a listed per-image price
 to the cost bound. Capability checks for the slot are `vision`,
-`structured_output`, `health` and `latency_ms` (mechanics only). Each
+`structured_output`, `health` and `latency_ms` (mechanics only). The
+`structured_output` check sends an image in the runtime's request mode for the
+current receipt (strict json_schema or prompt-JSON) and its proof records that
+mode; dispatch with a proof of another mode is blocked
+(`near_tee_vision_structured_proof_mode_mismatch`). Each
 screenshot is one request of at most 8 MiB: the canonical id with
 `x-no-aliasing: true`, the image as a base64 data URL `image_url` part, and
 `response_format` json_schema when the current receipt lists
 `structured_outputs`, otherwise the prompt's strict-JSON instruction; both are
 parsed by the strict `seraph.screenshot_analysis.v1` contract, and reasoning
-fields are never parsed as the answer. Input is estimated conservatively (one
-token per 28×28 pixel patch of the original image plus the prompt) and a
-request over `max_input_tokens` is blocked before contact. It runs on the
+fields are never parsed as the answer; parsing runs inside the lease so the
+route receipt records an invalid answer as failed. An image larger than 2048 px
+on its long side or 4 MiB is re-encoded for NEAR as metadata-free JPEG
+(quality 85, long side 2048); the stored capture is unchanged and the status
+records original and sent dimensions only. Input is estimated conservatively
+on the sent image (one token per 28×28 pixel patch plus the prompt) and a
+request over `max_input_tokens` is blocked before contact, as is a slot
+timeout above the background job budget minus the billing window and a 10 s
+margin (94 s by default). It runs on the
 shared broker at screenshot-background priority (below chat, serial bound one)
 with NEAR billing inside the lease; a missing cost is an Unknown liability that
 blocks the lane until fenced settlement. Invalid output, an echo mismatch or an
@@ -778,7 +790,10 @@ receipt, size and proof denials record a blocked analysis with no contact.
 Uploaded daemon captures and screenshot-folder images share the path: pending
 → NEAR vision analysis by the existing background job → digest record →
 end-of-day report, whose model label comes from the effective route and catalog
-receipt. Screen-analysis settings report `provider: near_tee` with the slot
+receipt. Background analysis starts only when the operator chooses provider
+`near_tee` in the screen-analysis settings (`""` keeps it off while the slot
+stays configured; `near_tee_vision_available` says whether it can be chosen).
+Screen-analysis settings then report `provider: near_tee` with the slot
 model, `daemon_cloud_provider: null` and `daemon_capture_handoff:
 local_upload`; the daemon makes no cloud call. The explicitly selected
 `codex-local` daemon OCR stays until the operator acknowledges its removal

@@ -1287,7 +1287,7 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > `inference.request` reports `openrouter_retired`. Without a NEAR TEE vision
 > slot, screen analysis reports no cloud provider (`provider: ""`,
 > `provider_blocked_reason: openrouter_retired`); with one it reports
-> `provider: near_tee` (#1147 PR4). It always refuses `openrouter`; the next screen-analysis settings save rewrites a
+> `provider: near_tee` once the operator chooses it (#1147 PR4). It always refuses `openrouter`; the next screen-analysis settings save rewrites a
 > stored `openrouter` provider and model to empty.
 
 This is the short operator-facing description of the current application. For
@@ -1420,7 +1420,15 @@ Status: **Partial** until live operator use; disabled by default. In
 3. Press **Run vision capability check**: four billed, mechanics-only requests
    (vision, structured output, health, latency).
 
-Screen analysis must stay enabled under the screen settings. Daemon uploads and
+Then choose **NEAR TEE vision slot** as the screen-analysis provider (choosing
+"off" keeps background analysis off while the slot stays configured). The vision
+timeout is capped at the background job budget minus the billing window and a
+10 s margin (94 s by default). Changing NEAR's structured-output listing needs a
+new structured output capability check, because that proof records the request
+mode; **Withdraw screenshot consent** blocks the slot without removing it.
+Screen analysis must stay enabled under the screen settings. Large captures are
+re-encoded for NEAR (long side 2048 px, JPEG) without changing the stored file.
+Daemon uploads and
 screenshot-folder images then queue as **pending**, the existing background
 analysis job sends one screenshot at a time (at most 8 MiB, image counted
 conservatively against the input limit) below chat priority, and the validated

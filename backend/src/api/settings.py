@@ -134,7 +134,7 @@ class RepoSandboxSettingsRequest(BaseModel):
 
 # Active screenshot semantic analysis is OpenRouter-only. Retained settings
 # from the historical local/Apple routes are normalized away by the reader.
-_VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter"})
+_VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter", "near_tee"})
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
@@ -509,6 +509,16 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
 
 def _read_screen_analysis_settings() -> dict[str, object]:
     return read_screen_analysis_settings()
+
+
+def _strip_derived_screen_fields(payload: dict[str, object]) -> None:
+    """Drop read-time projections; the NEAR TEE route identity is canonical
+    model-fabric state and is never persisted in the screen settings file."""
+    for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff"):
+        payload.pop(derived, None)
+    if payload.get("provider") == "near_tee":
+        payload["provider"] = ""
+        payload["model"] = ""
 
 
 def _write_screen_analysis_settings(payload: dict[str, object]) -> None:
@@ -1114,6 +1124,9 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
     if body.provider is not None:
         from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
         from src.observer.screen_analysis_settings import selectable_screen_analysis_providers
+        if body.provider == "near_tee" and body.provider not in selectable_screen_analysis_providers():
+            raise HTTPException(status_code=422, detail={"code": "near_tee_vision_slot_required",
+                "message": "Configure and consent to the NEAR TEE vision slot in model settings first."})
         if body.provider in _VALID_SCREEN_ANALYSIS_PROVIDERS and body.provider not in selectable_screen_analysis_providers():
             raise HTTPException(status_code=422, detail={"code": OPENROUTER_RETIRED_REASON,
                 "message": "OpenRouter is retired (ADR-035); no cloud screenshot provider can be selected."})
@@ -1167,7 +1180,7 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
         payload["archive_retention_days"] = body.archive_retention_days
-    payload.pop("provider_blocked_reason", None)
+    _strip_derived_screen_fields(payload)
     _write_screen_analysis_settings(payload)
     return await get_screen_analysis_settings()
 
@@ -1184,7 +1197,7 @@ async def pick_screenshot_folder(request: Request):
     payload = _read_screen_analysis_settings()
     payload["screenshot_folder"] = normalized
     payload["screenshot_folder_source"] = "screen-analysis-settings"
-    payload.pop("provider_blocked_reason", None)
+    _strip_derived_screen_fields(payload)
     _write_screen_analysis_settings(payload)
     return ScreenshotFolderPickResponse(
         screenshot_folder=normalized,

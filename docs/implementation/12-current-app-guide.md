@@ -1274,10 +1274,11 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > No route makes new OpenRouter contact: chat, agent and guardian turns, reports,
 > Cordis `inference.request`, screenshot vision, embeddings, capability checks
 > and screen-analysis provider selection all fail closed with the stable reason
-> `openrouter_retired`, with no fallback. Non-streaming text routes run on the
-> NEAR TEE text slot once the operator configures it (see below); routes
-> without a ready slot, and streaming, tool, vision and embedding routes
-> (PR3c–PR4), report **blocked** (`no_active_provider` or the slot reason) in
+> `openrouter_retired`, with no fallback. Text routes, including streaming
+> chat, chat-agent tool turns and Cordis `inference.request`, run on the NEAR
+> TEE text slot once the operator configures it (see below); routes without a
+> ready slot, and vision and embedding routes (PR3d–PR4), report **blocked**
+> (`no_active_provider` or the slot reason) in
 > `/api/runtime/status` and Settings; this is expected and not a crash. The optional NEAR text Work
 > capability (ADR-025) is unchanged. Retained OpenRouter configuration,
 > credential, receipts, ledger rows and Unknown liabilities stay readable and
@@ -1366,7 +1367,7 @@ the lane. Independently of any save, startup publishes the same route-scoped
 revoke once (witnessed, revision CAS, no ledger change, idempotent); a failure
 is shown as `route_revoke: degraded` under Settings and never stops startup.
 
-### Configure the NEAR TEE text slot (ADR-035, #1147 PR3b)
+### Configure the NEAR TEE text slot (ADR-035, #1147 PR3b/PR3c)
 
 Status: **Partial** until live operator use; nothing is enabled by default.
 In **Settings → NEAR TEE · text slot**:
@@ -1388,18 +1389,28 @@ In **Settings → NEAR TEE · text slot**:
    after saving.
 4. Press **Run capability check**: three billed, mechanics-only requests
    (text, health, latency) through the shared lane, producing the proofs that
-   dispatch requires.
+   dispatch requires. Streaming chat and agent tool turns need their own
+   `streaming` and `tool_use` checks (the same endpoint); a tool check is
+   refused with `near_tee_model_tools_unsupported` unless the catalog receipt
+   lists `tools`.
 
-The slot then serves non-streaming text routes such as the end-of-day report,
-the screenshot observation digest and the daily briefing, behind the one serial
-broker with chat priority. Report labels read "TEE-hosted per NEAR catalog as of
+The slot then serves text routes such as the end-of-day report, the screenshot
+observation digest, the daily briefing, chat (streamed over the WebSocket),
+chat-agent tool turns and Cordis `inference.request`, behind the one serial
+broker with chat priority over background work. `/api/runtime/status`
+`effective_runtime` names `near_tee`, the model and the dated catalog label
+only while the slot is the active chat provider, and lists the `streaming` and
+`tool_use` check state. A streamed reply is cut off at least 16 seconds before
+its deadline so billing can be read back; text already shown stays shown, but
+a cut-off, echo-mismatched or malformed stream fails the turn after its cost
+settles. Tool arguments must be strict JSON objects, and only offered tools may
+be called. Report labels read "TEE-hosted per NEAR catalog as of
 <time>; NEAR gateway receives plaintext; attestation not verified by Seraph; no
 end-to-end encryption". Seraph does not verify attestation and there is no
 end-to-end encryption. A missing NEAR billing record becomes an Unknown
 liability that blocks the whole lane, chat included, until it is settled under
 **Inference accounting**; a model echo mismatch or empty answer is settled and
-not adopted. Streaming chat, tools, vision and embeddings stay blocked until
-their slices land.
+not adopted. Vision and embeddings stay blocked until their slices land.
 
 ### Configure the OpenRouter route (Epic #736/#775)
 

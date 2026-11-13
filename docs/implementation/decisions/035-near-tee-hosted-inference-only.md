@@ -143,12 +143,16 @@ async settler. Reserve before contact at the slot's request cost bound. NEAR
 ADR-025's identity, parsing and bounds (at most two attempts, 1s apart, total
 15s or less, within the original deadline), for non-streaming and streaming
 requests alike; for streaming it runs after the stream ends, and deltas already
-delivered are never retracted. There is no token-price estimate and no
-inference replay.
+delivered are never retracted. A streaming request reserves the billing window
+out of its original deadline: the stream is ended or cancelled no later than
+16s before the deadline so readback can still run (tested). There is no
+token-price estimate and no inference replay.
 
 If no authoritative cost arrives, the operation becomes an Unknown liability
-and, exactly as today for uncertain outcomes (`uncertain_on_error`), the serial
-lease stays blocked until the operator settles it through the existing fenced
+and, as today for uncertain outcomes, the serial lease stays blocked. Today
+`uncertain_on_error` is set only for `openrouter` and `near.text`
+(`execution.py`); PR3 extends it to the NEAR TEE provider kind, with a negative
+test that a NEAR TEE contact error keeps the lease blocked. The lease stays blocked until the operator settles it through the existing fenced
 reconcile or manual-settlement path. Operator impact: one Unknown NEAR cost
 blocks all inference, chat included, until settled; the UI must surface the
 blocked lane, the liability and the recovery action. `reconcile_settled_near_operation`
@@ -264,7 +268,8 @@ operator approval.
 The NEAR gateway sees plaintext for every inference purpose; the TEE label is
 NEAR's catalog claim at a dated time, not Seraph-verified confidentiality.
 Model choice narrows to the allowlist, and DeepSeek stays blocked until its
-catalog metadata is complete. Semantic recall is lexical until re-indexing.
+catalog metadata is complete. One Unknown NEAR cost blocks all inference,
+chat included, until the operator settles it. Semantic recall is lexical until re-indexing.
 Voice stays unavailable. OpenRouter code remains until its liabilities clear.
 STATUS and the Current App Guide change only as slices merge.
 

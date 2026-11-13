@@ -356,6 +356,26 @@ def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, obje
     if reason := catalog_receipt_block_reason("text", profile, revision=configured.egress_revision):
         reasons.append(reason)
     label = tee_hosting_label("text", profile, revision=configured.egress_revision) if not reasons else None
+    # Effective lightweight chat cap: the outer REST/WebSocket turn timeout,
+    # the turn's own deadline 2s inside it, and the stream window left after
+    # the 16s billing reserve. A slot timeout above the deadline is refused.
+    from src.agent.direct_chat import direct_chat_context_timeout, direct_chat_turn_timeout
+    from src.model_fabric.near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS
+    turn_timeout = direct_chat_turn_timeout()
+    turn_deadline = max(turn_timeout - 2.0, 0.1)
+    chat_cap = {
+        "turn_timeout_seconds": turn_timeout,
+        "inference_deadline_seconds": direct_chat_context_timeout("chat_agent") if active else turn_deadline,
+        "stream_window_seconds": max(min(float(slot.timeout_seconds),
+            turn_deadline - NEAR_TEE_BILLING_RESERVE_SECONDS), 0.0),
+        "billing_reserve_seconds": NEAR_TEE_BILLING_RESERVE_SECONDS,
+    }
+    if float(slot.timeout_seconds) > turn_deadline:
+        reasons.append("near_tee_slot_timeout_exceeds_chat_turn")
+    elif chat_cap["stream_window_seconds"] < 1:
+        reasons.append("near_tee_chat_turn_window_insufficient")
+    if reasons:
+        label = None
     model = profile.model
     model_label = model.split("/")[-1]
     provider = "near_tee" if active else "none"
@@ -375,6 +395,7 @@ def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, obje
         "api_base": "https://cloud-api.near.ai/v1" if active else "",
         "vlm_configured": bool(vlm_status.get("configured")),
         "active_provider_policy": "near_tee_only",
+        "chat_turn_cap": chat_cap,
         # The only TEE statement: NEAR's dated catalog claim, never verified by Seraph.
         "tee_hosting_label": label,
         "tee_verified": False,

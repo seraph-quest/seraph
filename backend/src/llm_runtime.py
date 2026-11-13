@@ -3475,11 +3475,41 @@ async def _near_tee_stream(
             yield delta
 
     error_receipt = None
+    broker_stream = gpu_admission_broker.stream(request, admitted)
     try:
         with bind_precontact_guard(lambda: near_tee_precontact_reason(call)):
-            async for delta in gpu_admission_broker.stream(request, admitted):
-                yield delta
+            try:
+                async for delta in broker_stream:
+                    yield delta
+            except GeneratorExit:
+                if not started:
+                    raise
+                # The consumer stopped reading (closed stream, WebSocket gone,
+                # Cordis output cut). Ask the transport to end the provider
+                # stream and drain it in this task so billing is read back and
+                # the known cost settles inside the same lease.
+                state.stop_requested = True
+                try:
+                    async for _delta in broker_stream:
+                        pass
+                except Exception as drained:
+                    error_receipt = getattr(drained, "receipt", None)
+                outcome_code = state.failure_code or "near_tee_stream_cancelled"
+                session.attempt_finished(outcome="failed", error_code=outcome_code, decision=call.decision,
+                    degradation_code="near_tee_output_not_adopted")
+                await session.finalize(outcome="failed", degradation_codes=(outcome_code,))
+                raise
+    except GeneratorExit:
+        raise
     except BaseException as error:
+        if state.caller_cancelled and not isinstance(error, asyncio.CancelledError):
+            # The broker settled the known cost and released the lease as a
+            # caller cancellation; preserve the task's cancellation semantics.
+            error_receipt = getattr(error, "receipt", None)
+            session.attempt_finished(outcome="failed", error_code="near_tee_stream_cancelled",
+                decision=call.decision, degradation_code="near_tee_output_not_adopted")
+            await session.finalize(outcome="failed", degradation_codes=("near_tee_stream_cancelled",))
+            raise asyncio.CancelledError() from error
         error_receipt = getattr(error, "receipt", None)
         if started:
             code = getattr(error, "code", None) if isinstance(error, NearTeeError) else "transport_failed"
@@ -4084,7 +4114,10 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         primary_model = self.model_id
         reject_legacy_external_agent_model(primary_model)
         runtime_path = self._runtime_path or "agent_generate"
-        near_controls = _near_tee_runtime_controls(runtime_path) if request_context is None else None
+        # A usable NEAR TEE slot shapes the call whether or not the caller
+        # supplied its context; retired OpenRouter controls never do.
+        near_controls = (_near_tee_runtime_controls(runtime_path)
+            if request_context is None or _near_tee_context(request_context) else None)
         # A usable NEAR TEE slot owns the route; retired OpenRouter controls never apply.
         runtime_controls = {} if near_controls else _openrouter_runtime_controls(self._runtime_profile)
         if runtime_controls:
@@ -5261,10 +5294,15 @@ async def stream_completion_with_fallback(
         raise ProviderProfileConfigurationError("request id does not match inference context")
     if _near_tee_context(request_context):
         # ADR-035 PR3c: the NEAR TEE text slot streams through the same broker.
-        async for delta in _near_tee_stream(messages=messages, temperature=float(temperature),
+        from contextlib import aclosing
+
+        # aclosing: a consumer that stops early closes the NEAR stream in this
+        # task, so its billing readback runs before the lease is released.
+        async with aclosing(_near_tee_stream(messages=messages, temperature=float(temperature),
                 max_tokens=int(max_tokens), request_context=request_context, request_id=request_id,
-                runtime_path=runtime_path):
-            yield delta
+                runtime_path=runtime_path)) as stream:
+            async for delta in stream:
+                yield delta
         return
 
     profile_ids = (

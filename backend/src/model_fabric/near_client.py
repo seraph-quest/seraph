@@ -130,13 +130,19 @@ async def stream_near_events(
 
     Yields each ``data:`` payload parsed as strict JSON (duplicate keys and
     non-finite constants rejected) and returns normally only at ``[DONE]``.
-    ``stream_deadline`` is an event-loop time: every network read is bounded
-    by it, never the caller's work while this generator is suspended at a
-    yield, so a stalled provider is cut off before the caller's billing
-    window. Identity encoding, HTTP 200 and ``text/event-stream`` are
-    required; redirects are never followed; raw bytes and line length are
-    capped. Every failure is a content-safe ``error(code)``; ``on_open``
-    receives the response headers once the response exists (contact).
+    ``stream_deadline`` is an event-loop time. Only this generator's own
+    awaits (sending the request, each network read) are interrupted by it:
+    time the caller spends while the generator is suspended at a yield
+    still counts against the deadline but is never cut mid-work, so a
+    stalled provider is ended at the next read before the caller's billing
+    window. Bytes are buffered across reads and decoded per event, so a
+    UTF-8 character split between reads stays intact. Identity encoding,
+    HTTP 200 and ``text/event-stream`` are required; redirects are never
+    followed; raw bytes and line length are capped. Every failure is a
+    content-safe ``error(code)``. ``on_open`` receives the response headers
+    as soon as a response exists, before its status, encoding or content
+    type is checked: any response means the request reached NEAR (contact),
+    so the caller treats a later failure as contacted, never as no-contact.
     """
     loop = asyncio.get_running_loop()
 

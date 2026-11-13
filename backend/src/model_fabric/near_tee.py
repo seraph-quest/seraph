@@ -110,6 +110,13 @@ class NearTeeStreamState:
     cost_microusd: int | None = None
     delivered: bool = False
     stream_ended_at: float | None = None
+    # Set by the consumer side when it stops reading (closed generator):
+    # the transport ends the provider stream at its next resumption and
+    # still reads billing back inside the lease.
+    stop_requested: bool = False
+    # The caller's task was cancelled while the stream was open; billing
+    # was still read back and the cancellation is re-raised by the caller.
+    caller_cancelled: bool = False
 
 
 def assert_no_aliasing(headers: dict[str, str]) -> None:
@@ -593,6 +600,12 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
     contact with an authoritative cost is recorded on ``state`` (deltas
     already delivered stay delivered); no authoritative cost raises an
     Unknown liability and the serial lease stays blocked.
+
+    Caller stop or cancellation once the response exists is not an
+    uncertain outcome: the HTTP stream is closed, billing is read back
+    (shielded, within the original deadline) and ``near_tee_stream_cancelled``
+    is recorded so the known cost settles and the lease is released. A
+    cancellation is flagged on ``state`` for the caller to re-raise.
     """
     from .accounting import capture_near_billing_evidence, current_near_accounting_operation_id
     from .near_client import near_http_client, read_near_billing
@@ -614,20 +627,33 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
                 async for text in deltas:
                     state.delivered = True
                     yield text
+                    if state.stop_requested:
+                        # The consumer stopped reading; end the provider stream.
+                        failure = "near_tee_stream_cancelled"
+                        break
         except NearTeeError as exc:
             if not opened:
                 # No response: the outcome of the request is uncertain.
                 raise
             failure = exc.code
+        except asyncio.CancelledError:
+            if not opened:
+                raise
+            # The aclosing exit above already closed the HTTP response.
+            state.caller_cancelled = True
+            failure = "near_tee_stream_cancelled"
         state.stream_ended_at = time.time()
         try:
             identity = derive_near_inference_id(body_id=reader.body_id,
                 inference_id_header=opened[0].get("inference-id"))
         except NearTextBillingError:
             raise NearTeeError("near_tee_billing_identity_invalid") from None
-        evidence = await read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
+        billing = read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
             deadline_at=deadline, no_aliasing=True, error=NearTeeError, prefix="near_tee",
             capture=capture_near_billing_evidence)
+        # Shielded: a further cancellation cannot abandon the readback; if it
+        # interrupts this await anyway, the outcome stays an Unknown liability.
+        evidence = await asyncio.shield(billing) if state.caller_cancelled else await billing
     if evidence is None:
         raise NearTeeError("near_tee_cost_liability")
     if failure is None and not state.delivered:

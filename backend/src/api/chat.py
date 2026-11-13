@@ -25,6 +25,7 @@ from src.approval.runtime import (
 from src.agent.exceptions import ClarificationRequired
 from config.settings import settings
 from src.agent.direct_chat import (
+    direct_chat_turn_timeout,
     openrouter_route_block_reason,
     openrouter_route_block_recovery,
     route_block_overrun_minimum,
@@ -788,7 +789,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                         session_id=session.id,
                         request_id=llm_request_id,
                     ),
-                    timeout=min(settings.agent_chat_timeout, 60),
+                    timeout=direct_chat_turn_timeout(),
                 )
                 response_text = await redact_secrets_in_text(response_text)
                 assert_runtime_not_revoked()
@@ -810,7 +811,7 @@ async def chat(request: ChatRequest, http_request: HttpRequest):
                     details={
                         "duration_ms": int((perf_counter() - started_at) * 1000),
                         "message_length": len(request.message),
-                        "timeout_seconds": min(settings.agent_chat_timeout, 60),
+                        "timeout_seconds": direct_chat_turn_timeout(),
                         "request_id": llm_request_id,
                         "runtime": "direct-openrouter-chat",
                     },

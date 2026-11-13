@@ -350,6 +350,10 @@ async def _request_inference(jobs, run, candidate) -> dict:
         if near_controls is None and openrouter_retired():
             # No NEAR TEE route: name the stable cause instead of a generic block.
             raise NativeServiceBlocked(OPENROUTER_RETIRED_REASON)
+        if near_controls is not None and candidate["max_tokens"] > near_controls["output_limit"]:
+            # Named, not a generic route block: the request asks for more
+            # output than the operator's NEAR TEE slot allows.
+            raise NativeServiceBlocked("inference_max_tokens_exceeds_route")
         try:
             from dataclasses import replace
             from src.model_fabric.configuration import read_model_fabric_configuration

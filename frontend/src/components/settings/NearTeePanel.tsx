@@ -33,6 +33,8 @@ const SLOTS: readonly SlotSpec[] = [
   { name: "vision", title: "vision slot · screenshots", prefix: "NEAR TEE vision", models: NEAR_TEE_VISION_MODELS,
     checks: ["vision", "structured_output", "health", "latency_ms"], defaults: { maxInput: 16384, maxOutput: 2048 } },
 ];
+/** Default background job budget (120 s) minus the 16 s billing window and a 10 s margin. */
+const DEFAULT_VISION_MAX_TIMEOUT = 94;
 const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-40";
 
 function usd(value: number) { return (value / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, ""); }
@@ -105,6 +107,7 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
     </fieldset>
     {SLOTS.map(spec => <SlotEditor key={spec.name} spec={spec} slot={setup?.slots[spec.name] ?? null} stale={stale}
       revision={revision} setRevision={setRevision} policyRevoked={policyRevoked} laneCeilingMicrousd={laneCeilingMicrousd}
+      maxTimeout={spec.name === "vision" ? Math.floor(setup?.vision_max_timeout_seconds ?? DEFAULT_VISION_MAX_TIMEOUT) : 120}
       credential={credential} clearCredential={() => setCredential("")} busy={busy} setBusy={setBusy} setError={setError}
       setMessage={setMessage} safeError={safeError} mounted={mounted} onSave={onSave} />)}
     {error && <div role="alert" className="mt-2 text-[10px] text-red-400">{error}</div>}
@@ -123,6 +126,7 @@ interface SlotEditorProps {
   setRevision: (revision: number | undefined) => void;
   policyRevoked: boolean;
   laneCeilingMicrousd?: number | null;
+  maxTimeout: number;
   credential: string;
   clearCredential: () => void;
   busy: string | null;
@@ -134,7 +138,7 @@ interface SlotEditorProps {
   onSave: (payload: Record<string, unknown>) => Promise<ModelFabricSettingsStatus>;
 }
 
-function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, laneCeilingMicrousd, credential, clearCredential,
+function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, laneCeilingMicrousd, maxTimeout, credential, clearCredential,
   busy, setBusy, setError, setMessage, safeError, mounted, onSave }: SlotEditorProps) {
   const vision = spec.name === "vision";
   const [draft, setDraft] = useState(() => draftFrom(spec, slot));
@@ -157,7 +161,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     && (() => { try { return money(draft.reserveUsd) === slot.request_cost_bound_microusd; } catch { return false; } })());
   const carryConsent = Boolean(slot?.enabled && slot.consent_current && !policyRevoked && unchanged);
   const saveLabel = vision ? "Save NEAR TEE vision slot" : "Save NEAR TEE settings";
-  async function save() {
+  async function save(withdrawScreenshots = false) {
     setBusy("save:" + spec.name); setError(null); setMessage(null);
     try {
       if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) throw new Error("Refresh current settings to obtain the policy revision before saving.");
@@ -165,17 +169,20 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
       if (!spec.models.includes(draft.model)) throw new Error(`Choose a ${spec.name} model from the NEAR TEE allowlist.`);
       const reserve = money(draft.reserveUsd);
       if (reserve > laneCeilingMicrousd) throw new Error("Per-request reserve cannot exceed the shared lane ceiling.");
-      if (draft.enabled && !carryConsent && !acknowledged) throw new Error("Acknowledge that NEAR receives requests in plaintext before enabling or changing this slot.");
-      if (vision && draft.enabled && !carryConsent && !screenshotAcknowledged) throw new Error("Acknowledge that screenshots are sent to NEAR in plaintext before enabling or changing the vision slot.");
+      if (!withdrawScreenshots && draft.enabled && !carryConsent && !acknowledged) throw new Error("Acknowledge that NEAR receives requests in plaintext before enabling or changing this slot.");
+      if (vision && !withdrawScreenshots && draft.enabled && !carryConsent && !screenshotAcknowledged) throw new Error("Acknowledge that screenshots are sent to NEAR in plaintext before enabling or changing the vision slot.");
       const slotInput = {
         model_id: draft.model, enabled: draft.enabled,
         max_input_tokens: number(draft.maxInput, "Maximum input tokens", 1_048_576),
         max_output_tokens: number(draft.maxOutput, "Maximum output tokens", 65_536),
-        timeout_seconds: number(draft.timeout, "Request timeout", 120, false),
+        timeout_seconds: number(draft.timeout, vision ? "Request timeout (vision: background job budget)" : "Request timeout", maxTimeout, false),
         request_cost_bound_microusd: reserve,
         catalog_ttl_hours: number(draft.ttl, "Catalog receipt lifetime", 24),
         plaintext_provider_egress_acknowledged: draft.enabled && acknowledged,
-        ...(vision ? { screenshot_plaintext_egress_acknowledged: draft.enabled && screenshotAcknowledged } : {}),
+        // Sent only to grant (true) or to withdraw (false); omitted, an
+        // unchanged slot keeps its current screenshot consent.
+        ...(vision && withdrawScreenshots ? { screenshot_plaintext_egress_acknowledged: false }
+          : vision && draft.enabled && screenshotAcknowledged ? { screenshot_plaintext_egress_acknowledged: true } : {}),
       };
       // Only this slot is sent; the backend keeps the other stored slot.
       const value: NearTeeSetupInput = {
@@ -188,7 +195,8 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
       clearCredential();
       dirty.current = false; setRevision(next.egress_revision); setAcknowledged(false); setScreenshotAcknowledged(false);
       setDraft(draftFrom(spec, next.near_tee?.slots[spec.name]));
-      setMessage(`NEAR TEE ${spec.name} slot saved. Saving never calls NEAR; run the catalog check next.`);
+      setMessage(withdrawScreenshots ? "Screenshot consent withdrawn; the vision slot is blocked until you consent again."
+        : `NEAR TEE ${spec.name} slot saved. Saving never calls NEAR; run the catalog check next.`);
     } catch (reason) { if (mounted.current) setError(safeError(reason, "NEAR TEE settings could not be saved.")); }
     finally { if (mounted.current) setBusy(null); }
   }
@@ -225,7 +233,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
       </select></label>
       <label>Maximum input tokens{vision ? " · image counted conservatively" : ""}<input className={inputClass + " mt-1 w-full"} aria-label={label("maximum input tokens")} type="number" min={1} value={draft.maxInput} onChange={e => update("maxInput", e.target.value)} /></label>
       <label>Maximum output tokens<input className={inputClass + " mt-1 w-full"} aria-label={label("maximum output tokens")} type="number" min={1} value={draft.maxOutput} onChange={e => update("maxOutput", e.target.value)} /></label>
-      <label>Request timeout · seconds<input className={inputClass + " mt-1 w-full"} aria-label={label("request timeout")} type="number" min={1} max={120} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
+      <label>Request timeout · seconds{vision ? ` · at most ${maxTimeout} (background job budget)` : ""}<input className={inputClass + " mt-1 w-full"} aria-label={label("request timeout")} type="number" min={1} max={maxTimeout} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
       <label>Per-request reserve · USD<input className={inputClass + " mt-1 w-full"} aria-label={label("per-request reserve USD")} inputMode="decimal" value={draft.reserveUsd} onChange={e => update("reserveUsd", e.target.value)} /></label>
       <label>Catalog receipt lifetime · hours<input className={inputClass + " mt-1 w-full"} aria-label={label("catalog receipt hours")} type="number" min={1} max={24} value={draft.ttl} onChange={e => update("ttl", e.target.value)} /></label>
       <p className="sm:col-span-2 text-[9px] text-retro-text/60">Uses the shared inference lane ceiling{laneCeilingMicrousd ? ` ($${usd(laneCeilingMicrousd)})` : " (not published yet)"}. The reserve must cover maximum input and output{vision ? " and the image" : ""} at NEAR's catalog prices.</p>
@@ -235,6 +243,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     </fieldset>
     <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
       <button type="button" disabled={busy !== null} onClick={() => void save()}>{busy === "save:" + spec.name ? "Saving…" : saveLabel}</button>
+      {vision && slot?.enabled && slot.consent_current && <button type="button" disabled={busy !== null} onClick={() => void save(true)}>Withdraw screenshot consent</button>}
       <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void capabilityCheck()}>{busy === "capability:" + spec.name ? "Running capability check…" : (vision ? "Run vision capability check" : "Run capability check")}</button>
     </div>
   </div>;

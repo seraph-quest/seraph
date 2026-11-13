@@ -140,3 +140,27 @@ it("runs the vision capability check for vision mechanics and stays usable witho
   expect(screen.getByLabelText("Enable NEAR TEE vision slot")).not.toBeChecked();
   expect(screen.getByLabelText("NEAR TEE vision model")).toBeEnabled();
 });
+
+it("caps the vision timeout at the job budget and withdraws screenshot consent explicitly", async () => {
+  const visionSlot: NearTeeSlotStatus = { ...slot, model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct", profile_id: "near_tee.vision",
+    max_input_tokens: 16384, max_output_tokens: 2048 };
+  const onSave = vi.fn(async (_payload: Record<string, unknown>) => ({ ...saved(9),
+    near_tee: { ...setup(), slots: { text: slot, vision: visionSlot } } }) as ModelFabricSettingsStatus);
+  render(<NearTeePanel setup={{ ...setup(), vision_max_timeout_seconds: 94, slots: { text: slot, vision: visionSlot } }}
+    stale={false} policyRevision={7} laneCeilingMicrousd={1_000_000} onSave={onSave} />);
+  // Unchanged consented slot: a save omits the screenshot field (consent carries).
+  fireEvent.click(screen.getByRole("button", { name: "Save NEAR TEE vision slot" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  const carried = (onSave.mock.calls[0][0].near_tee as { slots: { vision: Record<string, unknown> } }).slots.vision;
+  expect(carried).not.toHaveProperty("screenshot_plaintext_egress_acknowledged");
+  fireEvent.click(screen.getByRole("button", { name: "Withdraw screenshot consent" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+  const withdrawn = (onSave.mock.calls[1][0].near_tee as { slots: { vision: Record<string, unknown> } }).slots.vision;
+  expect(withdrawn.screenshot_plaintext_egress_acknowledged).toBe(false);
+  fireEvent.change(screen.getByLabelText("NEAR TEE vision request timeout"), { target: { value: "100" } });
+  fireEvent.click(screen.getByLabelText("Acknowledge NEAR TEE vision plaintext access"));
+  fireEvent.click(screen.getByLabelText("Acknowledge screenshots sent to NEAR in plaintext"));
+  fireEvent.click(screen.getByRole("button", { name: "Save NEAR TEE vision slot" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("between 1 and 94");
+  expect(onSave).toHaveBeenCalledTimes(2);
+});

@@ -303,6 +303,8 @@ export interface NearTeeSetupStatus {
   disclosure: string;
   tee_verified: false;
   e2ee: false;
+  /** Largest vision timeout the background analysis job can carry (job budget minus billing window and margin). */
+  vision_max_timeout_seconds?: number;
   slots: { text: NearTeeSlotStatus | null; vision?: NearTeeSlotStatus | null };
 }
 
@@ -568,6 +570,8 @@ export function normalizeNearTeeSetup(value: unknown): NearTeeSetupStatus | null
     allowlist: { text: stringArray(allowlist?.text).filter(model => (NEAR_TEE_TEXT_MODELS as readonly string[]).includes(model)),
       vision: stringArray(allowlist?.vision).filter(model => (NEAR_TEE_VISION_MODELS as readonly string[]).includes(model)) },
     disclosure: NEAR_TEE_DISCLOSURE, tee_verified: false, e2ee: false,
+    vision_max_timeout_seconds: typeof row.vision_max_timeout_seconds === "number" && Number.isFinite(row.vision_max_timeout_seconds)
+      && row.vision_max_timeout_seconds >= 1 && row.vision_max_timeout_seconds <= 120 ? row.vision_max_timeout_seconds : undefined,
     slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text, "text"),
       vision: slots?.vision == null ? null : normalizeNearTeeSlot(slots.vision, "vision") },
   };

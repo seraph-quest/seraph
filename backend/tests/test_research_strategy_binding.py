@@ -21,6 +21,7 @@ def active():
         "stop_conditions": ["Stop after the admitted sources"]}}
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["foreign", "bool", "secret", "missing_vault", "baseline"])
 async def test_original_strategy_denies_before_actual_governed_preflight(accounting_db, monkeypatch, mode):
@@ -269,6 +270,7 @@ async def test_genuine_pre_injection_legacy_identity_requires_exact_schema1_grou
         assert not binds(task, attempt, run, typed_inputs=inputs())
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_active_original_strategy_actual_authenticated_vertical(accounting_db, monkeypatch, real_auth):
     from tests.test_research_native_vertical import test_authenticated_parent_two_children_real_public_source_and_dossier
@@ -399,6 +401,7 @@ async def test_native_admission_writer_rechecks_original_canonical_snapshot(acco
     assert (await jobs.inference_accounting_snapshot())["operation_count"] == 0
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resolver_state", ["changed", "blocked", "raising", "removed"])
 async def test_existing_active_replay_and_readiness_never_consult_current_resolver(accounting_db, monkeypatch, resolver_state):

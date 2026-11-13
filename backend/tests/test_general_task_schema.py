@@ -504,6 +504,7 @@ async def test_native_write_mismatch_rejected_without_root_or_physical_effect(ta
     registry.stop()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: generated-plan mismatch runs the planner over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_generated_mismatch_stays_editable_without_root_or_write(task_runtime, monkeypatch):
     sessions, workspace = task_runtime

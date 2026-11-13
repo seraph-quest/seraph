@@ -23,6 +23,9 @@ from src.model_fabric.audio_contracts import (
 )
 from src.security.trust_contract import EgressClass
 
+# ADR-035: pins the historical OpenRouter v3 audio route, admission and settings mechanics; audio is not selectable under ADR-035
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def legacy():
     return OpenRouterSetup(model_ids=("openrouter/vendor/test",), capabilities=("text",),
@@ -160,7 +163,8 @@ async def test_shared_transfer_retains_research_envelope_and_audio_envelope(monk
             return httpx.Response(200, stream=Stream())
         return original(**kwargs, transport=httpx.MockTransport(respond))
     monkeypatch.setattr(httpx, "AsyncClient", client)
-    decision = SimpleNamespace(allowed=True, selected=SimpleNamespace(adapter="openai_compatible_chat", endpoint="https://openrouter.ai/api/v1/chat/completions"))
+    decision = SimpleNamespace(allowed=True, selected=SimpleNamespace(adapter="openai_compatible_chat", endpoint="https://openrouter.ai/api/v1/chat/completions",
+        profile=SimpleNamespace(provider_kind="openrouter")))
     context = SimpleNamespace(deadline_at=time.time()+10, fallback_allowed=False)
     with pytest.raises(RuntimeError, match="invalid_research"):
         await llm_runtime._governed_research_chat_completion(decision=decision, context=context, body={}, api_key=None)

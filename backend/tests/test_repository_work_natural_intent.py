@@ -18,6 +18,9 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_repo_work_task_publication import actual_native_source
 
+# ADR-035: pins natural-intent repository work whose planner runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 NATURAL_REQUEST = ("Bug: in the example repository, calculator.add(1, 2) returns -1 instead of 3. "
                    "Fix calculator.py and run the repository's tests.")

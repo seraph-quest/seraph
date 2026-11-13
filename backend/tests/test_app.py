@@ -249,7 +249,14 @@ async def test_runtime_status_reports_openrouter_and_historical_vlm_metadata(cli
     assert payload["api_base"] == "https://openrouter.ai/api/v1"
     assert payload["active_profile"] == "openrouter"
     assert payload["effective_runtime"]["provider"] == "openrouter"
-    assert payload["effective_runtime"]["active_provider_policy"] == "openrouter_only"
+    # ADR-035: OpenRouter is retired and no NEAR TEE slot exists yet, so the
+    # stored OpenRouter metadata is reported but no provider is active.
+    effective = payload["effective_runtime"]
+    assert effective["active_provider_policy"] == "none_openrouter_retired"
+    assert effective["inference_ready"] is False
+    assert effective["inference_readiness"]["status"] == "blocked"
+    assert effective["inference_readiness"]["provider"] is None
+    assert {"openrouter_retired", "no_active_provider"} <= set(effective["inference_readiness"]["reasons"])
     assert payload["vlm_runtime"]["active"] is False
     assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_openrouter_only"
     assert payload["vlm_runtime"]["live_probe"]["checked"] is False

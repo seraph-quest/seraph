@@ -20,6 +20,9 @@ from src.workspace.production import (
     ProductionWorkspace, lifecycle_receipt_path, read_accounting_checkpoint, read_lifecycle_receipt, write_lifecycle_receipt,
 )
 
+# ADR-035: pins historical OpenRouter broker, ledger and settlement mechanics that still settle retained liabilities
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def _charge(cost):
     async def provider():

@@ -33,6 +33,9 @@ from tests.test_project_source import REPOSITORY, IssuesFixture, github_item
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 from tests.test_repository_work_natural_intent import _scripted_planner
 
+# ADR-035: pins project follow-through whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 BUG = "calculator.add(1, 2) returns -1 instead of 3; please fix calculator.py."
 
 

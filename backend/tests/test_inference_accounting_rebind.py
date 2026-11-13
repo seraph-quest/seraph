@@ -17,6 +17,9 @@ from src.workspace import maintenance_fence
 from src.workspace.accounting_continuity import rebind_accounting_root
 from src.workspace.production import ProductionWorkspace, ProductionWorkspaceReconciliationError, read_lifecycle_receipt
 
+# ADR-035: pins historical OpenRouter ledger rebind mechanics that still settle retained liabilities
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def prepare_source(accounting_db):
     root, engine, _factory = accounting_db

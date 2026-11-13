@@ -52,6 +52,9 @@ from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
 
+# ADR-035: pins calendar vertical negatives whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def _provider_event() -> dict[str, object]:
     return {

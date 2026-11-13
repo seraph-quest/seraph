@@ -13,6 +13,9 @@ from src.model_fabric.remote_inference_admission import RemoteInferenceAdmission
 from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
 from src.workflows.job_runtime import DurableJobRepository
 
+# ADR-035: pins the bounded research HTTP envelope over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 class ResponseStream(httpx.AsyncByteStream):
     def __init__(self, content, *, delay=0, drop=False):
@@ -51,7 +54,8 @@ def intercept(monkeypatch, stream, *, status=200, headers=None):
 
 def arguments(*, seconds=1):
     return dict(decision=SimpleNamespace(allowed=True, selected=SimpleNamespace(
-        adapter="openai_compatible_chat", endpoint="https://openrouter.ai/api/v1/chat/completions")),
+        adapter="openai_compatible_chat", endpoint="https://openrouter.ai/api/v1/chat/completions",
+        profile=SimpleNamespace(provider_kind="openrouter"))),
         context=SimpleNamespace(deadline_at=time.time()+seconds, fallback_allowed=False),
         body={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "quoted evidence"}], "max_tokens": 1024},
         api_key="intercepted-test-key")

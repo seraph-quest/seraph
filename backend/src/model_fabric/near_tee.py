@@ -171,7 +171,7 @@ async def prepare_near_tee_call(
     profile = near_tee_profile_for_slot(slot_name, slot)
     if context.allowed_profile_ids != (profile.id,):
         raise NearTeeDenied("profile_not_allowed")
-    if reason := catalog_receipt_block_reason(slot_name, profile, now=now):
+    if reason := catalog_receipt_block_reason(slot_name, profile, now=now, revision=configured.egress_revision):
         raise NearTeeDenied(reason)
     try:
         key = await capture_near_tee_credential(expected_revision=configured.egress_revision,
@@ -215,22 +215,52 @@ async def prepare_near_tee_call(
         inference_timeout_seconds=inference_timeout, headers=headers)
 
 
+def near_tee_precontact_reason(call: NearTeeCall, *, now: float | None = None) -> str | None:
+    return precontact_reason(headers=call.headers, deadline_at=call.context.deadline_at,
+        inference_timeout_seconds=call.inference_timeout_seconds, now=now)
+
+
+def precontact_reason(*, headers: dict[str, str], deadline_at: float, inference_timeout_seconds: float,
+                      now: float | None = None) -> str | None:
+    """Checks that must hold when bytes would leave; run under the contact writer.
+
+    Evaluated before contact is recorded, so a failure is a durable
+    never-contacted denial (reservation released, lease not blocked), never
+    an Unknown liability.
+    """
+    from .accounting import assert_current_inference_policy
+    try:
+        assert_no_aliasing(headers)
+    except NearTeeError as exc:
+        return exc.code
+    try:
+        assert_current_inference_policy()
+    except Exception as exc:
+        return getattr(exc, "code", None) or "provider_policy_revision_changed"
+    checked = time.time() if now is None else now
+    if min(inference_timeout_seconds, deadline_at - checked - NEAR_TEE_BILLING_RESERVE_SECONDS) < 1:
+        # Admitted too late to leave the billing window inside the deadline.
+        return "near_tee_deadline_insufficient"
+    return None
+
+
 async def near_tee_transport(call: NearTeeCall) -> NearTeeOutcome:
     """The admitted provider callback; runs only inside the broker lease."""
-    from .accounting import (
-        assert_current_inference_policy, capture_near_billing_evidence, current_near_accounting_operation_id,
-    )
+    from .accounting import capture_near_billing_evidence, current_near_accounting_operation_id
     from .near_client import near_http_client, read_near_billing, read_near_response, strict_json_object
     from .near_text_billing import NearTextBillingError, derive_near_inference_id
 
-    assert_no_aliasing(call.headers)
-    assert_current_inference_policy()
+    # The precontact guard already ran under the contact writer; the header
+    # is fixed here and the accounting layer rechecks policy after contact.
     operation_id = current_near_accounting_operation_id()
     encoded = json.dumps(call.body, ensure_ascii=False, separators=(",", ":")).encode()
     model = str(call.body["model"])
     deadline = call.context.deadline_at
     async with near_http_client() as client:
-        timeout = min(call.inference_timeout_seconds, deadline - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS)
+        # The guard proved >= 1s at contact; never let elapsed contact
+        # bookkeeping turn into a zero/negative pre-send timeout.
+        timeout = max(0.5, min(call.inference_timeout_seconds,
+            deadline - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS))
         raw, headers = await read_near_response(client, "/chat/completions", body=encoded, key=call.key,
             timeout=timeout, cap=NEAR_TEE_RESPONSE_CAP, no_aliasing=True, error=NearTeeError, prefix="near_tee")
         try:
@@ -271,24 +301,21 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
     billing is an Unknown liability (raised); known-cost failures are failed
     observations.
     """
-    from .accounting import (
-        assert_current_inference_policy, capture_near_billing_evidence, current_near_accounting_operation_id,
-    )
+    from .accounting import capture_near_billing_evidence, current_near_accounting_operation_id
     from .near_client import near_http_client, read_near_billing, read_near_response, strict_json_object
     from .near_text_billing import NearTextBillingError, derive_near_inference_id
     from .probe import CapabilityProbeObservation
 
     if capability not in NEAR_TEE_CHECK_CAPABILITIES or body.get("model") != profile.model or body.get("stream"):
         raise NearTeeError("near_tee_capability_check_unsupported")
-    headers = near_request_headers(key=key, no_aliasing=True, json_body=True)
-    assert_no_aliasing(headers)
-    assert_current_inference_policy()
+    # Header, policy and billing-window checks run as the precontact guard
+    # bound by the capability-check endpoint, before contact is recorded.
     operation_id = current_near_accounting_operation_id()
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
     async with near_http_client() as client:
         started = time.monotonic()
         raw, response_headers = await read_near_response(client, "/chat/completions", body=encoded, key=key,
-            timeout=deadline_at - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS, cap=NEAR_TEE_RESPONSE_CAP,
+            timeout=max(0.5, deadline_at - time.time() - NEAR_TEE_BILLING_RESERVE_SECONDS), cap=NEAR_TEE_RESPONSE_CAP,
             no_aliasing=True, error=NearTeeError, prefix="near_tee")
         elapsed_ms = max(int((time.monotonic() - started) * 1000), 0)
         try:

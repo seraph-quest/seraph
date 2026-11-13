@@ -1442,7 +1442,8 @@ async def _near_tee_setup_status(configured, accounting):
                 or accounting.get("ceiling_microusd") != configured.inference_lane.spend_ceiling_microusd):
             reason = accounting.get("reason_code") or "inference_accounting_unavailable"
         receipt = receipts.get(name)
-        catalog_reason = catalog_receipt_block_reason(name, profile, receipts=receipts)
+        catalog_reason = catalog_receipt_block_reason(name, profile, receipts=receipts,
+            revision=configured.egress_revision)
         if reason is None and catalog_reason is not None:
             reason = catalog_reason
         proof_reason = None
@@ -1527,7 +1528,7 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
             raise HTTPException(status_code=422, detail="near_tee_capability_check_unsupported")
         if reason := near_tee_slot_block_reason(configured, slot_name):
             raise HTTPException(status_code=409, detail=reason)
-        if reason := catalog_receipt_block_reason(slot_name, profile):
+        if reason := catalog_receipt_block_reason(slot_name, profile, revision=configured.egress_revision):
             raise HTTPException(status_code=409, detail=reason)
         try:
             near_tee_key = await capture_near_tee_credential(expected_revision=configured.egress_revision,
@@ -1632,16 +1633,26 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
             fixture=fixture,
         )
 
-    result = await run_capability_probe(
-        context=context,
-        candidate=candidate,
-        capability=body.capability,
-        canary_version=_CANARY_VERSION,
-        proof_ttl_seconds=body.proof_ttl_seconds,
-        transport=transport,
-        now=now,
-        admission_broker=remote_inference_admission_broker,
-    )
+    from contextlib import nullcontext
+    from src.model_fabric.accounting import bind_precontact_guard
+    guard = nullcontext()
+    if near_tee_key is not None:
+        from src.model_fabric.near_client import near_request_headers
+        from src.model_fabric.near_tee import precontact_reason
+        check_headers = near_request_headers(key=near_tee_key, no_aliasing=True, json_body=True)
+        guard = bind_precontact_guard(lambda: precontact_reason(headers=check_headers,
+            deadline_at=context.deadline_at, inference_timeout_seconds=body.timeout_seconds))
+    with guard:
+        result = await run_capability_probe(
+            context=context,
+            candidate=candidate,
+            capability=body.capability,
+            canary_version=_CANARY_VERSION,
+            proof_ttl_seconds=body.proof_ttl_seconds,
+            transport=transport,
+            now=now,
+            admission_broker=remote_inference_admission_broker,
+        )
     publish_receipt_persistence(
         runtime_path="capability_probe",
         status=result.route_persistence.status,

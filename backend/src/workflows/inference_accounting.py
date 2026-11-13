@@ -768,7 +768,8 @@ class InferenceAccountingRepositoryMixin:
     async def contact_inference_provider(self, operation_id: str, *, owner: str,
                                          fencing_token: int, policy_digest: str,
                                          near_contact_witness: object = None,
-                                         general_task_binding: object = None) -> dict[str, object]:
+                                         general_task_binding: object = None,
+                                         precontact_denial: str | None = None) -> dict[str, object]:
         from src.workflows.research_accounting import discovery_accounting_scope
         async with discovery_accounting_scope(self, operation_id=operation_id):
             denial = None
@@ -892,7 +893,12 @@ class InferenceAccountingRepositoryMixin:
                     # ADR-035: narrowed to OpenRouter (every non-NEAR) rows.
                     retired_denial = (OPENROUTER_RETIRED_REASON
                         if not is_near_operation(row.runtime_path, row.profile_id) and openrouter_retired() else None)
-                    denial = (opportunity_denial or retired_denial or ("provider_contact_denied" if _provider_contact_denied(row)
+                    # A caller precontact guard (e.g. the NEAR TEE billing
+                    # window) denies here, durably, before contact is recorded.
+                    guard_denial = (precontact_denial if isinstance(precontact_denial, str)
+                        and re.fullmatch(r"[a-z0-9_:.-]{1,128}", precontact_denial) else
+                        "precontact_guard_invalid" if precontact_denial is not None else None)
+                    denial = (guard_denial or opportunity_denial or retired_denial or ("provider_contact_denied" if _provider_contact_denied(row)
                         else "provider_policy_revision_changed" if current_digest != policy_digest
                         else "accounting_settings_revision_unavailable" if (
                             account.ceiling_microusd != deployment_spend_ceiling(configured)

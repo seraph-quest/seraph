@@ -3312,7 +3312,10 @@ def _near_tee_completion_sync(
     inside the one shared broker lease with its accounting reservation; no
     fallback to another slot, model or provider exists.
     """
-    from src.model_fabric.near_tee import NearTeeDenied, NearTeeError, near_tee_transport, prepare_near_tee_call
+    from src.model_fabric.accounting import bind_precontact_guard
+    from src.model_fabric.near_tee import (
+        NearTeeDenied, NearTeeError, near_tee_precontact_reason, near_tee_transport, prepare_near_tee_call,
+    )
     from src.model_fabric.execution import _run_awaitable_sync
 
     assert_runtime_not_revoked()
@@ -3338,12 +3341,13 @@ def _near_tee_completion_sync(
         return _run_awaitable_sync(near_tee_transport(call))
 
     try:
-        outcome = _execute_sync_with_gpu_admission(
-            context=call.context,
-            decision=call.decision,
-            operation_id=str(call.decision.attempt_id or f"{call.context.request_id}:near_tee"),
-            operation=operation,
-        )
+        with bind_precontact_guard(lambda: near_tee_precontact_reason(call)):
+            outcome = _execute_sync_with_gpu_admission(
+                context=call.context,
+                decision=call.decision,
+                operation_id=str(call.decision.attempt_id or f"{call.context.request_id}:near_tee"),
+                operation=operation,
+            )
     except BaseException as error:
         if started:
             code = getattr(error, "code", None) if isinstance(error, NearTeeError) else "transport_failed"

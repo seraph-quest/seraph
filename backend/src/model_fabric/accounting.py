@@ -24,6 +24,25 @@ _current_profile: ContextVar[str | None] = ContextVar("inference_accounting_prof
 _near_billing: ContextVar[dict[str, object] | None] = ContextVar("near_billing_evidence", default=None)
 _near_contact: ContextVar[object | None] = ContextVar("near_contact_authority", default=None)
 _task_group: ContextVar[object | None] = ContextVar("general_task_accounting_group", default=None)
+_precontact_guard: ContextVar[object | None] = ContextVar("inference_precontact_guard", default=None)
+
+
+@contextmanager
+def bind_precontact_guard(guard):
+    """Run ``guard()`` under the contact writer before contact is recorded.
+
+    A non-None reason code becomes a durable, sealed provider-contact denial
+    (never contacted): the reservation is released and the serial lease is
+    not blocked. Used for checks that must hold when bytes would leave, such
+    as the deadline still leaving the NEAR billing window (ADR-035).
+    """
+    if not callable(guard):
+        raise InferenceAccountingError("precontact_guard_invalid")
+    token = _precontact_guard.set(guard)
+    try:
+        yield
+    finally:
+        _precontact_guard.reset(token)
 
 
 @contextmanager
@@ -615,6 +634,14 @@ class DurableInferenceBrokerMixin:
             contact_kwargs = {"near_contact_witness": _near_contact.get()} if handle.request.runtime_path == "near_text_native" else {}
             if _task_group.get() is not None:
                 contact_kwargs["general_task_binding"] = _task_group.get()
+            guard = _precontact_guard.get()
+            if guard is not None:
+                try:
+                    reason = guard()
+                except Exception as exc:
+                    reason = getattr(exc, "code", None) or "precontact_guard_failed"
+                if reason is not None:
+                    contact_kwargs["precontact_denial"] = str(reason)[:128]
             await handle.repository.contact_inference_provider(handle.request.operation_id,
                 owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest, **contact_kwargs)
         except InferenceProviderContactDenied as error:

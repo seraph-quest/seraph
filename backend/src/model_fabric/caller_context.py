@@ -237,7 +237,13 @@ def build_canonical_inference_context(
     # Otherwise, with OpenRouter retired, fail closed first, before identity,
     # accounting, admission or transport, so every caller gets its existing
     # route-denial handling with the stable ``openrouter_retired`` reason.
-    policy = effective_workload_policy(runtime_path)
+    try:
+        policy = effective_workload_policy(runtime_path)
+    except Exception:
+        if openrouter_retired():
+            # An unreadable policy is never a route; keep the stable denial.
+            raise OpenRouterRetiredRouteError() from ProviderRetiredError()
+        raise
     near_tee_route = tuple(getattr(policy, "allowed_provider_kinds", ()) or ()) == (NEAR_TEE_PROVIDER_KIND,)
     if openrouter_retired() and not near_tee_route:
         raise OpenRouterRetiredRouteError() from ProviderRetiredError()

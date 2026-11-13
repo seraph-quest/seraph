@@ -25,6 +25,12 @@ from src.security.trust_contract import (
 )
 
 
+# ADR-035 retired OpenRouter by policy: the settings API now refuses OpenRouter
+# profile saves and canaries (tests/test_openrouter_retirement.py). This module
+# pins the historical generic-profile/canary mechanics behind the explicit
+# legacy fixture.
+pytestmark = pytest.mark.openrouter_legacy
+
 PERSISTED_PROFILE_ID = "persisted-openrouter"
 CANONICAL_LEGACY_PROBE_ID = "openrouter"
 PERSISTED_MODEL = "anthropic/claude-sonnet-4"

@@ -356,6 +356,26 @@ def clear_ambient_screenshot_analysis_provider():
         yield
 
 
+@pytest.fixture
+def openrouter_legacy_reenabled(monkeypatch):
+    """Explicit opt-in to the retired OpenRouter route (ADR-035).
+
+    OpenRouter is retired by policy and no production setting can re-enable
+    it. Regression tests that pin its historical mechanics (adapters, proofs,
+    accounting, reconciliation shapes) request this fixture, or carry the
+    ``openrouter_legacy`` marker, with transport still intercepted.
+    """
+    from src.model_fabric import retirement
+
+    monkeypatch.setattr(retirement, "_OPENROUTER_RETIRED", False)
+
+
+@pytest.fixture(autouse=True)
+def apply_openrouter_legacy_marker(request):
+    if request.node.get_closest_marker("openrouter_legacy") is not None:
+        request.getfixturevalue("openrouter_legacy_reenabled")
+
+
 @pytest.fixture(autouse=True)
 def ensure_test_workspace_dir():
     Path(os.environ["WORKSPACE_DIR"]).mkdir(parents=True, exist_ok=True)

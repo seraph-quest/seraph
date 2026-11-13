@@ -54,3 +54,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 addopts = "--cov=src --cov-report=term-missing"
+markers = [
+    "openrouter_legacy: explicitly re-enable retired OpenRouter (ADR-035) to pin historical mechanics; never production behavior",
+]

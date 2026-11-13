@@ -14,6 +14,12 @@ from src.model_fabric.configuration import (
 from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
 from src.vault.repository import vault_repository
 
+# ADR-035 retired OpenRouter by policy; saving or activating it is refused
+# (tests/test_openrouter_retirement.py). This module pins the historical
+# setup, publication and accounting mechanics that retained configuration and
+# settlement still rely on, behind the explicit legacy fixture.
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.fixture
 def model_fabric_workspace(tmp_path, monkeypatch):

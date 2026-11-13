@@ -27,6 +27,11 @@ from src.security.trust_contract import (
     TrustPrincipal,
 )
 
+# ADR-035 retired OpenRouter by policy. This module pins historical OpenRouter
+# mechanics behind the explicit legacy fixture; retirement-blocked behavior is
+# asserted in tests/test_openrouter_retirement.py.
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def _setup(**changes) -> OpenRouterSetup:
     values = {

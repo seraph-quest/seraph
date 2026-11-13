@@ -15,6 +15,8 @@ from src.memory.repository import memory_repository
 from src.tools.process_tools import SessionProcessCleanupError, process_runtime_manager
 from src.workflows.loader import Workflow, WorkflowStep
 from src.workflows.manager import WorkflowTool
+from tests.near_tee_support import write_near_tee_text_configuration
+from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
 
 async def test_flush_session_memory_deduplicates_unchanged_session(async_db):
@@ -118,8 +120,9 @@ async def test_flush_session_memory_retries_same_fingerprint_after_partial_failu
     ]
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: consolidation retry builds its canonical context on the historical OpenRouter route
-async def test_retry_after_snapshot_partial_does_not_double_strengthen(async_db):
+async def test_retry_after_snapshot_partial_does_not_double_strengthen(async_db, model_fabric_workspace):
+    # ADR-035: memory consolidation is served by a usable NEAR TEE text slot.
+    write_near_tee_text_configuration()
     manager = SessionManager()
     await manager.get_or_create("flush-idempotent")
     await manager.add_message(

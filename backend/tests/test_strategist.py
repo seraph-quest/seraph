@@ -15,6 +15,8 @@ from src.tools.approval import AuthorityTool
 from src.tools.audit import AuditedTool
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal, canonical_digest
 from src.model_fabric.remote_inference_admission import current_remote_inference_receipt_binding
+from tests.near_tee_support import write_near_tee_text_configuration
+from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
 
 # ── parse_strategist_response tests ──────────────────────
@@ -217,9 +219,10 @@ async def test_run_strategist_decision_completion_uses_bounded_runtime_path(mock
     assert call["request_context"].data_digest == canonical_digest(call["messages"])
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: strategist turn builds its canonical context on the historical OpenRouter route
 @pytest.mark.asyncio
-async def test_run_strategist_decision_completion_binds_durable_admission_receipts():
+async def test_run_strategist_decision_completion_binds_durable_admission_receipts(model_fabric_workspace):
+    # ADR-035: the strategist route is served by a usable NEAR TEE text slot.
+    write_near_tee_text_configuration()
     response = MagicMock()
     response.choices = [
         MagicMock(
@@ -256,6 +259,8 @@ async def test_run_strategist_decision_completion_binds_durable_admission_receip
 
     assert raw == '{"should_intervene": false, "content": "", "reasoning": "No intervention"}'
     request_context = completion.await_args.kwargs["request_context"]
+    assert request_context.allowed_provider_kinds == ("near_tee",)
+    assert request_context.allowed_profile_ids == ("near_tee.text",)
     assert request_context.principal.job_id == "strategist_tick:durable"
     assert request_context.principal.session_id == "strategist-session"
     assert current_remote_inference_receipt_binding() is None

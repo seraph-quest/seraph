@@ -152,14 +152,6 @@
    "category": "eval_facade",
    "count": 1
   },
-  "guardian/audio_native_executor.py::execute::build_canonical_inference_context:audio_transcription": {
-   "category": "capability_owned",
-   "count": 1
-  },
-  "guardian/audio_worker.py::AudioIngressWorker._process_impl::GpuAdmissionRequest": {
-   "category": "capability_owned",
-   "count": 1
-  },
   "guardian/opportunity_plans.py::_invoke_plan_completion.adapter::_governed_research_chat_completion": {
    "category": "capability_owned",
    "count": 1

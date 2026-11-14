@@ -660,55 +660,6 @@ class CaptureIntentPublication:
     document_link: object = None
 
 
-async def reserve_confirmed_audio_capture(db, owner, request, *, service, jobs,
-                                         request_id, message_id, confirmed_digest):
-    """Issue only from the original paired writer's confirmed canonical Message."""
-    from src.auth.service import authenticate_session
-    from src.work_board.general_task import digest
-    from src.work_board.general_task_proposal import new_group
-    from src.workflows.job_runtime import DurableJobRepository
-    if (not isinstance(jobs, DurableJobRepository) or request.plan is not None
-        or request.accept or request.input.document_source is not None):
-        raise BoardError("channel_capture_source_required", "Select a confirmed native audio Message", status_code=403)
-    source = dict(owner=owner, request_id=request_id, message_id=message_id,
-                  confirmed_digest=confirmed_digest)
-    _audio, message = await jobs.check_confirmed_audio_task_source(db, **source)
-    if request.input.intent != message.content:
-        raise BoardError("channel_capture_source_changed", "Use the exact confirmed Message", status_code=409)
-    await service.repository._validate_goal(db, owner, goal_id=request.input.goal_ref,
-                                           goal_revision=request.goal_revision)
-    operator = await authenticate_session(owner.session_id, touch=False)
-    if operator.principal.principal_id != owner.principal_id:
-        raise BoardError("channel_capture_owner_changed", "Original operator changed", status_code=403)
-    descriptors, tool_digest = service.snapshot()
-    if request.input.tool_set_digest not in (None, tool_digest):
-        raise BoardError("general_task_tool_set_changed", "Refresh the current tool contract", status_code=409)
-    task_input = request.input.model_copy(update={"tool_set_digest": tool_digest})
-    group = new_group(owner, task_input, descriptors, goal_revision=request.goal_revision,
-        request_key=request.idempotency_key,
-        expires_at=min(operator.idle_expires_at, operator.absolute_expires_at))
-    candidate = ChannelCaptureReservationV1(owner_principal_id=owner.principal_id,
-        original_root_id=owner.session_id, source_kind="audio", source_id=request_id,
-        canonical_message_id=message_id, source_digest=confirmed_digest,
-        conversation_session_id=message.session_id,
-        request_digest=digest(request.model_dump(mode="json")),
-        goal_revision=request.goal_revision, idempotency_key=request.idempotency_key,
-        task_input=task_input, proposal_group=group)
-    reservation = await jobs.reserve_audio_task_capture_metadata(db, **source, reservation=candidate)
-    async def source_check(db):
-        current_audio, current_message = await jobs.check_confirmed_audio_task_source(db, **source)
-        stored = json.loads(current_audio.metadata_json).get("channel_task_capture.v1")
-        if (current_message.content != reservation.task_input.intent
-            or stored != reservation.model_dump(mode="json")):
-            raise BoardError("channel_capture_source_changed", "Confirmed source changed", status_code=409)
-    def source_scope():
-        return jobs.confirmed_audio_task_source_scope(**source)
-    capture = CaptureIntentPublication(reservation, source_check, source_scope, _CAPTURE_SEAL,
-        stage_captured_identity())
-    await check_capture_publication(db, owner, request, capture)
-    return capture
-
-
 async def check_capture_publication(db, owner, request, capture):
     from src.work_board.general_task import digest
     from src.workflows.general_task_accounting import validate_group_owner

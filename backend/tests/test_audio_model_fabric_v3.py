@@ -145,7 +145,7 @@ def test_input_audio_has_no_url_or_noncanonical_base64():
 
 
 @pytest.mark.asyncio
-async def test_shared_transfer_retains_research_envelope_and_audio_envelope(monkeypatch):
+async def test_shared_transfer_retains_research_envelope_and_rejects_retired_audio_envelope(monkeypatch):
     from src import llm_runtime
     monkeypatch.setattr(llm_runtime, "assert_runtime_not_revoked", lambda: None)
     monkeypatch.setattr("src.model_fabric.accounting.assert_current_inference_policy", lambda: None)
@@ -168,10 +168,10 @@ async def test_shared_transfer_retains_research_envelope_and_audio_envelope(monk
     context = SimpleNamespace(deadline_at=time.time()+10, fallback_allowed=False)
     with pytest.raises(RuntimeError, match="invalid_research"):
         await llm_runtime._governed_research_chat_completion(decision=decision, context=context, body={}, api_key=None)
-    from src.workflows.inference_accounting import InferenceAccountingError
-    with pytest.raises(InferenceAccountingError, match="audio_native_contact_required"):
+    # #1179 retired voice input: the audio envelope no longer exists.
+    with pytest.raises(ValueError, match="governed_envelope_invalid"):
         await llm_runtime._governed_bounded_chat_transfer(decision=decision, context=context, body={}, api_key=None, envelope="audio")
-    assert len(calls) == 1  # Research fixture only; absent native audio never constructs a client.
+    assert len(calls) == 1  # Research fixture only; the retired audio envelope never constructs a client.
 
 
 @pytest.mark.asyncio
@@ -183,7 +183,9 @@ async def test_audio_accounting_rejects_missing_native_receipt_before_ephemeral_
     setup = configured_audio()
     configured = ModelFabricConfiguration(status="ready", openrouter_setup=setup, egress_revision=1)
     monkeypatch.setattr("src.model_fabric.configuration.read_model_fabric_configuration", lambda: configured)
-    monkeypatch.setattr(accounting, "_policy_for_runtime", lambda _: (configured, "d"*64))
+    # _policy_for_runtime takes (runtime_path, bound_profile); the base
+    # one-argument stub raised TypeError before reaching any audio check.
+    monkeypatch.setattr(accounting, "_policy_for_runtime", lambda *_: (configured, "d"*64))
     monkeypatch.setattr("src.model_fabric.remote_inference_admission.current_remote_inference_receipt_binding", lambda: None)
     request = GpuAdmissionRequest(operation_id="audio-original", owner_id="operator:original", session_id="conversation",
         job_id="audio-transcription:original", runtime_path="audio_transcription", data_digest="e"*64,
@@ -192,7 +194,7 @@ async def test_audio_accounting_rejects_missing_native_receipt_before_ephemeral_
     try:
         with pytest.raises(RemoteInferenceBindingError) as rejected:
             await accounting.DurableInferenceBrokerMixin()._prepare_accounting(request)
-        assert rejected.value.code == "audio_native_binding_required"
+        assert rejected.value.code == "audio_route_retired"  # #1179
     finally:
         accounting._profile_bindings.reset(token)
 
@@ -216,11 +218,12 @@ async def test_settings_audio_absence_and_fixture_cannot_mint_ready(monkeypatch)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_v3_settings_actual_sqlite_save_consent_restart_and_legacy_conflict(client, tmp_path, monkeypatch):
+async def test_v3_settings_refuse_retired_audio_but_keep_v3_save_and_legacy_conflict(client, tmp_path, monkeypatch):
+    """#1179: a v3 setup still saves and still blocks a silent v2 downgrade,
+    but the retired audio slot can never be enabled or acknowledged."""
     from config.settings import settings
     from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
     from src.model_fabric.configuration import read_model_fabric_configuration
-    from src.workflows.job_runtime import durable_job_repository
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path.parent / (tmp_path.name+"-lifecycle")))
     prepare_lifecycle_directory(ProductionWorkspace(host_root=tmp_path))
@@ -230,30 +233,27 @@ async def test_v3_settings_actual_sqlite_save_consent_restart_and_legacy_conflic
     payload = _openrouter_setup_payload(configured_audio())
     for field in ("purpose_consents", "credential_fingerprint"):
         payload.pop(field, None)
-    denied = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": payload})
-    assert denied.status_code == 403, denied.text
+    for acknowledged in (False, True):
+        attempt = dict(payload, audio_egress_acknowledged=acknowledged)
+        denied = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": attempt})
+        assert denied.status_code == 422, denied.text
+        assert "audio_route_retired" in denied.text
+    acknowledged_only = dict(payload, routes={**payload["routes"], "audio": None}, audio_egress_acknowledged=True)
+    denied = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": acknowledged_only})
+    assert denied.status_code == 422 and "audio_route_retired" in denied.text
     assert not (tmp_path/"model-fabric-settings.json").exists()
-    payload["audio_egress_acknowledged"] = True
+    payload["routes"] = {**payload["routes"], "audio": None}
     saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1, "openrouter_setup": payload})
     assert saved.status_code == 200, saved.text
     configured = read_model_fabric_configuration()
     assert configured.openrouter_setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION
-    assert configured.openrouter_setup.purpose_consents == {"audio": 3}
-    assert configured.openrouter_setup.routes["audio"].allowed_upstreams == ("deepinfra/turbo",)
-    snapshot = await durable_job_repository.inference_accounting_snapshot()
-    assert snapshot["status"] == "ready" and snapshot["ceiling_microusd"] == 10000
+    assert (configured.openrouter_setup.routes or {}).get("audio") is None
+    assert "audio" not in (configured.openrouter_setup.purpose_consents or {})
     before = (tmp_path/"model-fabric-settings.json").read_bytes()
-    reopened = await client.get("/api/settings/model-fabric")
-    assert reopened.status_code == 200, reopened.text
-    status = reopened.json()["openrouter_setup"]
-    assert status["schema_version"] == OPENROUTER_SETUP_V3_SCHEMA_VERSION
-    assert status["slot_statuses"]["audio"]["status"] == "configuration_required"
-    assert status["slot_statuses"]["audio"]["error_code"] == "credential_missing"
     old = dict(payload)
     old["schema_version"] = OPENROUTER_SETUP_V2_SCHEMA_VERSION
-    old.pop("audio_egress_acknowledged")
     old["routes"] = {k: v for k, v in payload["routes"].items() if k != "audio"}
-    conflict = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3, "openrouter_setup": old})
+    conflict = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": configured.egress_revision, "openrouter_setup": old})
     assert conflict.status_code == 409, conflict.text
     assert (tmp_path/"model-fabric-settings.json").read_bytes() == before
 
@@ -289,24 +289,6 @@ async def test_actual_proof_repository_caller_documentary_json_never_authorizes_
     # still cannot substitute for the unadopted documentary issuance owner.
     with pytest.raises(PermissionError, match="audio_documentary_acquisition_unavailable"):
         await audio_route_witness(profile, proof_ref=proof.proof_hash)
-
-
-@pytest.mark.asyncio
-async def test_audio_leaf_requires_actual_broker_contact_not_lookalike_binding(monkeypatch):
-    from src import llm_runtime
-    from src.model_fabric.remote_inference_admission import set_remote_inference_receipt_binding, reset_remote_inference_receipt_binding
-    from src.workflows.inference_accounting import InferenceAccountingError
-    from src.guardian.audio_ingress import OpenRouterInputAudio
-    profile = next(p for p in openrouter_profiles_for_setup(configured_audio()) if p.id == "openrouter.audio")
-    context = SimpleNamespace(runtime_path="audio_transcription", job_id="native-audio")
-    token = set_remote_inference_receipt_binding(SimpleNamespace(job_id="native-audio"))
-    try:
-        with pytest.raises(InferenceAccountingError, match="audio_native_contact_required"):
-            await llm_runtime._governed_audio_chat_completion(decision=SimpleNamespace(selected=SimpleNamespace(profile=profile)),
-                context=context, input_audio=OpenRouterInputAudio(data="YQ==", format="wav"),
-                evidence=evidence(profile), api_key=None)
-    finally:
-        reset_remote_inference_receipt_binding(token)
 
 
 @pytest.mark.asyncio

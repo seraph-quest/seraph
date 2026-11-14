@@ -19,7 +19,21 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Final
 
-from src.guardian.audio_ingress import AUDIO_INGRESS_SCHEMA_VERSION, AudioProviderStatus
+
+
+# #1179 retired Seraph's own voice-input pipeline (guardian/audio_ingress.py).
+# Telegram voice notes keep their metadata-only handoff record, which never
+# reaches a transcription owner; the closed status vocabulary and the schema
+# label it records were moved here unchanged so stored receipts stay readable.
+AUDIO_INGRESS_SCHEMA_VERSION: Final = "seraph.guardian.audio-ingress.v1"
+
+
+class AudioProviderStatus(str, Enum):
+    """Provider proof state; this module does not perform the proof."""
+
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
+    UNVERIFIED = "unverified"
 
 
 TELEGRAM_INGRESS_SCHEMA_VERSION: Final = "seraph.telegram.ingress.v1"

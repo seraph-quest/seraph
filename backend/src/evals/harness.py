@@ -1371,7 +1371,6 @@ async def _run_governed_completion_fixture(
 EVAL_SYNC_CLIENT_DB_PATCH_TARGETS: tuple[str, ...] = (
     "src.db.engine.get_session",
     "src.agent.session.get_session",
-    "src.guardian.audio_worker.get_session",
     "src.approval.repository.get_session",
     "src.audit.repository.get_session",
     "src.goals.repository.get_session",

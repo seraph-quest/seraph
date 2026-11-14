@@ -63,7 +63,6 @@ _PATCH_TARGETS = [
     "src.observer.screenshot_folder_source.get_session",
     "src.observer.local_capture_upload.get_session",
     "src.guardian.feedback.get_session",
-    "src.guardian.audio_worker.get_session",
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",
     "src.memory.repository.get_session",

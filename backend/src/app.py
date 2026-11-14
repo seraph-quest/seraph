@@ -675,22 +675,13 @@ async def _lifespan_services(app: FastAPI):
             logging.getLogger(__name__).exception(
                 "Routine install restart recovery failed; partial staging remains non-discoverable"
             )
-        # The existing Python audio owner recovers its paired native Workflow
-        # lease before legacy quarantine cleanup. Contacted jobs retain their
-        # original liability; private settled reviews survive until expiry.
-        try:
-            from src.guardian.audio_worker import cleanup_audio_ingress_jobs
-
-            cleaned_audio_jobs = await cleanup_audio_ingress_jobs()
-            if cleaned_audio_jobs:
-                logging.getLogger(__name__).warning(
-                    "Cleaned %d stale audio ingress job(s) during startup",
-                    cleaned_audio_jobs,
-                )
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
-            )
+        # #1179 retired voice input; the audio ingress worker and its restart
+        # cleanup are gone. A one-shot best-effort pass removes recordings the
+        # retired worker may have left in its fixed default quarantine root.
+        from src.guardian.retired_audio_quarantine import cleanup_retired_audio_quarantine_at_startup
+        cleanup_retired_audio_quarantine_at_startup()
+        # Settled audio documentation staging (a historical liability record,
+        # not voice input) is still reconciled here.
         try:
             from src.model_fabric.repository import ModelFabricRepository
 

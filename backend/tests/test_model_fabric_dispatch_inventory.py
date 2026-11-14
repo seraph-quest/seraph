@@ -322,11 +322,11 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1747,
+        1742,
         "_governed_bounded_chat_transfer",
         "client.stream",
         "canonical_adapter",
-        "Shared research/audio leaf transfers one nonstreaming response under the existing governed route, original deadline and closed research/audio byte envelope; audio additionally requires its native binding and source-attested endpoint contract. HTTP streaming bounds transfer; no extra client, queue, retry or fallback exists.",
+        "Shared research leaf transfers one nonstreaming response under the existing governed route, original deadline and closed research byte envelope (the audio envelope was retired with voice input, #1179). HTTP streaming bounds transfer; no extra client, queue, retry or fallback exists.",
         "Retain as a governed leaf adapter with the existing caller context, current policy fence and accounting ownership.",
     ),
     _review(
@@ -340,7 +340,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        5364,
+        5308,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -425,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4397,
+        4341,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -434,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4477,
+        4421,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -443,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4959,
+        4903,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -452,7 +452,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        5038,
+        4982,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -461,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2458,
+        2417,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -470,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2471,
+        2430,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -479,7 +479,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2486,
+        2445,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

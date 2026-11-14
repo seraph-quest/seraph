@@ -372,7 +372,7 @@ async def test_all_billable_kinds_missing_ledger_invalid_owner_never_contact(acc
         # Audio has an explicit v3/native-only contract; legacy setup denies
         # it before the shared ledger is consulted. Other billable kinds keep
         # their original continuity-first failure and never reach a callback.
-        denial = "audio_setup_v3_required" if runtime_path == "audio_transcription" else "continuity_unavailable"
+        denial = "audio_route_retired" if runtime_path == "audio_transcription" else "continuity_unavailable"  # #1179
         with pytest.raises(ValueError, match=denial):
             await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(candidate, provider)
     from src.db.models import WorkflowRunState, InferenceCostReservation

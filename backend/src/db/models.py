@@ -219,6 +219,11 @@ class Message(SQLModel, table=True):
 
 
 # ─── Audio ingress ───────────────────────────────────────
+#
+# UNUSED since #1179 (2026-11-14, operator decision): Seraph no longer has a
+# voice-input pipeline. AudioIngressJob and AudioConsentGrant are kept only so
+# existing rows stay readable and no destructive migration runs. No runtime path
+# creates or advances them; dropping the tables needs a separate operator call.
 
 class AudioIngressJob(SQLModel, table=True):
     """Durable metadata for one bounded push-to-talk processing attempt.

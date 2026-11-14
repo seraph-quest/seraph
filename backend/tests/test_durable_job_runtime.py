@@ -228,6 +228,16 @@ def test_admission_binds_authority_and_all_immutable_identity_fields():
         }[field_name])
 
 
+@pytest.mark.asyncio
+async def test_retired_audio_transcription_kind_is_never_admitted():
+    """#1179: admission refuses the retired kind before any database work."""
+    from src.workflows.job_runtime import DurableJobAdmissionDenied, durable_job_repository
+    spec = _spec()
+    spec = replace(spec, identity=replace(spec.identity, job_kind="audio_transcription_v1"))
+    with pytest.raises(DurableJobAdmissionDenied, match="audio_route_retired"):
+        await durable_job_repository.admit_job(spec)
+
+
 def test_scheduler_goal_snapshot_deduplication_allows_a_new_parent_lineage():
     spec = replace(
         _spec(job_id="job-snapshot-1", dedupe_key="candidate-snapshot"),

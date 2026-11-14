@@ -138,7 +138,6 @@ class TestSchedulerEngine:
                     "screenshot_observation_digest",
                     "weekly_activity_review",
                     "screen_cleanup",
-                    "audio_ingress_cleanup",
                     "cordis_mail_retention",
                     "inference_ledger_verification",
                     "work_board_dispatch",

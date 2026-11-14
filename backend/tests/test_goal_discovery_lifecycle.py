@@ -33,7 +33,7 @@ async def test_actual_app_public_discovery_failure_releases_exact_owner(client, 
             "src.guardian.goal_programmes.goal_programme_service.stop"):
         monkeypatch.setattr(target, AsyncMock())
     for target in ("src.workflows.job_runtime.durable_job_repository.recover_stale_jobs",
-            "src.workflows.routines.routine_service.recover_pending_installs", "src.guardian.audio_worker.cleanup_audio_ingress_jobs"):
+            "src.workflows.routines.routine_service.recover_pending_installs"):
         monkeypatch.setattr(target, AsyncMock(return_value=[]))
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=SimpleNamespace(
         interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)))

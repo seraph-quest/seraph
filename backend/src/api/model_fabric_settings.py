@@ -418,6 +418,12 @@ class CapabilityCanaryRequest(BaseModel):
     proof_ttl_seconds: int = Field(default=_DEFAULT_PROOF_TTL_SECONDS, ge=60, le=_MAX_PROOF_TTL_SECONDS)
     transformation_digest: str = DigestSentinel.NO_TRANSFORMATION
     redaction_applied: bool = False
+    # NEAR TEE vision ``structured_output`` only (#1167): which request mode
+    # the check exercises. Omitted, the slot's effective mode (json_schema
+    # when the catalog lists structured outputs or a current json_schema proof
+    # established it, otherwise prompt-JSON). ``json_schema`` asks a live check
+    # to establish json_schema when NEAR's catalog omits the feature.
+    structured_mode: Literal["json_schema", "prompt_json"] | None = None
 
 
 def _openrouter_setup_from_input(
@@ -1497,7 +1503,8 @@ def _catalog_receipt_summary(receipt):
     if not isinstance(receipt, dict):
         return None
     keys = ("slot", "model_id", "profile_hash", "checked_at_iso", "expires_at", "ttl_hours", "outcome",
-        "reason_code", "provider_type", "attestation_supported", "verifiable", "is_ready", "input_modalities",
+        "reason_code", "provider_type", "attestation_supported", "verifiable", "is_ready", "readiness_basis",
+        "input_modalities",
         "output_modalities", "features", "structured_outputs", "input_price_usd_per_million",
         "output_price_usd_per_million", "image_price_usd",
         "context_length", "max_output_tokens", "catalog_embedding_dimension", "required_cost_microusd", "response_sha256",
@@ -1524,8 +1531,10 @@ def _vision_max_timeout_seconds() -> float:
 async def _near_tee_setup_status(configured, accounting):
     """Local-only NEAR TEE status; never reads the catalog or calls NEAR."""
     from src.model_fabric.near_tee_catalog import (
-        TEE_LABEL_TEMPLATE, catalog_receipt_block_reason, read_catalog_receipts,
+        REASONING_RECOMMENDED_MAX_OUTPUT_TOKENS, TEE_LABEL_TEMPLATE, catalog_receipt_block_reason,
+        read_catalog_receipts, receipt_structured_outputs,
     )
+    from src.model_fabric.near_tee_vision import current_vision_structured_basis, structured_mode
     setup = configured.near_tee
     allowlists = {slot: sorted(models) for slot, models in NEAR_TEE_SLOT_ALLOWLISTS.items()}
     disclosure = ("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in "
@@ -1539,7 +1548,8 @@ async def _near_tee_setup_status(configured, accounting):
         "vision_max_timeout_seconds": _vision_max_timeout_seconds(),
         "check_capabilities": {**{slot: sorted(items) for slot, items in NEAR_TEE_SLOT_CHECK_CAPABILITIES.items()},
             "embedding": sorted(NEAR_TEE_EMBEDDING_CHECK_CAPABILITIES)},
-        "catalog_check_endpoint": "/api/settings/model-fabric/near-tee/catalog-check"}
+        "catalog_check_endpoint": "/api/settings/model-fabric/near-tee/catalog-check",
+        "reasoning_recommended_max_output_tokens": REASONING_RECOMMENDED_MAX_OUTPUT_TOKENS}
     if setup is None:
         return {**base, "configured": False, "status": "disabled", "reason_code": None, "key_present": False,
             "credential_fingerprint": None, "slots": {name: None for name in NEAR_TEE_IMPLEMENTED_SLOTS}}
@@ -1587,9 +1597,9 @@ async def _near_tee_setup_status(configured, accounting):
                         proof_reason = f"{'proof_expired' if expired else 'proof_missing'}:{capability}"
                         break
                     if name == "vision" and capability == "structured_output":
-                        from src.model_fabric.near_tee_catalog import receipt_structured_outputs
-                        from src.model_fabric.near_tee_vision import structured_mode
-                        if proof.proven_value != structured_mode(receipt_structured_outputs("vision", receipts=receipts)):
+                        basis = await current_vision_structured_basis(profile,
+                            catalog_lists=receipt_structured_outputs("vision", receipts=receipts))
+                        if proof.proven_value != structured_mode(basis is not None):
                             proof_reason = "proof_mode_mismatch:structured_output"
                             break
             except Exception:
@@ -1603,6 +1613,29 @@ async def _near_tee_setup_status(configured, accounting):
         # capability check (and tools in the catalog receipt) on this profile.
         # Only the text profile declares streaming and tool use.
         chat_capabilities = {}
+        # #1167: structured output is a proof-backed capability. Text callers
+        # sending response_format (planner, strategist, consolidation) need a
+        # fresh structured_output proof whatever NEAR's catalog lists; the
+        # vision slot sends json_schema when the catalog lists the feature or
+        # a current json_schema proof established it, otherwise prompt-JSON.
+        structured_basis = None
+        structured_capability = None
+        if catalog_reason is None and name in {"text", "vision"}:
+            try:
+                from src.model_fabric.near_tee_vision import latest_structured_output_proof
+                structured_proof = await latest_structured_output_proof(profile)
+            except Exception:
+                structured_proof, structured_capability = None, "proof_metadata_unavailable"
+            if name == "vision":
+                try:
+                    structured_basis = await current_vision_structured_basis(profile,
+                        catalog_lists=receipt_structured_outputs("vision", receipts=receipts))
+                except Exception:
+                    structured_basis = None
+            elif structured_proof is not None and proof_is_fresh(structured_proof):
+                structured_basis, structured_capability = "capability_proof", "ready"
+            elif structured_capability is None:
+                structured_capability = "proof_missing:structured_output"
         if catalog_reason is None and name == "text":
             from src.model_fabric.near_tee_catalog import catalog_receipt_feature_block_reason
             candidate = candidate_from_profile(profile)
@@ -1623,6 +1656,10 @@ async def _near_tee_setup_status(configured, accounting):
                     else f"proof_missing:{capability}")
         slots[name] = {**slot.__dict__, "profile_id": profile.id, "profile_hash": profile.contract_hash,
             "chat_capabilities": chat_capabilities,
+            # "catalog" (vision only), "capability_proof" or None (#1167).
+            "structured_output_basis": structured_basis,
+            # Text slot: whether response_format callers can dispatch (#1167).
+            "structured_output_capability": structured_capability,
             "consent_current": slot.enabled and not configured.egress_revoked
                 and slot.purpose_consent_revision == configured.egress_revision,
             "status": status, "reason_code": None if status == "ready" else reason,
@@ -1680,12 +1717,17 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
     profile = provider_profiles().get(body.profile_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Model-fabric profile not found")
+    if body.structured_mode is not None and (profile.id != "near_tee.vision"
+            or body.capability != ModelCapability.STRUCTURED_OUTPUT.value):
+        raise HTTPException(status_code=422, detail="structured_mode_unsupported")
     if profile.provider_kind == OPENROUTER_PROVIDER_KIND and openrouter_retired():
         raise HTTPException(status_code=409, detail={"code": OPENROUTER_RETIRED_REASON,
             "message": OPENROUTER_RETIRED_LABEL})
     configured = read_model_fabric_configuration()
     setup = configured.openrouter_setup
     near_tee_key = None
+    vision_structured = None
+    check_output_tokens = None
     if profile.provider_kind == "near_tee":
         from src.model_fabric.near_tee import NEAR_TEE_SLOT_CHECK_CAPABILITIES
         from src.model_fabric.near_tee_catalog import catalog_receipt_block_reason
@@ -1708,6 +1750,23 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
             from src.model_fabric.near_tee_catalog import catalog_receipt_feature_block_reason
             if reason := catalog_receipt_feature_block_reason(slot_name, "tools"):
                 raise HTTPException(status_code=409, detail=reason)
+        if slot_name != "embedding":
+            from src.model_fabric.near_tee_catalog import check_output_tokens as near_tee_check_output_tokens
+            check_output_tokens = near_tee_check_output_tokens(slot_name, profile.max_output_tokens)
+        if slot_name == "vision" and body.capability == ModelCapability.STRUCTURED_OUTPUT.value:
+            # #1167: the check runs the effective request mode, or json_schema
+            # on request so a live proof can establish it when NEAR's catalog
+            # omits structured_outputs.
+            from src.model_fabric.near_tee_catalog import receipt_structured_outputs
+            from src.model_fabric.near_tee_vision import current_vision_structured_basis
+            catalog_lists = receipt_structured_outputs("vision")
+            if body.structured_mode == "prompt_json" and catalog_lists:
+                raise HTTPException(status_code=409, detail="near_tee_vision_structured_mode_conflict")
+            if body.structured_mode is not None:
+                vision_structured = body.structured_mode == "json_schema"
+            else:
+                vision_structured = await current_vision_structured_basis(profile,
+                    catalog_lists=catalog_lists) is not None
         try:
             near_tee_key = await capture_near_tee_credential(expected_revision=configured.egress_revision,
                 expected_fingerprint=configured.near_tee.credential_fingerprint)
@@ -1752,7 +1811,8 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
     )
     if static_reasons:
         raise HTTPException(status_code=422, detail={"non_routable_reasons": static_reasons})
-    fixture = _canary_fixture(profile, body.capability)
+    fixture = _canary_fixture(profile, body.capability, vision_structured=vision_structured,
+        output_tokens=check_output_tokens)
     if not _MANUAL_CANARY_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Another manual model canary is already running")
     try:
@@ -1871,15 +1931,22 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
     }
 
 
-def _canary_fixture(profile: ProviderProfile, capability: str) -> dict[str, object]:
-    """Finalize the exact transport body whose digest is bound into trust."""
+def _canary_fixture(profile: ProviderProfile, capability: str, *, vision_structured: bool | None = None,
+                   output_tokens: int | None = None) -> dict[str, object]:
+    """Finalize the exact transport body whose digest is bound into trust.
+
+    ``output_tokens`` overrides the 64-token check budget for NEAR TEE chat
+    slots (a reasoning model gets more, #1167); ``vision_structured`` is the
+    NEAR TEE vision structured_output request mode chosen by the endpoint.
+    """
     if profile.id == "near_tee.vision" and capability == ModelCapability.STRUCTURED_OUTPUT.value:
-        # The vision structured_output check runs the runtime's request mode
-        # for the current catalog receipt (json_schema or prompt-JSON).
+        # The vision structured_output check runs the runtime's effective
+        # request mode (json_schema or prompt-JSON) or the requested one.
         from src.model_fabric.near_tee_catalog import receipt_structured_outputs
         from src.model_fabric.near_tee_vision import structured_check_body
-        payload = structured_check_body(model=profile.model, structured=receipt_structured_outputs("vision"),
-            max_tokens=64)
+        structured = receipt_structured_outputs("vision") if vision_structured is None else vision_structured
+        payload = structured_check_body(model=profile.model, structured=structured,
+            max_tokens=64 if output_tokens is None else output_tokens)
         return {"json": payload, "digest_payload": payload, "output_tokens": payload["max_tokens"]}
     if profile.transport_adapter == "vlm_analyze_file":
         prompt = "Describe whether this fixed canary image is readable."
@@ -1910,7 +1977,7 @@ def _canary_fixture(profile: ProviderProfile, capability: str) -> dict[str, obje
         return {"json": payload, "digest_payload": payload, "output_tokens": 1}
     controls = profile.options.get("_seraph_openrouter", {})
     payload = _chat_canary_payload(profile.model, capability, options=profile.options,
-        output_tokens=min(64, int(controls.get("output_limit", 64))))
+        output_tokens=(min(64, int(controls.get("output_limit", 64))) if output_tokens is None else output_tokens))
     return {
         "json": payload,
         "digest_payload": payload,

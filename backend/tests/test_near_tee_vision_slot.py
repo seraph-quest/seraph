@@ -138,11 +138,15 @@ def test_vision_allowlist_profile_and_catalog_rules():
     # A text-only model cannot serve the vision slot (no image input modality).
     text_only = parse_catalog_record(json.dumps(vision_catalog(input_modalities=("text",))).encode(), model_id=VISION_MODEL)
     assert evaluate_catalog(text_only, slot_name="vision", slot=slot)[0] == "near_tee_catalog_modality_missing"
-    # Incomplete DeepSeek metadata (isReady absent) fails closed.
-    deepseek = catalog_record("deepseek-ai/DeepSeek-V4.1-Flash-1017", isReady=_ABSENT)
-    facts = parse_catalog_record(json.dumps(deepseek).encode(), model_id="deepseek-ai/DeepSeek-V4.1-Flash-1017")
-    assert evaluate_catalog(facts, slot_name="vision", slot=replace(slot,
-        model_id="deepseek-ai/DeepSeek-V4.1-Flash-1017"))[0] == "near_tee_catalog_not_ready"
+    # #1167: DeepSeek's absent isReady passes on an attested, verifiable vllm
+    # record; an explicit false or a missing attestation still fails closed.
+    deepseek_slot = replace(slot, model_id="deepseek-ai/DeepSeek-V4.1-Flash-1017")
+    for changes, reason in (({"isReady": _ABSENT}, None), ({"isReady": False}, "near_tee_catalog_not_ready"),
+            ({"isReady": _ABSENT, "attestationSupported": _ABSENT}, "near_tee_catalog_not_attested"),
+            ({"isReady": _ABSENT, "verifiable": False}, "near_tee_catalog_not_verifiable")):
+        deepseek = catalog_record("deepseek-ai/DeepSeek-V4.1-Flash-1017", **changes)
+        facts = parse_catalog_record(json.dumps(deepseek).encode(), model_id="deepseek-ai/DeepSeek-V4.1-Flash-1017")
+        assert evaluate_catalog(facts, slot_name="vision", slot=deepseek_slot)[0] == reason
     # A listed per-image price joins the cost bound; a malformed one fails closed.
     priced = vision_catalog()
     priced["costPerImage"] = {"amount": 2000, "scale": 9, "currency": "USD"}  # $0.000002 -> 2 microUSD
@@ -534,17 +538,21 @@ async def test_structured_proof_mode_must_match_the_current_receipt(client, mode
     from src.model_fabric.selector import candidate_from_profile
 
     near = VisionFixture().install(monkeypatch)
-    operator = await _ready_vision(client, monkeypatch, near, structured=True)
+    operator = await _ready_vision(client, monkeypatch, near, structured=False)
     profile = profile_for("vision", read_model_fabric_configuration().near_tee.slots["vision"])
     candidate = candidate_from_profile(profile)
-    proof = await model_fabric_repository.latest_capability_proof(profile_schema_version=profile.schema_version,
-        profile_contract_hash=profile.contract_hash, profile_id=profile.id, model=profile.model,
-        endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class, adapter=candidate.adapter,
-        capability="structured_output")
-    assert proof.proven_value == "vision_json_schema" and candidate.endpoint == transport_endpoint(profile)
-    # NEAR's catalog stops listing structured_outputs: the json_schema proof no
-    # longer matches the prompt-JSON mode the runtime would now use.
-    near.catalogs[VISION_MODEL] = vision_catalog(supportedFeatures=["logprobs"])
+
+    async def latest():
+        return await model_fabric_repository.latest_capability_proof(profile_schema_version=profile.schema_version,
+            profile_contract_hash=profile.contract_hash, profile_id=profile.id, model=profile.model,
+            endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class, adapter=candidate.adapter,
+            capability="structured_output")
+
+    proof = await latest()
+    assert proof.proven_value == "vision_prompt_json" and candidate.endpoint == transport_endpoint(profile)
+    # NEAR's catalog starts listing structured_outputs: the prompt-JSON proof
+    # no longer matches the json_schema mode the runtime would now use.
+    near.catalogs[VISION_MODEL] = vision_catalog()
     rechecked = await client.post("/api/settings/model-fabric/near-tee/catalog-check",
         json={"expected_policy_revision": read_model_fabric_configuration().egress_revision})
     assert rechecked.status_code == 200
@@ -560,13 +568,19 @@ async def test_structured_proof_mode_must_match_the_current_receipt(client, mode
     redo = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "near_tee.vision",
         "capability": "structured_output", "timeout_seconds": 40, "proof_ttl_seconds": 600})
     assert redo.json()["outcome"] == "passed"
-    assert "response_format" not in near.chat_bodies()[-1]
-    redone = await model_fabric_repository.latest_capability_proof(profile_schema_version=profile.schema_version,
-        profile_contract_hash=profile.contract_hash, profile_id=profile.id, model=profile.model,
-        endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class, adapter=candidate.adapter,
-        capability="structured_output")
-    assert redone.proven_value == "vision_prompt_json"
-    assert (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]["status"] == "ready"
+    assert near.chat_bodies()[-1]["response_format"]["type"] == "json_schema"
+    assert (await latest()).proven_value == "vision_json_schema"
+    vision = (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]
+    assert vision["status"] == "ready" and vision["structured_output_basis"] == "catalog"
+    # #1167: if the catalog then omits structured_outputs again, the current
+    # json_schema proof (live evidence on this exact profile) keeps json_schema
+    # until it expires; the basis is reported honestly.
+    near.catalogs[VISION_MODEL] = vision_catalog(supportedFeatures=["logprobs"])
+    rechecked = await client.post("/api/settings/model-fabric/near-tee/catalog-check",
+        json={"expected_policy_revision": read_model_fabric_configuration().egress_revision})
+    vision = rechecked.json()["near_tee"]["slots"]["vision"]
+    assert vision["status"] == "ready" and vision["structured_output_basis"] == "capability_proof"
+    assert rechecked.json()["catalog_check"]["vision"]["structured_outputs"] is False
 
 
 def test_decode_bomb_dimensions_are_refused_before_decode():

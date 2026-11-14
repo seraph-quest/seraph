@@ -11,13 +11,16 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
+
 from config.settings import settings
 from tests.cordis_agent_loop import call, final, tools
 from tests.cordis_research import needs_cordis
 from tests.test_cordis_agent_loop_chat import ORIGIN, chat_env, shape, ws_turn
 from tests.test_research_native_vertical import real_auth  # noqa: F401
 
-pytestmark = [needs_cordis]
+# ADR-035: the orchestrator and specialists use the intercepted historical OpenRouter client (scripted)
+pytestmark = [needs_cordis, pytest.mark.openrouter_legacy]
 
 
 def _delegating(env, monkeypatch, loop):

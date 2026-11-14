@@ -20,6 +20,9 @@ from src.workflows.research_native import create_fixed_children
 from src.workflows.research_accounting import fund_fixed_group
 from src.workflows.research_waits import pause_parent, resume_parent
 
+# ADR-035: pins the native research kernel whose model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.fixture(autouse=True)
 def configured_real_auth(monkeypatch):

@@ -21,7 +21,8 @@ from tests.test_mail_reply_operator_vertical import prepared_flow
 from src.runtime_plugins.dispatch import NativeServiceBlocked
 from src.workflows.job_runtime import DurableJobRepository
 
-pytestmark = [needs_cordis, pytest.mark.asyncio]
+# ADR-035: reuses the operator mail-reply vertical whose model step runs over the intercepted historical OpenRouter route
+pytestmark = [needs_cordis, pytest.mark.asyncio, pytest.mark.openrouter_legacy]
 
 
 @asynccontextmanager

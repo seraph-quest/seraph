@@ -31,7 +31,8 @@ from tests.cordis_agent_loop import (AGENT_LOOP, ScriptedModel, call, cutover_ag
 from tests.cordis_research import NODE, needs_cordis, seed_composition_inventory
 from tests.test_research_native_vertical import real_auth  # noqa: F401
 
-pytestmark = [needs_cordis]
+# ADR-035: the governed model is the intercepted historical OpenRouter client (scripted MockTransport)
+pytestmark = [needs_cordis, pytest.mark.openrouter_legacy]
 SECRET = "VAULT_SECRET_CANARY_1019_value"
 ORIGIN = {"origin": "http://localhost:3001"}
 TARGETS = ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",

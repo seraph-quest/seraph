@@ -22,6 +22,9 @@ from tests.test_general_task_planner import accounting_db, prepare, forbid_exter
 from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
+# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False, task_limits=None, work_limits=None, goal_limits=None):
     # Repository publication/source mechanics given a usable repair route;

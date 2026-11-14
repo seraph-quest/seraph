@@ -168,6 +168,7 @@ async def test_single_shot_proposal_rejects_unsupported_patch_sections(async_db,
     assert rejected.value.code == "model_patch_invalid"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
 @pytest.mark.asyncio
 @pytest.mark.parametrize("section", _PROPOSAL_SECTIONS)
 async def test_iterative_proposal_rejects_unsupported_patch_sections(accounting_db, monkeypatch,
@@ -261,6 +262,7 @@ def _hostile_calculator(action):
             % (len(lines), body))
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["commit", "textconv"])
 async def test_exported_diff_must_match_the_tested_tree(accounting_db, monkeypatch, repository_admission_signer, action):

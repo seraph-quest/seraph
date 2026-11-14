@@ -19,6 +19,7 @@ import pytest
 from tests.cordis_agent_loop import deny_sockets
 from tests.cordis_research import NODE, PACKAGE, needs_cordis, research_host
 from tests.test_inference_accounting import accounting_db  # noqa: F401
+from tests.near_tee_support import write_near_tee_text_configuration
 from src.agent.presets import PRESETS, PresetError, preset_digest, require_call, require_unattended
 from src.runtime_plugins.guardian_turns import (GUARDIAN_DOMAIN, PRESETS_DOMAIN, GuardianBlocked, guardian_completion,
                                                 guardian_runtime_status)
@@ -300,6 +301,9 @@ async def test_epoch_change_during_the_call_fences_adoption(accounting_db, monke
 @pytest.mark.asyncio
 async def test_strategist_decision_is_fenced_by_its_scheduler_tick(accounting_db, monkeypatch):  # noqa: F811
     deny_sockets(monkeypatch)
+    # ADR-035: the strategist route is served by a usable NEAR TEE text slot;
+    # the model stays scripted at the completion boundary (no contact).
+    write_near_tee_text_configuration()
     from datetime import datetime, timedelta, timezone
     from src.agent.strategist import run_strategist_decision_completion
     from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
@@ -710,6 +714,8 @@ async def _strategist_tick(monkeypatch, occurrence: str, content: str | None) ->
 @pytest.mark.asyncio
 async def test_strategist_tick_is_identical_on_both_owners_and_blocked_without_cordis(accounting_db, monkeypatch):  # noqa: F811
     deny_sockets(monkeypatch)
+    # ADR-035: a usable NEAR TEE text slot serves the strategist route; completions stay scripted.
+    write_near_tee_text_configuration()
     from unittest.mock import AsyncMock
     from src.scheduler.jobs import strategist_tick
     from tests.test_strategist_tick import _make_guardian_state
@@ -891,6 +897,8 @@ async def _claimed_tick(occurrence: str) -> int:
 
 @needs_cordis
 @pytest.mark.asyncio
+# ADR-035: pins the governed strategist path over the intercepted historical OpenRouter transport and ledger
+@pytest.mark.openrouter_legacy
 async def test_strategist_inference_lands_in_the_one_broker_and_ledger_on_both_owners(  # noqa: F811
         accounting_db, real_auth, monkeypatch):
     """The real governed path, offline: the same broker, ledger row, owner and tick binding on either loop."""

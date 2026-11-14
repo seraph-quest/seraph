@@ -25,6 +25,9 @@ from src.workflows.job_runtime import durable_job_repository
 from tests import test_repo_repair_local_vertical as native
 from tests.test_repo_node import make_fixture, NODE, PROFILE
 
+# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 PROOF_ROOT=Path(os.environ.get("SERAPH_TEST_EVIDENCE_ROOT") or str(Path(__file__).resolve().parents[2]/".agent-evidence/912"))/f"integrated-{os.getpid()}"
 

@@ -20,6 +20,9 @@ from src.execution import repo_supervisor
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.repository_admission_lifecycle import repository_admission_signer
 
+# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def test_original_producer_requires_committed_registration_before_any_command(tmp_path):
     from datetime import datetime, timezone, timedelta

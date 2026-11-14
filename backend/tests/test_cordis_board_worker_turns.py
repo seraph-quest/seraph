@@ -25,7 +25,8 @@ from src.runtime_plugins.board_worker_turns import (BOARD_WORKERS_DOMAIN, PRESET
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository, durable_job_repository
 
-pytestmark = [needs_cordis, pytest.mark.asyncio]
+# ADR-035: the worker draft model step runs over the intercepted historical OpenRouter transport
+pytestmark = [needs_cordis, pytest.mark.asyncio, pytest.mark.openrouter_legacy]
 OUTPUT = {"subject": "Re: Architecture review", "body": "Thanks, I will follow up next week.",
           "caveats": ["Review before sending."]}
 

@@ -21,6 +21,9 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 from tests.test_repo_source_recovered_finalizer import _signed_ownerless_fixture, _rows
 from tests.test_repo_source_stop_knownpost_candidate import _retain_original_node_runtime
 
+# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @asynccontextmanager
 async def _authenticated_original_api(accounting_db, monkeypatch, language, *, failed=False,

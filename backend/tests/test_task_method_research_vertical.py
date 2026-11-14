@@ -22,6 +22,9 @@ from src.auth.middleware import OperatorAuthMiddleware
 from src.workflows.job_runtime import DurableJobRepository
 from src.db.task_method_models import TaskMethodActive
 
+# ADR-035: the task-method research model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @needs_cordis
 @pytest.mark.asyncio

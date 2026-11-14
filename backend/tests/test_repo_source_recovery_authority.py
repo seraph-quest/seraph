@@ -25,6 +25,9 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 from src.workflows.job_runtime import _digest
 
+# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def _capture_original_issued_bearer(monkeypatch):
     """Retain only the genuine fixture issuer's in-memory return, never SQL credentials."""

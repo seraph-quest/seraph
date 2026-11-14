@@ -107,6 +107,8 @@ def public_http_fixture():
     "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper"])
 @needs_cordis
 @pytest.mark.asyncio
+# ADR-035: the discovery model step runs over the intercepted historical OpenRouter route (canary + transport)
+@pytest.mark.openrouter_legacy
 async def test_authenticated_public_programme_logout_native_discovery(accounting_db, real_auth, public_http_fixture, research_cordis, monkeypatch, scenario):
     from config.settings import settings
     from src.api import auth, goals, model_fabric_settings

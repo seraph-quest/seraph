@@ -21,6 +21,9 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_repo_work_task_publication import actual_native_source, admit_existing_source_request
 
+# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def _original(accounting_db, monkeypatch, **limits):
     from src.auth.service import authenticate_session

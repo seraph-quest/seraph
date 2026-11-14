@@ -20,6 +20,9 @@ from tests.test_goal_discovery_vertical import public_http_fixture, research_cor
 from tests.test_inference_accounting import accounting_db, setup_configuration
 from tests.test_research_native_vertical import real_auth, ResponseBytes
 
+# ADR-035: the programme digest model step runs over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @needs_cordis
 @pytest.mark.asyncio

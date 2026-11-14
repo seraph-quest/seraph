@@ -24,7 +24,8 @@ from tests.test_research_native_vertical import ResponseBytes, real_auth  # noqa
 from src.auth.middleware import OperatorAuthMiddleware
 from src.workflows.job_runtime import DurableJobRepository
 
-pytestmark = [needs_cordis, pytest.mark.asyncio]
+# ADR-035: research inference runs over the intercepted historical OpenRouter route (canary + transport)
+pytestmark = [needs_cordis, pytest.mark.asyncio, pytest.mark.openrouter_legacy]
 
 HTML = b"<html><head><style>p{}</style></head><body><h1>Release 2</h1><p>Shipped &amp; dated.</p><script>x()</script></body></html>"
 RSS = (b'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Release feed</title>'

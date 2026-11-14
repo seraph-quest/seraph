@@ -1386,15 +1386,31 @@ In **Settings → NEAR TEE · text slot**:
 3. Press **Run catalog check**. It reads NEAR's catalog record for the model
    only (no inference) and passes only for `providerType=vllm`, attestation
    supported, verifiable, ready, text in/out, enough context and a reserve that
-   covers maximum input and output at the catalog prices. The receipt expires
-   after its lifetime and after any later settings save, so re-run the check
-   after saving.
+   covers maximum input and output at the catalog prices. When NEAR's record
+   omits `isReady` (as for `deepseek-ai/DeepSeek-V4.1-Flash-1017`), readiness
+   is inferred from the vllm, attested and verifiable fields and the slot
+   shows "Readiness inferred"; an explicit not-ready flag still fails. The
+   receipt expires after its lifetime and after any later settings save, so
+   re-run the check after saving.
 4. Press **Run capability check**: three billed, mechanics-only requests
    (text, health, latency) through the shared lane, producing the proofs that
    dispatch requires. Streaming chat and agent tool turns need their own
    `streaming` and `tool_use` checks (the same endpoint); a tool check is
    refused with `near_tee_model_tools_unsupported` unless the catalog receipt
    lists `tools`.
+5. Press **Run structured output check** (one billed request) before JSON
+   callers such as the task planner, strategist and session consolidation use
+   the slot; without a current proof they are blocked before contact, whatever
+   NEAR's catalog lists.
+
+Reasoning models (the receipt lists `reasoning`, e.g. DeepSeek V4.1 Flash,
+GLM 5.3 Flash, Qwen3.8) spend reasoning tokens inside the maximum output:
+set it to at least 4096 (Settings shows this hint below that), and at most
+8192 when the catalog lists no output limit, with a reserve that covers it
+(DeepSeek at $0.30/$1.20 per million: 8192 input + 4096 output needs about
+$0.0074). Capability checks for these models send up to 1024 output tokens.
+An answer cut off by the output bound fails as `near_tee_output_truncated`
+after its cost settles; raise the maximum output and retry.
 
 The slot then serves text routes such as the end-of-day report, the screenshot
 observation digest, the daily briefing, chat (streamed over the WebSocket),
@@ -1413,7 +1429,7 @@ the slot timeout within that deadline. Tool arguments must be strict JSON
 objects, and only offered tools may be called. Upgrading to this version
 changes the slot's profile hash: re-run **Run catalog check** and each
 capability check before use. Report labels read "TEE-hosted per NEAR catalog as of
-<time>; NEAR gateway receives plaintext; attestation not verified by Seraph; no
+&lt;time&gt;; NEAR gateway receives plaintext; attestation not verified by Seraph; no
 end-to-end encryption". Seraph does not verify attestation and there is no
 end-to-end encryption. A missing NEAR billing record becomes an Unknown
 liability that blocks the whole lane, chat included, until it is settled under
@@ -1427,7 +1443,7 @@ Status: **Partial** until live operator use; disabled by default. In
 
 1. Pick a vision model (`z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`,
    `Qwen/Qwen3-VL-30B-A3B-Instruct`, `deepseek-ai/DeepSeek-V4.1-Flash-1017`;
-   DeepSeek fails the catalog check while NEAR omits its readiness), set
+   DeepSeek's missing readiness flag is inferred from its attested record), set
    limits and the per-request reserve, tick **both** the plaintext
    acknowledgement and the separate screenshot consent ("screenshots are sent
    to the NEAR gateway in plaintext"), and press **Save NEAR TEE vision slot**.
@@ -1437,13 +1453,18 @@ Status: **Partial** until live operator use; disabled by default. In
    requests) or not (strict prompt-JSON).
 3. Press **Run vision capability check**: four billed, mechanics-only requests
    (vision, structured output, health, latency).
+4. Optional when the catalog omits structured outputs (DeepSeek): press **Run
+   JSON-schema structured output check**. If it passes, screenshots use JSON
+   schema requests while that proof is current ("a current capability check
+   established JSON schema requests"); if it fails, run the vision capability
+   check again to return to prompt-JSON.
 
 Then choose **NEAR TEE vision slot** as the screen-analysis provider (choosing
 "off" keeps background analysis off while the slot stays configured). The vision
 timeout is capped at the background job budget minus the billing window and a
-10 s margin (94 s by default). Changing NEAR's structured-output listing needs a
-new structured output capability check, because that proof records the request
-mode; **Withdraw screenshot consent** blocks the slot without removing it.
+10 s margin (94 s by default). When NEAR starts listing structured outputs, a
+prompt-JSON proof needs a new structured output capability check, because that
+proof records the request mode; **Withdraw screenshot consent** blocks the slot without removing it.
 Screen analysis must stay enabled under the screen settings. Large captures are
 re-encoded for NEAR (long side 2048 px, JPEG) without changing the stored file.
 Daemon uploads and

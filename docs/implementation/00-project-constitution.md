@@ -170,6 +170,7 @@ The following architecture decisions are normative:
 33. [ADR-033: Optional governed OpenRouter audio transcription](./decisions/033-governed-optional-audio-route.md) (OpenRouter audio never activated under ADR-035)
 34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
 35. [ADR-035: NEAR TEE-hosted inference only](./decisions/035-near-tee-hosted-inference-only.md) (supersedes ADR-006's provider choice and ADR-024's OpenRouter slots)
+36. [ADR-036: DSH-style plugin structure, pinned trust bundle and profiles](./decisions/036-dsh-style-plugin-structure.md) (refines ADR-026)
 
 ADR-033 extends only the versioned setup.v3 target with one optional disabled
 audio route; under ADR-035 that OpenRouter route is never activated and a NEAR

@@ -608,11 +608,12 @@ async def recheck_done_source(db,*,witness):
 
 async def _recheck_original_commitment(db,task,event,witness):
     """SQL-only original/current Root fence; historical Done keeps its own deadline."""
+    from src.auth.service import local_root_marker_valid
     from src.memory.repository import _m5_selection_binding_key_id
     metadata = _parse_request_metadata(event.metadata_json)
     root = await db.get(OperatorSession,task.owner_session_id,populate_existing=True)
     if (root is None or not root.token_hash or root.principal_id != task.owner_principal_id
-        or root.token_hash != witness.operator._token_hash
+        or root.token_hash != witness.operator._token_hash or not local_root_marker_valid(root.token_hash)
         or root.revoked_at is not None or root.replaced_by_id is not None or root.is_bearer_tombstone
         or metadata["key_id"] != _m5_selection_binding_key_id(_signing_key=witness.signing_key)
         or not hmac.compare_digest(metadata["authorization_mac"],_authorization_mac(metadata,root.token_hash,witness.signing_key))

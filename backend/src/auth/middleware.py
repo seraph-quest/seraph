@@ -217,6 +217,44 @@ def _auth_failure_response(path: str, code: str, *, status_code: int) -> JSONRes
     return JSONResponse({"detail": {"code": str(code)[:128]}}, status_code=status_code)
 
 
+# ``ownership_proof_invalid`` is a rejected presented credential (continuity
+# cookie or recovery code); ``/api/auth/login`` establishes it as 401.
+# ``ownership_proof_required`` is an authenticated root without an enrolled
+# identity; ``/api/auth/ownership/*`` establishes it as 403.
+_AUTH_FAILURE_UNAUTHENTICATED = {
+    "authentication_required", "invalid_token", "ownership_proof_invalid",
+    "session_expired", "session_revoked", "session_unavailable",
+}
+_AUTH_FAILURE_FORBIDDEN = {
+    "legacy_ownership_unproved", "mutation_origin_required", "ownership_proof_required",
+}
+
+
+def auth_failure_status(code: str) -> int:
+    """Typed HTTP status for an ``AuthFailure`` a route did not map itself.
+
+    Session verdicts are 401 (the middleware's own status), boundary and
+    ownership-proof refusals 403, a missing recovery record 404, an
+    unconfigured authority 503 (as at the middleware edge), and any other
+    ownership/recovery state conflict 409 (as ``/api/auth/ownership/*``).
+    """
+    if code in _AUTH_FAILURE_UNAUTHENTICATED:
+        return 401
+    if code in _AUTH_FAILURE_FORBIDDEN or code.endswith("_forbidden"):
+        return 403
+    if code == "recovery_record_unavailable":
+        return 404
+    if code == "auth_not_configured":
+        return 503
+    return 409
+
+
+async def auth_failure_handler(request: Request, exc: AuthFailure) -> JSONResponse:
+    """App-wide guard: an ``AuthFailure`` is never surfaced as a 500 (#1175)."""
+    code = str(getattr(exc, "code", "") or "authentication_required")
+    return _auth_failure_response(request.url.path, code, status_code=auth_failure_status(code))
+
+
 async def authenticate_websocket(websocket) -> AuthenticatedOperator:
     """Authenticate a WebSocket before accepting it.
 

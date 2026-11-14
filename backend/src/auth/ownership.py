@@ -21,7 +21,7 @@ from src.db.models import (
     OperatorSession, OperatorContinuityCredential, OperatorRecoveryJournal,
     WorkBoardTask, WorkBoardInputArtifact, WorkBoardAttempt, WorkBoardStatus, WorkflowRunState,
 )
-from src.auth.service import AuthFailure, _aware, _token_hash, _ownership_metadata
+from src.auth.service import AuthFailure, _aware, _token_hash, _ownership_metadata, local_root_marker_valid
 
 CONTINUITY_MAX_AGE = 365 * 24 * 60 * 60
 MAX_SELECTIONS = 50
@@ -119,6 +119,9 @@ async def _current_root(db, operator):
         or _now() >= _aware(root.idle_expires_at)
         or _now() >= _aware(root.absolute_expires_at)
         or not operator._token_hash or root.token_hash != operator._token_hash
+        # The local no-login root (#1161) carries the root marker as its
+        # proof and has authority only while its mode is on.
+        or not local_root_marker_valid(root.token_hash)
     ):
         raise AuthFailure("session_revoked")
     return root

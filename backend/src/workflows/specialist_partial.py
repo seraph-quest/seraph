@@ -29,12 +29,13 @@ def bounded(model):
 
 
 async def authenticate_partial_owner(db,task,*,operator=None,owner=None):
-    from src.auth.service import AuthenticatedOperator
+    from src.auth.service import AuthenticatedOperator, local_root_marker_valid
     from src.workflows.job_runtime import _as_utc,_utc_now
     root=await db.get(OperatorSession,task.owner_session_id,populate_existing=True)
     now=_utc_now()
     if (root is None or root.principal_id!=task.owner_principal_id or root.revoked_at or root.replaced_by_id
-        or root.is_bearer_tombstone or _as_utc(root.idle_expires_at)<=now or _as_utc(root.absolute_expires_at)<=now):
+        or root.is_bearer_tombstone or _as_utc(root.idle_expires_at)<=now or _as_utc(root.absolute_expires_at)<=now
+        or not local_root_marker_valid(root.token_hash)):
         deny('specialist_partial_owner_unavailable')
     if operator is not None:
         if (type(operator) is not AuthenticatedOperator or operator.ownership_continuity!='stable'

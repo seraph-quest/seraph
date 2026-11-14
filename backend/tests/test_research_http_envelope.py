@@ -85,13 +85,18 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
     elif kind == "truncated":
         headers = {"content-length": "100"}
     elif kind == "trickle":
-        stream = ResponseStream(b"x" * (12 * 1024), delay=0.08)
+        # Each chunk outlasts the whole deadline, so the absolute deadline
+        # (not stream completion) always ends the transfer mid-body.
+        stream = ResponseStream(b"x" * (12 * 1024), delay=10)
     elif kind == "drop":
         stream = ResponseStream(b"", drop=True)
     elif kind == "5xx":
         status = 503
     calls = intercept(monkeypatch, stream, status=status, headers=headers)
-    kwargs = arguments(seconds=0.12 if kind == "trickle" else 2)
+    # The deadline is absolute from here and admission spends part of it
+    # before the POST: 0.12s let a slow runner expire it precontact (no POST,
+    # the [trickle] flake, #1180). 1s keeps the POST reached and the cut bounded.
+    kwargs = arguments(seconds=1 if kind == "trickle" else 2)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     started = time.monotonic()
     with pytest.raises(GpuAdmissionUncertainError):

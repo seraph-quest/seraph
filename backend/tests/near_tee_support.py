@@ -134,3 +134,17 @@ def near_inference_requests(near):
 
 def near_settled_rows(snapshot, runtime_path: str):
     return [row for row in snapshot["operations"] if row["runtime_path"] == runtime_path]
+
+
+def assume_repository_repair_route_available(monkeypatch) -> None:
+    """Precondition for repository registration/admission mechanics tests (#1159).
+
+    Those tests pin how the stock selector, native owner and child admission
+    behave given a usable repair route, independent of provider setup. With
+    OpenRouter retired the repair iteration step has no NEAR TEE adapter, so
+    it is refused with ``near_tee_route_unsupported`` before planning (pinned
+    in test_near_tee_vertical_journeys). No provider transport is enabled by
+    this: model calls stay mocked/forbidden.
+    """
+    from src.model_fabric import near_tee_vertical
+    monkeypatch.setattr(near_tee_vertical, "repository_repair_route_block", lambda: None)

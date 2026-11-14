@@ -671,6 +671,15 @@ async def test_research_dossier_children_reach_near_and_settle_from_near_billing
     assert snapshot["unknown_microusd"] == 0
     children = [run for run in runs if run.job_kind == "readonly_research_child"]
     parent = next(run for run in runs if run.job_kind == "research_dossier")
+    # Each child's stored prompt digest is the canonical digest of the exact
+    # NEAR body sent, and the reservation binds the same digest.
+    from src.security.trust_contract import canonical_digest
+    from src.workflows.job_runtime import _serialize
+    from src.workflows.research_native import checkpoint
+    sent = {canonical_digest(body) for body in bodies}
+    ready = [checkpoint(_serialize(child), "research:prompt-ready") for child in children]
+    assert {item["payload_digest"] for item in ready} == sent and len(sent) == 2
+    assert {row["payload_digest"] for row in rows} == sent
     assert [run.status for run in children] == ["succeeded", "succeeded"], [(r.job_kind, r.status) for r in runs]
     assert parent.status == "succeeded", parent.status
     # The verified dossier is adopted and the card completes.
@@ -684,9 +693,7 @@ MAIL_OUTPUT = {"subject": "Re: Architecture review", "body": "Thanks — I will 
     "caveats": ["Review before sending."]}
 
 
-@pytest.mark.asyncio
-async def test_mail_reply_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch):
-    from src.db.models import WorkBoardStatus, WorkBoardTask
+async def _mail_world(accounting_db, monkeypatch, key):
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.repository import WorkBoardRepository
     from src.workflows.job_runtime import DurableJobRepository
@@ -697,7 +704,7 @@ async def test_mail_reply_reaches_near_and_settles_from_near_billing(accounting_
     jobs = DurableJobRepository()
     near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
     near.answer = {"role": "assistant", "content": json.dumps(MAIL_OUTPUT)}
-    created = await mail.mail_api.create_reply_task(mail._request(mail._reply_body("reply-near")))
+    created = await mail.mail_api.create_reply_task(mail._request(mail._reply_body(key)))
     assert created.status_code == 201, created.body
     task_id = json.loads(created.body)["task_id"]
 
@@ -715,9 +722,22 @@ async def test_mail_reply_reaches_near_and_settles_from_near_billing(accounting_
     monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", SourceAdapter)
     dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=jobs, session_provider=sessions,
         runner_id="service:work-board")
-    receipt = await dispatcher.run_pass()
+    return sessions, jobs, near, task_id, dispatcher, SourceAdapter
+
+
+async def _task(sessions, task_id):
+    from src.db.models import WorkBoardTask
     async with sessions() as db:
-        task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+        return (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_mail_reply_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch):
+    from src.db.models import WorkBoardStatus
+    sessions, jobs, near, task_id, dispatcher, SourceAdapter = await _mail_world(accounting_db, monkeypatch,
+        "reply-near")
+    receipt = await dispatcher.run_pass()
+    task = await _task(sessions, task_id)
     assert receipt["completed"] == 1 and task.status is WorkBoardStatus.done, (receipt, task.block_reason)
     assert SourceAdapter.reads == 2
     body = assert_near_contract(near_inference_requests(near))
@@ -728,6 +748,94 @@ async def test_mail_reply_reaches_near_and_settles_from_near_billing(accounting_
     assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD
     job = await jobs.get_job(rows[0]["job_id"])
     assert job["job_kind"] == "mail_reply_draft" and job["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_mail_reply_truncated_near_answer_is_named_and_settled(accounting_db, monkeypatch):
+    """A JSON draft cut at the slot's output bound is near_tee_output_truncated:
+    contact happened, the NEAR cost settled, nothing is adopted."""
+    from src.db.models import WorkBoardStatus
+    sessions, jobs, near, task_id, dispatcher, _source = await _mail_world(accounting_db, monkeypatch,
+        "reply-near-truncated")
+    near.finish_reason = "length"
+    near.answer = {"role": "assistant", "content": '{"subject": "Re: Archi'}
+    receipt = await dispatcher.run_pass()
+    task = await _task(sessions, task_id)
+    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled", rows
+    assert task.status is WorkBoardStatus.blocked and task.block_reason == "near_tee_output_truncated"
+
+
+@pytest.mark.asyncio
+async def test_mail_reply_missing_near_billing_is_unknown_and_blocks_the_lane(accounting_db, monkeypatch,
+        isolated_broker):
+    sessions, jobs, near, task_id, dispatcher, _source = await _mail_world(accounting_db, monkeypatch,
+        "reply-near-unknown")
+    near.billing_missing = True
+    receipt = await dispatcher.run_pass()
+    task = await _task(sessions, task_id)
+    assert task.block_kind == "unknown_effect"
+    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+        "strategist_agent")
+
+
+@pytest.mark.asyncio
+async def test_mail_reply_near_reservation_resumes_after_crash_before_contact(accounting_db, monkeypatch,
+        isolated_broker):
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import WorkBoardStatus, WorkflowRunState
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.work_board.repository import WorkBoardRepository
+    from src.workflows.job_runtime import DurableJobRepository
+    sessions, jobs, near, task_id, dispatcher, SourceAdapter = await _mail_world(accounting_db, monkeypatch,
+        "reply-near-crash")
+
+    class WorkerCrash(BaseException):
+        pass
+    original_prepare = isolated_broker._prepare_accounting
+
+    async def crash_after_reservation(request):
+        await original_prepare(request)
+        raise WorkerCrash()
+    monkeypatch.setattr(isolated_broker, "_prepare_accounting", crash_after_reservation)
+    with pytest.raises(WorkerCrash):
+        await dispatcher.run_pass()
+    before = (await DurableJobRepository().inference_accounting_snapshot())["operations"]
+    assert len(before) == 1 and before[0]["state"] == "reserved" and before[0]["profile_id"] == "near_tee.text"
+    assert near_inference_requests(near) == []
+    async with sessions() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == before[0]["job_id"]))).scalar_one()
+        run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await accounting_db[1].dispose()
+    recovered = await DurableJobRepository().recover_stale_jobs()
+    assert recovered[0]["status"] == "queued", recovered
+    restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    from src import llm_runtime
+    from src.model_fabric import execution, remote_inference_admission
+    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", restarted)
+    monkeypatch.setattr(execution, "gpu_admission_broker", restarted)
+    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", restarted)
+    dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=DurableJobRepository(),
+        session_provider=sessions, runner_id="service:work-board")
+    reconciled = await dispatcher.reconcile_linked_attempts()
+    assert before[0]["job_id"] in reconciled, reconciled
+    task = await _task(sessions, task_id)
+    assert task.status is WorkBoardStatus.done, (task.status, task.block_reason)
+    assert len(near_inference_requests(near)) == 2  # one NEAR call + its billing readback
+    rows = near_settled_rows(await DurableJobRepository().inference_accounting_snapshot(), "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled"
+    assert (rows[0]["operation_id"], rows[0]["sequence"]) == (before[0]["operation_id"], before[0]["sequence"])
+
+
+def assert_unknown_liability_blocks_lane(snapshot, broker, runtime_path):
+    """Contact happened and no NEAR cost arrived: an Unknown liability that
+    keeps the serial lease blocked (never settled, never released)."""
+    rows = near_settled_rows(snapshot, runtime_path)
+    assert len(rows) == 1 and rows[0]["state"] == "unknown" and snapshot["unknown_microusd"] > 0, rows
+    receipt = broker.receipt_for(rows[0]["operation_id"])
+    assert receipt.status == "blocked" and receipt.active_operation_id == rows[0]["operation_id"]
 
 
 # ── Calendar meeting prep ────────────────────────────────────────
@@ -763,10 +871,8 @@ class CalendarNearFixture:
         return _Fixture()
 
 
-@pytest.mark.asyncio
-async def test_calendar_meeting_prep_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch):
+async def _calendar_world(accounting_db, monkeypatch, key="calendar-near"):
     from types import SimpleNamespace
-    from src.db.models import WorkBoardStatus, WorkBoardTask
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.repository import WorkBoardRepository
     from src.workflows.job_runtime import DurableJobRepository
@@ -778,9 +884,8 @@ async def test_calendar_meeting_prep_reaches_near_and_settles_from_near_billing(
     near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=CalendarNearFixture())
     goal_id, typed_input = await _seed_calendar(sessions, owner)
     task_id = await _todo_capability_task(sessions, owner, capability="calendar.meeting-prep.v1",
-        goal_id=goal_id, typed_input=typed_input, key="calendar-near")
+        goal_id=goal_id, typed_input=typed_input, key=key)
     calendar_reads = []
-
     from src.integrations.google_calendar import vault_repository
     vault_read = vault_repository.get
 
@@ -814,18 +919,94 @@ async def test_calendar_meeting_prep_reaches_near_and_settles_from_near_billing(
             actor_session_id="service-session:work-board")
         await db.commit()
     dispatcher = WorkBoardDispatcher(repository=repository, jobs=jobs, session_provider=sessions)
-    result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
-    async with sessions() as db:
-        task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
-    assert result["completed"] is True and task.status is WorkBoardStatus.done, (result, task.block_reason)
-    assert len([read for read in calendar_reads if read[0] == "GET"]) == 2  # two event reads around the model
+    return sessions, jobs, near, task_id, claim, typed_input, dispatcher, calendar_reads
+
+
+def assert_calendar_on_near(near, calendar_reads, snapshot, *, event_reads=2):
+    # Two event reads around the model (plus any read before a crash).
+    assert len([read for read in calendar_reads if read[0] == "GET"]) == event_reads
     body = assert_near_contract(near_inference_requests(near))
     assert body["response_format"] == {"type": "json_object"} and body["max_tokens"] == 1024
-    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+    rows = near_settled_rows(snapshot, "strategist_agent")
     assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.text"
     assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD
-    job = await jobs.get_job(rows[0]["job_id"])
+    return rows[0]
+
+
+@pytest.mark.asyncio
+async def test_calendar_meeting_prep_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch):
+    from src.db.models import WorkBoardStatus
+    sessions, jobs, near, task_id, claim, typed_input, dispatcher, calendar_reads = await _calendar_world(
+        accounting_db, monkeypatch)
+    result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
+    task = await _task(sessions, task_id)
+    assert result["completed"] is True and task.status is WorkBoardStatus.done, (result, task.block_reason)
+    row = assert_calendar_on_near(near, calendar_reads, await jobs.inference_accounting_snapshot())
+    job = await jobs.get_job(row["job_id"])
     assert job["job_kind"] == "calendar_meeting_prep" and job["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_calendar_meeting_prep_missing_near_billing_is_unknown_and_blocks_the_lane(accounting_db,
+        monkeypatch, isolated_broker):
+    sessions, jobs, near, task_id, claim, typed_input, dispatcher, _reads = await _calendar_world(
+        accounting_db, monkeypatch, key="calendar-near-unknown")
+    near.billing_missing = True
+    result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
+    task = await _task(sessions, task_id)
+    assert result["completed"] is False and task.block_kind == "unknown_effect", (result, task.block_reason)
+    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+        "strategist_agent")
+
+
+@pytest.mark.asyncio
+async def test_calendar_meeting_prep_near_reservation_resumes_after_crash_before_contact(accounting_db,
+        monkeypatch, isolated_broker):
+    """A worker crash after the NEAR reservation and before contact resumes
+    the same reservation after restart (inference_accounting typed resume):
+    one NEAR call, the original operation and sequence, settled from NEAR."""
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import WorkflowRunState
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.workflows.job_runtime import DurableJobRepository
+    sessions, jobs, near, task_id, claim, typed_input, dispatcher, calendar_reads = await _calendar_world(
+        accounting_db, monkeypatch, key="calendar-near-crash")
+
+    class WorkerCrash(BaseException):
+        pass
+    original_prepare = isolated_broker._prepare_accounting
+
+    async def crash_after_reservation(request):
+        await original_prepare(request)
+        raise WorkerCrash()
+    monkeypatch.setattr(isolated_broker, "_prepare_accounting", crash_after_reservation)
+    with pytest.raises(WorkerCrash):
+        await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
+    before = (await DurableJobRepository().inference_accounting_snapshot())["operations"]
+    assert len(before) == 1 and before[0]["state"] == "reserved" and before[0]["profile_id"] == "near_tee.text"
+    assert near_inference_requests(near) == []
+    async with sessions() as db:
+        run = (await db.execute(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == before[0]["job_id"]))).scalar_one()
+        run.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await accounting_db[1].dispose()
+    recovered = await DurableJobRepository().recover_stale_jobs()
+    assert recovered[0]["status"] == "queued", recovered
+    restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    from src import llm_runtime
+    from src.model_fabric import execution, remote_inference_admission
+    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", restarted)
+    monkeypatch.setattr(execution, "gpu_admission_broker", restarted)
+    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", restarted)
+    dispatcher = WorkBoardDispatcher(repository=dispatcher.repository, jobs=DurableJobRepository(),
+        session_provider=sessions)
+    reconciled = await dispatcher.reconcile_linked_attempts()
+    assert before[0]["job_id"] in reconciled
+    after = await DurableJobRepository().inference_accounting_snapshot()
+    # The crashed attempt read the event once before its reservation.
+    row = assert_calendar_on_near(near, calendar_reads, after, event_reads=3)
+    assert (row["operation_id"], row["sequence"]) == (before[0]["operation_id"], before[0]["sequence"])
 
 
 def test_every_route_block_reason_has_work_board_text():
@@ -837,3 +1018,299 @@ def test_every_route_block_reason_has_work_board_text():
     block = panel[panel.index("const BLOCK_REASON_TEXT"):panel.index("const blockReasonText")]
     missing = sorted(code for code in retirement.ROUTE_BLOCK_REASONS if f"  {code}: \"{code} · " not in block)
     assert missing == []
+
+
+# ── Communication preparation (Mail source inside a general task) ─
+
+
+from tests.test_document_build_native_capacity import build_admission_lifecycle  # noqa: E402,F401
+
+
+@pytest.mark.asyncio
+async def test_communication_preparation_mail_source_reaches_near_and_settles(accounting_db, monkeypatch,
+        build_admission_lifecycle):
+    """The selected Mail source of a communications task is published and
+    drafted on NEAR TEE (communication_preparation._publish_source)."""
+    import base64
+    from types import SimpleNamespace
+    import httpx
+    from fastapi import FastAPI
+    from src.api import work_board as board_api
+    from src.auth import service as auth_service
+    from src.auth.middleware import OperatorAuthMiddleware
+    from src.db.models import InferenceCostReservation
+    from src.integrations.gmail_read import GMAIL_READONLY_SCOPE, _metadata_from_payload
+    from src.native_tools.registry import ToolRegistry
+    from src.vault import crypto
+    from src.work_board.communication_contracts import CommunicationCreate
+    from src.work_board.communication_preparation import read_plan
+    from src.work_board.contracts import CommunicationSelection, WorkBoardOwner
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.work_board.general_task import GeneralTaskService
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests import test_mail_reply_vertical as mail
+    monkeypatch.setattr(crypto, "_fernet", None)
+    sessions = accounting_db[2].accounting_sessions
+    message = {"id": "provider-message-1", "threadId": "provider-thread-1", "historyId": "stable-history",
+        "labelIds": ["INBOX", "UNREAD"], "snippet": "Private preview", "payload": {"mimeType": "text/plain",
+            "headers": [{"name": "Subject", "value": "Architecture review"}],
+            "body": {"data": base64.urlsafe_b64encode(b"Private source body stable").decode()}}}
+    monkeypatch.setattr(mail, "MESSAGE_REVISION", _metadata_from_payload(message).message_revision)
+    issued = []
+    create_session = auth_service.create_session
+
+    async def capture_session(*args, **kwargs):
+        result = await create_session(*args, **kwargs)
+        issued.append(result[0])
+        return result
+    monkeypatch.setattr(auth_service, "create_session", capture_session)
+    await mail._seed(sessions, monkeypatch)
+    monkeypatch.setattr(settings, "deployment_environment", "test")
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+    near.answer = {"role": "assistant", "content": json.dumps(
+        {"subject": "Private reply", "body": "Review this exact reply", "caveats": []})}
+    await build_admission_lifecycle.start()
+    operator = mail._operator()
+    owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+    source_reads = []
+
+    async def source_transport(url, **kwargs):
+        await kwargs["authority_check"]()
+        if kwargs["method"] == "POST":
+            value = {"access_token": "mail-access", "scope": GMAIL_READONLY_SCOPE}
+        else:
+            source_reads.append(url)
+            value = message
+        return SimpleNamespace(status_code=200, headers={"content-type": "application/json"},
+            content=json.dumps(value).encode())
+    from src.integrations.gmail_read import vault_repository
+    vault_read = vault_repository.get
+
+    async def vault_get(key, *args, **kwargs):
+        if key != "mail-reply-vertical-secret":
+            return await vault_read(key, *args, **kwargs)
+        return json.dumps({"client_id": "fixture-client", "refresh_token": "fixture-refresh"})
+    monkeypatch.setattr("src.integrations.gmail_read.request_pinned_https", source_transport)
+    monkeypatch.setattr("src.integrations.gmail_read.vault_repository.get", vault_get)
+    registry = ToolRegistry()
+    service = GeneralTaskService(registry)
+    dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
+    registry.communication_dispatcher = dispatcher
+    registry.start()
+    service.start()
+    try:
+        monkeypatch.setattr(board_api, "dispatcher", dispatcher)
+        app = FastAPI()
+        app.add_middleware(OperatorAuthMiddleware)
+        app.include_router(board_api.router, prefix="/api")
+        creation = CommunicationCreate(goal_id=mail.GOAL, goal_revision=1, selection=CommunicationSelection(
+            reply_inputs=[{key: value for key, value in mail._reply_body("communication-near").items()
+                if key != "idempotency_key"}], meeting_inputs=[], reschedule_inputs=[],
+            acknowledge_private_review=True), max_cost_microusd=25_000, wall_seconds=120,
+            idempotency_key="communication-near-mail")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8004",
+                cookies={mail.settings.operator_auth_cookie_name: issued[0]},
+                headers={"Origin": "http://127.0.0.1:3001"}) as client:
+            response = await client.post("/api/work-board/general-tasks/communications",
+                json=creation.model_dump(mode="json"))
+            assert response.status_code == 200, response.text
+            task_id = response.json()["task"]["task_id"]
+        result = await dispatcher.run_pass()
+        assert result["completed"] == 1, result
+        async with sessions() as db:
+            plan = await read_plan(db, owner, task_id, service=service)
+            paid = list((await db.execute(select(InferenceCostReservation).where(
+                InferenceCostReservation.runtime_path == "strategist_agent"))).scalars())
+    finally:
+        service.stop()
+        registry.stop()
+    assert len(plan.reply_drafts) == 1 and plan.reply_drafts[0].body == "Review this exact reply"
+    assert len(source_reads) == 2
+    body = assert_near_contract(near_inference_requests(near))
+    assert "Draft a safe email reply" in body["messages"][0]["content"]
+    assert len(paid) == 1 and paid[0].state == "settled" and paid[0].profile_id == "near_tee.text"
+    assert paid[0].actual_cost_microusd == NEAR_COST_MICROUSD
+
+
+# ── Unknown liability (no NEAR billing readback) per vertical ────
+
+
+@pytest.mark.asyncio
+async def test_work_board_card_proposal_missing_near_billing_is_unknown(accounting_db, monkeypatch,
+        isolated_broker):
+    from src.work_board.contracts import WorkBoardProposalRequest
+    from src.work_board import triage as triage_service
+    sessions, jobs, operator, owner, task, near = await _card_proposal_world(accounting_db, monkeypatch)
+    near.billing_missing = True
+    result = await triage_service.create_proposal(owner, task.task_id, kind="specify",
+        request=WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="near-unknown"),
+        operator=operator)
+    assert result["status"] == "blocked" and result["provider_contact_state"] == "unknown", result
+    assert result["proposed_tasks"] == []
+    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+        "strategist_agent")
+
+
+@pytest.mark.asyncio
+async def test_guardian_assessment_missing_near_billing_is_unknown(isolated_runtime, monkeypatch, tmp_path,
+        isolated_broker):
+    from src.db.models import GuardianOpportunity
+    from src.guardian import opportunity_runtime
+    from src.workflows.job_runtime import DurableJobRepository
+    sessions, row, offered = await _guardian_world(isolated_runtime, monkeypatch, tmp_path)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+    near.answer = assessment_answer(offered)
+    near.billing_missing = True
+    await opportunity_runtime.execute_assessment(row.id)
+    async with sessions() as db:
+        final = await db.get(GuardianOpportunity, row.id)
+    # Contacted uncertainty is retained liability, never a replay.
+    assert final.status == "unknown", (final.status, final.reason_code)
+    assert (await jobs.get_job(final.job_id))["status"] == "unknown_external_effect"
+    assert_unknown_liability_blocks_lane(await jobs.inference_accounting_snapshot(), isolated_broker,
+        "strategist_agent")
+
+
+@pytest.mark.asyncio
+async def test_research_missing_near_billing_is_unknown_and_adopts_nothing(accounting_db, monkeypatch,
+        isolated_broker):
+    from src.db.models import WorkBoardStatus, WorkflowRunState
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.work_board.repository import WorkBoardRepository
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_vertical_no_provider_journeys import _seed_research, _todo_capability_task
+    install_research_source(monkeypatch)
+    sessions = accounting_db[2].accounting_sessions
+    operator, owner = await operator_owner(monkeypatch)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, capabilities=("text",),
+        near=ResearchNearFixture())
+    near.billing_missing = True
+    goal_id, typed_input = await _seed_research(sessions, owner)
+    task_id = await _todo_capability_task(sessions, owner, capability="work.research-dossier.v1",
+        goal_id=goal_id, typed_input=typed_input, key="research-near-unknown")
+    dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=jobs, session_provider=sessions,
+        runner_id="service:work-board")
+    receipt = await dispatcher.run_pass()
+    task = await _task(sessions, task_id)
+    async with sessions() as db:
+        runs = list((await db.execute(select(WorkflowRunState))).scalars())
+    snapshot = await jobs.inference_accounting_snapshot()
+    rows = near_settled_rows(snapshot, "readonly_research_child")
+    contacted = [row for row in rows if row["contact_started_at"] is not None]
+    # Exactly one contact: the serial lane stays blocked by its Unknown cost,
+    # so the sibling is never contacted and no dossier is adopted.
+    assert len(contacted) == 1 and contacted[0]["state"] == "unknown" and snapshot["unknown_microusd"] > 0
+    assert len([r for r in near_inference_requests(near) if r.url.path == "/v1/chat/completions"]) == 1
+    receipt_for = isolated_broker.receipt_for(contacted[0]["operation_id"])
+    assert receipt_for.status == "blocked"
+    assert receipt.get("completed", 0) == 0 and task.status is not WorkBoardStatus.done
+    assert not any(run.job_kind == "readonly_research_child" and run.status == "succeeded" for run in runs)
+
+
+@pytest.mark.asyncio
+async def test_research_near_body_mismatch_fails_closed_before_contact(accounting_db, monkeypatch):
+    """A NEAR request body that differs from the stored prompt is refused
+    before admission: no NEAR chat request and no settled research cost."""
+    from src.db.models import WorkBoardStatus
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.work_board.repository import WorkBoardRepository
+    from src.workflows import research_provider
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_vertical_no_provider_journeys import _seed_research, _todo_capability_task
+    install_research_source(monkeypatch)
+    sessions = accounting_db[2].accounting_sessions
+    operator, owner = await operator_owner(monkeypatch)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, capabilities=("text",),
+        near=ResearchNearFixture())
+    original = research_provider._near_call
+
+    async def drifted(context, body, **kwargs):
+        from dataclasses import replace as dc_replace
+        call = await original(context, body, **kwargs)
+        return dc_replace(call, body={**call.body, "temperature": float(call.body["temperature"]) + 0.5})
+    monkeypatch.setattr(research_provider, "_near_call", drifted)
+    goal_id, typed_input = await _seed_research(sessions, owner)
+    task_id = await _todo_capability_task(sessions, owner, capability="work.research-dossier.v1",
+        goal_id=goal_id, typed_input=typed_input, key="research-near-drift")
+    dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=jobs, session_provider=sessions,
+        runner_id="service:work-board")
+    receipt = await dispatcher.run_pass()
+    task = await _task(sessions, task_id)
+    assert receipt.get("completed", 0) == 0 and task.status is not WorkBoardStatus.done
+    assert [r for r in near_inference_requests(near) if r.url.path == "/v1/chat/completions"] == []
+    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "readonly_research_child")
+    assert all(row["contact_started_at"] is None for row in rows), rows
+
+
+# ── Repository repair stays blocked on NEAR TEE (no NEAR adapter) ─
+
+
+@pytest.mark.asyncio
+async def test_repository_repair_is_blocked_on_near_before_planning_or_contact(accounting_db, monkeypatch):
+    """The repair iteration model step has no NEAR TEE adapter: a repository
+    intent is refused with near_tee_route_unsupported before any planning
+    group, job, reservation or NEAR contact, so no planning money is spent."""
+    from src.db.models import InferenceCostReservation, WorkBoardTask, WorkflowRunState
+    from src.native_tools.task_adapters import ToolRegistry, _repository_work_block_reason, repository_work_descriptor
+    from src.work_board.contracts import GeneralTaskCreate
+    from src.work_board.general_task import GeneralTaskService
+    from src.work_board.general_task_planner import GeneralTaskPlanner
+    from src.work_board.repository import BoardError
+    from tests.test_work_board_m6_provider_free_journey import _goal
+    from tests.test_vertical_no_provider_journeys import _general_task_client
+    sessions = accounting_db[2].accounting_sessions
+    operator, owner = await operator_owner(monkeypatch)
+    near = await prepare_near_tee_vertical(monkeypatch)
+    reason = retirement.NEAR_TEE_ROUTE_UNSUPPORTED_REASON
+    # General planning is served by NEAR; repository repair is not.
+    assert retirement.inactive_route_reason("general_task_planner") is None
+    goal = _goal("goal-repository-near", "Fix the failing parser test")
+    goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
+    async with sessions() as db:
+        db.add(goal)
+    # 1. The stock selector never offers repository_work, with the stable reason.
+    #    (Tool policy and a local executor allow it; only the route blocks.)
+    monkeypatch.setattr(settings, "repo_sandbox", settings.repo_sandbox.model_copy(update={"enabled": True}))
+    with monkeypatch.context() as scoped:
+        scoped.setattr("src.tools.policy.is_tool_allowed", lambda tool, mode: True)
+        assert _repository_work_block_reason("full") == reason
+
+    # 2. A frozen tool set that still names repository_work: planning refuses
+    #    it at the HTTP boundary with the stable reason, before any contact.
+    class FrozenRepositoryRegistry(ToolRegistry):
+        def descriptors(self):
+            return [repository_work_descriptor()]
+    monkeypatch.setattr("src.native_tools.registry.ToolRegistry", FrozenRepositoryRegistry)
+    async with _general_task_client(accounting_db, monkeypatch, owner) as (client, registry, dispatcher):
+        descriptor = registry.descriptors()[0]
+        body = {"goal_revision": 1, "idempotency_key": "repository-near",
+            "input": {"goal_ref": goal.id, "intent": "Fix the bug in parser.py so tests pass",
+                "requested_output": descriptor.output_schema, "inference_egress_acknowledged": True,
+                "limits": {"max_cost_microusd": 50_000}}}
+        for _ in range(2):  # a retry gets the same block
+            created = await client.post("/api/work-board/general-tasks", json=body)
+            assert created.status_code == 409, created.text
+            detail = created.json()["detail"]
+            assert detail["code"] == reason and detail["message"] == retirement.inactive_route_label(reason)
+    # 3. An explicit repository plan is refused before inspection or staging.
+    service = GeneralTaskService(ToolRegistry(), planner=GeneralTaskPlanner())
+    request = GeneralTaskCreate.model_validate({"goal_revision": 1, "idempotency_key": "repository-near-plan",
+        "expected_plan_revision": 1,
+        "input": {"goal_ref": goal.id, "intent": "Fix the parser", "requested_output": descriptor.output_schema,
+            "inference_egress_acknowledged": True, "limits": {"max_cost_microusd": 50_000}},
+        "plan": {"schema_version": 1, "revision": 1, "steps": [{"step_id": "repair", "tool_id": "repository_work",
+            "input": {}, "depends_on": [], "output_contract": {"type": "object"}}]}})
+    with pytest.raises(BoardError) as blocked:
+        async with sessions() as db:
+            await service.create(db, owner, request)
+    assert blocked.value.code == reason and blocked.value.extra["provider_contact"] == "not_started"
+    # Nothing was contacted, reserved, admitted or published.
+    assert near_inference_requests(near) == []
+    async with sessions() as db:
+        assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+        assert list((await db.execute(select(WorkflowRunState))).scalars()) == []
+        assert list((await db.execute(select(WorkBoardTask))).scalars()) == []

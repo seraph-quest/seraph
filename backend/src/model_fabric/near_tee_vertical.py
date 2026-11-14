@@ -95,9 +95,10 @@ def vertical_inference_policy(runtime_path: str) -> tuple[Any, str, VerticalRout
     """``current_inference_policy`` for a vertical served by NEAR TEE (#1159).
 
     Returns ``(configured, policy_digest, setup)``. The NEAR TEE text slot
-    serving ``runtime_path`` wins; otherwise (explicit legacy test mode only,
-    since retirement blocks earlier) the retained OpenRouter projection.
-    Raises ``PermissionError`` when no reviewed policy is current.
+    serving ``runtime_path`` wins; otherwise the retained OpenRouter
+    projection, in the explicit legacy test mode only. Raises
+    ``PermissionError`` (with the stable route-block reason) when no reviewed
+    policy is current, including OpenRouter retired with no NEAR TEE route.
     """
     from .configuration import read_model_fabric_configuration
     configured = read_model_fabric_configuration()
@@ -114,6 +115,11 @@ def vertical_inference_policy(runtime_path: str) -> tuple[Any, str, VerticalRout
             spend_ceiling_microusd=route.spend_ceiling_microusd, max_output_tokens=route.max_output_tokens,
             timeout_seconds=route.timeout_seconds,
             temperature=float(slot.temperature) if slot.temperature is not None else 0.0)
+    from .retirement import openrouter_retired
+    if openrouter_retired():
+        # No NEAR TEE route and OpenRouter retired: no reviewed policy is
+        # current; never fall back to the retained OpenRouter projection.
+        raise PermissionError(vertical_route_block(runtime_path) or "no_active_provider")
     from .effective_policy import inference_policy_from_configuration
     configured, digest = inference_policy_from_configuration(configured)
     setup = configured.openrouter_setup
@@ -137,6 +143,20 @@ def vertical_route_block(runtime_path: str) -> str | None:
     if near_tee_vertical_route(runtime_path) is None and openrouter_retired():
         return NO_ACTIVE_PROVIDER_REASON
     return None
+
+
+def repository_repair_route_block() -> str | None:
+    """Why repository repair cannot run, or None (legacy test mode only).
+
+    #1159: the repository repair iteration model step (``repo_repair_source``)
+    binds its consented exact request body, route digest and code-egress
+    consent to the retired OpenRouter target and has no NEAR TEE adapter.
+    With OpenRouter retired it is blocked before any planning, reservation or
+    contact: ``near_tee_route_unsupported`` when a NEAR TEE slot serves the
+    route (never implying a provider outage), else the shared inactive reason.
+    """
+    from .retirement import openrouter_only_route_block
+    return openrouter_only_route_block("strategist_agent")
 
 
 def is_near_tee_context(context: Any) -> bool:
@@ -235,12 +255,12 @@ async def run_near_tee_vertical_call(call, *, priority=None, before_contact=None
                 broker=execution.gpu_admission_broker, hooks=hooks, before_contact=before_contact)
         except BaseException as exc:
             error_receipt = getattr(exc, "receipt", None)
-            if hooks._active is not None:
+            if hooks.attempt_active:
                 # Transport started and raised (for example an Unknown cost).
                 hooks.attempt_finished(outcome="failed", error_code=near_tee_failure_code(exc) or
                     near_tee_failure_code(exc.__cause__) or "transport_failed", decision=decision,
                     degradation_code="transport_failed")
-            if hooks._completed:
+            if hooks.has_completed_attempts:
                 await hooks.finalize(outcome="failed", degradation_codes=("near_tee_output_not_adopted",))
             raise
         receipt = await hooks.finalize(outcome="succeeded")

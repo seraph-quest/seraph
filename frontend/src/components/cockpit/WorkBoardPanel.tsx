@@ -117,6 +117,12 @@ const BLOCK_REASON_TEXT: Record<string, string> = {
   near_tee_embedding_evidence_required: "near_tee_embedding_evidence_required · The NEAR TEE embedding slot awaits its ADR-035 evidence; nothing was contacted.",
   inference_lane_required: "inference_lane_required · Publish the shared inference lane ceiling in Settings; nothing was contacted.",
   near_tee_request_reserve_exceeds_lane_ceiling: "near_tee_request_reserve_exceeds_lane_ceiling · The NEAR TEE request bound exceeds the lane ceiling; nothing was contacted. Adjust it in Settings.",
+  // NEAR TEE answers not adopted (#1159): contacted, cost settled from NEAR billing, no effect.
+  near_tee_output_truncated: "near_tee_output_truncated · The NEAR TEE answer hit the slot's output bound; its cost was settled and nothing was adopted. Raise the slot's output bound, then retry.",
+  near_tee_model_mismatch: "near_tee_model_mismatch · NEAR answered with a different model; its cost was settled and nothing was adopted.",
+  near_tee_empty_output: "near_tee_empty_output · The NEAR TEE answer was empty; its cost was settled and nothing was adopted.",
+  near_tee_answer_invalid: "near_tee_answer_invalid · The NEAR TEE answer was malformed; its cost was settled and nothing was adopted.",
+  near_tee_cost_overrun: "near_tee_cost_overrun · The NEAR cost exceeded the request bound; it was settled and nothing was adopted.",
 };
 const blockReasonText = (reason: string | null | undefined) => (reason ? BLOCK_REASON_TEXT[reason] ?? reason : reason);
 

@@ -111,6 +111,7 @@ class NearFixture:
         self.billing_missing = False
         self.cost_nano = 1_500_000
         self.body_id = "chatcmpl-fixture"
+        self.finish_reason = "stop"
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -126,7 +127,7 @@ class NearFixture:
         if path == "/v1/chat/completions":
             model = self.echo_model or body["model"]
             return _json({"id": self.body_id, "model": model, "choices": [{"index": 0,
-                "finish_reason": "stop", "message": dict(self.answer)}]})
+                "finish_reason": self.finish_reason, "message": dict(self.answer)}]})
         if path == "/v1/billing/costs":
             if self.billing_missing:
                 return httpx.Response(503, stream=_Stream({"error": "unavailable"}))

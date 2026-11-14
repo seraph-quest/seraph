@@ -652,13 +652,19 @@ TEE text slot through one shared vertical helper (#1159, **Partial**): each
 keeps its durable job, reservation and adoption contract, runs every NEAR TEE
 precontact gate (sealed denials, catalog receipt, proofs, `x-no-aliasing`),
 and settles from NEAR billing inside its broker lease, with no fallback. On
-NEAR TEE now: general-task, repository-work and specialist planning, Work
-Board card proposals, guardian opportunity assessment and plan generation,
-research dossiers (child synthesis and programme discovery requests), Mail
-reply drafts, Calendar meeting prep and communication preparation. Still
-without a NEAR TEE path: the repository repair iteration model step
+NEAR TEE now: general-task and specialist planning, Work Board card
+proposals, guardian opportunity assessment and plan generation, research
+dossiers (child synthesis and programme discovery requests), Mail reply
+drafts, Calendar meeting prep and communication preparation. Repository work
+stays blocked on NEAR TEE: its repair iteration model step
 (`repo_repair_source`, whose consented exact request body and code-egress
-consent are bound to the retired OpenRouter target). Every vertical blocks
+consent are bound to the retired OpenRouter target) has no NEAR TEE adapter,
+so `repository_work` is never offered and a repository intent or plan is
+refused with `near_tee_route_unsupported` before any planning, reservation or
+contact (no planning cost). A NEAR TEE answer that is not adopted (for
+example `near_tee_output_truncated` for a JSON draft cut at the slot's output
+bound) settles its NEAR cost and blocks the Mail or Calendar card with that
+code. Every vertical blocks
 before any job, reservation or contact with the same precedence as Settings'
 `inference_block_reason`: `provider_policy_revoked`, then the NEAR TEE slot's
 own reason (for example `near_tee_credential_required`), then

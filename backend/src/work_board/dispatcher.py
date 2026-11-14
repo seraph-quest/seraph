@@ -1380,6 +1380,23 @@ _CAPABILITY_MODEL_ROUTES = {
 }
 
 
+def _near_known_cost_failure(exc: BaseException) -> str | None:
+    """The NEAR TEE code of a settled known-cost failure in ``exc``'s chain.
+
+    An Unknown liability (``near_tee_cost_liability``) is never returned: it
+    stays on the reconciliation path.
+    """
+    from src.model_fabric.near_tee import NearTeeError
+    seen = 0
+    current: BaseException | None = exc
+    while current is not None and seen < 4:
+        if isinstance(current, NearTeeError):
+            return None if current.code == "near_tee_cost_liability" else current.code
+        current = current.__cause__ or current.__context__
+        seen += 1
+    return None
+
+
 def _route_provider(context: Any) -> str:
     """The provider class of a governed Mail/Calendar context (#1159)."""
     from src.model_fabric.near_tee_vertical import is_near_tee_context
@@ -6490,11 +6507,16 @@ class WorkBoardDispatcher:
                 # generic reconciliation observes a live lease and leaves
                 # the board running forever.  Ambiguous failures deliberately
                 # stay on the existing reconciliation path.
-                if (
+                near_known_cost = _near_known_cost_failure(exc) if _text(task.capability_id) in {
+                    "work.mail-reply-draft.v1", "calendar.meeting-prep.v1"} else None
+                if near_known_cost is not None or (
                     _text(task.capability_id) == "work.mail-reply-draft.v1"
                     and _safe_error_code(exc)
                     in {"mail_reply_source_drift", "mail_reply_authority_stale"}
                 ):
+                    # #1159: a NEAR TEE known-cost failure (truncated or
+                    # mismatched answer) was settled from NEAR billing and
+                    # adopted nothing; close the root blocked with its code.
                     try:
                         current_projection = await self.jobs.get_job(job_id)
                         lease = (
@@ -6516,16 +6538,41 @@ class WorkBoardDispatcher:
                                 fencing_token=int(lease.get("fencing_token") or 0),
                                 expected_state="running",
                                 expected_revision=int(current_projection.get("revision") or 0),
-                                reason=_safe_error_code(exc),
+                                reason=near_known_cost or _safe_error_code(exc),
                                 result={"memory_status": "no_learning"},
-                                result_summary="Mail reply authority changed before draft publication",
+                                result_summary=("NEAR TEE answer not adopted; its cost settled from NEAR billing"
+                                    if near_known_cost else "Mail reply authority changed before draft publication"),
                             )
                     except Exception:
                         # A concurrent recovery/lease transition owns the
                         # durable outcome; retain the conservative reconcile
                         # path rather than guessing which writer won.
                         logger.info("mail reply terminal drift settlement raced for %s", job_id)
-                if _safe_error_code(exc) == "calendar_reconciliation_required":
+                reconciled = None
+                if near_known_cost is not None:
+                    try:
+                        current_job = await self.jobs.get_job(job_id)
+                        if not isinstance(current_job, Mapping) or _status(current_job) != "blocked":
+                            raise RuntimeError("near known-cost root not closed")
+                        current = await self._refresh_claim(claim)
+                        await self._project(
+                            current.task,
+                            current.attempt,
+                            board_revision=current.task.task_revision,
+                            status=WorkBoardStatus.blocked,
+                            outcome=near_known_cost,
+                            block_kind="capability",
+                            block_reason=near_known_cost,
+                            result_refs=[{"job_id": job_id, "workflow_run_id": job_id, "status": "blocked",
+                                "reason_code": near_known_cost, "recovery_action": "retry_after_prerequisite"}],
+                            lease_owner=current.attempt.lease_owner or self.runner_id,
+                        )
+                        reconciled = True
+                    except Exception:
+                        reconciled = None  # The conservative reconcile path below owns it.
+                if reconciled:
+                    pass
+                elif _safe_error_code(exc) == "calendar_reconciliation_required":
                     try:
                         current = await self._refresh_claim(claim)
                         await self._project(

@@ -646,8 +646,9 @@ async def test_calendar_and_research_block_with_retired_reason(accounting_db, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_failure", [False, True])
 async def test_specialist_delegation_planning_blocks_with_retired_reason(task_runtime, monkeypatch,
-        native_admission_lifecycle):
+        native_admission_lifecycle, receipt_failure):
     """A reserved specialist delegation reaches its child-planning model step
     and is refused with the stable cause: no child card, planning job,
     reservation or contact; the parent's existing jobs are unchanged."""
@@ -716,9 +717,34 @@ async def test_specialist_delegation_planning_blocks_with_retired_reason(task_ru
     assert verify_task_tool_closure(invocation.witness, binding=binding,
         fencing_token=accounting["parent_fence"]).outcome == "route_precontact"
     service._native_invocations[invocation_id] = invocation
+    publish_receipt = dispatcher.jobs.publish_general_task_step_receipt
+    if receipt_failure:
+        # #1159 critic: an unexpected failure AFTER the closure was published
+        # (here the blocked step receipt) must still record an honest outcome.
+        failures = []
+
+        async def fail_once(*args, **kwargs):
+            if not failures:
+                failures.append(True)
+                raise RuntimeError("scripted receipt writer failure")
+            return await publish_receipt(*args, **kwargs)
+        monkeypatch.setattr(dispatcher.jobs, "publish_general_task_step_receipt", fail_once)
     retained = await retain_native_failure(service, dispatcher.jobs, binding, child_owner=accounting["parent_owner"])
-    assert retained == OPENROUTER_RETIRED_REASON
     projection = await dispatcher.jobs.get_job(invocation_id)
+    if receipt_failure:
+        # The conservative path records the outcome (never left running) and
+        # reuses the same immutable closure (published exactly once).
+        assert retained is None and failures == [True]
+        assert projection["status"] == "unknown_external_effect", projection["status"]
+        from src.workflows.general_task_guard import cleanup_checkpoint_id
+        parent = await dispatcher.jobs.get_job(binding.parent_job_id)
+        identity = cleanup_checkpoint_id(binding, projection["lease"]["fencing_token"])
+        closures = [item for item in parent["checkpoints"] if item.get("checkpoint_id") == identity]
+        assert len(closures) == 1, [(item.get("checkpoint_id"), item.get("recorded_at"))
+            for item in parent["checkpoints"] if str(item.get("checkpoint_id", "")).startswith("general:cleanup:")]
+        assert transport["contacts"] == []
+        return
+    assert retained == OPENROUTER_RETIRED_REASON
     assert projection["status"] == "blocked" and projection["effects"] == []
     assert transport["contacts"] == []
     assert (await dispatcher.jobs.inference_accounting_snapshot())["operations"] == []

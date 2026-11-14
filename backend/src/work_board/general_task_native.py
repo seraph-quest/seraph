@@ -644,7 +644,7 @@ async def _retain_precontact_failure(service, jobs, binding, *, child_owner, fen
     from src.work_board.contracts import GeneralTaskStepReceiptV1
     from src.work_board.general_task import digest
     from src.workflows.general_task_guard import effective_child_phase
-    from src.workflows.job_runtime import _digest, DurableJobError
+    from src.workflows.job_runtime import _digest
     try:
         parent = await jobs.get_job(binding.parent_job_id)
         closure = await jobs.publish_general_task_tool_closure(binding.invocation_id,
@@ -674,7 +674,14 @@ async def _retain_precontact_failure(service, jobs, binding, *, child_owner, fen
             result_summary="Native step refused before provider contact; no_learning")
         service.release_native_invocation(binding.invocation_id)
         return reason
-    except (BoardError, DurableJobError):
+    except Exception:
+        # Any failure to publish the no-contact proof (not only canonical
+        # drift) falls back to the conservative unknown path, which records
+        # an honest outcome. The original callback closure is idempotent:
+        # republishing it returns the same immutable record.
+        import logging
+        logging.getLogger(__name__).warning("general task precontact retention fell back to unknown",
+            exc_info=False)
         return None
 
 
@@ -814,6 +821,14 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
             inputs = await resolve_current_native_step_inputs(db, parent, task, attempt,
                 manifest, envelope, ready)
         service.check_method_source(envelope, ready, inputs)
+        if _is_repository_work_descriptor(descriptor):
+            from src.model_fabric.near_tee_vertical import repository_repair_route_block
+            if reason := repository_repair_route_block():
+                # #1159: a repository Task published before retirement cannot
+                # run its repair model step on NEAR TEE: blocked before the
+                # child is admitted, with no reservation or contact.
+                return {"verified": False, "blocked": True, "reason": reason,
+                    "provider_contact_state": "not_started", "no_learning": True, "native_execution": True}
         binding, _admitted = await admit_native_step(jobs, job_id, owner=owner, fence=fence,
             step=ready, descriptor=descriptor, inputs=inputs, service=service)
         if _is_repository_work_descriptor(descriptor):

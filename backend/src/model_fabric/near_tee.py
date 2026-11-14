@@ -156,6 +156,13 @@ def near_tee_answer(payload: object, model: str) -> tuple[str | None, str | None
     return content, None
 
 
+def _finish_reason(payload: object) -> object:
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if isinstance(choices, list) and len(choices) == 1 and isinstance(choices[0], dict):
+        return choices[0].get("finish_reason")
+    return None
+
+
 def _text_content(content: object) -> str | list[dict[str, str]] | None:
     """Plain text or a list of text parts; images belong to the vision slot (PR4)."""
     if isinstance(content, str):
@@ -500,6 +507,10 @@ async def near_tee_transport(call: NearTeeCall) -> NearTeeOutcome:
             text = message.get("content") if message is not None else None
         else:
             text, failure = near_tee_answer(payload, model)
+        if failure is None and "response_format" in call.body and _finish_reason(payload) == "length":
+            # #1159: a structured (JSON) answer cut at the output bound is
+            # never a valid object; name it instead of a later parse error.
+            failure = "near_tee_output_truncated"
         del raw, payload
         evidence = await read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
             deadline_at=deadline, no_aliasing=True, error=NearTeeError, prefix="near_tee",

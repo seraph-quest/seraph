@@ -241,7 +241,7 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
                     response, payload = await broker.execute(request, invoke)
             except BaseException:
                 if started:
-                    if hooks._active is not None:
+                    if hooks.attempt_active:
                         hooks.attempt_finished(outcome="failed", error_code="research_provider_incomplete",
                             decision=decision)
                     await hooks.finalize(outcome="failed")
@@ -445,7 +445,7 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
                     response, payload = await broker.execute(request, invoke)
             except BaseException:
                 if started:
-                    if hooks._active is not None:
+                    if hooks.attempt_active:
                         hooks.attempt_finished(outcome="failed", error_code="programme_provider_incomplete",
                             decision=decision)
                     await hooks.finalize(outcome="failed")

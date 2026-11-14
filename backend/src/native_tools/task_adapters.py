@@ -78,7 +78,9 @@ def _repository_work_block_reason(mode):
         "repo-python-pytest-v1", "repo-python-pytest-publication-v1", "repo-node24-npm-v1",
     }:
         return "repository_executor_unsupported"
-    return None
+    from src.model_fabric.near_tee_vertical import repository_repair_route_block
+    # #1159: the iteration model step has no NEAR TEE adapter; never offer it.
+    return repository_repair_route_block()
 
 
 @dataclass(frozen=True)

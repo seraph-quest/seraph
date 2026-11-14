@@ -163,6 +163,14 @@ class GeneralTaskPlanner:
             raise BoardError("general_task_tools_unavailable", "No typed registered tools are available", status_code=409)
         from src.model_fabric.retirement import (NO_ACTIVE_PROVIDER_REASON, inactive_route_label,
             inactive_route_reason, openrouter_retired)
+        from src.model_fabric.near_tee_vertical import repository_repair_route_block
+        if (any(item.tool_id == "repository_work" for item in descriptors)
+                and (reason := repository_repair_route_block())):
+            # #1159: repository repair cannot execute on NEAR TEE; refuse its
+            # planning before any group, job, reservation or contact so no
+            # planning money is spent on work that cannot run.
+            raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
+                route_block=True, provider_contact="not_started")
         if reason := inactive_route_reason("general_task_planner"):
             # ADR-035: planning has no usable route (no active provider, a
             # revoked egress or a NEAR TEE slot reason); name it before any

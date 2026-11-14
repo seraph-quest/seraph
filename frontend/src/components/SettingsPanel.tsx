@@ -23,6 +23,7 @@ import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 import { isLocalNoLoginSession, LocalNoLoginBadge } from "./auth/localNoLogin";
+import { SETTINGS_OPEN_SECTION_EVENT, type SettingsSectionId } from "../lib/settingsNavigation";
 import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
@@ -471,12 +472,28 @@ export function SettingsPanel() {
   }, [setSettingsPanelOpen]);
   const wasOpenRef = useRef(false);
 
+  // A deep link (#1172: status items name the section that resolves them)
+  // survives the open transition, which otherwise resets to the first section.
+  const requestedSectionRef = useRef<SettingsSection | null>(null);
+  useEffect(() => {
+    const openSection = (event: { section: SettingsSectionId } | undefined) => {
+      const section = event?.section;
+      if (!section || !SETTINGS_SECTIONS.some((entry) => entry.id === section)) return;
+      requestedSectionRef.current = section;
+      setActiveSection(section);
+      setSettingsPanelOpen(true);
+    };
+    appEventBus.on(SETTINGS_OPEN_SECTION_EVENT, openSection);
+    return () => appEventBus.off(SETTINGS_OPEN_SECTION_EVENT, openSection);
+  }, [setSettingsPanelOpen]);
+
   useLayoutEffect(() => {
     if (settingsPanelOpen && !wasOpenRef.current) {
-      setActiveSection("artifacts");
+      setActiveSection(requestedSectionRef.current ?? "artifacts");
     } else if (!settingsPanelOpen && wasOpenRef.current) {
       setActiveSection("artifacts");
     }
+    requestedSectionRef.current = null;
     wasOpenRef.current = settingsPanelOpen;
   }, [settingsPanelOpen]);
 
@@ -649,6 +666,7 @@ export function SettingsPanel() {
                     ? "border-retro-highlight text-retro-highlight"
                     : "border-retro-text/15 text-retro-text/45 hover:text-retro-text"
                 }`}
+                aria-pressed={activeSection === section.id}
                 onClick={() => setActiveSection(section.id)}
               >
                 {section.label}

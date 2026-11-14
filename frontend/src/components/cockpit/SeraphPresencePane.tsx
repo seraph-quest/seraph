@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import Seraph, { type SeraphState, type SeraphTelemetryEntry } from "./Seraph";
+import { classifyObserverContext, describeObserverFault } from "../../lib/cockpitShellStatus";
 import {
   deriveSeraphPresenceState,
   type SeraphPresenceDescriptor,
@@ -32,7 +33,9 @@ function contextLabel(snapshot: SeraphPresenceSnapshot): string {
   if (snapshot.metadataState === "unavailable") return "UNKNOWN";
   if (snapshot.connectionStatus === "error") return "FAULT";
   if (snapshot.connectionStatus !== "connected") return "OFFLINE";
-  if ((snapshot.dataQuality ?? "").toLowerCase().includes("degraded")) return "DEGRADED";
+  const observerContext = classifyObserverContext(snapshot.dataQuality, snapshot.dataQualityReason);
+  if (observerContext.kind === "fault") return "DEGRADED";
+  if (observerContext.kind === "not_refreshed" || observerContext.kind === "unexplained") return "PARTIAL";
   if (snapshot.isAgentBusy) return "ACTIVE";
   return "GOOD";
 }
@@ -45,6 +48,10 @@ function contextHint(snapshot: SeraphPresenceSnapshot): string {
   if (snapshot.metadataState === "unavailable") {
     return "continuity unavailable · load to confirm";
   }
+  const observerContext = classifyObserverContext(snapshot.dataQuality, snapshot.dataQualityReason);
+  if (observerContext.kind === "fault") return withFreshness(snapshot, describeObserverFault(observerContext).replace(/\.$/, "").toLowerCase());
+  if (observerContext.kind === "not_refreshed") return withFreshness(snapshot, "not refreshed yet for this session");
+  if (observerContext.kind === "unexplained") return withFreshness(snapshot, "some sources not refreshed · reason not reported");
   return withFreshness(snapshot, (snapshot.dataQuality ?? (
     snapshot.connectionStatus === "connected" ? "live link" : "direct fallback"
   )).replace(/_/g, " "));

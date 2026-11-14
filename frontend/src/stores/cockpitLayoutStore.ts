@@ -27,6 +27,9 @@ interface CockpitLayoutStore {
   hideNonCorePanes: () => void;
   resetLayout: () => void;
   setActiveSection: (section: CockpitSection) => void;
+  /** Conversation dock visibility (#1172). Open by default. */
+  chatDockOpen: boolean;
+  setChatDockOpen: (open: boolean) => void;
 }
 
 export type CockpitSection = "home" | "inbox" | "work" | "goals" | "library" | "connections" | "reports";
@@ -37,6 +40,7 @@ interface PersistedCockpitLayoutStoreState {
   inspectorVisible?: boolean;
   paneVisibility?: Partial<Record<CockpitPaneId, boolean>>;
   savedPaneVisibility?: Partial<Record<CockpitLayoutId, Partial<Record<CockpitPaneId, boolean>>>>;
+  chatDockOpen?: boolean;
 }
 
 const noopStorage: StateStorage = {
@@ -241,6 +245,8 @@ export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
           inspectorVisible: true,
         }),
       setActiveSection: (activeSection) => set({ activeSection }),
+      chatDockOpen: true,
+      setChatDockOpen: (chatDockOpen) => set({ chatDockOpen }),
     }),
     {
       name: "seraph_cockpit_layout",
@@ -258,6 +264,7 @@ export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
         );
         return {
           activeSection: isCockpitSection(legacyState.activeSection) ? legacyState.activeSection : "home",
+          chatDockOpen: legacyState.chatDockOpen !== false,
           activeLayoutId,
           inspectorVisible: syncInspectorVisibility(paneVisibility),
           paneVisibility,
@@ -270,6 +277,7 @@ export const useCockpitLayoutStore = create<CockpitLayoutStore>()(
       },
       partialize: (state) => ({
         activeSection: state.activeSection,
+        chatDockOpen: state.chatDockOpen,
         activeLayoutId: state.activeLayoutId,
         inspectorVisible: state.inspectorVisible,
         paneVisibility: state.paneVisibility,

@@ -137,7 +137,12 @@ class ContextManager:
             return scoped
         # A scoped refresh may not have completed yet. Preserve harmless
         # operator state, but never carry an unrelated goal summary forward.
-        return replace(self._context, active_goals_summary="", data_quality="degraded")
+        return replace(
+            self._context,
+            active_goals_summary="",
+            data_quality="degraded",
+            data_quality_reason="unscoped_fallback",
+        )
 
     def is_daemon_connected(
         self,
@@ -184,11 +189,13 @@ class ContextManager:
                 sources_ok = 0
                 source_degraded = False
                 sources_total = len(active_sources)
+                quality_reasons: list[str] = []
 
                 for source_type, source_name in active_sources:
                     runner = _OBSERVER_SOURCE_RUNNERS.get(source_type)
                     if runner is None:
                         logger.warning("Observer source '%s' has no runtime runner", source_type)
+                        quality_reasons.append(f"source_error:{source_type}")
                         continue
                     try:
                         if source_type == "goals":
@@ -200,12 +207,13 @@ class ContextManager:
                         else:
                             source_results[source_type] = await runner()
                         sources_ok += 1
-                        source_degraded = source_degraded or (
-                            source_results[source_type].get("observer_source_status") == "degraded"
-                        )
+                        if source_results[source_type].get("observer_source_status") == "degraded":
+                            source_degraded = True
+                            quality_reasons.append(f"source_degraded:{source_type}")
                     except Exception:
                         logger.exception("Observer source '%s' (%s) failed during refresh", source_type, source_name)
                         source_results[source_type] = {}
+                        quality_reasons.append(f"source_error:{source_type}")
 
                 time_data = source_results.get("time", {})
                 calendar_data = source_results.get("calendar", {})
@@ -215,6 +223,7 @@ class ContextManager:
                 # Derive data quality
                 if sources_total == 0:
                     data_quality = "stale"
+                    quality_reasons = ["no_active_sources"]
                 elif sources_ok == sources_total and not source_degraded:
                     data_quality = "good"
                 elif sources_ok == 0:
@@ -288,6 +297,7 @@ class ContextManager:
                     previous_user_state=old.user_state,
                     attention_budget_last_reset=last_reset,
                     data_quality=data_quality,
+                    data_quality_reason=None if data_quality == "good" else ",".join(quality_reasons) or None,
                     observer_confidence=assessment.observer_confidence,
                     salience_level=assessment.salience_level,
                     salience_reason=assessment.salience_reason,
@@ -330,6 +340,7 @@ class ContextManager:
                         "sources_total": sources_total,
                         "active_source_types": [source_type for source_type, _ in active_sources],
                         "data_quality": data_quality,
+                        "data_quality_reason": None if data_quality == "good" else ",".join(quality_reasons) or None,
                         "observer_confidence": assessment.observer_confidence,
                         "salience_level": assessment.salience_level,
                         "salience_reason": assessment.salience_reason,

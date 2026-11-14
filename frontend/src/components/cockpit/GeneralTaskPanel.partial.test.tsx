@@ -284,10 +284,11 @@ it.each(["success", "http failure", "missing artifact", "wrong digest", "wrong s
   vi.stubGlobal("WebSocket", class { readyState = 0; close() {} send() {} });
   await act(async () => { render(<CockpitView onSend={() => {}} />); });
   await act(async () => { fireEvent.click(screen.getByTestId("cockpit-section-work")); });
-  const windows = screen.getByRole("button", { name: "Windows" });
-  await act(async () => { fireEvent.click(windows); });
+  // #1172: the Windows manager moved into More → Workspace windows.
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "More actions" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("menuitem", { name: "Workspace windows" })); });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Show all" })); });
-  await act(async () => { fireEvent.click(windows); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Close windows menu" })); });
   fireEvent.click(await screen.findByRole("button", { name: "Open task Stopped specialist work" }));
   await selectAndInspect(false);
   fireEvent.click(screen.getByRole("button", { name: `Inspect partial artifact ${output.artifact_id}` }));

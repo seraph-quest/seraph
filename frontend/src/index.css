@@ -479,9 +479,10 @@ body {
   --cockpit-tone-border-soft: rgba(141, 226, 255, 0.12);
   --cockpit-tone-border: rgba(141, 226, 255, 0.18);
   --cockpit-tone-border-strong: rgba(141, 226, 255, 0.28);
-  --cockpit-tone-muted-20: rgba(126, 154, 176, 0.46);
-  --cockpit-tone-muted-30: rgba(126, 154, 176, 0.58);
-  --cockpit-tone-muted-40: rgba(126, 154, 176, 0.72);
+  /* #1172: muted tones raised to WCAG AA (>= 4.5:1) on panel and soft backgrounds. */
+  --cockpit-tone-muted-20: rgba(126, 154, 176, 0.86);
+  --cockpit-tone-muted-30: rgba(126, 154, 176, 0.9);
+  --cockpit-tone-muted-40: rgba(126, 154, 176, 0.95);
   --cockpit-tone-muted-60: rgba(152, 180, 201, 0.84);
   --cockpit-tone-shadow-inset: rgba(7, 16, 25, 0.92);
   --cockpit-tone-shadow-outline: rgba(141, 226, 255, 0.1);
@@ -506,11 +507,12 @@ body {
   --cockpit-border: rgba(41, 96, 126, 0.18);
   --cockpit-border-strong: rgba(31, 116, 162, 0.38);
   --cockpit-text: #173245;
-  --cockpit-muted: #5d7688;
-  --cockpit-accent: #1e7fae;
-  --cockpit-accent-strong: #138a72;
-  --cockpit-warning: #b36a00;
-  --cockpit-danger: #c15353;
+  /* #1172: light text tokens darkened to WCAG AA (>= 4.5:1) on panel, soft and menu backgrounds. */
+  --cockpit-muted: #4a6274;
+  --cockpit-accent: #14668e;
+  --cockpit-accent-strong: #0d6b58;
+  --cockpit-warning: #8a5200;
+  --cockpit-danger: #a63a3a;
   --cockpit-state-selected-border: rgba(30, 127, 174, 0.42);
   --cockpit-state-selected-fill: rgba(30, 127, 174, 0.08);
   --cockpit-state-selected-shadow: rgba(30, 127, 174, 0.12);
@@ -661,10 +663,10 @@ body {
   --cockpit-tone-border-soft: rgba(31, 116, 162, 0.12);
   --cockpit-tone-border: rgba(31, 116, 162, 0.18);
   --cockpit-tone-border-strong: rgba(31, 116, 162, 0.28);
-  --cockpit-tone-muted-20: rgba(93, 118, 136, 0.62);
-  --cockpit-tone-muted-30: rgba(93, 118, 136, 0.74);
-  --cockpit-tone-muted-40: rgba(93, 118, 136, 0.82);
-  --cockpit-tone-muted-60: rgba(74, 98, 116, 0.9);
+  --cockpit-tone-muted-20: #4d6678;
+  --cockpit-tone-muted-30: #4a6274;
+  --cockpit-tone-muted-40: #465e70;
+  --cockpit-tone-muted-60: #3f5769;
   --cockpit-tone-shadow-inset: rgba(255, 255, 255, 0.92);
   --cockpit-tone-shadow-outline: rgba(31, 116, 162, 0.08);
 }
@@ -865,7 +867,8 @@ body {
 }
 
 .cockpit-action--primary {
-  color: #041119;
+  /* #041119 in dark, white in light (darker AA accent gradient, #1172). */
+  color: var(--cockpit-send-text);
   background: linear-gradient(135deg, var(--cockpit-accent), var(--cockpit-accent-strong));
   font-weight: 700;
 }

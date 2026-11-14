@@ -53,6 +53,13 @@ class CurrentContext:
 
     # Data quality — "good" if all sources succeeded, "degraded" if some failed, "stale" if all failed
     data_quality: str = "good"
+    # Why data_quality is not "good", so operator surfaces can tell an
+    # expected state from a fault (#1172). None when good. Otherwise a
+    # comma-separated list of: "unscoped_fallback" (this operator scope has
+    # not been refreshed yet), "no_active_sources", "source_error:<type>"
+    # (the source raised or has no runner) or "source_degraded:<type>" (it
+    # reported degraded).
+    data_quality_reason: Optional[str] = None
     observer_confidence: str = "grounded"
     salience_level: str = "low"
     salience_reason: str = "background"

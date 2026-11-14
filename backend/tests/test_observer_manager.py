@@ -656,3 +656,57 @@ class TestCurrentContextSerialization:
         ctx = CurrentContext(recent_git_activity=[{"message": "commit: fix"}, {"message": "commit: add"}])
         block = ctx.to_prompt_block()
         assert "2 commits" in block
+
+
+class TestDataQualityReason:
+    """#1172: operator surfaces need to tell an expected state from a fault."""
+
+    @pytest.mark.asyncio
+    async def test_good_refresh_has_no_reason(self):
+        mgr = ContextManager()
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time")]), \
+             patch("src.observer.sources.time_source.gather_time", return_value={
+                 "time_of_day": "morning", "day_of_week": "Monday", "is_working_hours": True,
+             }):
+            ctx = await mgr.refresh()
+        assert ctx.data_quality == "good"
+        assert ctx.data_quality_reason is None
+        assert ctx.to_dict()["data_quality_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_source_error_and_degraded_sources_are_named(self):
+        mgr = ContextManager()
+        with patch("src.observer.manager._active_observer_definitions",
+                   return_value=[("time", "time"), ("git", "git"), ("goals", "goals")]), \
+             patch("src.observer.sources.time_source.gather_time", side_effect=RuntimeError("boom")), \
+             patch("src.observer.sources.git_source.gather_git", return_value=None), \
+             patch("src.observer.sources.goal_source.gather_goals", new_callable=AsyncMock, return_value={
+                 "active_goals_summary": "", "observer_source_status": "degraded",
+             }):
+            ctx = await mgr.refresh()
+        assert ctx.data_quality == "degraded"
+        assert ctx.data_quality_reason == "source_error:time,source_degraded:goals"
+
+    @pytest.mark.asyncio
+    async def test_all_sources_failing_is_stale_with_errors(self):
+        mgr = ContextManager()
+        with patch("src.observer.manager._active_observer_definitions", return_value=[("time", "time")]), \
+             patch("src.observer.sources.time_source.gather_time", side_effect=RuntimeError("boom")):
+            ctx = await mgr.refresh()
+        assert ctx.data_quality == "stale"
+        assert ctx.data_quality_reason == "source_error:time"
+
+    @pytest.mark.asyncio
+    async def test_no_active_sources_reason(self):
+        mgr = ContextManager()
+        with patch("src.observer.manager._active_observer_definitions", return_value=[]):
+            ctx = await mgr.refresh()
+        assert ctx.data_quality == "stale"
+        assert ctx.data_quality_reason == "no_active_sources"
+
+    def test_unscoped_fallback_is_named(self):
+        mgr = ContextManager()
+        ctx = mgr.get_context(owner_principal_id="operator", owner_session_id="root")
+        assert ctx.data_quality == "degraded"
+        assert ctx.data_quality_reason == "unscoped_fallback"
+        assert ctx.active_goals_summary == ""

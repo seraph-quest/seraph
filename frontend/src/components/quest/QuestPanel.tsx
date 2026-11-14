@@ -1,5 +1,7 @@
 import { GoalProgrammePanel } from "./GoalProgrammePanel";
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import { create } from "zustand";
 import { useQuestStore } from "../../stores/questStore";
 import { useChatStore } from "../../stores/chatStore";
 import { DomainStats } from "./DomainStats";
@@ -8,6 +10,19 @@ import { GoalForm } from "./GoalForm";
 import { GoalLoopPanel } from "./GoalLoopPanel";
 import type { GoalInfo } from "../../types";
 import { useAttentionGoalFocus } from "../../hooks/useAttentionGoalFocus";
+import { useCockpitLayoutStore } from "../../stores/cockpitLayoutStore";
+
+/**
+ * The cockpit Goals section publishes an inline host element here (#1172).
+ * QuestPanel stays a single, always-mounted instance (attention focus events
+ * rely on that) and portals its content into the Goals section when it is
+ * active, instead of depending on a transient overlay flag that is lost on
+ * reload and left the persisted Goals section with an empty canvas.
+ */
+export const useGoalsInlineHost = create<{ host: HTMLElement | null; setHost: (host: HTMLElement | null) => void }>()((set) => ({
+  host: null,
+  setHost: (host) => set({ host }),
+}));
 
 const LEVELS = ["daily", "weekly", "monthly", "quarterly", "annual", "vision"] as const;
 const DOMAINS = ["productivity", "performance", "health", "influence", "growth"] as const;
@@ -63,9 +78,13 @@ export function QuestPanel() {
     setSearch(""); setFilterLevel(""); setFilterDomain(""); setEditingGoal(null);
   }, setFocusProgrammeId);
 
+  const activeSection = useCockpitLayoutStore((s) => s.activeSection);
+  const inlineHost = useGoalsInlineHost((s) => s.host);
+  const inline = activeSection === "goals" && inlineHost !== null;
+
   useEffect(() => {
-    if (questPanelOpen) refresh();
-  }, [questPanelOpen, refresh]);
+    if (questPanelOpen || inline) refresh();
+  }, [questPanelOpen, inline, refresh]);
 
   const filteredTree = useMemo(
     () =>
@@ -81,7 +100,7 @@ export function QuestPanel() {
     [filteredTree, selectedGoalId],
   );
 
-  if (!questPanelOpen) return null;
+  if (!questPanelOpen && !inline) return null;
 
   const content = (
     <div className="cockpit-tone-scope cockpit-goals-scope flex-1 min-h-0 overflow-y-auto retro-scrollbar flex flex-col gap-3 pb-2">
@@ -162,6 +181,37 @@ export function QuestPanel() {
     </div>
   );
 
+  const goalForm = editingGoal !== null && (
+    <GoalForm
+      goal={editingGoal === "new" ? undefined : editingGoal}
+      onClose={() => setEditingGoal(null)}
+    />
+  );
+
+  if (inline && inlineHost) {
+    return (
+      <>
+        {createPortal(
+          <section className="cockpit-section-surface cockpit-goals-surface" data-testid="cockpit-goals-section" aria-label="Goals">
+            <div className="cockpit-section-header">
+              <div>
+                <div className="cockpit-eyebrow">GOALS</div>
+                <h2>Priorities</h2>
+                <p>Structured goals Seraph plans and reviews against. Select a goal to inspect its loop and programmes.</p>
+              </div>
+              <button type="button" className="cockpit-action" onClick={() => setEditingGoal("new")}>
+                New goal
+              </button>
+            </div>
+            {content}
+          </section>,
+          inlineHost,
+        )}
+        {goalForm}
+      </>
+    );
+  }
+
   return (
     <>
       <div className="cockpit-modal-shell">
@@ -190,12 +240,7 @@ export function QuestPanel() {
           <div className="cockpit-modal-body">{content}</div>
         </section>
       </div>
-      {editingGoal !== null && (
-        <GoalForm
-          goal={editingGoal === "new" ? undefined : editingGoal}
-          onClose={() => setEditingGoal(null)}
-        />
-      )}
+      {goalForm}
     </>
   );
 }

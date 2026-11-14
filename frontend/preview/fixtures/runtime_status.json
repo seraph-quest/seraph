@@ -1,0 +1,2743 @@
+{
+ "version": "2026.10.7",
+ "build_id": "SERAPH_PRIME_v2026.10.7",
+ "provider": "openrouter",
+ "model": "x-ai/grok-4.1-fast",
+ "model_label": "grok-4.1-fast",
+ "api_base": "https://openrouter.ai/api/v1",
+ "active_profile": "openrouter",
+ "effective_runtime": {
+  "runtime_path": "chat_agent",
+  "active_profile": "near_tee.text",
+  "configured_profile": "near_tee.text",
+  "provider": "near_tee",
+  "provider_label": "near_tee",
+  "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "configured_model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "model_label": "DeepSeek-V4.1-Flash-1017",
+  "mode": "remote_provider",
+  "route_label": "NEAR TEE text slot",
+  "summary_label": "NEAR TEE text slot \u00b7 DeepSeek-V4.1-Flash-1017",
+  "api_base": "https://cloud-api.near.ai/v1",
+  "vlm_configured": true,
+  "active_provider_policy": "near_tee_only",
+  "chat_turn_cap": {
+   "turn_timeout_seconds": 60.0,
+   "inference_deadline_seconds": 58.0,
+   "stream_window_seconds": 30.0,
+   "billing_reserve_seconds": 16.0
+  },
+  "tee_hosting_label": "TEE-hosted per NEAR catalog as of 2026-11-14T15:28:03.929152+00:00; NEAR gateway receives plaintext; attestation not verified by Seraph; no end-to-end encryption",
+  "tee_verified": false,
+  "e2ee": false,
+  "provider_receives_plaintext": true,
+  "inference_ready": true,
+  "inference_readiness": {
+   "status": "ready",
+   "reasons": [],
+   "provider": "near_tee",
+   "active_only": true,
+   "cloud_egress": "cloud_allowed_full",
+   "cloud_consent": true,
+   "cost_ceiling_microusd": 1000000000,
+   "profile_id": "near_tee.text",
+   "capabilities": {
+    "streaming": "ready",
+    "tool_use": "ready"
+   }
+  },
+  "legacy_local_route_blocked": true
+ },
+ "default_provider": "openrouter",
+ "default_model": "openrouter/x-ai/grok-4.1-fast",
+ "default_model_label": "grok-4.1-fast",
+ "default_api_base": "https://openrouter.ai/api/v1",
+ "provider_profiles": [
+  {
+   "id": "claude-anthropic",
+   "provider_kind": "anthropic",
+   "model": "anthropic/claude-sonnet-4-20250514",
+   "transport_model": "anthropic/claude-sonnet-4-20250514",
+   "api_base": "",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": false,
+   "missing_secret": true,
+   "options": {},
+   "capabilities": [
+    "reasoning",
+    "tool_use",
+    "writing"
+   ],
+   "cost": "high",
+   "cost_tier": "high",
+   "latency": "medium",
+   "latency_tier": "medium",
+   "task": "general",
+   "task_class": "general",
+   "task_classes": [],
+   "budget": "high",
+   "budget_class": "high",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Anthropic-keyed Claude profile; operators may pin the exact provider model id in LLM_PROVIDER_PROFILES.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": null,
+   "max_output_tokens": null,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": null,
+   "max_latency_ms": null,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "4cecff4de7a4676cddd2f5748290375e72ea1c49eb56d4d4423dd250c7a3f4fc",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_family_excluded"
+  },
+  {
+   "id": "codex-openai",
+   "provider_kind": "openai",
+   "model": "openai/gpt-5.5",
+   "transport_model": "gpt-5.5",
+   "api_base": "https://api.openai.com/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": false,
+   "missing_secret": true,
+   "options": {
+    "reasoning_effort": "low"
+   },
+   "capabilities": [
+    "reasoning",
+    "tool_use",
+    "coding"
+   ],
+   "cost": "high",
+   "cost_tier": "high",
+   "latency": "medium",
+   "latency_tier": "medium",
+   "task": "coding",
+   "task_class": "coding",
+   "task_classes": [],
+   "budget": "high",
+   "budget_class": "high",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "OpenAI GPT-5.5 profile with low reasoning effort configured as a request option; model id uses the LiteLLM provider prefix.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": null,
+   "max_output_tokens": null,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": null,
+   "max_latency_ms": null,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "17bd7cd37f69719a0ff0262c5ac3c41ad1bf5bfd059dc78dc4d17b909655e51c",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed"
+  },
+  {
+   "id": "gpt-5.5-low",
+   "provider_kind": "openai",
+   "model": "openai/gpt-5.5",
+   "transport_model": "gpt-5.5",
+   "api_base": "https://api.openai.com/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": false,
+   "missing_secret": true,
+   "options": {
+    "reasoning_effort": "low"
+   },
+   "capabilities": [
+    "reasoning",
+    "tool_use",
+    "coding"
+   ],
+   "cost": "high",
+   "cost_tier": "high",
+   "latency": "medium",
+   "latency_tier": "medium",
+   "task": "coding",
+   "task_class": "coding",
+   "task_classes": [],
+   "budget": "high",
+   "budget_class": "high",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Compatibility alias for codex-openai; model uses LiteLLM id openai/gpt-5.5 and reasoning_effort stays a request option.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": null,
+   "max_output_tokens": null,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": null,
+   "max_latency_ms": null,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "29a24a2c02a3f4c71956333851d952d529877cb6182afc0366c1aa0bdbbbb0ba",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed"
+  },
+  {
+   "id": "local-gemma-chat-thinking",
+   "provider_kind": "local",
+   "model": "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "transport_model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "api_base": "http://192.0.2.10:8001/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": true,
+   "missing_secret": false,
+   "options": {
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "reasoning": true
+   },
+   "capabilities": [
+    "text",
+    "streaming",
+    "structured_output",
+    "local",
+    "private",
+    "reasoning_profile",
+    "on"
+   ],
+   "cost": "low",
+   "cost_tier": "low",
+   "latency": "low",
+   "latency_tier": "low",
+   "task": "chat_agent",
+   "task_class": "chat_agent",
+   "task_classes": [
+    "interactive_chat"
+   ],
+   "budget": "low",
+   "budget_class": "low",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Local Gemma profile contract. Treat as unsafe for production profile routing until the local runtime proof receipt says safe.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": 32768,
+   "max_output_tokens": 4096,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": 120000,
+   "max_latency_ms": 120000,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "36fb61daa023c4291b3057894789db767f120ead13eb93fc4e42399110279c6b",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+   "prompt_safety_ratio": 0.9,
+   "tool_reserve_tokens": 14000,
+   "prompt_budget_tokens": 11395,
+   "runtime_path": "chat_agent",
+   "runtime_priority": "interactive"
+  },
+  {
+   "id": "local-gemma-report-thinking",
+   "provider_kind": "local",
+   "model": "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "transport_model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "api_base": "http://192.0.2.10:8001/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": true,
+   "missing_secret": false,
+   "options": {
+    "chat_template_kwargs": {
+     "enable_thinking": true
+    },
+    "reasoning": true
+   },
+   "capabilities": [
+    "text",
+    "streaming",
+    "structured_output",
+    "local",
+    "private",
+    "reasoning_profile",
+    "on"
+   ],
+   "cost": "low",
+   "cost_tier": "low",
+   "latency": "low",
+   "latency_tier": "low",
+   "task": "end_of_day_goal_report",
+   "task_class": "end_of_day_goal_report",
+   "task_classes": [
+    "report_synthesis",
+    "memory_synthesis"
+   ],
+   "budget": "low",
+   "budget_class": "low",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Local Gemma profile contract. Treat as unsafe for production profile routing until the local runtime proof receipt says safe.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": 32768,
+   "max_output_tokens": 4096,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": 240000,
+   "max_latency_ms": 240000,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "19ff080d8dda289576a3c462e321131d910f9a90e73a6a37893d05f045642d35",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+   "prompt_safety_ratio": 0.9,
+   "tool_reserve_tokens": 14000,
+   "prompt_budget_tokens": 11395,
+   "runtime_path": "end_of_day_goal_report",
+   "runtime_priority": "high"
+  },
+  {
+   "id": "local-gemma-screenshot-fast",
+   "provider_kind": "local",
+   "model": "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "transport_model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "api_base": "http://192.0.2.10:8001/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": true,
+   "missing_secret": false,
+   "options": {
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "reasoning": false,
+    "reasoning_format": "none"
+   },
+   "capabilities": [
+    "text",
+    "streaming",
+    "structured_output",
+    "local",
+    "private",
+    "reasoning_profile",
+    "off"
+   ],
+   "cost": "low",
+   "cost_tier": "low",
+   "latency": "low",
+   "latency_tier": "low",
+   "task": "screenshot_image_analysis",
+   "task_class": "screenshot_image_analysis",
+   "task_classes": [
+    "vision_analysis"
+   ],
+   "budget": "low",
+   "budget_class": "low",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Local Gemma profile contract. Treat as unsafe for production profile routing until the local runtime proof receipt says safe.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": 32768,
+   "max_output_tokens": 1400,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": 120000,
+   "max_latency_ms": 120000,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "c86ba55600f23081b504ae17143db805bdf076aff9ed1ac4c4dc5442a92801a5",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+   "prompt_safety_ratio": 0.9,
+   "tool_reserve_tokens": 14000,
+   "prompt_budget_tokens": 14091,
+   "runtime_path": "screenshot_image_analysis",
+   "runtime_priority": "normal"
+  },
+  {
+   "id": "local-gemma-strategist-fast",
+   "provider_kind": "local",
+   "model": "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "transport_model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "api_base": "http://192.0.2.10:8001/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": true,
+   "missing_secret": false,
+   "options": {
+    "chat_template_kwargs": {
+     "enable_thinking": false
+    },
+    "reasoning": false,
+    "reasoning_format": "none"
+   },
+   "capabilities": [
+    "text",
+    "streaming",
+    "structured_output",
+    "local",
+    "private",
+    "reasoning_profile",
+    "off"
+   ],
+   "cost": "low",
+   "cost_tier": "low",
+   "latency": "low",
+   "latency_tier": "low",
+   "task": "strategist_agent",
+   "task_class": "strategist_agent",
+   "task_classes": [
+    "agent_reasoning"
+   ],
+   "budget": "low",
+   "budget_class": "low",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Local Gemma profile contract. Treat as unsafe for production profile routing until the local runtime proof receipt says safe.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": 32768,
+   "max_output_tokens": 512,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": 60000,
+   "max_latency_ms": 60000,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "d8386a2f970bb0d3de8fe36db3429cd4c05b39210382bf6fb3e207c750842fba",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+   "prompt_safety_ratio": 0.9,
+   "tool_reserve_tokens": 14000,
+   "prompt_budget_tokens": 14979,
+   "runtime_path": "strategist_agent",
+   "runtime_priority": "high"
+  },
+  {
+   "id": "local-ollama",
+   "provider_kind": "local",
+   "model": "openai/unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "transport_model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+   "api_base": "http://localhost:11434/v1",
+   "enabled": true,
+   "keyless": true,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": true,
+   "missing_secret": false,
+   "options": {},
+   "capabilities": [
+    "text",
+    "streaming",
+    "local",
+    "private"
+   ],
+   "cost": "low",
+   "cost_tier": "low",
+   "latency": "low",
+   "latency_tier": "low",
+   "task": "general",
+   "task_class": "general",
+   "task_classes": [
+    "interactive_chat",
+    "report_synthesis",
+    "memory_synthesis",
+    "agent_reasoning"
+   ],
+   "budget": "low",
+   "budget_class": "low",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Local Ollama-compatible profile.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": 32768,
+   "max_output_tokens": 4096,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": 120000,
+   "max_latency_ms": 120000,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "12d8e3d82d0ff04d1de366a0280c388ec89f42eea27a644fde5150d8160d8c6c",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed"
+  },
+  {
+   "id": "near_tee.text",
+   "provider_kind": "near_tee",
+   "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+   "transport_model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+   "api_base": "https://cloud-api.near.ai/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": false,
+   "missing_secret": true,
+   "options": {
+    "_seraph_near_tee": {
+     "temperature": null,
+     "output_limit": 4096,
+     "timeout_seconds": 30.0,
+     "input_limit": 8192,
+     "request_cost_bound_microusd": 20000,
+     "catalog_ttl_hours": 24
+    }
+   },
+   "capabilities": [
+    "text",
+    "structured_output",
+    "streaming",
+    "tool_use"
+   ],
+   "cost": null,
+   "cost_tier": null,
+   "latency": null,
+   "latency_tier": null,
+   "task": "interactive_chat",
+   "task_class": "interactive_chat",
+   "task_classes": [
+    "interactive_chat",
+    "agent_reasoning",
+    "report_synthesis",
+    "memory_synthesis"
+   ],
+   "budget": "medium",
+   "budget_class": "medium",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in plaintext; no end-to-end encryption.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": 8192,
+   "max_output_tokens": 4096,
+   "cost_microusd": 20000,
+   "cost_source": "near_tee_catalog_receipt",
+   "cost_source_updated_at": 0.0,
+   "local_resource_ms": null,
+   "max_latency_ms": 30000,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "c0684fb634d9dd1517733388d30fc21444b8ce38d1f052fb98bb1efba3133868",
+   "model_fabric_eligible": true,
+   "model_fabric_exclusion_reason": null
+  },
+  {
+   "id": "openai-compatible",
+   "provider_kind": "openai_compatible",
+   "model": "openrouter/x-ai/grok-4.1-fast",
+   "transport_model": "openrouter/x-ai/grok-4.1-fast",
+   "api_base": "https://openrouter.ai/api/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": false,
+   "missing_secret": true,
+   "options": {},
+   "capabilities": [
+    "reasoning",
+    "tool_use"
+   ],
+   "cost": "medium",
+   "cost_tier": "medium",
+   "latency": "medium",
+   "latency_tier": "medium",
+   "task": "general",
+   "task_class": "general",
+   "task_classes": [],
+   "budget": "medium",
+   "budget_class": "medium",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "Generic OpenAI-compatible profile backed by LLM_API_BASE and LLM_API_KEY.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": null,
+   "max_output_tokens": null,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": null,
+   "max_latency_ms": null,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "e714a3adc26292b39ddb9b728cd20630ec7fe6c4a36fa9840ef1f91c51f77399",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "provider_kind_not_allowed"
+  },
+  {
+   "id": "openrouter",
+   "provider_kind": "openrouter",
+   "model": "openrouter/x-ai/grok-4.1-fast",
+   "transport_model": "x-ai/grok-4.1-fast",
+   "api_base": "https://openrouter.ai/api/v1",
+   "enabled": true,
+   "keyless": false,
+   "env_secret": "[redacted]",
+   "secret_env": "[redacted]",
+   "secret_ref": "[redacted]",
+   "secret_configured": false,
+   "missing_secret": true,
+   "options": {
+    "provider": {
+     "only": [],
+     "allow_fallbacks": false,
+     "require_parameters": true,
+     "data_collection": "deny",
+     "data_retention_policy": "deny",
+     "zdr": true
+    }
+   },
+   "capabilities": [
+    "text",
+    "reasoning",
+    "tool_use",
+    "streaming"
+   ],
+   "cost": "medium",
+   "cost_tier": "medium",
+   "latency": "medium",
+   "latency_tier": "medium",
+   "task": "general",
+   "task_class": "general",
+   "task_classes": [
+    "interactive_chat",
+    "report_synthesis",
+    "memory_synthesis",
+    "agent_reasoning"
+   ],
+   "budget": "medium",
+   "budget_class": "medium",
+   "fallback": [],
+   "fallback_models": [],
+   "safety_notes": "OpenRouter-compatible cloud profile; credentials stay provider-scoped.",
+   "transport_adapter": "openai_compatible_chat",
+   "context_window_tokens": null,
+   "max_output_tokens": null,
+   "cost_microusd": null,
+   "cost_source": null,
+   "cost_source_updated_at": null,
+   "local_resource_ms": null,
+   "max_latency_ms": null,
+   "follow_redirects": false,
+   "schema_version": "seraph.model-fabric.v1",
+   "contract_hash": "32c92d6fa229bfe6a3b665efb464742caaaed7cd4ef2a9fb77d826caac6379ab",
+   "model_fabric_eligible": false,
+   "model_fabric_exclusion_reason": "openrouter_retired"
+  }
+ ],
+ "vlm_runtime": {
+  "mode": "gpu-server",
+  "active": false,
+  "disabled_reason": "local_vlm_disabled_near_tee_only",
+  "configured": true,
+  "base_url": "http://192.0.2.10:8001",
+  "backend_url": "http://192.0.2.10:8000/v1",
+  "chat_api_base": "http://192.0.2.10:8001/v1",
+  "chat_completion_endpoint": "http://192.0.2.10:8001/v1/chat/completions",
+  "chat_health_endpoint": "http://192.0.2.10:8001/health/chat",
+  "queue_status_endpoint": "http://192.0.2.10:8001/queue/status",
+  "health_endpoint": "http://192.0.2.10:8001/health",
+  "backend_health_endpoint": "http://192.0.2.10:8001/health/backend",
+  "api_key_configured": true,
+  "feeder_window": 2,
+  "live_probe": {
+   "checked": false,
+   "reachable": false,
+   "reason": "deferred_fast_metadata",
+   "health": {
+    "checked": false,
+    "ok": false,
+    "status_code": null,
+    "error": ""
+   },
+   "backend_health": {
+    "checked": false,
+    "ok": false,
+    "status_code": null,
+    "error": ""
+   },
+   "queue_status": {
+    "checked": false,
+    "ok": false,
+    "status_code": null,
+    "error": ""
+   },
+   "chat_proxy": {
+    "checked": false,
+    "ok": false,
+    "status_code": null,
+    "error": ""
+   }
+  }
+ },
+ "model_fabric": {
+  "status": "blocked",
+  "configuration_status": "ready",
+  "configuration_error": null,
+  "configured_chat_profile": "openrouter",
+  "inference_readiness": {
+   "status": "blocked",
+   "profile_id": "openrouter",
+   "provider": null,
+   "reasons": [
+    "openrouter_retired",
+    "no_active_provider",
+    "profile_ineligible:openrouter_retired",
+    "credential_missing",
+    "context_bound_missing",
+    "output_bound_missing",
+    "latency_bound_missing",
+    "cost_bound_missing",
+    "cost_source_missing",
+    "proof_missing:health",
+    "proof_missing:latency_ms",
+    "proof_missing:streaming",
+    "proof_missing:text",
+    "proof_missing:tool_use",
+    "chat_provider_policy_missing"
+   ]
+  },
+  "inference_accounting": {
+   "authorized_period": "2026-11",
+   "period_high_water": "2026-11",
+   "reason_code": null,
+   "status": "ready",
+   "accounting_continuity_verified": true,
+   "revision": 33,
+   "ledger_digest": "redacted-ledger_digest",
+   "request_reserve_review": {
+    "settings_revision": 3,
+    "accounting_revision": 2,
+    "bound_microusd": 20000
+   },
+   "period_review": null,
+   "deployment_id": "redacted-deployment_id",
+   "period_id": "2026-11",
+   "settings_revision": 3,
+   "ceiling_microusd": 1000000000,
+   "committed_microusd": 2113,
+   "reserved_microusd": 0,
+   "unknown_microusd": 0,
+   "remaining_microusd": 999997887,
+   "overrun_max_cost_microusd": 0,
+   "unreviewed_overruns": [],
+   "operation_count": 10,
+   "operations_truncated": false,
+   "memory_status": "no_learning"
+  },
+  "profiles": [
+   {
+    "id": "near_tee.text",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "near_tee",
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "api_base": "https://cloud-api.near.ai/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": false,
+    "missing_secret": true,
+    "capabilities": [
+     "text",
+     "structured_output",
+     "streaming",
+     "tool_use"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": 20000,
+    "cost_source": "near_tee_catalog_receipt",
+    "cost_source_updated_at": 0.0,
+    "model_fabric_eligible": true,
+    "model_fabric_exclusion_reason": null,
+    "routable": false,
+    "non_routable_reasons": [
+     "credential_missing",
+     "cost_source_stale"
+    ],
+    "canary_timeout_seconds": 30
+   }
+  ],
+  "excluded_profiles": [
+   {
+    "id": "openrouter",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "openrouter",
+    "model": "x-ai/grok-4.1-fast",
+    "api_base": "https://openrouter.ai/api/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": false,
+    "missing_secret": true,
+    "capabilities": [
+     "text",
+     "reasoning",
+     "tool_use",
+     "streaming"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "openrouter_retired",
+    "routable": false,
+    "non_routable_reasons": [
+     "openrouter_retired",
+     "credential_missing",
+     "context_bound_missing",
+     "output_bound_missing",
+     "latency_bound_missing",
+     "cost_bound_missing",
+     "cost_source_missing",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:streaming",
+     "proof_missing:text",
+     "proof_missing:tool_use"
+    ],
+    "canary_timeout_seconds": 10
+   },
+   {
+    "id": "openai-compatible",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "openai_compatible",
+    "model": "openrouter/x-ai/grok-4.1-fast",
+    "api_base": "https://openrouter.ai/api/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": false,
+    "missing_secret": true,
+    "capabilities": [
+     "reasoning",
+     "tool_use"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "credential_missing",
+     "context_bound_missing",
+     "output_bound_missing",
+     "latency_bound_missing",
+     "cost_bound_missing",
+     "cost_source_missing",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:tool_use"
+    ],
+    "canary_timeout_seconds": 10
+   },
+   {
+    "id": "codex-openai",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "openai",
+    "model": "gpt-5.5",
+    "api_base": "https://api.openai.com/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": false,
+    "missing_secret": true,
+    "capabilities": [
+     "reasoning",
+     "tool_use",
+     "coding"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "credential_missing",
+     "context_bound_missing",
+     "output_bound_missing",
+     "latency_bound_missing",
+     "cost_bound_missing",
+     "cost_source_missing",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:tool_use"
+    ],
+    "canary_timeout_seconds": 10
+   },
+   {
+    "id": "gpt-5.5-low",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "openai",
+    "model": "gpt-5.5",
+    "api_base": "https://api.openai.com/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": false,
+    "missing_secret": true,
+    "capabilities": [
+     "reasoning",
+     "tool_use",
+     "coding"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "credential_missing",
+     "context_bound_missing",
+     "output_bound_missing",
+     "latency_bound_missing",
+     "cost_bound_missing",
+     "cost_source_missing",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:tool_use"
+    ],
+    "canary_timeout_seconds": 10
+   },
+   {
+    "id": "claude-anthropic",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "anthropic",
+    "model": "anthropic/claude-sonnet-4-20250514",
+    "api_base": "",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": false,
+    "missing_secret": true,
+    "capabilities": [
+     "reasoning",
+     "tool_use",
+     "writing"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_family_excluded",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_family_excluded",
+     "credential_ref_not_allowed",
+     "endpoint_invalid",
+     "context_bound_missing",
+     "output_bound_missing",
+     "latency_bound_missing",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:tool_use"
+    ],
+    "canary_timeout_seconds": 10
+   },
+   {
+    "id": "local-ollama",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "local",
+    "model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+    "api_base": "http://localhost:11434/v1",
+    "enabled": true,
+    "keyless": true,
+    "secret_configured": true,
+    "missing_secret": false,
+    "capabilities": [
+     "text",
+     "streaming",
+     "local",
+     "private"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:streaming",
+     "proof_missing:text"
+    ],
+    "canary_timeout_seconds": 120
+   },
+   {
+    "id": "local-gemma-screenshot-fast",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "local",
+    "model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+    "api_base": "http://192.0.2.10:8001/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": true,
+    "missing_secret": false,
+    "capabilities": [
+     "text",
+     "streaming",
+     "structured_output",
+     "local",
+     "private",
+     "reasoning_profile",
+     "off"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:streaming",
+     "proof_missing:structured_output",
+     "proof_missing:text"
+    ],
+    "canary_timeout_seconds": 120
+   },
+   {
+    "id": "local-gemma-report-thinking",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "local",
+    "model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+    "api_base": "http://192.0.2.10:8001/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": true,
+    "missing_secret": false,
+    "capabilities": [
+     "text",
+     "streaming",
+     "structured_output",
+     "local",
+     "private",
+     "reasoning_profile",
+     "on"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:streaming",
+     "proof_missing:structured_output",
+     "proof_missing:text"
+    ],
+    "canary_timeout_seconds": 180
+   },
+   {
+    "id": "local-gemma-chat-thinking",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "local",
+    "model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+    "api_base": "http://192.0.2.10:8001/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": true,
+    "missing_secret": false,
+    "capabilities": [
+     "text",
+     "streaming",
+     "structured_output",
+     "local",
+     "private",
+     "reasoning_profile",
+     "on"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:streaming",
+     "proof_missing:structured_output",
+     "proof_missing:text"
+    ],
+    "canary_timeout_seconds": 120
+   },
+   {
+    "id": "local-gemma-strategist-fast",
+    "profile_contract_hash": "redacted-profile_contract_hash",
+    "provider_kind": "local",
+    "model": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+    "api_base": "http://192.0.2.10:8001/v1",
+    "enabled": true,
+    "keyless": false,
+    "secret_configured": true,
+    "missing_secret": false,
+    "capabilities": [
+     "text",
+     "streaming",
+     "structured_output",
+     "local",
+     "private",
+     "reasoning_profile",
+     "off"
+    ],
+    "transport_adapter": "openai_compatible_chat",
+    "cost_microusd": null,
+    "cost_source": null,
+    "cost_source_updated_at": null,
+    "model_fabric_eligible": false,
+    "model_fabric_exclusion_reason": "provider_kind_not_allowed",
+    "routable": false,
+    "non_routable_reasons": [
+     "provider_kind_not_allowed",
+     "proof_missing:health",
+     "proof_missing:latency_ms",
+     "proof_missing:streaming",
+     "proof_missing:structured_output",
+     "proof_missing:text"
+    ],
+    "canary_timeout_seconds": 60
+   }
+  ],
+  "workload_policies": [],
+  "openrouter_setup": null,
+  "near_tee": {
+   "schema_version": "seraph.near.tee.setup.v1",
+   "api_base": "https://cloud-api.near.ai/v1",
+   "allowlist": {
+    "text": [
+     "Qwen/Qwen3.6-35B-A3B-FP8",
+     "Qwen/Qwen3.8-27B",
+     "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "z-ai/glm-5.3-flash"
+    ],
+    "vision": [
+     "Qwen/Qwen3-VL-30B-A3B-Instruct",
+     "Qwen/Qwen3.8-27B",
+     "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "z-ai/glm-5.3-flash"
+    ],
+    "embedding": [
+     "Qwen/Qwen3-Embedding-0.6B"
+    ]
+   },
+   "implemented_slots": [
+    "text",
+    "vision",
+    "embedding"
+   ],
+   "tee_verified": false,
+   "e2ee": false,
+   "disclosure": "TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in plaintext; no end-to-end encryption.",
+   "screenshot_disclosure": "Screenshots are sent to the NEAR gateway in plaintext for analysis. TEE-hosted per NEAR catalog, not verified by Seraph; no end-to-end encryption.",
+   "vision_max_timeout_seconds": 4.0,
+   "check_capabilities": {
+    "text": [
+     "health",
+     "latency_ms",
+     "streaming",
+     "structured_output",
+     "text",
+     "tool_use"
+    ],
+    "vision": [
+     "health",
+     "latency_ms",
+     "structured_output",
+     "vision"
+    ],
+    "embedding": [
+     "embedding",
+     "health",
+     "latency_ms"
+    ]
+   },
+   "catalog_check_endpoint": "/api/settings/model-fabric/near-tee/catalog-check",
+   "reasoning_recommended_max_output_tokens": 4096,
+   "configured": true,
+   "status": "ready",
+   "embedding_index": null,
+   "reason_code": null,
+   "key_present": true,
+   "credential_fingerprint": "[redacted]",
+   "slots": {
+    "text": {
+     "model_id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "max_input_tokens": 8192,
+     "max_output_tokens": 4096,
+     "request_cost_bound_microusd": 20000,
+     "enabled": true,
+     "timeout_seconds": 30.0,
+     "temperature": null,
+     "catalog_ttl_hours": 24,
+     "purpose_consent_revision": 7,
+     "max_batch_size": null,
+     "profile_id": "near_tee.text",
+     "profile_hash": "c0684fb634d9dd1517733388d30fc21444b8ce38d1f052fb98bb1efba3133868",
+     "chat_capabilities": {
+      "streaming": "ready",
+      "tool_use": "ready"
+     },
+     "structured_output_basis": "capability_proof",
+     "structured_output_capability": "ready",
+     "consent_current": true,
+     "status": "ready",
+     "reason_code": null,
+     "catalog_receipt": {
+      "slot": "text",
+      "model_id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "profile_hash": "c0684fb634d9dd1517733388d30fc21444b8ce38d1f052fb98bb1efba3133868",
+      "checked_at_iso": "2026-11-14T15:28:03.929152+00:00",
+      "expires_at": "2026-11-15T15:28:03.929152+00:00",
+      "ttl_hours": 24,
+      "outcome": "passed",
+      "reason_code": null,
+      "provider_type": "vllm",
+      "attestation_supported": true,
+      "verifiable": true,
+      "is_ready": null,
+      "readiness_basis": "absent_flag_attested",
+      "input_modalities": [
+       "image",
+       "text"
+      ],
+      "output_modalities": [
+       "text"
+      ],
+      "features": [
+       "reasoning",
+       "tools"
+      ],
+      "structured_outputs": false,
+      "input_price_usd_per_million": "0.300000000",
+      "output_price_usd_per_million": "1.200000000",
+      "image_price_usd": null,
+      "context_length": 1048576,
+      "max_output_tokens": null,
+      "catalog_embedding_dimension": null,
+      "required_cost_microusd": 7373,
+      "response_sha256": "b1ddd46af7a2f847ecf607778718350e373811787310582e6d0b82aa591781b4",
+      "tee_hosted_per_catalog": true,
+      "tee_verified": false,
+      "e2ee": false
+     },
+     "catalog_receipt_current": true,
+     "tee_hosted_per_catalog": true,
+     "tee_hosting_label": "TEE-hosted per NEAR catalog as of 2026-11-14T15:28:03.929152+00:00; NEAR gateway receives plaintext; attestation not verified by Seraph; no end-to-end encryption",
+     "capability_check_timeout_seconds": 46,
+     "check_capabilities": [
+      "text",
+      "health",
+      "latency_ms"
+     ]
+    },
+    "vision": null,
+    "embedding": null
+   }
+  },
+  "inference_lane": {
+   "spend_ceiling_microusd": 1000000000,
+   "max_queued": 64,
+   "max_inflight": 1,
+   "max_outstanding_per_owner": 16,
+   "max_retries": 2,
+   "request_reserve_review_microusd": null,
+   "schema_version": "seraph.inference.lane.v1",
+   "published": true,
+   "status": "published"
+  },
+  "provider_retirement": {
+   "openrouter": {
+    "state": "retired",
+    "reason_code": "openrouter_retired",
+    "decision": "ADR-035",
+    "label": "Retired (ADR-035) \u2014 no new requests; existing costs can still be settled",
+    "new_requests_allowed": false,
+    "settlement_available": true,
+    "route_revoke": {
+     "status": "noop",
+     "reason_code": null
+    }
+   }
+  },
+  "proofs": [
+   {
+    "profile_id": "openrouter",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "openrouter",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "openrouter",
+    "capability": "streaming",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "openrouter",
+    "capability": "text",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "openrouter",
+    "capability": "tool_use",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "openai-compatible",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "openai-compatible",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "openai-compatible",
+    "capability": "tool_use",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "codex-openai",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "codex-openai",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "codex-openai",
+    "capability": "tool_use",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "gpt-5.5-low",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "gpt-5.5-low",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "gpt-5.5-low",
+    "capability": "tool_use",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-ollama",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-ollama",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-ollama",
+    "capability": "streaming",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-ollama",
+    "capability": "text",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-screenshot-fast",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-screenshot-fast",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-screenshot-fast",
+    "capability": "streaming",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-screenshot-fast",
+    "capability": "structured_output",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-screenshot-fast",
+    "capability": "text",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-report-thinking",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-report-thinking",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-report-thinking",
+    "capability": "streaming",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-report-thinking",
+    "capability": "structured_output",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-report-thinking",
+    "capability": "text",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-chat-thinking",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-chat-thinking",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-chat-thinking",
+    "capability": "streaming",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-chat-thinking",
+    "capability": "structured_output",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-chat-thinking",
+    "capability": "text",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-strategist-fast",
+    "capability": "health",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-strategist-fast",
+    "capability": "latency_ms",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-strategist-fast",
+    "capability": "streaming",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-strategist-fast",
+    "capability": "structured_output",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "local-gemma-strategist-fast",
+    "capability": "text",
+    "status": "missing",
+    "outcome": null,
+    "checked_at": null,
+    "expires_at": null
+   },
+   {
+    "profile_id": "near_tee.text",
+    "capability": "health",
+    "status": "fresh",
+    "outcome": "passed",
+    "checked_at": "2026-11-14T15:28:12.496035+00:00",
+    "expires_at": "2026-11-15T15:28:12.496035+00:00"
+   },
+   {
+    "profile_id": "near_tee.text",
+    "capability": "latency_ms",
+    "status": "fresh",
+    "outcome": "passed",
+    "checked_at": "2026-11-14T15:28:15.184498+00:00",
+    "expires_at": "2026-11-15T15:28:15.184498+00:00"
+   },
+   {
+    "profile_id": "near_tee.text",
+    "capability": "streaming",
+    "status": "fresh",
+    "outcome": "passed",
+    "checked_at": "2026-11-14T15:28:17.188269+00:00",
+    "expires_at": "2026-11-15T15:28:17.188269+00:00"
+   },
+   {
+    "profile_id": "near_tee.text",
+    "capability": "structured_output",
+    "status": "fresh",
+    "outcome": "passed",
+    "checked_at": "2026-11-14T15:28:16.130652+00:00",
+    "expires_at": "2026-11-15T15:28:16.130652+00:00"
+   },
+   {
+    "profile_id": "near_tee.text",
+    "capability": "text",
+    "status": "fresh",
+    "outcome": "passed",
+    "checked_at": "2026-11-14T15:28:11.135218+00:00",
+    "expires_at": "2026-11-15T15:28:11.135218+00:00"
+   },
+   {
+    "profile_id": "near_tee.text",
+    "capability": "tool_use",
+    "status": "fresh",
+    "outcome": "passed",
+    "checked_at": "2026-11-14T15:28:18.355898+00:00",
+    "expires_at": "2026-11-15T15:28:18.355898+00:00"
+   }
+  ],
+  "topology": {
+   "text": [
+    "audio_transcription",
+    "general_task_planner",
+    "readonly_research_child",
+    "cordis_interactive_inference",
+    "cordis_background_inference",
+    "chat_agent",
+    "onboarding_agent",
+    "orchestrator_agent",
+    "strategist_agent",
+    "session_title_generation",
+    "session_consolidation",
+    "context_window_summary",
+    "daily_briefing",
+    "activity_digest",
+    "evening_review",
+    "weekly_activity_review",
+    "end_of_day_goal_report",
+    "screenshot_observation_digest",
+    "memory_embedding",
+    "memory_keeper",
+    "vault_keeper",
+    "goal_planner",
+    "web_researcher",
+    "file_worker",
+    "workflow_runner"
+   ],
+   "vlm": [
+    "screenshot_image_analysis"
+   ]
+  },
+  "runtime_paths": {
+   "audio_transcription": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "general_task_planner": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "readonly_research_child": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "cordis_interactive_inference": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "cordis_background_inference": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "chat_agent": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "onboarding_agent": {
+    "selected": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 2904
+    },
+    "attempted": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 2904
+    },
+    "attempt_count": 1,
+    "last_outcome": "succeeded",
+    "fallback_used": false,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "receipt_id": "redacted-receipt_id",
+     "finished_at": "2026-11-14T15:30:47.296776+00:00"
+    },
+    "persistence": "persisted",
+    "persistence_error_code": null,
+    "persistence_observed_at": "2026-11-14T15:30:47.298911+00:00",
+    "receipt_persistence_degraded": false
+   },
+   "orchestrator_agent": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "strategist_agent": {
+    "selected": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "failed",
+     "latency_ms": 19904
+    },
+    "attempted": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "failed",
+     "latency_ms": 19904
+    },
+    "attempt_count": 1,
+    "last_outcome": "failed",
+    "fallback_used": false,
+    "fallback_reason_code": null,
+    "degradation_codes": [
+     "near_tee_output_truncated"
+    ],
+    "succeeded": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "receipt_id": "redacted-receipt_id",
+     "finished_at": "2026-11-14T15:30:38.655135+00:00"
+    },
+    "persistence": "persisted",
+    "persistence_error_code": null,
+    "persistence_observed_at": "2026-11-14T15:45:55.580260+00:00",
+    "receipt_persistence_degraded": false
+   },
+   "session_title_generation": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "session_consolidation": {
+    "selected": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 3868
+    },
+    "attempted": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 3868
+    },
+    "attempt_count": 1,
+    "last_outcome": "succeeded",
+    "fallback_used": false,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "receipt_id": "redacted-receipt_id",
+     "finished_at": "2026-11-14T15:45:35.664565+00:00"
+    },
+    "persistence": "persisted",
+    "persistence_error_code": null,
+    "persistence_observed_at": "2026-11-14T15:45:35.678455+00:00",
+    "receipt_persistence_degraded": false
+   },
+   "context_window_summary": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "daily_briefing": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "activity_digest": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "evening_review": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "weekly_activity_review": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "end_of_day_goal_report": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "screenshot_observation_digest": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "screenshot_image_analysis": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "memory_embedding": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "memory_keeper": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "vault_keeper": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "goal_planner": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "web_researcher": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "file_worker": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "workflow_runner": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "capability_probe": {
+    "selected": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 2879
+    },
+    "attempted": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 2879
+    },
+    "attempt_count": 1,
+    "last_outcome": "succeeded",
+    "fallback_used": false,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "receipt_id": "redacted-receipt_id",
+     "finished_at": "2026-11-14T15:28:21.235634+00:00"
+    },
+    "persistence": "persisted",
+    "persistence_error_code": null,
+    "persistence_observed_at": "2026-11-14T15:28:21.245923+00:00",
+    "receipt_persistence_degraded": false
+   }
+  },
+  "workloads": {
+   "interactive": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "vision": {
+    "selected": null,
+    "attempted": null,
+    "attempt_count": 0,
+    "last_outcome": null,
+    "fallback_used": null,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": null,
+    "persistence": "unknown",
+    "persistence_error_code": null,
+    "persistence_observed_at": null,
+    "receipt_persistence_degraded": false
+   },
+   "capability_probe": {
+    "selected": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 2879
+    },
+    "attempted": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "destination_class": "remote",
+     "outcome": "succeeded",
+     "latency_ms": 2879
+    },
+    "attempt_count": 1,
+    "last_outcome": "succeeded",
+    "fallback_used": false,
+    "fallback_reason_code": null,
+    "degradation_codes": [],
+    "succeeded": {
+     "profile_id": "near_tee.text",
+     "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+     "adapter": "openai_compatible_chat",
+     "receipt_id": "redacted-receipt_id",
+     "finished_at": "2026-11-14T15:28:21.235634+00:00"
+    },
+    "persistence": "persisted",
+    "persistence_error_code": null,
+    "persistence_observed_at": "2026-11-14T15:28:21.245923+00:00",
+    "receipt_persistence_degraded": false
+   }
+  }
+ },
+ "cordis_runtime": {
+  "runtime_role": "lifecycle_host",
+  "state": "ready",
+  "reason": null,
+  "recovery": null,
+  "readiness": {
+   "state": "verified",
+   "checked_at": 1794671473387
+  },
+  "native_services": {
+   "state": "partial",
+   "supported_methods": [
+    "artifacts.adopt",
+    "artifacts.read",
+    "artifacts.stage",
+    "audit.append",
+    "authority.resolve",
+    "capabilities.describe",
+    "capabilities.invoke",
+    "capabilities.list",
+    "connections.inspect",
+    "connections.invokeBoundAdapter",
+    "goals.read",
+    "inference.request",
+    "memory.retrieve",
+    "tasks.admit",
+    "tasks.cancel",
+    "tasks.checkpoint",
+    "tasks.inspect"
+   ],
+   "blocked_methods": [
+    "agent-loop.cancelTurn",
+    "agent-loop.inspectTurn",
+    "agent-loop.startTurn",
+    "board-workers.startTurn",
+    "conversation.accept",
+    "conversation.append",
+    "conversation.cancel",
+    "conversation.read",
+    "delegation.startChild",
+    "guardian.startTurn",
+    "memory.applyReviewed",
+    "memory.forget",
+    "memory.propose",
+    "research.buildPlan",
+    "research.executeAccepted",
+    "scheduler.disable",
+    "scheduler.dispatchDue",
+    "scheduler.register",
+    "source-extraction.extract",
+    "tasks.settle"
+   ],
+   "transient_failures": 0,
+   "last_transient_reason": null
+  },
+  "profile_id": "seraph-cordis-bootstrap-v1",
+  "cordis_version": "4.0.0-rc.10",
+  "node_version": "v22.16.0",
+  "composition_digest": "233e222b4a689aa73fdcc200bdb48895b02c2c7c7b0d037947731e814aded977",
+  "package_digest": "d2f1549f08f07fb070d332ff8363caad3f0baf0c2f579f6980aa89c06976d718",
+  "plugins": [
+   {
+    "id": "operator@example.invalid",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.state.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.authority.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.goals.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.tasks.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.capabilities.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.inference.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.memory.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.artifacts.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.audit.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.research.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.conversation.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.scheduler.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.dispatch.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.connections.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.agent-presets.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.agent-loop.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.guardian.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.delegation.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.board-workers.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.source-extraction.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.goal-plan.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   },
+   {
+    "id": "seraph.guardian-research.v1",
+    "state": "ready",
+    "reason": null,
+    "digest": "redacted-digest"
+   }
+  ],
+  "cleanup": {
+   "state": "pending",
+   "process_reaped": false,
+   "resources_remaining": 3,
+   "cordis_disposal": "not_started"
+  }
+ },
+ "providers": {
+  "providers": [
+   {
+    "provider": "state",
+    "state": "active",
+    "reason_code": null
+   },
+   {
+    "provider": "authority",
+    "state": "active",
+    "reason_code": null
+   },
+   {
+    "provider": "audit",
+    "state": "active",
+    "reason_code": null
+   },
+   {
+    "provider": "tasks",
+    "state": "active",
+    "reason_code": null
+   },
+   {
+    "provider": "goals",
+    "state": "active",
+    "reason_code": null
+   },
+   {
+    "provider": "memory",
+    "state": "active",
+    "reason_code": null
+   },
+   {
+    "provider": "artifacts",
+    "state": "active",
+    "reason_code": null
+   }
+  ],
+  "mandatory_ready": true,
+  "audit_write_probe": {
+   "checked_at": "2026-11-14T15:15:31.279531+00:00",
+   "outcome": "passed",
+   "reason_code": null
+  }
+ },
+ "chat_runtime": {
+  "loop": "cordis.agent-loop.v1",
+  "route": "chat_agent",
+  "owner_epoch": 3,
+  "reason": null,
+  "recovery": null,
+  "owner_kind": "cordis"
+ },
+ "guardian_runtime": {
+  "loop": "cordis.guardian.v1",
+  "owner_epoch": 3,
+  "reason": null,
+  "recovery": null
+ },
+ "runtime_domains": [
+  {
+   "domain": "seraph.authority.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.goals.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.tasks.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.capabilities.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.inference.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.memory.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.artifacts.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.audit.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.research.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.conversation.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.scheduler.v1",
+   "owner_kind": "cordis",
+   "epoch": 2,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.connections.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.agent-presets.v1",
+   "owner_kind": "cordis",
+   "epoch": 3,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.agent-loop.v1",
+   "owner_kind": "cordis",
+   "epoch": 3,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.guardian.v1",
+   "owner_kind": "cordis",
+   "epoch": 3,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.delegation.v1",
+   "owner_kind": "cordis",
+   "epoch": 3,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.source-extraction.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.board-workers.v1",
+   "owner_kind": "cordis",
+   "epoch": 3,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.state.v1",
+   "owner_kind": "legacy",
+   "epoch": 1,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  },
+  {
+   "domain": "seraph.dispatch.v1",
+   "owner_kind": "cordis",
+   "epoch": 2,
+   "state": "ready",
+   "reason": null,
+   "recovery": null
+  }
+ ],
+ "scheduler_runtime": {
+  "domain": "seraph.scheduler.v1",
+  "state": "active",
+  "reason": null,
+  "recovery": null,
+  "owner_kind": "cordis",
+  "epoch": 2,
+  "since": "2026-11-14T15:15:31.407785+00:00",
+  "inflight": 0,
+  "owner": "cordis",
+  "owner_epoch": 2,
+  "owner_state": "ready",
+  "blocked_jobs": []
+ },
+ "dispatch_runtime": {
+  "domain": "seraph.dispatch.v1",
+  "state": "active",
+  "reason": null,
+  "recovery": null,
+  "owner_kind": "cordis",
+  "epoch": 2,
+  "since": "2026-11-14T15:15:31.410712+00:00",
+  "inflight": 0,
+  "live_workers": 0,
+  "owner": "cordis",
+  "owner_epoch": 2,
+  "owner_state": "ready"
+ },
+ "gpu_admission": {
+  "schema_version": "seraph.remote-inference-admission.v1",
+  "resource_class": "remote_inference",
+  "status": "ready",
+  "degraded": false,
+  "degradation_code": null,
+  "serial_gpu": false,
+  "serial_remote_inference": true,
+  "max_active": 1,
+  "max_inflight": 1,
+  "max_retries": 2,
+  "active": null,
+  "queued": [],
+  "capacity": {
+   "max_queued": 64,
+   "queued": 0,
+   "available": 64,
+   "max_outstanding_per_owner": 16,
+   "max_owner_cost_microusd": 1000000000,
+   "owners": {}
+  },
+  "operator_visible": true,
+  "claim_boundary": "process_local_admission_lease; durable_job_repository_remains_canonical",
+  "verification": {
+   "contract": "contract_tested",
+   "configuration": "configuration_required",
+   "provider": "live_unverified"
+  }
+ },
+ "remote_inference_admission": {
+  "schema_version": "seraph.remote-inference-admission.v1",
+  "resource_class": "remote_inference",
+  "status": "ready",
+  "degraded": false,
+  "degradation_code": null,
+  "serial_gpu": false,
+  "serial_remote_inference": true,
+  "max_active": 1,
+  "max_inflight": 1,
+  "max_retries": 2,
+  "active": null,
+  "queued": [],
+  "capacity": {
+   "max_queued": 64,
+   "queued": 0,
+   "available": 64,
+   "max_outstanding_per_owner": 16,
+   "max_owner_cost_microusd": 1000000000,
+   "owners": {}
+  },
+  "operator_visible": true,
+  "claim_boundary": "process_local_admission_lease; durable_job_repository_remains_canonical",
+  "verification": {
+   "contract": "contract_tested",
+   "configuration": "configuration_required",
+   "provider": "live_unverified"
+  }
+ },
+ "timezone": "UTC",
+ "llm_logging_enabled": true,
+ "operator_auth": {
+  "mode": "local_no_login",
+  "local_no_login": true,
+  "login_required": false
+ }
+}

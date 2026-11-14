@@ -27,8 +27,21 @@ fallback):
   ``architecture.outputModalities``, ``supportedFeatures``, optional
   ``maxOutputLength`` and optional ``isReady``.
 
-Readiness absent (as for ``deepseek-ai/DeepSeek-V4.1-Flash-1017``) is not
-ready. An absent ``maxOutputLength`` is an unknown output limit: the slot then
+Readiness (#1167, ADR-035 amendment 2026-11-14): ``isReady: true`` passes
+(basis ``catalog_ready``); an explicit ``isReady: false`` fails
+``near_tee_catalog_not_ready``; an **absent** ``isReady`` passes only when the
+record is otherwise eligible (``providerType`` ``vllm``,
+``attestationSupported`` true and ``verifiable`` true), with basis
+``absent_flag_attested`` recorded in the receipt (as for
+``deepseek-ai/DeepSeek-V4.1-Flash-1017``). Any other shape is not ready.
+
+``structured_outputs`` in the receipt is NEAR's catalog fact only. It is not a
+capability: callers needing structured output still need a fresh
+``structured_output`` capability proof on the slot profile, and a current
+proof can establish the vision slot's json_schema mode when the catalog omits
+the feature (``near_tee_vision.vision_structured_basis``).
+
+An absent ``maxOutputLength`` is an unknown output limit: the slot then
 passes only with ``max_output_tokens`` at most
 ``UNKNOWN_OUTPUT_LIMIT_CAP`` (8192), otherwise
 ``near_tee_catalog_output_limit_unknown``.
@@ -71,6 +84,18 @@ _EMBEDDING_OUTPUT_MODALITIES = frozenset({"embedding", "embeddings"})
 _EMBEDDING_DIMENSION_FIELDS = ("embeddingDimension", "embeddingDimensions", "dimensions", "outputDimension")
 # Conservative output bound when the catalog omits maxOutputLength.
 UNKNOWN_OUTPUT_LIMIT_CAP = 8192
+# Readiness bases recorded in the receipt (#1167).
+READINESS_CATALOG_READY = "catalog_ready"
+READINESS_ABSENT_FLAG_ATTESTED = "absent_flag_attested"
+# Reasoning models (catalog ``supportedFeatures`` lists ``reasoning``) spend
+# reasoning tokens inside ``max_tokens``. Guidance for the slot's maximum
+# output, surfaced in Settings; nothing enforces it.
+REASONING_RECOMMENDED_MAX_OUTPUT_TOKENS = 4096
+# Output budget of a capability check: 64 tokens, or for a reasoning model up
+# to this many (never above the slot's own maximum output) so the check does
+# not end inside the reasoning phase (#1167).
+CHECK_OUTPUT_TOKENS = 64
+REASONING_CHECK_OUTPUT_TOKENS = 1024
 
 
 class NearTeeCatalogError(ValueError):
@@ -202,6 +227,21 @@ def required_cost_microusd(facts: CatalogFacts, *, max_input_tokens: int, max_ou
     return math.ceil(total)
 
 
+def readiness_basis(facts: CatalogFacts) -> str | None:
+    """Why the record counts as ready, or None when it does not (#1167).
+
+    An explicit ``isReady: false`` is never ready. An absent flag is inferred
+    ready only for an otherwise eligible TEE-hosted record (vllm, attestation
+    supported, verifiable); the receipt records that basis.
+    """
+    if facts.is_ready is True:
+        return READINESS_CATALOG_READY
+    if (facts.is_ready is None and facts.provider_type == "vllm" and facts.attestation_supported is True
+            and facts.verifiable is True):
+        return READINESS_ABSENT_FLAG_ATTESTED
+    return None
+
+
 def _evaluate_embedding(facts: CatalogFacts, *, slot) -> tuple[str | None, int | None]:
     """Embedding slot catalog rules.
 
@@ -219,7 +259,7 @@ def _evaluate_embedding(facts: CatalogFacts, *, slot) -> tuple[str | None, int |
         return "near_tee_catalog_not_attested", required
     if facts.verifiable is not True:
         return "near_tee_catalog_not_verifiable", required
-    if facts.is_ready is not True:
+    if readiness_basis(facts) is None:
         return "near_tee_catalog_not_ready", required
     if "text" not in facts.input_modalities or not _EMBEDDING_OUTPUT_MODALITIES.intersection(facts.output_modalities):
         return "near_tee_catalog_modality_missing", required
@@ -249,7 +289,7 @@ def evaluate_catalog(facts: CatalogFacts, *, slot_name: str, slot) -> tuple[str 
         return "near_tee_catalog_not_attested", required
     if facts.verifiable is not True:
         return "near_tee_catalog_not_verifiable", required
-    if facts.is_ready is not True:
+    if readiness_basis(facts) is None:
         return "near_tee_catalog_not_ready", required
     if not needed_in <= set(facts.input_modalities) or not needed_out <= set(facts.output_modalities):
         return "near_tee_catalog_modality_missing", required
@@ -286,12 +326,30 @@ def _image_price_text(price: tuple[int, int] | None) -> str | None:
 def receipt_structured_outputs(slot_name: str, *, receipts: dict[str, dict[str, object]] | None = None) -> bool:
     """Whether the slot's stored receipt lists NEAR's ``structured_outputs`` feature.
 
+    A catalog fact only, never a capability: the vision slot combines it with
+    a current json_schema capability proof (``vision_structured_basis``); the
+    text slot's structured callers need their own fresh proof regardless.
     Read only after ``catalog_receipt_block_reason`` passed for the same
     receipts; never refreshes the catalog.
     """
     receipt = (read_catalog_receipts() if receipts is None else receipts).get(slot_name)
     features = receipt.get("features") if isinstance(receipt, dict) else None
     return isinstance(features, list) and "structured_outputs" in features
+
+
+def check_output_tokens(slot_name: str, slot_max_output_tokens: int, *,
+                        receipts: dict[str, dict[str, object]] | None = None) -> int:
+    """The ``max_tokens`` a capability check of this slot sends.
+
+    64 by default; up to ``REASONING_CHECK_OUTPUT_TOKENS`` (bounded by the
+    slot's maximum output) when the slot's receipt lists ``reasoning``, since
+    reasoning tokens count against ``max_tokens``.
+    """
+    receipt = (read_catalog_receipts() if receipts is None else receipts).get(slot_name)
+    features = receipt.get("features") if isinstance(receipt, dict) else None
+    if isinstance(features, list) and "reasoning" in features:
+        return max(1, min(int(slot_max_output_tokens), REASONING_CHECK_OUTPUT_TOKENS))
+    return CHECK_OUTPUT_TOKENS
 
 
 def build_receipt(*, slot_name: str, slot, profile, facts: CatalogFacts | None, raw: bytes | None,
@@ -308,6 +366,8 @@ def build_receipt(*, slot_name: str, slot, profile, facts: CatalogFacts | None, 
         "attestation_supported": facts.attestation_supported if facts else None,
         "verifiable": facts.verifiable if facts else None,
         "is_ready": facts.is_ready if facts else None,
+        # "catalog_ready", "absent_flag_attested" (#1167) or None (not ready).
+        "readiness_basis": readiness_basis(facts) if facts else None,
         "input_modalities": list(facts.input_modalities) if facts else [],
         "output_modalities": list(facts.output_modalities) if facts else [],
         "features": list(facts.features) if facts else [],

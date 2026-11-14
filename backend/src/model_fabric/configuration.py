@@ -65,8 +65,12 @@ NEAR_TEE_TEXT_ALLOWLIST: dict[str, int] = {
     "Qwen/Qwen3.6-35B-A3B-FP8": 262_144,
 }
 # ADR-035 vision rows (text+image input per the 2026-11-13 catalog read).
-# DeepSeek-V4.1-Flash-1017 is listed but its catalog record lacks
-# ``isReady`` and structured outputs, so the catalog check fails closed.
+# DeepSeek-V4.1-Flash-1017's catalog record lacks ``isReady`` and lists no
+# ``structured_outputs``. Since #1167 (ADR-035 amendment 2026-11-14) the
+# catalog check infers readiness for an absent flag on a vllm, attested and
+# verifiable record (basis ``absent_flag_attested``; an explicit false still
+# fails), and structured output needs a current capability proof: the vision
+# slot uses prompt-JSON unless a json_schema proof establishes it.
 NEAR_TEE_VISION_ALLOWLIST: dict[str, int] = {
     "z-ai/glm-5.3-flash": 1_048_576,
     "Qwen/Qwen3.8-27B": 262_144,

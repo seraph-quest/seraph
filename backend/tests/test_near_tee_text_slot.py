@@ -245,6 +245,10 @@ def test_answer_never_uses_reasoning_and_checks_echo():
     assert near_tee_answer(reasoning_only, TEXT_MODEL) == (None, "near_tee_empty_output")
     reasoning_only["choices"][0]["message"]["content"] = None
     assert near_tee_answer(reasoning_only, TEXT_MODEL) == (None, "near_tee_empty_output")
+    # #1167: reasoning that used the whole output bound is a truncation, and
+    # the reasoning text still never becomes the answer.
+    reasoning_only["choices"][0]["finish_reason"] = "length"
+    assert near_tee_answer(reasoning_only, TEXT_MODEL) == (None, "near_tee_output_truncated")
     assert near_tee_answer({**payload, "model": "Qwen/Qwen3-30B-A3B-Instruct-2507"}, TEXT_MODEL) == (None, "near_tee_model_mismatch")
     tools = json.loads(json.dumps(payload))
     tools["choices"][0]["message"]["tool_calls"] = [{"id": "x"}]
@@ -255,8 +259,13 @@ def test_answer_never_uses_reasoning_and_checks_echo():
     ({"providerType": "chutes"}, "near_tee_catalog_provider_not_vllm"),
     ({"attestationSupported": False}, "near_tee_catalog_not_attested"),
     ({"verifiable": False}, "near_tee_catalog_not_verifiable"),
-    ({"isReady": _ABSENT}, "near_tee_catalog_not_ready"),
+    # #1167: an absent isReady is inferred ready only on an attested and
+    # verifiable vllm record; an explicit false always blocks.
     ({"isReady": False}, "near_tee_catalog_not_ready"),
+    ({"isReady": _ABSENT, "attestationSupported": _ABSENT}, "near_tee_catalog_not_attested"),
+    ({"isReady": _ABSENT, "attestationSupported": False}, "near_tee_catalog_not_attested"),
+    ({"isReady": _ABSENT, "verifiable": _ABSENT}, "near_tee_catalog_not_verifiable"),
+    ({"isReady": _ABSENT, "providerType": _ABSENT}, "near_tee_catalog_provider_not_vllm"),
     ({"input_modalities": ("image",)}, "near_tee_catalog_modality_missing"),
     ({"output_modalities": ("image",)}, "near_tee_catalog_modality_missing"),
     ({"contextLength": 4096}, "near_tee_catalog_context_too_small"),
@@ -277,10 +286,14 @@ def test_catalog_unknown_output_limit_and_flat_shape():
     with pytest.raises(NearTeeCatalogError, match="near_tee_catalog_response_invalid"):
         parse_catalog_record(json.dumps(flat_catalog_record()).encode(), model_id=TEXT_MODEL)
     # No silent top-level fallback for metadata fields.
-    hoisted = catalog_record(isReady=_ABSENT)
+    hoisted = catalog_record(isReady=False)
     hoisted["isReady"] = True
     facts = parse_catalog_record(json.dumps(hoisted).encode(), model_id=TEXT_MODEL)
     assert evaluate_catalog(facts, slot_name="text", slot=_slot(enabled=True))[0] == "near_tee_catalog_not_ready"
+    hoisted = catalog_record(isReady=_ABSENT, attestationSupported=_ABSENT)
+    hoisted["attestationSupported"] = True
+    facts = parse_catalog_record(json.dumps(hoisted).encode(), model_id=TEXT_MODEL)
+    assert evaluate_catalog(facts, slot_name="text", slot=_slot(enabled=True))[0] == "near_tee_catalog_not_attested"
 
 
 def test_catalog_cost_bound_and_shape():

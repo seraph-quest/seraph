@@ -57,7 +57,14 @@ from src.auth.cancellation import (
     reset_revocation_guard,
     set_revocation_guard,
 )
-from src.auth.service import AuthFailure, auth_enabled, authenticate_token, bind_operator_principal
+from src.auth.service import (
+    AuthFailure,
+    auth_enabled,
+    authenticate_session,
+    authenticate_token,
+    bind_operator_principal,
+    local_no_login_active,
+)
 from src.guardian.state import build_guardian_state
 from src.models.schemas import ChatIngressEnvelope, ChatRequest, ChatResponse
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
@@ -131,13 +138,30 @@ def _approval_transport_metadata(exc: ApprovalRequired, approval: object | None 
     return metadata
 
 
+def _local_root_session_id(http_request: HttpRequest) -> str | None:
+    """The persisted local no-login root bound by the auth middleware."""
+    if auth_enabled() or not local_no_login_active():
+        return None
+    operator = getattr(getattr(http_request, "state", None), "operator", None)
+    session_id = getattr(operator, "session_id", None)
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+async def _recheck_rest_authority(auth_cookie: str | None, local_session_id: str | None) -> None:
+    if local_session_id:
+        await authenticate_session(local_session_id, touch=False)
+        return
+    await authenticate_token(auth_cookie, touch=False)
+
+
 async def _watch_rest_operator_session(
     auth_cookie: str | None,
     revocation_guard: Event,
     stop_event: asyncio.Event,
+    local_session_id: str | None = None,
 ) -> None:
     """Fail closed when an authenticated REST turn loses its session."""
-    if not auth_cookie or not auth_enabled():
+    if not local_session_id and (not auth_cookie or not auth_enabled()):
         return
     poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
     while not stop_event.is_set():
@@ -147,7 +171,7 @@ async def _watch_rest_operator_session(
         except asyncio.TimeoutError:
             pass
         try:
-            await authenticate_token(auth_cookie, touch=False)
+            await _recheck_rest_authority(auth_cookie, local_session_id)
         except AuthFailure:
             revocation_guard.set()
             return
@@ -160,12 +184,15 @@ async def _watch_rest_operator_session(
 def _begin_rest_revocation_watch(http_request: HttpRequest):
     """Install a context-propagated revocation guard for one REST inference."""
     auth_cookie = http_request.cookies.get(settings.operator_auth_cookie_name)
-    if not auth_cookie or not auth_enabled():
+    local_session_id = _local_root_session_id(http_request)
+    if not local_session_id and (not auth_cookie or not auth_enabled()):
         return None
     revocation_guard = Event()
     stop_event = asyncio.Event()
     watcher = asyncio.create_task(
-        _watch_rest_operator_session(auth_cookie, revocation_guard, stop_event),
+        _watch_rest_operator_session(
+            auth_cookie, revocation_guard, stop_event, local_session_id=local_session_id,
+        ),
         name="rest-operator-revocation-watch",
     )
     token = set_revocation_guard(revocation_guard)
@@ -192,9 +219,9 @@ async def _ensure_rest_authorized(http_request: HttpRequest, scope) -> None:
         assert_runtime_not_revoked()
         if scope[0].is_set():
             raise RuntimeRevokedError("authenticated operator session was revoked")
-        await authenticate_token(
+        await _recheck_rest_authority(
             http_request.cookies.get(settings.operator_auth_cookie_name),
-            touch=False,
+            _local_root_session_id(http_request),
         )
         # The watcher may revoke the session while token authentication is
         # awaiting its result. Recheck both the context guard and the watcher

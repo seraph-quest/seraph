@@ -13,7 +13,6 @@ import json
 import subprocess
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
 from tests.cordis_agent_loop import deny_sockets
@@ -851,34 +850,6 @@ async def test_a_blocked_guardian_domain_skips_every_flush_and_keeps_its_fingerp
 
 # ---------------------------------------------------------------- one broker, one ledger
 
-class _ProviderBoundary(httpx.AsyncBaseTransport, httpx.BaseTransport):
-    """httpx transport at the provider boundary: canaries and decisions answered locally, nothing leaves."""
-
-    def __init__(self, calls: list):
-        self.calls = calls
-
-    def _answer(self, request) -> bytes:
-        assert request.url.host == "openrouter.ai" and request.url.path == "/api/v1/chat/completions"
-        body = json.loads(request.content)
-        self.calls.append(body)
-        if len(body["messages"]) == 1:
-            content = '{"ok":true}' if "response_format" in body else "CANARY_OK"
-        else:
-            content = STRATEGIST_SCENARIOS["no_intervene"]
-        return json.dumps(dict(id=f"intercepted-{len(self.calls)}",
-                               choices=[dict(message=dict(role="assistant", content=content))],
-                               usage=dict(cost="0.000002", prompt_tokens=10, completion_tokens=10))).encode()
-
-    async def handle_async_request(self, request):
-        from tests.test_research_native_vertical import ResponseBytes
-        return httpx.Response(200, request=request, headers={"content-type": "application/json"},
-                              stream=ResponseBytes(self._answer(request)))
-
-    def handle_request(self, request):
-        return httpx.Response(200, request=request, headers={"content-type": "application/json"},
-                              content=self._answer(request))
-
-
 async def _claimed_tick(occurrence: str) -> int:
     from datetime import datetime, timedelta, timezone
     from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec
@@ -897,56 +868,25 @@ async def _claimed_tick(occurrence: str) -> int:
 
 @needs_cordis
 @pytest.mark.asyncio
-# ADR-035: pins the governed strategist path over the intercepted historical OpenRouter transport and ledger
-@pytest.mark.openrouter_legacy
 async def test_strategist_inference_lands_in_the_one_broker_and_ledger_on_both_owners(  # noqa: F811
         accounting_db, real_auth, monkeypatch):
-    """The real governed path, offline: the same broker, ledger row, owner and tick binding on either loop."""
+    """The real governed path, offline: the same broker, ledger row, owner and tick binding on either loop.
+
+    ADR-035: the strategist route is the NEAR TEE text slot; NEAR is the
+    intercepted fixture (any other host fails the test) and the cost settles
+    from its billing readback.
+    """
     deny_sockets(monkeypatch)
-    from dataclasses import replace
-    from fastapi import FastAPI
     from sqlalchemy import select
     from src.agent.strategist import run_strategist_decision_completion
-    from src.api import auth, model_fabric_settings
-    from src.auth.middleware import OperatorAuthMiddleware
     from src.db.engine import get_session
     from src.db.models import InferenceCostReservation
     from src.model_fabric import remote_inference_admission
-    from src.model_fabric.configuration import write_model_fabric_configuration
-    from tests.test_inference_accounting import setup_configuration
+    from tests.near_tee_support import near_inference_requests, prepare_near_tee_vertical
     monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
                         remote_inference_admission.remote_inference_admission_broker)
-    configured = setup_configuration()
-    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
-        replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "structured_output")),
-        profiles=(), policies=()), egress_revision=configured.egress_revision + 1))
-    await durable_job_repository.configure_inference_accounting(1000)
-    calls = []
-    original_client, original_sync_client = httpx.AsyncClient, httpx.Client
-
-    def clients(**kwargs):
-        if kwargs.get("transport") is None:
-            kwargs["transport"] = _ProviderBoundary(calls)
-        return original_client(**kwargs)
-
-    def sync_clients(**kwargs):
-        if kwargs.get("transport") is None:
-            kwargs["transport"] = _ProviderBoundary(calls)
-        return original_sync_client(**kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", clients)
-    monkeypatch.setattr(httpx, "Client", sync_clients)
-    app = FastAPI()
-    app.add_middleware(OperatorAuthMiddleware)
-    app.include_router(auth.router, prefix="/api/auth")
-    app.include_router(model_fabric_settings.router, prefix="/api")
-    async with original_client(transport=httpx.ASGITransport(app=app), base_url="http://test",
-                               headers={"origin": "http://localhost:3001"}) as client:
-        assert (await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})).status_code == 200
-        for capability in ("text", "structured_output", "latency_ms", "health"):
-            proof = await client.post("/api/settings/model-fabric/canary", json=dict(
-                profile_id="openrouter", capability=capability, timeout_seconds=30))
-            assert proof.status_code == 200 and proof.json()["outcome"] == "passed", proof.text
-    canaries = len(calls)
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=durable_job_repository)
+    near.answer = {"role": "assistant", "content": STRATEGIST_SCENARIOS["no_intervene"]}
     ledger = {}
     async with guardian_host(cordis=False) as host:
         monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
@@ -966,10 +906,13 @@ async def test_strategist_inference_lands_in_the_one_broker_and_ledger_on_both_o
                     InferenceCostReservation.job_id == occurrence))).scalars().all()
             ledger[owner] = [(row.runtime_path, row.owner_id, row.state, row.job_fencing_token == fence,
                               row.actual_cost_microusd) for row in rows]
+    # NEAR billing: 1_500_000 nano-USD = 1500 micro-USD per settled request.
     assert ledger["legacy"] == ledger["cordis"] == [
-        ("strategist_agent", "service:scheduler:strategist_tick", ledger["legacy"][0][2], True, 2)]
-    decisions = calls[canaries:]
+        ("strategist_agent", "service:scheduler:strategist_tick", ledger["legacy"][0][2], True, 1500)]
+    decisions = [json.loads(request.content) for request in near_inference_requests(near)
+                 if request.url.path == "/v1/chat/completions"]
     assert len(decisions) == 2 and decisions[0] == decisions[1]  # the same provider request on both loops
+    assert {request.url.host for request in near.requests} == {"cloud-api.near.ai"}
     (turn,) = await _jobs_of_kind("cordis_guardian_turn_v1")
     assert turn["status"] == "succeeded"
 

@@ -13,7 +13,10 @@ from src.auth.service import (
     AuthFailure,
     AuthenticatedOperator,
     auth_enabled,
+    authenticate_local_operator,
     authenticate_token,
+    is_loopback_host,
+    local_no_login_active,
     test_bypass_operator,
 )
 
@@ -79,15 +82,47 @@ def _hostname(value: str) -> str:
     return hostname.strip().rstrip(".").lower()
 
 
+def _origin_hostname(origin: str) -> str:
+    try:
+        return (urlsplit(origin).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def validate_request_boundary(*, host: str, origin: str | None, method: str) -> str | None:
     allowed_hosts = {_hostname(item) for item in _csv(settings.operator_auth_allowed_hosts)}
     if not _hostname(host) or _hostname(host) not in allowed_hosts:
+        return "origin_forbidden"
+    local = local_no_login_active()
+    if local and not is_loopback_host(_hostname(host)):
+        # No-login authority is loopback-only: a configured LAN or test host
+        # name never reaches it (DNS-rebinding defence).
         return "origin_forbidden"
     if method.upper() not in _SAFE_METHODS:
         if not origin:
             return "mutation_origin_required"
         if origin.rstrip("/") not in _csv(settings.operator_auth_allowed_origins):
             return "origin_forbidden"
+    if local and origin:
+        # Without a login there is no cookie to withhold from a cross-site
+        # page, so any Origin a browser sends must be an allowed loopback one,
+        # even on a safe method.
+        if (
+            origin.rstrip("/") not in _csv(settings.operator_auth_allowed_origins)
+            or not is_loopback_host(_origin_hostname(origin))
+        ):
+            return "origin_forbidden"
+    return None
+
+
+def local_peer_error(peer: str | None) -> str | None:
+    """No-login requests must come from a loopback socket peer.
+
+    The socket peer is used directly; forwarding headers are never trusted
+    for this decision.
+    """
+    if not is_loopback_host(peer):
+        return "local_peer_forbidden"
     return None
 
 
@@ -140,10 +175,17 @@ async def authenticate_websocket(websocket) -> AuthenticatedOperator:
     WebSockets do not pass through Starlette's HTTP middleware stack, so the
     handshake must enforce the same host/origin and session-cookie boundary.
     """
+    local = False
     if not auth_enabled():
         if test_bypass_enabled():
             return test_bypass_operator()
-        raise AuthFailure("auth_not_configured")
+        if not local_no_login_active():
+            raise AuthFailure("auth_not_configured")
+        local = True
+        client = getattr(websocket, "client", None)
+        peer_error = local_peer_error(getattr(client, "host", None))
+        if peer_error:
+            raise AuthFailure(peer_error)
     boundary_error = validate_request_boundary(
         host=websocket.headers.get("host", ""),
         origin=websocket.headers.get("origin"),
@@ -151,6 +193,8 @@ async def authenticate_websocket(websocket) -> AuthenticatedOperator:
     )
     if boundary_error:
         raise AuthFailure(boundary_error)
+    if local:
+        return await authenticate_local_operator()
     return await authenticate_token(
         websocket.cookies.get(settings.operator_auth_cookie_name)
     )
@@ -158,13 +202,21 @@ async def authenticate_websocket(websocket) -> AuthenticatedOperator:
 
 class OperatorAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        local = False
         if not auth_enabled():
             if test_bypass_enabled():
                 request.state.operator = test_bypass_operator()
                 return await call_next(request)
-            if request.url.path.startswith("/api"):
-                return _auth_failure_response(request.url.path, "auth_not_configured", status_code=503)
-            return await call_next(request)
+            if not local_no_login_active():
+                if request.url.path.startswith("/api"):
+                    return _auth_failure_response(request.url.path, "auth_not_configured", status_code=503)
+                return await call_next(request)
+            # Local single-operator mode (#1161): no login, but every request
+            # must come from a loopback peer and pass the Host/Origin boundary.
+            local = True
+            peer_error = local_peer_error(request.client.host if request.client else None)
+            if peer_error:
+                return JSONResponse({"detail": {"code": peer_error}}, status_code=403)
         from src.workflows.selected_context_contract import COMPANION_ORIGIN, PAIRED_PATHS
         if request.method == "POST" and request.url.path in PAIRED_PATHS:
             # Closed MV3 ingress only. Never grant browser cookie authority or
@@ -201,7 +253,9 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
         try:
-            if request.method == "GET" and request.url.path == "/api/operator/continuation":
+            if local:
+                operator = await authenticate_local_operator()
+            elif request.method == "GET" and request.url.path == "/api/operator/continuation":
                 from src.auth.service import authenticate_home_token_readonly
                 operator = await authenticate_home_token_readonly(request.cookies.get(settings.operator_auth_cookie_name))
             else:

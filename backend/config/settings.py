@@ -114,6 +114,17 @@ class Settings(BaseSettings):
     operator_auth_allow_unauthenticated_tests: bool = False
     operator_auth_backend_workers: int = 1
     operator_auth_revocation_poll_seconds: float = 2.0
+    # Opt-in local single-operator mode without a password (#1161). Startup
+    # refuses it unless DEPLOYMENT_ENVIRONMENT=development, no operator
+    # secret/hash is configured, and the backend binds loopback only. Every
+    # request is still checked for a loopback peer plus allowed Host/Origin.
+    # Any local process or page that passes those checks has operator
+    # authority; never enable it on a shared or remotely reachable host.
+    operator_auth_local_no_login: bool = False
+    # The host the backend listener binds. The managed local launcher exports
+    # it beside its ``--host`` argument; local no-login mode refuses to start
+    # unless it names a loopback address.
+    backend_bind_host: str = ""
 
     # Phase 1 — Soul & Memory
     soul_file: str = "soul.md"

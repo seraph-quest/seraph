@@ -53,6 +53,147 @@ def auth_enabled() -> bool:
     return bool(settings.operator_auth_secret or settings.operator_auth_secret_hash)
 
 
+# Local single-operator mode without login (#1161).  The persisted root row is
+# found by this marker in ``token_hash``.  Real bearer hashes are 64-character
+# SHA-256 hex digests, so no presented cookie can ever hash to the marker and
+# the root has no bearer credential at all.
+LOCAL_ROOT_TOKEN_MARKER = "local-no-login-root"
+# The local root has no idle or absolute expiry: identity and ownership stay
+# stable across restarts while the mode stays enabled.
+LOCAL_ROOT_EXPIRY = datetime(2999, 1, 1, tzinfo=timezone.utc)
+AUTH_MODE_PASSWORD = "password"
+AUTH_MODE_LOCAL_NO_LOGIN = "local_no_login"
+AUTH_MODE_TEST_BYPASS = "test_bypass"
+AUTH_MODE_UNCONFIGURED = "unconfigured"
+
+
+def local_no_login_active() -> bool:
+    """Whether the opt-in loopback-only no-login mode is in effect.
+
+    Startup validation refuses an invalid combination; this predicate repeats
+    the environment and credential conditions so a later settings change can
+    never widen the mode beyond development without a password.
+    """
+    return (
+        bool(settings.operator_auth_local_no_login)
+        and not auth_enabled()
+        and settings.deployment_environment.strip().lower() == "development"
+    )
+
+
+def operator_sessions_enforced() -> bool:
+    """Whether requests resolve to a persisted operator root.
+
+    True for password authentication and for the local no-login root; false
+    for the unconfigured fail-closed state and the explicit test bypass.
+    """
+    return auth_enabled() or local_no_login_active()
+
+
+def auth_mode() -> str:
+    if auth_enabled():
+        return AUTH_MODE_PASSWORD
+    if local_no_login_active():
+        return AUTH_MODE_LOCAL_NO_LOGIN
+    if (
+        settings.deployment_environment == "test"
+        and settings.operator_auth_allow_unauthenticated_tests
+    ):
+        return AUTH_MODE_TEST_BYPASS
+    return AUTH_MODE_UNCONFIGURED
+
+
+def auth_mode_status() -> dict:
+    """Non-sensitive auth-mode projection for runtime status and audit."""
+    mode = auth_mode()
+    return {
+        "mode": mode,
+        "local_no_login": mode == AUTH_MODE_LOCAL_NO_LOGIN,
+        "login_required": mode == AUTH_MODE_PASSWORD,
+    }
+
+
+_LOOPBACK_NAMES = {"localhost"}
+
+
+def is_loopback_host(value: str | None) -> bool:
+    """True for ``localhost`` or a literal loopback IPv4/IPv6 address."""
+    import ipaddress
+
+    raw = str(value or "").strip().lower().rstrip(".")
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    if not raw:
+        return False
+    if raw in _LOOPBACK_NAMES:
+        return True
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return bool(address.is_loopback or (mapped is not None and mapped.is_loopback))
+
+
+def _argv_bind_options(argv: list[str]) -> tuple[str | None, bool]:
+    """Return the uvicorn ``--host`` value and whether a socket was inherited."""
+    host: str | None = None
+    inherited = False
+    for index, item in enumerate(argv):
+        if item == "--host" and index + 1 < len(argv):
+            host = argv[index + 1]
+        elif item.startswith("--host="):
+            host = item.split("=", 1)[1]
+        elif item in {"--fd", "--uds"} or item.startswith(("--fd=", "--uds=")):
+            inherited = True
+    return host, inherited
+
+
+def local_bind_error(argv: list[str] | None = None) -> str | None:
+    """Explain why the backend bind is not provably loopback-only."""
+    import sys
+
+    configured = settings.backend_bind_host.strip()
+    if not configured:
+        return (
+            "OPERATOR_AUTH_LOCAL_NO_LOGIN requires BACKEND_BIND_HOST to name the "
+            "loopback listener (the managed local launcher sets 127.0.0.1)"
+        )
+    if not is_loopback_host(configured):
+        return f"OPERATOR_AUTH_LOCAL_NO_LOGIN requires a loopback bind, not {configured!r}"
+    argv_host, inherited = _argv_bind_options(list(sys.argv if argv is None else argv))
+    if inherited:
+        return "OPERATOR_AUTH_LOCAL_NO_LOGIN cannot verify an inherited --fd/--uds listener"
+    if argv_host is not None and not is_loopback_host(argv_host):
+        return f"OPERATOR_AUTH_LOCAL_NO_LOGIN requires a loopback bind, not --host {argv_host!r}"
+    return None
+
+
+def _validate_local_no_login() -> None:
+    environment = settings.deployment_environment.strip().lower()
+    if environment != "development":
+        raise RuntimeError(
+            "OPERATOR_AUTH_LOCAL_NO_LOGIN is permitted only when DEPLOYMENT_ENVIRONMENT=development"
+        )
+    if settings.operator_auth_secret or settings.operator_auth_secret_hash:
+        raise RuntimeError(
+            "OPERATOR_AUTH_LOCAL_NO_LOGIN cannot be combined with OPERATOR_AUTH_SECRET or OPERATOR_AUTH_SECRET_HASH"
+        )
+    if settings.operator_auth_allow_unauthenticated_tests:
+        raise RuntimeError("OPERATOR_AUTH_LOCAL_NO_LOGIN cannot be combined with the test auth bypass")
+    bind_error = local_bind_error()
+    if bind_error:
+        raise RuntimeError(bind_error)
+    from urllib.parse import urlsplit
+
+    hosts = [item.strip() for item in settings.operator_auth_allowed_hosts.split(",") if item.strip()]
+    if not any(is_loopback_host(urlsplit(f"//{item}").hostname) for item in hosts):
+        raise RuntimeError("OPERATOR_AUTH_LOCAL_NO_LOGIN requires a loopback host in OPERATOR_AUTH_ALLOWED_HOSTS")
+    origins = [item.strip() for item in settings.operator_auth_allowed_origins.split(",") if item.strip()]
+    if not any(is_loopback_host(urlsplit(item).hostname) for item in origins):
+        raise RuntimeError("OPERATOR_AUTH_LOCAL_NO_LOGIN requires a loopback origin in OPERATOR_AUTH_ALLOWED_ORIGINS")
+
+
 def require_auth_configured() -> None:
     if not auth_enabled():
         raise AuthFailure("auth_not_configured")
@@ -78,6 +219,8 @@ def validate_auth_configuration() -> None:
         raise RuntimeError("operator authentication expiry configuration is invalid")
     if settings.operator_auth_revocation_poll_seconds <= 0:
         raise RuntimeError("operator authentication revocation polling must be positive")
+    if settings.operator_auth_local_no_login:
+        _validate_local_no_login()
 
 
 def _pbkdf2(value: str, salt: bytes, iterations: int = 600_000) -> bytes:
@@ -330,6 +473,9 @@ async def create_session(
 
 
 def _touch_is_due(record: OperatorSession, now: datetime) -> bool:
+    if _is_local_root(record):
+        # The local root has no idle window to slide.
+        return False
     last_seen_at = _aware(record.last_seen_at)
     configured_idle_seconds = max(float(settings.operator_auth_idle_seconds), 0.001)
     interval = min(
@@ -472,6 +618,9 @@ async def _find_session_record(
         record = await db.get(OperatorSession, current_id)
         if record is None:
             return None, "authentication_required"
+        if _is_local_root(record) and not local_no_login_active():
+            # The no-login root carries authority only while its mode is on.
+            return None, "session_revoked"
         # Tombstones hold retired bearer hashes only.  They are never owner
         # authorities, including for the narrow WebSocket continuity path.
         if record.is_bearer_tombstone is not False:
@@ -718,4 +867,158 @@ async def authenticate_principal(principal_id: str, *, db=None) -> Authenticated
     now = datetime.now(timezone.utc)
     if record is None or record.revoked_at is not None or now >= _aware(record.idle_expires_at) or now >= _aware(record.absolute_expires_at):
         raise AuthFailure('session_revoked')
+    if _is_local_root(record) and not local_no_login_active():
+        raise AuthFailure('session_revoked')
     return await _operator_from_record(db, record)
+
+
+def _is_local_root(record: OperatorSession) -> bool:
+    token_hash = str(getattr(record, "token_hash", "") or "")
+    return token_hash == LOCAL_ROOT_TOKEN_MARKER or token_hash.startswith(LOCAL_ROOT_TOKEN_MARKER + ":")
+
+
+def _local_root_usable(record: OperatorSession, now: datetime) -> bool:
+    return (
+        record.is_bearer_tombstone is False
+        and record.revoked_at is None
+        and record.replaced_by_id is None
+        and now < _aware(record.idle_expires_at)
+        and now < _aware(record.absolute_expires_at)
+    )
+
+
+_LOCAL_ROOT_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _local_root_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    with _AUTH_TOUCH_LOCKS_GUARD:
+        lock = _LOCAL_ROOT_LOCKS.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _LOCAL_ROOT_LOCKS[loop] = lock
+        return lock
+
+
+async def _read_local_root(db) -> OperatorSession | None:
+    return (
+        await db.execute(
+            select(OperatorSession)
+            .where(OperatorSession.token_hash == LOCAL_ROOT_TOKEN_MARKER)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def authenticate_local_operator() -> AuthenticatedOperator:
+    """Resolve the persisted local single-operator root (#1161).
+
+    The root is an ordinary ``OperatorSession`` owner row with a normal
+    ``operator:root:*`` principal, the normal operator grants and a bound
+    ``OperatorIdentity``, so ownership, WebSocket watches and durable owner
+    checks use the same contracts as a password session.  It is created once
+    and reused across restarts.  It has no bearer token and no expiry; it is
+    reachable only through the loopback/Host/Origin-checked local mode.
+    """
+    if not local_no_login_active():
+        raise AuthFailure("auth_not_configured")
+    now = datetime.now(timezone.utc)
+    async with get_session() as db:
+        record = await _read_local_root(db)
+        if record is not None and _local_root_usable(record, now):
+            return await _operator_from_record(db, record)
+    operator, _created = await _ensure_local_root()
+    return operator
+
+
+async def _ensure_local_root() -> tuple[AuthenticatedOperator, bool]:
+    from src.db.models import OperatorIdentity
+
+    async with _local_root_lock():
+        now = datetime.now(timezone.utc)
+        async with get_session() as db:
+            record = await _read_local_root(db)
+            if record is not None and _local_root_usable(record, now):
+                return await _operator_from_record(db, record), False
+            identity_id: str | None = None
+            predecessor = record
+            if predecessor is None:
+                # A root retired while the mode was off keeps its identity.
+                predecessor = (
+                    await db.execute(
+                        select(OperatorSession)
+                        .where(OperatorSession.token_hash.like(LOCAL_ROOT_TOKEN_MARKER + ":retired:%"))
+                        .order_by(OperatorSession.created_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if predecessor is not None and predecessor.operator_identity_id:
+                # A live identity carries over so earlier work stays
+                # discoverable through the normal ownership-recovery contract;
+                # the retired root itself never regains authority.
+                identity = await db.get(OperatorIdentity, predecessor.operator_identity_id)
+                if identity is not None and identity.revoked_at is None:
+                    identity_id = identity.id
+            if record is not None:
+                # Keep the retired root as revoked history and free the marker.
+                record.revoked_at = record.revoked_at or now
+                record.token_hash = f"{LOCAL_ROOT_TOKEN_MARKER}:retired:{record.id}"
+                db.add(record)
+                await db.flush()
+            if identity_id is None:
+                identity = OperatorIdentity()
+                db.add(identity)
+                await db.flush()
+                identity_id = identity.id
+            record = OperatorSession(
+                token_hash=LOCAL_ROOT_TOKEN_MARKER,
+                idle_expires_at=LOCAL_ROOT_EXPIRY,
+                absolute_expires_at=LOCAL_ROOT_EXPIRY,
+                is_bearer_tombstone=False,
+                operator_identity_id=identity_id,
+            )
+            db.add(record)
+            await db.flush()
+            operator = await _operator_from_record(db, record)
+    logger.warning(
+        "Local no-login operator root created (principal %s); any loopback "
+        "process or page passing the Host/Origin checks has operator authority",
+        operator.principal.principal_id,
+    )
+    return operator, True
+
+
+async def reconcile_local_operator_root() -> dict:
+    """Startup reconciliation of the local root with the configured mode.
+
+    With the mode on, the root is ensured (created once, then reused).  With
+    the mode off, an active local root is revoked so no background owner check
+    keeps treating it as live under password authentication.  Its operator
+    identity is kept, so re-enabling the mode binds a new root to the same
+    identity rather than silently reviving revoked authority.
+    """
+    status = auth_mode_status()
+    if local_no_login_active():
+        operator, created = await _ensure_local_root()
+        status.update({
+            "principal_id": operator.principal.principal_id,
+            "operator_session_id": operator.session_id,
+            "operator_identity_id": operator.operator_identity_id,
+            "root_created": created,
+            "bind_host": settings.backend_bind_host.strip(),
+        })
+        return status
+    if settings.deployment_environment.strip().lower() == "test":
+        # The mode can never be active in the test environment, so no local
+        # root can exist there; skip the store read for test-process startup.
+        return status
+    async with get_session() as db:
+        record = await _read_local_root(db)
+        if record is not None:
+            now = datetime.now(timezone.utc)
+            if record.revoked_at is None:
+                record.revoked_at = now
+            record.token_hash = f"{LOCAL_ROOT_TOKEN_MARKER}:retired:{record.id}"
+            db.add(record)
+            status["local_root_retired"] = record.id
+    return status

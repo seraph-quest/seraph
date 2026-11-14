@@ -2165,8 +2165,8 @@ async def init_db() -> None:
         # Seed the fixed Cordis composition inventory only into an empty table
         # (fresh or pre-feature workspace). A partial inventory stays partial
         # so missing mandatory owners keep denying service invocations.
-        from src.runtime_plugins.ownership import (introduce_domains_sync, introduce_state_domain_sync,
-                                                   seed_legacy_inventory_sync)
+        from src.runtime_plugins.ownership import (introduce_dispatch_domain_sync, introduce_domains_sync,
+                                                   introduce_state_domain_sync, seed_legacy_inventory_sync)
         await conn.run_sync(seed_legacy_inventory_sync)
         # Domains introduced after an inventory existed (#1020) are added once
         # as their legacy owner; nothing else in a partial inventory changes.
@@ -2174,6 +2174,9 @@ async def init_db() -> None:
         # Then the Python-hosted state domain (#1024), only onto the exact
         # pre-#1024 inventory: a chained exact-prefix step, never insert-if-missing.
         await conn.run_sync(introduce_state_domain_sync)
+        # Then the dispatcher lifecycle domain (#1025), only onto the exact
+        # post-#1024 inventory: the next chained exact-prefix step.
+        await conn.run_sync(introduce_dispatch_domain_sync)
 
     # Reconcile legacy Done-parent links once the additive board schema exists.
     # The helper only materializes proof-backed handoffs; rows without an

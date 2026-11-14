@@ -152,6 +152,8 @@ async def recover(dispatcher, owner, task_id, request):
 
 
 async def retry(dispatcher,owner,task_id,request):
+    from src.work_board.dispatcher import require_dispatch_active
+    require_dispatch_active()  # #1025: no worker launch while dispatch is not active
     """One explicit second parser generation after exact terminated-child proof."""
     from datetime import timedelta
     from src.work_board.document_compare_native import execute

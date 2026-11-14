@@ -110,6 +110,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # It contains only live server asyncio tasks; it is not persisted or exposed
 # to operators.
 _ACTIVE_WORKER_TASKS: dict[tuple[str, str], asyncio.Task[Any]] = {}
+from src.runtime_plugins.lifecycle import LifecycleBlocked  # noqa: E402 - import-time side-effect free
 _GOAL_SNAPSHOT_PREFLIGHT_ERRORS = frozenset(
     {
         "goal_snapshot_criterion_missing",
@@ -2949,8 +2950,22 @@ class WorkBoardDispatcher:
                 expired += int(mutation is not None)
         return expired
 
+    async def _lifecycle_step(self) -> None:
+        """#1025: each mutating step of a managed pass starts under the live dispatch epoch.
+
+        A step already inside its own transaction when the owner row moves
+        finishes at E; the next step refuses with ``composition_dependency_changed``.
+        Outside a lifecycle tick (tests, manual calls) this is a no-op.
+        """
+        from src.runtime_plugins.lifecycle import assert_tick_fence, current_tick
+        if current_tick() is None:
+            return
+        async with self.session_provider() as db:
+            await assert_tick_fence(db)
+
     async def run_pass(self) -> dict[str, Any]:
         observed_at = self.now()
+        await self._lifecycle_step()
         try:
             inbox_expired = await expire_inbox_items(limit=20)
             inbox_repaired = await repair_inbox_dispositions(limit=20)
@@ -2961,10 +2976,15 @@ class WorkBoardDispatcher:
             logger.exception("guardian inbox repair pass failed")
             inbox_expired = 0
             inbox_repaired = 0
+        await self._lifecycle_step()
         expired_reviews = await self._expire_review_windows(now=observed_at)
+        await self._lifecycle_step()
         await self.recover_expired_near_finance(now=observed_at)
+        await self._lifecycle_step()
         reconciled = await self.reconcile_pending_attempts(now=observed_at)
+        await self._lifecycle_step()
         linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
+        await self._lifecycle_step()
         try:
             await self._recover_linked_pipelines()
         except Exception:
@@ -2975,9 +2995,13 @@ class WorkBoardDispatcher:
             # managed tick, including after restart, without an operator session.
             try:
                 from src.workflows.repo_repair_stop import close_expired_repository_roots
+                await self._lifecycle_step()
                 await close_expired_repository_roots(source, self.jobs)
+            except LifecycleBlocked:
+                raise
             except Exception:
                 logger.warning("expired repository original closure unavailable")
+        await self._lifecycle_step()
         async with self.session_provider() as db:
             candidates = await self.repository.list_dispatch_candidates(
                 db,
@@ -3770,43 +3794,8 @@ class WorkBoardDispatcher:
                 event=replay_event,
             )
 
-        # Mirror the board intent into the authoritative durable run before
-        # adapter cleanup.  A crash after this checkpoint is replayed from the
-        # persisted attempt binding and cannot silently relaunch work.
-        checkpoint_proven = True
-        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
-        if _status(projection) == "running" and _text(lease.get("owner")) and lease.get("fencing_token") is not None:
-            try:
-                await self.jobs.record_checkpoint(
-                    job_id,
-                    checkpoint_id="cancel_requested",
-                    state={"phase": "cancel_requested", "reason_code": "operator_cancelled"},
-                    owner=_text(lease.get("owner")),
-                    fencing_token=int(lease.get("fencing_token")),
-                    expected_revision=projection.get("revision"),
-                )
-            except Exception:
-                # The adapter/root readback below remains authoritative.  A
-                # failed checkpoint is treated as an unproven cleanup path.
-                logger.info("durable cancel intent checkpoint requires reconciliation for %s", job_id)
-                checkpoint_proven = False
-
-        cleanup_receipts, cleanup_proven = await self._cleanup_adapter(
-            task,
-            active,
-            inputs,
-            projection,
-            reason=reason,
-        )
-        # The common tree cleanup is still required after adapter-specific
-        # hooks: descendants are authoritative durable jobs and are cancelled
-        # before their root.  It is idempotent for a hook that already ended
-        # the root.
-        try:
-            receipts = await self.jobs.cancel_job_tree(job_id, reason=reason[:128])
-        except Exception:
-            receipts = []
-            cleanup_proven = False
+        cleanup_receipts, receipts, cleanup_proven, checkpoint_proven = await self._stop_attempt_tree(
+            task, active, inputs, projection, reason=reason, reason_code="operator_cancelled")
         root = await self.jobs.get_job(job_id)
         return await self._project_cancel_result(
             task,
@@ -3849,6 +3838,125 @@ class WorkBoardDispatcher:
                 "idempotency_key": spec.identity.idempotency_key,
             }
         return WorkBoardDispatcher._direct_expected_identity(task, attempt, inputs, projection)
+
+    async def _stop_attempt_tree(
+        self,
+        task: WorkBoardTask,
+        active: WorkBoardAttempt,
+        inputs: Mapping[str, Any],
+        projection: Mapping[str, Any],
+        *,
+        reason: str,
+        reason_code: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, bool]:
+        """The one stop sequence shared by operator cancel and the #1025 lifecycle drain.
+
+        Checkpoint the cancel intent into the authoritative durable run, run the
+        capability cleanup hook, then cancel the durable tree. Returns
+        ``(hook_receipts, tree_receipts, cleanup_proven, checkpoint_proven)``;
+        callers then read the root back and require the tree readback.
+        """
+        job_id = _text(active.workflow_run_id)
+        # Mirror the board intent into the authoritative durable run before
+        # adapter cleanup.  A crash after this checkpoint is replayed from the
+        # persisted attempt binding and cannot silently relaunch work.
+        checkpoint_proven = True
+        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        if _status(projection) == "running" and _text(lease.get("owner")) and lease.get("fencing_token") is not None:
+            try:
+                await self.jobs.record_checkpoint(
+                    job_id,
+                    checkpoint_id="cancel_requested",
+                    state={"phase": "cancel_requested", "reason_code": reason_code},
+                    owner=_text(lease.get("owner")),
+                    fencing_token=int(lease.get("fencing_token")),
+                    expected_revision=projection.get("revision"),
+                )
+            except Exception:
+                # The adapter/root readback below remains authoritative.  A
+                # failed checkpoint is treated as an unproven cleanup path.
+                logger.info("durable cancel intent checkpoint requires reconciliation for %s", job_id)
+                checkpoint_proven = False
+
+        cleanup_receipts, cleanup_proven = await self._cleanup_adapter(
+            task,
+            active,
+            inputs,
+            projection,
+            reason=reason,
+        )
+        # The common tree cleanup is still required after adapter-specific
+        # hooks: descendants are authoritative durable jobs and are cancelled
+        # before their root.  It is idempotent for a hook that already ended
+        # the root.
+        try:
+            receipts = await self.jobs.cancel_job_tree(job_id, reason=reason[:128])
+        except Exception:
+            receipts = []
+            cleanup_proven = False
+        return cleanup_receipts, receipts, cleanup_proven, checkpoint_proven
+
+    async def drain_attempt_past_bound(self, task_id: str, attempt_id: str, *,
+                                       reason: str = "dispatch_drain_timeout") -> dict[str, Any]:
+        """#1025: stop one attempt still live past the lifecycle drain bound.
+
+        The attempt goes through the operator cancel's own stop sequence
+        (``_stop_attempt_tree``: cancel-intent checkpoint, capability cleanup
+        hook, ``cancel_job_tree``) and its readback (``_cancel_tree_readback``
+        of the re-read root and every returned descendant). The result is
+        ``cleanup_proven`` only when the checkpoint and hook are proven, the
+        tree readback passes, the root is not in an uncertain external-effect
+        state and the process-local worker is no longer alive; otherwise it is
+        ``unknown`` and the caller must not flip the owner. The board attempt
+        itself is left to its existing lease recovery and reconciliation.
+        """
+        key = (task_id, attempt_id)
+        worker = self._active_worker_tasks.get(key)
+        receipts: list[dict[str, Any]] = []
+        proven = False
+        job_id = ""
+        try:
+            async with self.session_provider() as db:
+                task = await db.get(WorkBoardTask, task_id)
+                attempt = await db.get(WorkBoardAttempt, attempt_id)
+            job_id = _text(getattr(attempt, "workflow_run_id", None))
+            if task is not None and attempt is not None and job_id:
+                try:
+                    inputs = _parse_typed_input(task)
+                except Exception:
+                    inputs = {}
+                projection = await self.jobs.get_job(job_id)
+                if not isinstance(projection, Mapping):
+                    projection = {}
+                # The operator cancel's own sequence: checkpoint, hook, tree cancel ...
+                hook_receipts, tree_receipts, hook_proven, checkpoint_proven = await self._stop_attempt_tree(
+                    task, attempt, inputs, projection, reason=reason, reason_code=reason[:64])
+                receipts.extend([*hook_receipts, *tree_receipts])
+                # ... then its readback: the root and every returned descendant are
+                # re-read; an uncertain external effect or live row is never "cancelled".
+                root = await self.jobs.get_job(job_id)
+                tree_proven = await self._cancel_tree_readback(job_id, root, [*hook_receipts, *tree_receipts])
+                proven = bool(hook_proven and checkpoint_proven and tree_proven
+                              and _status(root) not in UNCERTAIN_EXTERNAL_EFFECT_STATUSES)
+        except Exception:
+            logger.warning("drain cleanup for %s/%s unavailable", task_id, attempt_id, exc_info=True)
+            proven = False
+        if worker is not None and not worker.done() and worker is not asyncio.current_task():
+            # An unadmitted attempt (no durable run yet) or a hook that left the
+            # worker running: cancel it and wait, bounded, never release it early.
+            worker.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            if not job_id:
+                proven = worker.done()
+        alive = worker is not None and not worker.done()
+        status = "cancelled" if proven and not alive else "unknown"
+        return {"task_id": task_id, "attempt_id": attempt_id, "job_id": job_id or None, "status": status,
+                "cleanup_proven": bool(proven and not alive), "worker_alive": alive,
+                "receipts": [{"job_id": item.get("job_id"), "status": item.get("status")}
+                             for item in receipts if isinstance(item, Mapping)]}
 
     async def _cleanup_adapter(
         self,
@@ -5934,6 +6042,7 @@ class WorkBoardDispatcher:
             artifact_refs=projection["artifacts"])
 
     async def recover_research(self, owner, task_id, request):
+        require_dispatch_active()
         from src.work_board.research_control import bound, reserve_recovery
         from src.workflows.research_coordinator import continue_parent, freeze_quiescent
         async with self.session_provider() as db:
@@ -12770,6 +12879,15 @@ class WorkBoardDispatcher:
 
 
 _dispatcher = WorkBoardDispatcher()
+
+
+def require_dispatch_active() -> None:
+    """#1025: an API launch that enters the live-worker registry needs an active dispatch owner."""
+    from src.runtime_plugins.lifecycle import runtime_lifecycle
+    try:
+        runtime_lifecycle.require_dispatch_active()
+    except LifecycleBlocked as exc:
+        raise BoardError(exc.reason_code, exc.recovery, status_code=409) from exc
 
 
 async def run_work_board_dispatch() -> dict[str, Any]:

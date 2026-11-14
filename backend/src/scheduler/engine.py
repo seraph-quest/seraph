@@ -59,6 +59,30 @@ def _async_job_wrapper(
     return wrapper
 
 
+def _lifecycle_job(func, *, job_id: str):
+    """Gate one registered job by its lifecycle domain (#1025); retention jobs are exempt.
+
+    The timer keeps its phase: a tick whose domain is not active returns at
+    entry with a visible block instead of the instance being paused.
+    """
+    async def gated():
+        from src.runtime_plugins.lifecycle import runtime_lifecycle
+        return await runtime_lifecycle.run_gated(job_id, func)
+
+    gated.__name__ = f"lifecycle_{job_id}"
+    gated.__qualname__ = gated.__name__
+    return gated
+
+
+def _record_missed_fire(event) -> None:
+    """A fire dropped past its misfire grace stays visible (``skipped / missed_fire``)."""
+    try:
+        from src.scheduler.background_inference import record_scheduler_job_missed
+        record_scheduler_job_missed(str(event.job_id))
+    except Exception:
+        logger.warning("Could not record a missed fire of %s", getattr(event, "job_id", "?"), exc_info=True)
+
+
 async def _skip_disabled_inference_job(job_id: str) -> bool:
     """Skip a whole governed job the operator switched off; no model call runs."""
     from src.scheduler.background_inference import (
@@ -327,12 +351,19 @@ def init_scheduler() -> AsyncIOScheduler | None:
         },
     ]
 
+    from src.runtime_plugins.lifecycle import job_domain
+
     for job in jobs:
         try:
-            _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
+            job_domain(job["id"])  # an unclassified system job is refused, never ungated
+            _scheduler.add_job(**{**job, "func": _lifecycle_job(job["func"], job_id=job["id"])},
+                               replace_existing=True, coalesce=True, max_instances=1)
         except Exception:
             logger.exception("Failed to register job: %s", job["id"])
 
+    from apscheduler.events import EVENT_JOB_MISSED
+
+    _scheduler.add_listener(_record_missed_fire, EVENT_JOB_MISSED)
     _scheduler.start()
     logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
     return _scheduler
@@ -394,11 +425,11 @@ async def sync_scheduled_jobs() -> None:
                 await execute_scheduled_job(job_id, scheduled_slot_utc=slot_utc)
 
             _scheduler.add_job(
-                _async_job_wrapper(
+                _lifecycle_job(_async_job_wrapper(
                     _run_scheduled_job,
                     _scheduler_loop,
                     job_id=apscheduler_id,
-                ),
+                ), job_id=apscheduler_id),
                 trigger=build_cron_trigger(job),
                 id=apscheduler_id,
                 name=job["name"],

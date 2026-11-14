@@ -26,7 +26,11 @@ pytestmark = [needs_cordis, pytest.mark.asyncio]
 
 
 # #1020 adds the presets (cut over first; agent-loop's prerequisite) and guardian domains.
-MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN, "seraph.delegation.v1", "seraph.board-workers.v1"]
+# #1025 appends the scheduler lifecycle, then the dispatcher lifecycle (D3 order).
+MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN, "seraph.delegation.v1", "seraph.board-workers.v1",
+            "seraph.scheduler.v1", "seraph.dispatch.v1"]
+TURN_MANIFEST = MANIFEST[:5]
+LIFECYCLE_MANIFEST = MANIFEST[5:]
 
 
 def _by_domain(receipts):
@@ -46,25 +50,35 @@ async def test_fresh_workspace_cuts_chat_over_once_and_a_missing_runtime_blocks_
     # Cordis not built or not running: the domain is cut over but blocked with the host's fix.
     stopped = CordisHost()
     receipts = _by_domain(await run_boot_cutover(stopped))
-    assert list(receipts) == MANIFEST
-    assert all(item["action"] == "cut_over" and item["state"] == "blocked" for item in receipts.values())
+    # #1025: the lifecycle domains move only on this boot's proof; without it the scheduler
+    # stays legacy/ready (deferred, unmarked) and dispatch waits for its prerequisite.
+    assert list(receipts) == TURN_MANIFEST + ["seraph.scheduler.v1"]
+    assert all(receipts[domain]["action"] == "cut_over" and receipts[domain]["state"] == "blocked"
+               for domain in TURN_MANIFEST)
+    assert receipts["seraph.scheduler.v1"] == {"runtime_domain": "seraph.scheduler.v1", "action": "deferred",
+                                               "reason": "cordis_boot_proof_missing"}
     status = await chat_runtime_status(stopped)
     assert status["loop"] == "blocked" and status["owner_kind"] == "cordis"
     assert status["reason"].startswith("cordis_") and status["recovery"]
     # A restart while the host is still down changes nothing, so it audits nothing and never says "completed".
     again = _by_domain(await run_boot_cutover(stopped))
-    assert list(again) == MANIFEST
-    assert all(item["action"] == "still_blocked" for item in again.values())
+    assert list(again) == TURN_MANIFEST + ["seraph.scheduler.v1"]
+    assert all(again[domain]["action"] == "still_blocked" for domain in TURN_MANIFEST)
+    assert again["seraph.scheduler.v1"]["action"] == "deferred"
     assert await _events(BOOT_EVENT) == []
     jobs = DurableJobRepository()
     async with research_host(jobs) as host:
-        # A later boot with a ready runtime completes the same cutover, never a second one.
+        # A later boot with a ready runtime completes the same cutover, never a second one,
+        # and cuts the lifecycle domains over for the first time on its proof.
         completed = _by_domain(await run_boot_cutover(host))
         assert list(completed) == MANIFEST
-        assert all(item["action"] == "completed" and item["state"] == "ready" for item in completed.values())
+        assert all(completed[domain]["action"] == "completed" and completed[domain]["state"] == "ready"
+                   for domain in TURN_MANIFEST)
+        assert all(completed[domain]["action"] == "cut_over" and completed[domain]["state"] == "ready"
+                   for domain in LIFECYCLE_MANIFEST)
         # Each completion is audited, but none is a second cutover marker.
         boots = await _events(BOOT_EVENT)
-        assert sorted(item["runtime_domain"] for item in boots) == sorted(MANIFEST)
+        assert sorted(item["runtime_domain"] for item in boots) == sorted(TURN_MANIFEST)
         assert all((item["reason"], item["prior"]["state"], item["state"]) == ("completed", "blocked", "ready")
                    for item in boots)
         status = await chat_runtime_status(host)

@@ -13,6 +13,7 @@ import { createPlugin as audit } from "./audit/index.js";
 import { createPlugin as research } from "./research/index.js";
 import { createPlugin as conversation } from "./conversation/index.js";
 import { createPlugin as scheduler } from "./scheduler/index.js";
+import { createPlugin as dispatch } from "./dispatch/index.js";
 import { createPlugin as connections } from "./connections/index.js";
 import { createPlugin as agent_presets } from "./agent_presets/index.js";
 import { createPlugin as agent_loop } from "./agent_loop/index.js";
@@ -35,6 +36,7 @@ export const SERVICE_KEYS = [
   "seraphResearch",
   "seraphConversation",
   "seraphScheduler",
+  "seraphDispatch",
   "seraphConnections",
   "seraphAgentPresets",
   "seraphAgentLoop",
@@ -59,6 +61,7 @@ export function servicePlugins(client: ScopedRequestClient, digests: Readonly<Re
   "seraph.research.v1": research(client),
   "seraph.conversation.v1": conversation(client),
   "seraph.scheduler.v1": scheduler(client),
+  "seraph.dispatch.v1": dispatch(client),
   "seraph.connections.v1": connections(client),
   "seraph.agent-presets.v1": agent_presets(client),
   "seraph.agent-loop.v1": agent_loop(client),

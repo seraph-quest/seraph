@@ -25,7 +25,8 @@ guardian, delegation and Board worker turns (#1020). Each runtime domain
 changes owner only through its fenced `RuntimeCompositionState` epoch. The
 Python/FastAPI backend remains the parent process and the owner of canonical
 state, authority, audit, scheduling and interfaces; A3 ownership of state,
-scheduling and interfaces (#1024–#1026) is not complete. Without Node or a
+scheduling and interfaces (#1024–#1026) is not complete (#1025 moves the
+scheduler and dispatcher lifecycle decision to the owner rows, Partial). Without Node or a
 built package only Cordis-dependent work blocks. Existing extension and
 capability-pack support is separate from this migration.
 
@@ -225,6 +226,28 @@ and own no activation of the Python-hosted providers (operator decision on
 #1024), and backup/restore stay with the host CLI with no in-process
 maintenance handoff. See the
 [guide section](./12-current-app-guide.md#python-hosted-mandatory-providers-1024).
+
+**Scheduler and dispatcher lifecycle** from
+[#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
+**Partial**: the one Python scheduler and the WorkBoard dispatcher run only
+while their owner rows (`seraph.scheduler.v1`, new `seraph.dispatch.v1`) are
+ready at an epoch and, once cut over to Cordis (at boot only on the running
+reviewed child's proof; otherwise they stay on the identical legacy owner),
+while that child proves the domain's plugin. Retention and cleanup jobs are exempt. Timers keep
+their phase and a non-active domain refuses ticks at entry with a visible
+block; stale epochs are fenced inside the run, occurrence and board
+transactions; deactivation drains within the original bounds, then stops
+leftover attempts through their own cleanup and `cancel_job_tree`, and never
+flips the owner while cleanup is unproven; live operator transitions drain at
+E before the flip; shutdown is bounded and closes admission first. `seraph.dispatch.v1` is
+added once to the exact post-#1024 inventory, forward-only. Verified with
+temporary state and the real reviewed child; external transport and inference
+denied. Partial because per-job blocks still use the background-inference JSON
+status record (the D2 status table is not built), Settings and the cockpit
+banner do not yet render the domain statuses (they are in
+`/api/runtime/status`), and governed-occurrence/board-claim race tests on a
+real board are pending. See the
+[guide section](./12-current-app-guide.md#scheduler-and-dispatcher-lifecycle-1025).
 
 **Cordis guardian research** from
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal

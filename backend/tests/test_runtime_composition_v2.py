@@ -15,7 +15,8 @@ from src.db.engine import get_session
 from src.db.models import AuditEvent, RuntimeCompositionState, WorkflowRunState
 from src.runtime_plugins.cutover import register_cutover_domain
 from src.runtime_plugins.ownership import (
-    BINDING_SCHEMA, DOMAIN_INTRODUCTIONS, DOMAINS, MANIFEST_VERSION, MANIFEST_VERSION_V1, PRE_STATE_DOMAINS,
+    BINDING_SCHEMA, DISPATCH_DOMAIN, DOMAIN_INTRODUCTIONS, DOMAINS, MANIFEST_VERSION, MANIFEST_VERSION_V1,
+    PRE_DISPATCH_DOMAINS, PRE_STATE_DOMAINS, introduce_dispatch_domain_sync,
     PYTHON_HOSTED_DOMAINS, STATE_DOMAIN, CompositionBindingError, CompositionDependency, RuntimeCompositionBinding,
     bind_invocation, composition_fence_predicates, composition_writer, introduce_domains_sync,
     introduce_state_domain_sync, legacy_composition_digest, seed_legacy_inventory_sync, transition_owner)
@@ -36,8 +37,11 @@ def _committed():
 
 
 def test_frozen_domain_and_manifest_tables():
-    assert DOMAINS == (*PRE_STATE_DOMAINS, STATE_DOMAIN) and len(PRE_STATE_DOMAINS) == 18
+    assert PRE_DISPATCH_DOMAINS == (*PRE_STATE_DOMAINS, STATE_DOMAIN) and len(PRE_STATE_DOMAINS) == 18
+    # #1025: the dispatcher lifecycle domain is the next chained exact-prefix step.
+    assert DOMAINS == (*PRE_DISPATCH_DOMAINS, DISPATCH_DOMAIN) and len(DOMAINS) == 20
     assert STATE_DOMAIN not in PRE_STATE_DOMAINS and STATE_DOMAIN not in DOMAIN_INTRODUCTIONS
+    assert DISPATCH_DOMAIN not in PRE_DISPATCH_DOMAINS and DISPATCH_DOMAIN not in DOMAIN_INTRODUCTIONS
     assert set(DOMAIN_INTRODUCTIONS) < set(PRE_STATE_DOMAINS)
     assert PYTHON_HOSTED_DOMAINS == {STATE_DOMAIN, "seraph.authority.v1", "seraph.audit.v1"}
     assert MANIFEST_VERSION == "runtime-service-methods.v2" and MANIFEST_VERSION_V1 == "runtime-service-methods.v1"
@@ -169,9 +173,9 @@ def _rows(engine):
 
 
 def _upgrade(connection):
-    """``init_db``'s order: seed an empty table, #1020 introductions, then the state step."""
+    """``init_db``'s order: seed an empty table, #1020 introductions, the state step, then dispatch (#1025)."""
     return (seed_legacy_inventory_sync(connection), introduce_domains_sync(connection),
-            introduce_state_domain_sync(connection))
+            introduce_state_domain_sync(connection), introduce_dispatch_domain_sync(connection))
 
 
 def test_exact_pre_a31_inventory_gains_one_state_row_and_audit_event(tmp_path):
@@ -181,9 +185,9 @@ def test_exact_pre_a31_inventory_gains_one_state_row_and_audit_event(tmp_path):
                                 "WHERE runtime_domain = 'seraph.memory.v1'"))
     before, _ = _rows(engine)
     with engine.begin() as connection:
-        assert _upgrade(connection) == (0, [], True)
+        assert _upgrade(connection) == (0, [], True, True)
     with engine.begin() as connection:
-        assert _upgrade(connection) == (0, [], False)  # idempotent: audited once
+        assert _upgrade(connection) == (0, [], False, False)  # idempotent: audited once
     rows, events = _rows(engine)
     assert set(rows) == set(DOMAINS) and len(events) == 1
     assert events[0]["introduced_by"] == "1024" and events[0]["owner_kind"] == "legacy"
@@ -198,8 +202,8 @@ def test_chained_steps_bring_a_pre_1020_inventory_to_the_full_set(tmp_path):
     assert len(originals) == 14
     engine = _sync_db(tmp_path / "pre1020.db", originals)
     with engine.begin() as connection:
-        seeded, introduced, state = _upgrade(connection)
-    assert (seeded, sorted(introduced), state) == (0, sorted(DOMAIN_INTRODUCTIONS), True)
+        seeded, introduced, state, dispatch = _upgrade(connection)
+    assert (seeded, sorted(introduced), state, dispatch) == (0, sorted(DOMAIN_INTRODUCTIONS), True, True)
     rows, events = _rows(engine)
     assert set(rows) == set(DOMAINS) and len(events) == 1
 
@@ -207,9 +211,9 @@ def test_chained_steps_bring_a_pre_1020_inventory_to_the_full_set(tmp_path):
 def test_empty_inventory_is_seeded_whole_including_state(tmp_path):
     engine = _sync_db(tmp_path / "fresh.db", ())
     with engine.begin() as connection:
-        assert _upgrade(connection) == (len(DOMAINS), [], False)
+        assert _upgrade(connection) == (len(DOMAINS), [], False, False)
     rows, events = _rows(engine)
-    assert set(rows) == set(DOMAINS) and len(DOMAINS) == 19 and events == []
+    assert set(rows) == set(DOMAINS) and len(DOMAINS) == 20 and events == []
 
 
 @pytest.mark.parametrize("domains", [
@@ -231,7 +235,9 @@ async def test_init_db_runs_the_migration_on_a_pre_a31_database():
     from src.db.engine import init_db
     await init_db()
     async with get_session() as db:
-        await db.execute(delete(RuntimeCompositionState).where(RuntimeCompositionState.runtime_domain == STATE_DOMAIN))
+        # A pre-#1024 inventory has neither the state nor the later dispatch row (#1025).
+        await db.execute(delete(RuntimeCompositionState).where(
+            RuntimeCompositionState.runtime_domain.in_((STATE_DOMAIN, DISPATCH_DOMAIN))))
     await init_db()
     async with get_session() as db:
         rows = {row.runtime_domain: row for row in (await db.execute(select(RuntimeCompositionState))).scalars()}
@@ -240,6 +246,9 @@ async def test_init_db_runs_the_migration_on_a_pre_a31_database():
     assert set(rows) == set(DOMAINS)
     assert (rows[STATE_DOMAIN].owner_kind, rows[STATE_DOMAIN].epoch, rows[STATE_DOMAIN].state) == ("legacy", 1, "ready")
     assert [item["introduced_by"] for item in events if item["runtime_domain"] == STATE_DOMAIN] == ["1024"]
+    assert [item["introduced_by"] for item in events if item["runtime_domain"] == DISPATCH_DOMAIN][-1:] == ["1025"]
+    assert (rows[DISPATCH_DOMAIN].owner_kind, rows[DISPATCH_DOMAIN].epoch, rows[DISPATCH_DOMAIN].state) == (
+        "legacy", 1, "ready")
 
 
 def test_composition_rows_epochs_and_migration_survive_cli_backup_and_restore(tmp_path):
@@ -266,7 +275,7 @@ def test_composition_rows_epochs_and_migration_survive_cli_backup_and_restore(tm
             "SELECT runtime_domain, epoch FROM runtime_composition_states")).all())
     assert set(epochs) == set(PRE_STATE_DOMAINS) and epochs["seraph.memory.v1"] == 3
     with restored.begin() as connection:
-        assert _upgrade(connection) == (0, [], True)
+        assert _upgrade(connection) == (0, [], True, True)
     rows, events = _rows(restored)
     restored.dispose()
     assert set(rows) == set(DOMAINS) and len(events) == 1 and rows["seraph.memory.v1"][1] == 3

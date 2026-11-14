@@ -84,6 +84,10 @@ register_cutover_domain("seraph.guardian.v1", prerequisites=(PRESETS_DOMAIN,))
 # legacy orchestrator, and agent-loop's legacy gate is drained before delegation moves.
 register_cutover_domain("seraph.delegation.v1", prerequisites=(PRESETS_DOMAIN, "seraph.agent-loop.v1"))
 register_cutover_domain("seraph.board-workers.v1", prerequisites=(PRESETS_DOMAIN,))
+# #1025: the scheduler timer lifecycle, then the WorkBoard dispatcher lifecycle.
+# Both are drained before any live flip (``runtime_plugins.lifecycle``).
+register_cutover_domain("seraph.scheduler.v1")
+register_cutover_domain("seraph.dispatch.v1", prerequisites=("seraph.scheduler.v1",))
 
 
 # ---------------------------------------------------------------- legacy turn gate
@@ -156,6 +160,17 @@ def _host_digest(host, domain: str) -> str | None:
     if host is None or not getattr(host, "admitting", False) or reviewed is None:
         return None
     return (reviewed.plugin_digests or {}).get(domain)
+
+
+# Lifecycle domains (#1025) are cut over at boot only on this boot's proof; otherwise
+# they stay on the legacy owner (the same Python mechanism) instead of turning blocked.
+PROOF_GATED_DOMAINS = frozenset({"seraph.scheduler.v1", "seraph.dispatch.v1"})
+
+
+def _proved_now(host, domain: str) -> bool:
+    from .ownership import _boot_proved
+    digest = _host_digest(host, domain)
+    return digest is not None and _boot_proved(domain, "cordis", digest, host)
 
 
 async def _step(db, domain, *, owner_kind, epoch, digest, state, host=None):
@@ -300,6 +315,13 @@ async def run_boot_cutover(host) -> list[dict]:
                                                           "state": current.state}, actor="runtime")
                             receipts.append({"runtime_domain": entry.domain, "action": action,
                                              "state": current.state, "epoch": current.epoch})
+                            continue
+                        if entry.domain in PROOF_GATED_DOMAINS and not _proved_now(host, entry.domain):
+                            # #1025: the legacy owner runs the identical scheduler/dispatcher, so
+                            # without this boot's proof the domain stays legacy and ready, unmarked;
+                            # a later boot with a running reviewed child cuts it over.
+                            receipts.append({"runtime_domain": entry.domain, "action": "deferred",
+                                             "reason": "cordis_boot_proof_missing"})
                             continue
                         prior = _checked_row(row).payload() | {"state": row.state}
                         await _move(db, entry.domain, "cordis", host)

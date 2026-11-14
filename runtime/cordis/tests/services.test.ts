@@ -121,7 +121,7 @@ test('scope disposal and expiry fence retained providers and late native respons
   await new Promise(resolve=>setImmediate(resolve));
   active = false; release?.(blocked);
   await assert.rejects(waiting,/unavailable/);
-  assert.equal(composition.resources.remaining,23); // host21 plugins + logger/lifecycle.
+  assert.equal(composition.resources.remaining,24); // host22 plugins + logger/lifecycle.
   await composition.dispose(); assert.equal(composition.resources.remaining,0);
 });
 test('concurrent scopes retain independent original request clients and register no ambient authority', async () => {
@@ -259,5 +259,17 @@ test('provider frames are closed host reports that only update the state facade 
     assert.deepEqual(composition.context.seraphState.readiness('seraph.audit.v1'),
       {domain: 'seraph.audit.v1', state: 'active', epoch: 1, composition_digest: 'd'.repeat(64), reason_code: null});
     assert.ok(composition.states().some(state => state.id === 'seraph.state.v1' && state.state === 'ready'));
+  } finally { await composition.dispose(); }
+});
+test('the dispatch facade is a readiness-only provider: no method, timer, store or execution (#1025)', async () => {
+  assert.ok(![...SERVICE_METHODS].some(method => String(method).startsWith('dispatch.')), 'dispatch exposes no service method');
+  const composition = new Composition(profile()); await composition.start();
+  try {
+    assert.deepEqual(composition.context.seraphDispatch.describe(),
+      {domain: 'seraph.dispatch.v1', timers: false, storage: false, executes: false});
+    assert.ok(composition.states().some(state => state.id === 'seraph.dispatch.v1' && state.state === 'ready'));
+    const order = Object.keys(servicePlugins({isActive: () => false, request: async () => blocked}));
+    assert.equal(order.indexOf('seraph.dispatch.v1'), order.indexOf('seraph.scheduler.v1') + 1);
+    assert.equal(SERVICE_KEYS[order.indexOf('seraph.dispatch.v1')], 'seraphDispatch');
   } finally { await composition.dispose(); }
 });

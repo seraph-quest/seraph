@@ -30,7 +30,13 @@ PRE_STATE_DOMAINS = (
     "seraph.scheduler.v1", "seraph.connections.v1", "seraph.agent-presets.v1", "seraph.agent-loop.v1",
     "seraph.guardian.v1", "seraph.delegation.v1", "seraph.source-extraction.v1", "seraph.board-workers.v1")
 STATE_DOMAIN = "seraph.state.v1"
-DOMAINS = (*PRE_STATE_DOMAINS, STATE_DOMAIN)
+# The WorkBoard dispatcher lifecycle (#1025): a domain of its own so that a
+# dispatch owner change never bumps ``seraph.tasks.v1`` (the job ledger every
+# method depends on). Introduced only onto exactly ``PRE_DISPATCH_DOMAINS``.
+DISPATCH_DOMAIN = "seraph.dispatch.v1"
+SCHEDULER_DOMAIN = "seraph.scheduler.v1"
+PRE_DISPATCH_DOMAINS = (*PRE_STATE_DOMAINS, STATE_DOMAIN)
+DOMAINS = (*PRE_DISPATCH_DOMAINS, DISPATCH_DOMAIN)
 # Python always hosts these owners (#1024 operator decision): their rows are
 # always the legacy owner with the fixed legacy digest, never Cordis.
 PYTHON_HOSTED_DOMAINS = frozenset({STATE_DOMAIN, "seraph.authority.v1", "seraph.audit.v1"})
@@ -581,6 +587,59 @@ def introduce_state_domain_sync(connection) -> bool:
                                 "introduced_by": "1024", "prior_domains": len(PRE_STATE_DOMAINS)}),
          "at": datetime.now(timezone.utc).replace(tzinfo=None)})
     return True
+
+
+def introduce_dispatch_domain_sync(connection) -> bool:
+    """Add ``seraph.dispatch.v1`` to an exact post-#1024 inventory (#1025).
+
+    The next chained exact-prefix step after ``introduce_state_domain_sync``:
+    it runs only when the inventory is exactly ``PRE_DISPATCH_DOMAINS`` and
+    every row decodes, inserts one legacy row (epoch 1, the fixed legacy
+    digest, ``ready``) plus one audit event, and changes no existing row. Any
+    other partial or unknown inventory is left alone and keeps failing closed.
+    Forward-only: an older binary rejects the extra row with
+    ``composition_inventory_invalid``.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from types import SimpleNamespace
+    rows = [SimpleNamespace(**row._mapping) for row in connection.execute(text(
+        "SELECT runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref "
+        "FROM runtime_composition_states"))]
+    names = [row.runtime_domain for row in rows]
+    if len(names) != len(PRE_DISPATCH_DOMAINS) or set(names) != set(PRE_DISPATCH_DOMAINS):
+        return False
+    try:
+        for row in rows:
+            _checked_row(row)
+    except CompositionBindingError as exc:
+        raise CompositionBindingError("composition_inventory_invalid") from exc
+    inserted = connection.execute(text(
+        "INSERT INTO runtime_composition_states "
+        "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "
+        "SELECT :domain, 'legacy', 1, :digest, 'ready', NULL WHERE NOT EXISTS "
+        "(SELECT 1 FROM runtime_composition_states WHERE runtime_domain = :domain)"),
+        {"domain": DISPATCH_DOMAIN, "digest": legacy_composition_digest(DISPATCH_DOMAIN)}).rowcount
+    if inserted != 1:
+        return False
+    connection.execute(text(
+        "INSERT INTO audit_events (id, session_id, actor, event_type, tool_name, risk_level, policy_mode, summary, "
+        "details_json, created_at) VALUES (:id, NULL, 'system', 'runtime_composition_domain_introduced', NULL, "
+        "'low', 'full', :summary, :details, :at)"),
+        {"id": str(uuid4()), "summary": f"Runtime domain {DISPATCH_DOMAIN} introduced as its legacy owner",
+         "details": _canonical({"runtime_domain": DISPATCH_DOMAIN, "owner_kind": "legacy", "epoch": 1,
+                                "introduced_by": "1025", "prior_domains": len(PRE_DISPATCH_DOMAINS)}),
+         "at": datetime.now(timezone.utc).replace(tzinfo=None)})
+    return True
+
+
+def domain_ready_predicate(runtime_domain: str, owner_kind: str, epoch: int, composition_digest: str):
+    """Standalone ``EXISTS`` fence for non-job writes (#1025): the exact owner is ready at ``epoch``."""
+    from sqlalchemy.orm import aliased
+    state = aliased(RuntimeCompositionState)
+    return select(state.runtime_domain).where(
+        state.runtime_domain == runtime_domain, state.owner_kind == owner_kind, state.epoch == epoch,
+        state.composition_digest == composition_digest, state.state == "ready").exists()
 
 
 def _boot_proved(runtime_domain: str, owner_kind: str, composition_digest: str, boot_host) -> bool:

@@ -24,7 +24,7 @@ pytestmark = pytest.mark.openrouter_legacy
 
 async def settled(documentary, async_db):
     repository,operator,request,calls=documentary
-    result=await repository.stage_audio_documentation(operator,request)
+    result=await doc.stage(repository,operator,request)
     async with async_db() as db:
         row=await db.get(Bundle,result['staged_ref'])
         sources=(await db.execute(select(Source).order_by(Source.ordinal))).scalars().all()
@@ -46,7 +46,7 @@ async def test_post_actual_commit_cancellation_preserves_success(documentary,asy
             raised=True
             raise asyncio.CancelledError('after actual SQLite success commit')
     with pytest.raises(asyncio.CancelledError):
-        await ModelFabricRepository(provider).stage_audio_documentation(operator,request)
+        await doc.stage(ModelFabricRepository(provider),operator,request)
     async with async_db() as db: row=(await db.execute(select(Bundle))).scalars().one()
     assert raised and row.revision==1 and row.error_code=='audio_documentation_source_incomplete'
     assert row.reserved_bytes==doc.RESERVED_BYTES
@@ -62,7 +62,7 @@ async def test_cancelled_unsettled_acquisition_remains_charged(documentary,async
         return httpx.Response(200,headers={'content-type':'application/json'},
             stream=httpx.ByteStream(b'{"data":{"is_management_key":true}}'))
     monkeypatch.setattr(httpx,'AsyncClient',lambda **kwargs:constructor(**kwargs,transport=httpx.MockTransport(respond)))
-    with pytest.raises(asyncio.CancelledError): await repository.stage_audio_documentation(operator,request)
+    with pytest.raises(asyncio.CancelledError): await doc.stage(repository,operator,request)
     async with async_db() as db:
         row=(await db.execute(select(Bundle))).scalars().one()
         source=(await db.execute(select(Source))).scalars().one()
@@ -71,7 +71,7 @@ async def test_cancelled_unsettled_acquisition_remains_charged(documentary,async
     action=doc.RejectStagedDocumentationV1(action='reject_staged_documentation',staged_ref=row.id,
         expected_staged_revision=0,expected_bundle_digest=row.bundle_digest)
     with pytest.raises(doc.DocumentationError,match='cleanup_unknown'):
-        await repository.reject_audio_documentation(operator,action)
+        await doc.review(repository,operator,action)
     assert len(doc.private_read(source))==source.size_bytes
 
 

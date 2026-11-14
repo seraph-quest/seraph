@@ -55,7 +55,7 @@ from src.extensions.telegram_ingress import (
     build_telegram_ingress_receipt,
     ingest_telegram_update,
 )
-from src.guardian.audio_ingress import AudioProviderStatus
+from src.extensions.telegram_ingress import AudioProviderStatus
 from src.vault.repository import vault_repository
 
 

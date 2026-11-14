@@ -1144,8 +1144,10 @@ mechanics receipts are not candidate-quality evaluation or harness-improvement
 proof. External usefulness remains unverified; ordinary regression and security
 checks remain required.
 Required child criteria map #750 conversation identity/outbox, #748 native
-software, #749 paired edge, #751 audio capture/decode/persistence, #752
-Telegram transport, and #755 capability-pack lifecycle. Static source checks
+software, #749 paired edge, #752 Telegram transport, and #755
+capability-pack lifecycle; #751 audio capture/decode/persistence and the
+optional voice readiness check are explicit exclusions since voice input was
+retired (#1179). Static source checks
 are informational; each behavioral gate requires one current schema-v1,
 ownership- and revision-bound child receipt under the server-resolved,
 server-owned `operator-receipts/epic-736-child-evidence` directory. Receipt
@@ -1181,13 +1183,13 @@ revision. Live Telegram remains unverified; see
 Paired-channel Task capture ([#1022](https://github.com/seraph-quest/seraph/issues/1022))
 is **Partial**. A paired Telegram `/task` message creates one review-only Task
 that can be inspected, paused, resumed or cancelled from Telegram and continued in
-the cockpit; unpaired senders and replayed provider events create nothing. Live
-voice is an explicit "Voice route unavailable" state under
-[ADR-033](./decisions/033-governed-optional-audio-route.md) until a source-attested
-endpoint, codec and pricing proof exists (tracked follow-up). Transcript
-correction updates the unexecuted intent through one corrected canonical Message
-and a separate fresh Goal/Task action, tested with a scripted transcription; it
-never replays the original call or transfers audio liability. Channel origins
+the cockpit; unpaired senders and replayed provider events create nothing. Voice input
+(push-to-talk, the audio ingress API and worker, and the audio route) was
+removed by operator decision on 2026-11-14
+([#1179](https://github.com/seraph-quest/seraph/issues/1179));
+[ADR-033](./decisions/033-governed-optional-audio-route.md) is retired. Existing
+audio DB rows are kept unused; no audio capture, transcription or audio-sourced
+Task can be created. Channel origins
 and output links are signed with a key derived from the workspace vault key
 (explicit `CAPABILITY_JOURNAL_SECRET`/`OPERATOR_AUTH_SECRET` overrides), so stock
 deployments need no new setting. Live Telegram,
@@ -1299,6 +1301,7 @@ they do not establish real-account or production usefulness. See the
 - [ ] Stable operator ownership and exact read-only recovery remain **Partial**, available with the installed reviewed program revision: private device continuity can link explicitly selected records across new execution roots, while prior grants, effects and ambiguous legacy ownership remain blocked. Actual authenticated local snapshot execution, selection, fresh empty intent and evidence recall are covered by integrated tests and a managed browser/API/file receipt; prior authority is never restored by availability. See [Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
 - [ ] Local task evidence working sets remain **Partial**, available with the installed reviewed program revision: canonical citation references, verified output lineage, exclusion and exact rendered-packet adoption use owner/task/goal/revision checks. Recovered history is read only; private and historic source egress stays blocked for generic strategist use. Focused API, SQLite, artifact and inspector checks establish local mechanics, not live provider usefulness. See [Task Evidence Working Sets](./task-evidence-working-sets.md).
 - [ ] Cockpit shell layout (#1172): an always-visible conversation dock, a "Needs you" rail, one status popover whose non-ready items say why and link to the fix, and a More menu for rarely used controls. Fixes the empty Goals canvas, the stale chat model and version labels (now from `effective_runtime` and a live `build_id`), and shows expected configuration (daemon off, an operator scope the observer has not refreshed yet) as not-a-fault, while `/api/observer/state.data_quality_reason` lets observer source errors raise a warning. Focused component tests cover the fixes; visual checks used an offline fixture preview only. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-shell-layout-1172).
+- [x] Voice input removed (#1179, operator decision 2026-11-14): the push-to-talk control and the dock's "Voice input" section, `/api/audio/*`, the audio ingress worker, the `audio_ingress_cleanup` job, the audio documentation settings endpoints and UI and the audio effective grants are gone; [ADR-033](./decisions/033-governed-optional-audio-route.md) is retired. The audio tables and their rows are kept unused, with no destructive migration. Startup removes any recordings left in the fixed default quarantine directory `realpath($TMPDIR)/seraph-audio` once, best effort, refusing symlinks. See [Current App Guide](./12-current-app-guide.md#local-cockpit-interaction-boundaries).
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
 - [x] Public docs target the `v2026.6.30` app era; the published GitHub Pages site updates only after a `main` push touches `docs/**` and the Pages workflow succeeds.
 - [x] The live truth surface is now `docs/research/` plus `docs/implementation/`, while the GitHub Project, issues, and PRs carry active execution state.

@@ -23,9 +23,8 @@ import httpx
 from config.settings import settings
 from fastapi import APIRouter, HTTPException, Request, Query
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
-from src.model_fabric.audio_documentation import (MetadataSelection, DocumentationAction,
-    AcquireSelectedProfileMetadataV1, AcceptStagedDocumentationV1, DocumentationError,
-    select_metadata, access_readback)
+# #1179 retired voice input; only the stored metadata-access readback remains.
+from src.model_fabric.audio_documentation import MetadataSelection, access_readback
 
 from src.approval.runtime import get_current_trust_principal
 from src.llm_runtime import provider_profiles
@@ -274,6 +273,12 @@ class OpenRouterSetupInput(BaseModel):
         if isinstance(data, dict) and data.get("schema_version") != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
             if "audio_egress_acknowledged" in data or isinstance(data.get("routes"), dict) and "audio" in data["routes"]:
                 raise ValueError("audio_setup_v3_required")
+        if isinstance(data, dict) and data.get("schema_version") == OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+            # #1179 retired voice input: a stored v3 setup still saves, but the
+            # audio slot can never be enabled or acknowledged again.
+            audio = data.get("routes", {}).get("audio") if isinstance(data.get("routes"), dict) else None
+            if data.get("audio_egress_acknowledged") is True or isinstance(audio, dict) and audio.get("enabled") is not False:
+                raise ValueError("audio_route_retired")
         if isinstance(data, dict) and data.get("schema_version") in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
             legacy = {"model_ids", "models", "model_id", "capabilities", "modalities", "temperature", "max_output_tokens", "timeout_seconds", "timeout", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd", "cloud_egress", "max_cost_microusd", "max_queue_size", "fallback_allowed"}
             if legacy.intersection(data):
@@ -1052,38 +1057,6 @@ async def put_model_fabric_settings(body: ModelFabricConfigurationRequest, reque
         return await _put_model_fabric_settings_locked(body, request)
 
 
-@router.post("/settings/model-fabric/audio-documentation")
-async def audio_documentation_action(body: DocumentationAction, request: Request):
-    from src.model_fabric.repository import model_fabric_repository
-    from src.model_fabric.effective_policy import configuration_mutation_lock
-    if not _is_local_request(request):
-        raise HTTPException(status_code=403, detail={"code":"audio_documentation_boundary_forbidden"})
-    try:
-        async with configuration_mutation_lock:
-            operator = getattr(request.state, "operator", None)
-            if isinstance(body, AcquireSelectedProfileMetadataV1):
-                from fastapi.responses import JSONResponse
-                result = await model_fabric_repository.stage_audio_documentation(operator, body)
-                return JSONResponse(result, status_code=201)
-            if isinstance(body, AcceptStagedDocumentationV1):
-                return await model_fabric_repository.accept_audio_documentation(operator, body)
-            return await model_fabric_repository.reject_audio_documentation(operator, body)
-    except DocumentationError as exc:
-        raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
-    except (OSError, TimeoutError):
-        raise HTTPException(status_code=409, detail={"code":"audio_documentation_acquisition_unavailable"}) from None
-
-
-@router.get("/settings/model-fabric/audio-documentation")
-async def read_owned_audio_documentation(request: Request):
-    from src.model_fabric.repository import model_fabric_repository
-    from src.model_fabric.audio_documentation import owned_staging
-    try:
-        return {"staged": await owned_staging(model_fabric_repository, getattr(request.state, "operator", None))}
-    except DocumentationError as exc:
-        raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
-
-
 async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationRequest, request: Request):
     if not _is_local_request(request):
         raise HTTPException(
@@ -1092,22 +1065,8 @@ async def _put_model_fabric_settings_locked(body: ModelFabricConfigurationReques
         )
     credential_mutated = False
     if "audio_metadata_access" in body.model_fields_set:
-        if body.audio_metadata_access is None or {"openrouter", "openrouter_setup", "near_text", "profiles", "workload_policies"}.intersection(body.model_fields_set):
-            raise HTTPException(status_code=422, detail={"code":"audio_metadata_selection_separate_mutation_required"})
-        persisted = read_model_fabric_configuration()
-        if body.expected_policy_revision != persisted.egress_revision:
-            raise HTTPException(status_code=409, detail={"code":"audio_metadata_revision_changed"})
-        from src.model_fabric.repository import model_fabric_repository
-        try:
-            selected = await select_metadata(model_fabric_repository, getattr(request.state, "operator", None),
-                persisted, body.audio_metadata_access)
-            target = replace(persisted, audio_metadata_access=selected, egress_revision=persisted.egress_revision+1)
-            write_model_fabric_configuration(target, expected_revision=persisted.egress_revision)
-        except DocumentationError as exc:
-            raise HTTPException(status_code=exc.status, detail={"code":exc.code}) from None
-        except ValueError:
-            raise HTTPException(status_code=409, detail={"code":"audio_metadata_selection_unavailable"}) from None
-        return await model_fabric_settings_payload()
+        # #1179 retired voice input and its audio documentation selection.
+        raise HTTPException(status_code=409, detail={"code": "audio_route_retired"})
     previous_vault_value: str | None = None
     previous_process_value = str(settings.openrouter_api_key or "")
     try:

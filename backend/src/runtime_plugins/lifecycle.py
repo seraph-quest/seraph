@@ -65,7 +65,9 @@ SHUTDOWN_TRANSITION_SECONDS = 10.0
 
 # Closed classification of every system job registered by ``init_scheduler``.
 # Retention/cleanup (deletion) jobs are exempt from the Cordis gate.
-RETENTION_JOBS = frozenset({"screen_cleanup", "audio_ingress_cleanup", "cordis_mail_retention"})
+# #1179 retired voice input: ``audio_ingress_cleanup`` is no longer registered,
+# so it is no longer classified (an unknown job id fails closed).
+RETENTION_JOBS = frozenset({"screen_cleanup", "cordis_mail_retention"})
 DISPATCH_JOBS = frozenset({"work_board_dispatch"})
 SCHEDULER_GATED_JOBS = frozenset({
     "programme_daily_digest", "goal_public_discovery", "memory_consolidation", "goal_check", "calendar_scan",

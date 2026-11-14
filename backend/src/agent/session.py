@@ -29,7 +29,6 @@ from src.db.models import (
     MemoryEpisodeType,
     Message,
     NativeNotificationOutbox,
-    OperatorSession,
     TelegramTransportOutbox,
     QueuedInsight,
     ScheduledJob,
@@ -323,42 +322,15 @@ class SessionManager:
                 and session.owner_principal_id != owner_principal_id
             ):
                 raise SessionOwnerMismatchError(session_id)
-            # Audio bytes live outside the database, so quarantine cleanup is a
-            # deletion precondition.  Keep the session and its durable job rows
-            # when cleanup cannot be proven; the worker's retention pass can
-            # then retry the server-owned paths instead of losing their receipt.
+            # #1179 retired voice input. Historical AudioIngressJob rows are
+            # kept (unused) but still hold a foreign key to this conversation,
+            # so they are deleted with it. The retired audio worker owned the
+            # quarantine files; their retention was at most 15 minutes and is
+            # not re-run here.
             audio_jobs_result = await db.execute(
                 select(AudioIngressJob).where(AudioIngressJob.session_id == session_id)
             )
             audio_jobs = list(audio_jobs_result.scalars().all())
-            try:
-                from src.guardian.audio_worker import cleanup_audio_job_paths
-            except Exception:
-                logger.warning(
-                    "Audio quarantine cleanup is unavailable while deleting session %s",
-                    session_id,
-                    exc_info=True,
-                )
-                return False
-            for audio_job in audio_jobs:
-                try:
-                    cleaned = cleanup_audio_job_paths(
-                        audio_job.raw_path,
-                        audio_job.normalized_path,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Audio quarantine cleanup failed while deleting session %s",
-                        session_id,
-                        exc_info=True,
-                    )
-                    return False
-                if not cleaned:
-                    logger.warning(
-                        "Audio quarantine cleanup is incomplete while deleting session %s",
-                        session_id,
-                    )
-                    return False
             try:
                 process_runtime_manager.stop_processes_for_session(
                     session_id,
@@ -423,12 +395,8 @@ class SessionManager:
             )
             for intervention in interventions.scalars().all():
                 await db.delete(intervention)
-            # Audio jobs hold a foreign key to the canonical conversation.  The
-            # quarantine preflight above succeeded, so delete the metadata rows
-            # only after their private paths are proven gone.
-            from src.guardian.audio_worker import forget_audio_job_review
+            # Historical audio rows hold a foreign key to the conversation.
             for audio_job in audio_jobs:
-                forget_audio_job_review(audio_job.request_id)
                 await db.delete(audio_job)
             # A deleted conversation can never resume an old native delivery.
             # Preserve the outbox receipt while cancelling active handoffs so
@@ -915,10 +883,6 @@ class SessionManager:
         message_id: str,
         metadata_json: str,
         attachment_refs: object = None,
-        confirmation_job_id: str | None = None,
-        confirmation_digest: str | None = None,
-        confirmation_owner_principal_id: str | None = None,
-        confirmation_operator_session_id: str | None = None,
     ) -> tuple[Message, bool]:
         """Persist one user ingress before dispatch and detect safe retries.
 
@@ -926,96 +890,6 @@ class SessionManager:
         key.  SQLite's existing primary-key constraint closes the small race
         between concurrent retries without adding a parallel receipt table.
         """
-        confirmation_mode = any(
-            value is not None
-            for value in (
-                confirmation_job_id,
-                confirmation_digest,
-                confirmation_owner_principal_id,
-                confirmation_operator_session_id,
-            )
-        )
-        if confirmation_mode and not all(
-            isinstance(value, str) and value
-            for value in (
-                confirmation_job_id,
-                confirmation_digest,
-                confirmation_owner_principal_id,
-                confirmation_operator_session_id,
-            )
-        ):
-            raise ValueError("confirmation reservation fence is incomplete")
-        if confirmation_mode:
-            assert confirmation_job_id is not None
-            assert confirmation_digest is not None
-            assert confirmation_owner_principal_id is not None
-            assert confirmation_operator_session_id is not None
-            # Claim the durable job fence and insert the canonical message in
-            # the same transaction.  Cancellation can win before this update;
-            # once it does, no message reservation is possible.
-            async with get_session() as db:
-                # The worker's request-time re-authentication closes the
-                # normal path, but session revocation can race that check.  A
-                # A row lock makes this transaction the linearization point on
-                # databases that support ``FOR UPDATE``.  SQLite's serialized
-                # write transaction provides the same fail-closed ordering for
-                # the local-first runtime: a revoked or expired operator
-                # session cannot reserve a canonical message after this check.
-                authority_result = await db.execute(
-                    select(OperatorSession)
-                    .where(OperatorSession.id == confirmation_operator_session_id)
-                    .with_for_update()
-                )
-                authority = authority_result.scalars().first()
-                now = datetime.now(timezone.utc)
-                if authority is None or authority.revoked_at is not None:
-                    raise MessageIngressConflictError(message_id)
-                idle_expires_at = authority.idle_expires_at
-                absolute_expires_at = authority.absolute_expires_at
-                if idle_expires_at.tzinfo is None:
-                    idle_expires_at = idle_expires_at.replace(tzinfo=timezone.utc)
-                if absolute_expires_at.tzinfo is None:
-                    absolute_expires_at = absolute_expires_at.replace(tzinfo=timezone.utc)
-                if now >= idle_expires_at or now >= absolute_expires_at:
-                    raise MessageIngressConflictError(message_id)
-                claimed = await db.execute(
-                    update(AudioIngressJob)
-                    .where(
-                        AudioIngressJob.id == confirmation_job_id,
-                        AudioIngressJob.status == "confirming",
-                        AudioIngressJob.confirmed_transcript_digest == confirmation_digest,
-                        AudioIngressJob.owner_principal_id == confirmation_owner_principal_id,
-                        AudioIngressJob.operator_session_id == confirmation_operator_session_id,
-                    )
-                    .values(status="confirming_reserved", updated_at=datetime.now(timezone.utc))
-                )
-                if claimed.rowcount != 1:
-                    raise MessageIngressConflictError(message_id)
-                existing = await db.get(Message, message_id)
-                if existing is not None:
-                    if (
-                        existing.session_id != session_id
-                        or existing.role != "user"
-                        or not self._ingress_metadata_matches(existing.metadata_json, metadata_json)
-                        or existing.content != content
-                    ):
-                        raise MessageIngressConflictError(message_id)
-                    db.expunge(existing)
-                    return existing, True
-                try:
-                    message = await self._add_message_in_db(
-                        db,
-                        session_id,
-                        "user",
-                        content,
-                        metadata_json=metadata_json,
-                        message_id=message_id,
-                        attachment_refs=attachment_refs,
-                    )
-                except IntegrityError as exc:
-                    raise MessageIngressConflictError(message_id) from exc
-                return message, False
-
         existing = await self.get_message(message_id)
         if existing is not None:
             if (

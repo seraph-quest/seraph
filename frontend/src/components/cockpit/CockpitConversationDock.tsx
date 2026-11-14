@@ -25,8 +25,6 @@ export interface CockpitConversationDockProps {
   onOpenApprovals?: (approvalId?: string) => void;
   /** Onboarding prompt/skip controls while onboarding is active. */
   onboarding?: ReactNode;
-  /** Push-to-talk control. */
-  voice?: ReactNode;
   composerValue: string;
   onComposerChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -38,13 +36,13 @@ export interface CockpitConversationDockProps {
 /**
  * Conversation with Seraph as a first-class, always-findable surface (#1172).
  * It replaces the thin bottom composer plus the hidden "Conversation" window:
- * the thread, what Seraph is doing now, voice and the composer live together
+ * the thread, what Seraph is doing now and the composer live together
  * in a dock that every section keeps visible.
  */
 export function CockpitConversationDock(props: CockpitConversationDockProps) {
   const {
     open, onToggle, sessionTitle, sessions, currentSessionId, onSwitchSession, onNewSession,
-    messages, isAgentBusy, activity, roleLabel, ageLabel, onOpenApprovals, onboarding, voice,
+    messages, isAgentBusy, activity, roleLabel, ageLabel, onOpenApprovals, onboarding,
     composerValue, onComposerChange, onSubmit, inputRef, placeholder, submitDisabled,
   } = props;
   const feedRef = useRef<HTMLDivElement | null>(null);
@@ -157,12 +155,6 @@ export function CockpitConversationDock(props: CockpitConversationDockProps) {
         ) : null}
       </div>
 
-      {voice ? (
-        <details className="cockpit-dock-voice">
-          <summary>Voice input</summary>
-          <div className="cockpit-dock-voice-body">{voice}</div>
-        </details>
-      ) : null}
       <form className="cockpit-composer" onSubmit={onSubmit}>
         <div className="cockpit-composer-row">
           <label className="cockpit-visually-hidden" htmlFor="cockpit-composer-input">Message Seraph</label>

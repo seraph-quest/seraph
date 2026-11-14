@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from src.auth.service import authenticate_session, AuthFailure
 import src.db.engine as database
 from src.db.models import (Goal, GoogleServiceConnection, CalendarReadConsent, MailReadConsent,
-    AudioConsentGrant, AudioIngressJob, GovernedScheduleBinding, GuardianSourceWatch,
+    GovernedScheduleBinding, GuardianSourceWatch,
     ApprovalRequest, WorkBoardTask, TelegramTransportState, GitHubFollowthroughConnection)
 
 LIMIT = 100
@@ -31,7 +31,7 @@ def _revision(row):
 
 def _entry(kind, record_id, *, boundary, purpose, source, destination, state, revision,
            expiry=None, goal_id=None, limits=None, controls=None, jobs=None):
-    capability={'calendar_consent':'calendar.observe_due_events.v1','mail_consent':'mail.read.v1','audio':'audio.push_to_talk.v1','goal':'goal.proactive.v1','source_watch':'guardian.research-watch.v1','github':'github.followthrough.v1','telegram':'telegram.transport.v1','node':'paired.observation.v1'}.get(kind.removesuffix('_model'),kind)
+    capability={'calendar_consent':'calendar.observe_due_events.v1','mail_consent':'mail.read.v1','goal':'goal.proactive.v1','source_watch':'guardian.research-watch.v1','github':'github.followthrough.v1','telegram':'telegram.transport.v1','node':'paired.observation.v1'}.get(kind.removesuffix('_model'),kind)
     return dict(grant_id=f'{kind}:{record_id}', kind=kind, capability_id=capability, record_id=record_id,
         boundary=boundary, purpose=purpose, source=source, destination=destination,
         state=state, revision=revision, expires_at=_iso(expiry), goal_id=goal_id,
@@ -105,14 +105,8 @@ async def inventory(request):
                     source='mail' if kind.startswith('mail') else 'calendar',destination='governed_provider',
                     state=effective if model_allowed else 'denied',revision=c.revision,expiry=c.expires_at,
                     goal_id=c.goal_id,controls=['revoke'],jobs=consent_jobs(c.consent_id,kind)))
-        audio_jobs=await owned(AudioIngressJob,'operator_session_id')
-        for c in await owned(AudioConsentGrant,'operator_session_id'):
-            state=c.state if c.expires_at.replace(tzinfo=c.expires_at.tzinfo or timezone.utc)>datetime.now(timezone.utc) else 'expired'
-            rows.append(_entry('audio',c.reference,boundary='observation' if c.boundary=='capture' else 'inference_egress',
-                purpose='push_to_talk_'+c.boundary,source='microphone',destination='local_quarantine' if c.boundary=='capture' else 'governed_provider',
-                state=state,revision=1,expiry=c.expires_at,controls=['revoke'],jobs=[
-                    {'job_id':j.request_id,'state':j.status,'kind':'audio'} for j in audio_jobs
-                    if c.reference in {j.capture_consent_reference,j.model_consent_reference}]))
+        # #1179 retired voice input: historical AudioConsentGrant rows are kept
+        # unused and are no longer an effective grant or a revocable control.
         for g in goals.values():
             from src.guardian.source_watch import _goal_admission
             admitted,reason,budget=_goal_admission(g)
@@ -245,10 +239,8 @@ async def revoke(request, body):
     if not selected or ('revoke' not in selected['controls'] and 'deny' not in selected['controls'] and not (selected['kind']=='approval' and selected['state']=='consumed')):
         raise HTTPException(404,detail={'code':'effective_grant_not_found'})
     kind,record=selected['kind'],selected['record_id']
-    if kind in {'audio'} and body.expected_revision!=selected['revision']:
-        raise HTTPException(409,detail={'code':'effective_grant_revision_stale'})
     controls={'expected_revision':body.expected_revision,'idempotency_key':body.idempotency_key}
-    from src.api import calendar, mail, audio, goals, approvals, nodes
+    from src.api import calendar, mail, goals, approvals, nodes
     target=_with_body(request,controls)
     try:
         if kind.startswith('calendar_consent'):
@@ -259,8 +251,6 @@ async def revoke(request, body):
             result=await mail.revoke_consent(target,record)
         elif kind=='mail_connection':
             result=await mail.revoke_connection(target,record)
-        elif kind=='audio':
-            result=await audio.revoke_audio_consent(record,target)
         elif kind=='goal':
             result=await goals.update_goal(record,goals.GoalUpdate(proactive_enabled=False,expected_revision=body.expected_revision),target)
         elif kind=='schedule':

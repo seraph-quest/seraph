@@ -24,15 +24,20 @@ _FINGERPRINT = "0123456789ab"
 
 def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_microusd: int = 1_000_000,
         request_cost_bound_microusd: int = 20_000, credential_fingerprint: str | None = _FINGERPRINT,
-        egress_revoked: bool = False, timeout_seconds: float = 30.0) -> ModelFabricConfiguration:
-    """Persist a ready, consented, enabled NEAR TEE text slot behind the shared lane."""
+        egress_revoked: bool = False, timeout_seconds: float = 30.0,
+        max_input_tokens: int = 8192) -> ModelFabricConfiguration:
+    """Persist a ready, consented, enabled NEAR TEE text slot behind the shared lane.
+
+    ``max_input_tokens`` is the slot's context bound; agent turns that carry
+    the full tool inventory need a larger one than single-prompt verticals.
+    """
     configuration = ModelFabricConfiguration(
         status="ready",
         egress_revision=egress_revision,
         egress_revoked=egress_revoked,
         inference_lane=InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd),
         near_tee=NearTeeSetup(credential_fingerprint=credential_fingerprint, slots={"text": NearTeeSlot(
-            model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=8192, max_output_tokens=1024,
+            model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=max_input_tokens, max_output_tokens=1024,
             request_cost_bound_microusd=request_cost_bound_microusd, enabled=True,
             timeout_seconds=timeout_seconds, purpose_consent_revision=egress_revision)}),
     )
@@ -63,6 +68,7 @@ NEAR_TEE_TEXT_PROFILE_ID = "near_tee.text"
 async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_000_000,
         request_cost_bound_microusd: int = 20_000, capabilities=("text", "structured_output"),
         timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2,
+        max_input_tokens: int = 8192,
         proof_age_seconds: float = 1.0):
     """A ready NEAR TEE text slot with every dispatch gate satisfied; no contact.
 
@@ -96,7 +102,7 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
 
     near = (near or NearFixture()).install(monkeypatch)
     fingerprint = hashlib.sha256(NEAR_TEE_VERTICAL_KEY.encode()).hexdigest()[:12]
-    write_near_tee_text_configuration(ceiling_microusd=ceiling_microusd,
+    write_near_tee_text_configuration(ceiling_microusd=ceiling_microusd, max_input_tokens=max_input_tokens,
         request_cost_bound_microusd=request_cost_bound_microusd, credential_fingerprint=fingerprint,
         timeout_seconds=timeout_seconds, egress_revision=egress_revision)
     await vault_repository.store("near_api_key", NEAR_TEE_VERTICAL_KEY)

@@ -1,10 +1,9 @@
 """Shared fixtures for the #1019 Cordis agent-loop suites.
 
 Scripted inference only: either a fixed in-memory smolagents ``Model`` returns
-the next scripted message, or (``governed_inference``) the real
-``FallbackLiteLLMModel`` runs its canonical preflight and route selection and
-only the governed OpenRouter transport's HTTP client is answered by an
-``httpx.MockTransport`` (#1107's pattern). Sockets and DNS are denied, so no
+the next scripted message, or (``near_scripted_gateway``) the production model
+runs its canonical preflight and ADR-035 NEAR TEE route selection and only the
+NEAR gateway is answered by an ``httpx.MockTransport`` (#1107's pattern). Sockets and DNS are denied, so no
 provider is contacted and nothing is spent. The reviewed Cordis child is real,
 and the agent-loop owner is cut over with the production fenced owner
 transition and a boot proof from that child.
@@ -59,78 +58,6 @@ class ScriptedModel(Model):
         if not self.script:
             raise AssertionError("scripted model exhausted")
         return self.script.pop(0)
-
-
-class GovernedProvider:
-    """The provider behind the governed transport: replays the script as OpenRouter chat completions.
-
-    Requests leave ``_governed_openai_chat_completion`` exactly as they would for
-    OpenRouter; the real request serialization and response parsing both run.
-    ``calls`` records, per request, the offered tool names and the message count.
-    """
-
-    def __init__(self, script):
-        self.script, self.calls, self.bodies = list(script), [], []
-
-    def handle(self, request):
-        import httpx
-        assert request.url.host == "openrouter.ai", request.url
-        body = json.loads(request.content)
-        self.bodies.append(body)
-        self.calls.append({"tools": [tool["function"]["name"] for tool in body.get("tools") or []],
-                           "messages": len(body["messages"])})
-        if not self.script:
-            raise AssertionError("scripted provider exhausted")
-        message = self.script.pop(0)
-        calls = [{"id": item.id, "type": "function",
-                  "function": {"name": item.function.name, "arguments": json.dumps(item.function.arguments)}}
-                 for item in message.tool_calls or []]
-        return httpx.Response(200, json={
-            "id": f"gen-{len(self.bodies)}", "object": "chat.completion", "model": body["model"],
-            "choices": [{"index": 0, "finish_reason": "tool_calls" if calls else "stop",
-                         "message": {"role": "assistant", "content": message.content or None,
-                                     "tool_calls": calls or None}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.000001}})
-
-
-def governed_inference(monkeypatch, script) -> GovernedProvider:
-    """Chat and onboarding agents get the real governed model; only its provider HTTP is scripted."""
-    import httpx
-    from config.settings import settings
-    from src import llm_runtime
-    from src.model_fabric.configuration import openrouter_policy_for_setup
-    from src.model_fabric.repository import model_fabric_repository
-    from tests.test_agent_control_flow_propagation import _openrouter_route
-    setup, profile, proofs = _openrouter_route()
-    provider = GovernedProvider(script)
-    monkeypatch.setattr(settings, "openrouter_api_key", "fixture-openrouter-key")
-
-    def model(*, runtime_path: str = "chat_agent", temperature=None, **_kwargs):
-        return llm_runtime.FallbackLiteLLMModel(model_id=profile.routing_model, api_base=profile.api_base,
-                                                api_key="fixture-openrouter-key", runtime_profile=profile.id,
-                                                runtime_path=runtime_path, max_tokens=512,
-                                                **({} if temperature is None else {"temperature": temperature}))
-
-    async def latest_capability_proof(*, capability, **_kwargs):
-        return proofs.get(capability)
-    real_client = httpx.Client
-
-    def client(*args, **kwargs):
-        return real_client(*args, **{**kwargs, "transport": httpx.MockTransport(provider.handle)})
-    monkeypatch.setattr("src.agent.factory.get_model", model)
-    monkeypatch.setattr("src.agent.onboarding.LiteLLMModel", model)
-    monkeypatch.setattr("src.agent.onboarding.build_model_kwargs", lambda **kwargs: kwargs)
-    monkeypatch.setattr(llm_runtime, "provider_profiles", lambda *_a, **_k: {profile.id: profile})
-    monkeypatch.setattr(llm_runtime, "_fallback_targets", lambda *_a, **_k: [])
-    monkeypatch.setattr("src.model_fabric.caller_context.effective_workload_policy",
-                        lambda *_a, **_k: openrouter_policy_for_setup(setup, "chat_agent"))
-    monkeypatch.setattr(model_fabric_repository, "latest_capability_proof", latest_capability_proof)
-    monkeypatch.setattr(llm_runtime, "_execute_sync_with_gpu_admission", lambda **kwargs: kwargs["operation"]())
-    monkeypatch.setattr(llm_runtime, "_new_route_receipt_session", lambda *_a, **_k: None)
-    monkeypatch.setattr(llm_runtime, "_can_log_request", lambda *_a, **_k: False)
-    # Only the governed transport builds a synchronous httpx.Client on these paths.
-    monkeypatch.setattr(httpx, "Client", client)
-    return provider
 
 
 async def cutover_agent_loop(host, *, to: str = "cordis"):
@@ -190,3 +117,78 @@ def patched_package(directory, old: str, new: str):
     files = {path: hashlib.sha256((root / path).read_bytes()).hexdigest() for path in BUILD_FILES}
     (root / "dist/build-manifest.json").write_text(json.dumps({"format": 1, "npm_version": NPM_VERSION, "files": files}) + "\n")
     return root
+
+
+def near_scripted_gateway(script):
+    """ADR-035: the scripted conversation answered by the intercepted NEAR TEE gateway.
+
+    The chat and onboarding agents keep their production model; their route is
+    the NEAR TEE text slot (prepared by ``tests.near_tee_support``). Each NEAR
+    completion pops the next scripted message (content and/or tool calls);
+    every NEAR billing readback settles the request. Any other host, the real
+    transports and litellm fail the test. ``calls`` records, per completion,
+    the offered tool names and the message count, as ``GovernedProvider`` did.
+    """
+    import httpx
+    from tests.test_near_tee_text_slot import NearFixture, _json
+
+    class ScriptedNear(NearFixture):
+        def __init__(self):
+            super().__init__()
+            self.script, self.calls, self.bodies = list(script), [], []
+
+        def handler(self, request):
+            if request.method == "POST" and request.url.raw_path.decode() == "/v1/chat/completions":
+                self.requests.append(request)
+                assert request.url.host == "cloud-api.near.ai", request.url
+                body = json.loads(request.content)
+                self.bodies.append(body)
+                if body.get("stream"):
+                    return self._stream(body)
+                self.calls.append({"tools": [tool["function"]["name"] for tool in body.get("tools") or []],
+                                   "messages": len(body["messages"])})
+                if not self.script:
+                    raise AssertionError("scripted provider exhausted")
+                message = self.script.pop(0)
+                calls = [{"id": item.id, "type": "function",
+                          "function": {"name": item.function.name, "arguments": json.dumps(item.function.arguments)}}
+                         for item in message.tool_calls or []]
+                self.body_id = f"chatcmpl-scripted-{len(self.bodies)}"
+                answer = {"role": "assistant", "content": message.content or None}
+                if calls:
+                    answer["tool_calls"] = calls
+                return _json({"id": self.body_id, "model": body["model"], "choices": [{"index": 0,
+                    "finish_reason": "tool_calls" if calls else "stop", "message": answer}]})
+            return super().handler(request)
+
+        def _stream(self, body):
+            # Direct chat streams one scripted reply: its content, or the
+            # answer of a scripted final_answer call, as SSE deltas.
+            self.calls.append({"tools": [], "messages": len(body["messages"]), "stream": True})
+            if not self.script:
+                raise AssertionError("scripted provider exhausted")
+            message = self.script.pop(0)
+            content = message.content or next((item.function.arguments.get("answer", "")
+                                               for item in message.tool_calls or []), "")
+            self.body_id = f"chatcmpl-scripted-{len(self.bodies)}"
+            events = [{"id": self.body_id, "model": body["model"], "choices": [{"index": 0,
+                "delta": {"role": "assistant", "content": content}}]},
+                {"id": self.body_id, "model": body["model"], "choices": [{"index": 0, "delta": {},
+                    "finish_reason": "stop"}]}]
+            payload = b"".join(("data: " + json.dumps(event, separators=(",", ":")) + "\n\n").encode()
+                               for event in events) + b"data: [DONE]\n\n"
+            class _SSE(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    yield payload
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_SSE())
+
+        def install(self, monkeypatch):
+            # The starlette TestClient drives the app through httpx.Client.post
+            # on its own in-process transport; keep that live. The real sync and
+            # async network transports and litellm stay refused.
+            real_post, real_stream = httpx.Client.post, httpx.Client.stream
+            super().install(monkeypatch)
+            monkeypatch.setattr(httpx.Client, "post", real_post)
+            monkeypatch.setattr(httpx.Client, "stream", real_stream)
+            return self
+    return ScriptedNear()

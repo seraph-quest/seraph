@@ -4,10 +4,11 @@ Each case runs one scripted conversation through both loops in fresh
 temporary workspaces, with real Auth, SQLite, the real wrapped ``Tool``
 objects from the agent factories and the real reviewed Cordis child, then
 compares tool effects, approval rows, transcript rows and WS frames. Only the
-loop-naming status text may differ. By default the model is the real governed
-``FallbackLiteLLMModel`` and only its OpenRouter HTTP client is scripted (an
-``httpx.MockTransport``; no network, inference or spend), so tool export,
-provider message cleaning, ``tool_choice`` and approval/clarification
+loop-naming status text may differ. By default the model is the production
+chat model on its ADR-035 route, the NEAR TEE text slot, and only the NEAR
+gateway is scripted (an intercepted ``httpx.MockTransport``; any other host,
+the real transports and litellm fail the test; no inference or spend), so tool
+export, provider message cleaning, ``tool_choice`` and approval/clarification
 propagation are the production ones (#1107).
 """
 from __future__ import annotations
@@ -27,12 +28,11 @@ from starlette.testclient import TestClient
 
 from config.settings import settings
 from tests.cordis_agent_loop import (AGENT_LOOP, ScriptedModel, call, cutover_agent_loop, deny_sockets, final,
-                                     governed_inference, text, tools)
+                                     near_scripted_gateway, text, tools)
 from tests.cordis_research import NODE, needs_cordis, seed_composition_inventory
 from tests.test_research_native_vertical import real_auth  # noqa: F401
 
-# ADR-035: the governed model is the intercepted historical OpenRouter client (scripted MockTransport)
-pytestmark = [needs_cordis, pytest.mark.openrouter_legacy]
+pytestmark = [needs_cordis]
 SECRET = "VAULT_SECRET_CANARY_1019_value"
 ORIGIN = {"origin": "http://localhost:3001"}
 TARGETS = ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",
@@ -112,7 +112,11 @@ def chat_env(tmp_path, monkeypatch, script, *, loop: str, onboarded: bool = True
     for target in TARGETS:
         monkeypatch.setattr(target, sessions)
     if governed:
-        model = governed_inference(monkeypatch, script)
+        # ADR-035: the chat route is the NEAR TEE text slot; the scripted
+        # conversation is answered by the intercepted NEAR gateway.
+        model = near_scripted_gateway(script)
+        from src.vault import crypto as vault_crypto
+        monkeypatch.setattr(vault_crypto, "_fernet", None)  # this environment's own Vault key
     else:
         model = ScriptedModel(script)
         monkeypatch.setattr("src.agent.factory.get_model", lambda **_kwargs: model)
@@ -139,6 +143,11 @@ def chat_env(tmp_path, monkeypatch, script, *, loop: str, onboarded: bool = True
             async with engine.begin() as connection:
                 await connection.run_sync(SQLModel.metadata.create_all)
             await seed_composition_inventory()
+            if governed:
+                from tests.near_tee_support import prepare_near_tee_vertical
+                await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=model,
+                                                capabilities=("text", "structured_output", "tool_use", "streaming"),
+                                                max_input_tokens=65536)
             host = CordisHost(node_path=Path(NODE), service_dispatch=NativeServiceDispatcher(jobs=jobs))
             assert await host.start(), host.snapshot()
             if onboarded:
@@ -211,7 +220,11 @@ def both(tmp_path, monkeypatch, script_factory, drive, **kwargs):
 
 def test_ws_tool_turn_parse_error_and_final_answer_match_legacy(tmp_path, monkeypatch, real_auth):  # noqa: F811
     def script():
-        return [tools(call("read_file", {"file_path": "notes.txt"})), text("plain text without a tool call"),
+        # ADR-035: the NEAR TEE slot forces tool_choice for agent turns and fails
+        # closed on a reply without a tool call (near_tee_tool_call_required), so
+        # the recoverable step error is a tool call the tool itself rejects.
+        return [tools(call("read_file", {"file_path": "notes.txt"})),
+                tools(call("read_file", {"file_path": "missing-notes.txt"}, "call-2")),
                 final("The notes say hello.")]
 
     def drive(env):
@@ -235,8 +248,14 @@ def test_ws_status_names_the_actual_loop(tmp_path, monkeypatch, real_auth):  # n
 
 
 def test_ws_direct_chat_streams_deltas_then_settles_through_cordis(tmp_path, monkeypatch, real_auth):  # noqa: F811
+    # The Vault holds the NEAR TEE key, so streaming redaction withholds a tail
+    # as long as that key; each part outgrows it, so each releases a delta.
+    parts = ("Hello there, this is the first streamed part of the reply. ",
+             "Here is the second streamed part, also long enough to release. ",
+             "And the third streamed part closes the reply!")
+
     async def stream(*_args, **_kwargs):
-        for part in ("Hello", " there", "!"):
+        for part in parts:
             yield part
 
     def drive(env):
@@ -248,7 +267,7 @@ def test_ws_direct_chat_streams_deltas_then_settles_through_cordis(tmp_path, mon
     legacy, cordis = both(tmp_path, monkeypatch, lambda: [], drive)
     assert legacy[0] == cordis[0] and legacy[1] == cordis[1]
     assert [item[0] for item in cordis[0] if item[0] in {"delta", "final"}] == ["delta", "delta", "delta", "final"]
-    assert cordis[0][-1][1] == "Hello there!"
+    assert cordis[0][-1][1] == "".join(parts).strip()
     assert cordis[2] == [("succeeded", None)]
 
 
@@ -453,7 +472,8 @@ def test_measured_direct_chat_first_delta_legacy_vs_cordis(tmp_path, monkeypatch
     import time
 
     async def stream(*_args, **_kwargs):
-        yield "Hi"
+        # Longer than the Vault's NEAR TEE key, so the redactor releases a delta.
+        yield "Hi, this first delta is longer than the longest Vault secret."
 
     def drive(env):
         samples = []

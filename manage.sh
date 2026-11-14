@@ -752,10 +752,21 @@ function start_local_frontend() {
     return 1
 }
 
+function cordis_cli_python() {
+    # The keyless Cordis CLI runs under env -i, so a version-manager shim
+    # (asdf/pyenv: needs $HOME) or an old system python3 must not be used.
+    # The backend's own uv environment is the supported interpreter (#1168).
+    if [ -x "$SCRIPT_DIR/backend/.venv/bin/python" ]; then
+        printf '%s\n' "$SCRIPT_DIR/backend/.venv/bin/python"
+    else
+        command -v python3
+    fi
+}
+
 function cordis_cli() {
     # Same keyless path as `./manage.sh cordis`: no operator env, credentials or workspace.
     env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
-        python3 -m src.runtime_plugins.cli "$@"
+        "$(cordis_cli_python)" -m src.runtime_plugins.cli "$@"
 }
 
 # Goal discovery plans and extracts only through the reviewed Cordis host (#1008).
@@ -934,7 +945,7 @@ if [ "$COMMAND" = "cordis" ]; then
     # This finite keyless path never reads operator env, credentials or workspace.
     # Build uses already installed pins; probe launches/reaps the production host.
     exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
-        python3 -B -m src.runtime_plugins.cli "$@"
+        "$(cordis_cli_python)" -B -m src.runtime_plugins.cli "$@"
 fi
 COMPOSE_FILES=(
     -f "$SCRIPT_DIR/docker-compose.$ENV.yaml"

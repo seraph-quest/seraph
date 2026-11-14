@@ -1049,10 +1049,18 @@ reason (for example `state_init_db_failed`, `authority_vault_key_unavailable`,
 only degrade. A Cordis callback blocks with `native_provider_<name>_unavailable`
 when any provider its method depends on is degraded or failed (for example
 `audit.append` or `capabilities.invoke` while artifacts is degraded).
-`/api/runtime/status` reports `providers`, rechecked on each request: a
-mandatory provider whose predicate now fails becomes `failed` with its typed
-reason, and a degraded or failed provider whose predicate passes again
-recovers. Every Cordis child (re)start receives fresh provider reports.
+`/api/runtime/status` reports `providers`, rechecked on each request without
+writing anything: audit is checked read-only there, and the last audit write
+probe is shown with its time and outcome (`audit_write_probe`). A mandatory
+provider whose predicate now fails becomes `failed` with its typed reason, and
+a degraded or failed provider whose predicate passes again recovers. Rechecks
+and shutdown marks are serialized by one lock. Every Cordis child (re)start
+runs the audit write probe (bounded retries on a held SQLite writer lock; still
+contended means `unknown`, never `failed`) and sends fresh provider reports
+**before** the host admits anything: if the reports cannot be produced (for
+example `composition_inventory_invalid` or a closed state gate) or are not
+acknowledged, that boot is `blocked` (`provider_reports_unavailable` or
+`provider_report_not_acknowledged`) and its child is stopped.
 Importing the worker or `src.app` starts no consumer, connection, task, thread
 (other than the rate limiter's library timer), scheduler job or DB file.
 
@@ -1071,15 +1079,22 @@ then releases the lease.
 `seraph.state.v1` is a runtime domain and every method depends on it. New
 admissions write binding schema 3 under manifest `runtime-service-methods.v2`.
 Persisted schema 1 (#1019) and schema 2 (#1020) bindings keep manifest v1 and
-decode and re-encode byte-identically, so their job CAS predicates still
-match; committed fixtures captured before #1024 pin that. Startup adds the
+decode and re-encode byte-identically through frozen literal manifest-v1
+tables (`METHOD_DEPENDENCIES_V1`, `METHOD_DEPENDENCIES_V1_SCHEMA1`), never the
+live rules, so their job CAS predicates still match; committed fixtures
+captured from the pre-#1024 code pin both the tables and the bindings. Startup adds the
 legacy `seraph.state.v1` row with one `runtime_composition_domain_introduced`
 audit event (`introduced_by: "1024"`) as a chained exact-prefix step after
 #1020's domain introductions: only an inventory that is then exactly the
 previous 18 domains gains it, including on the first start after a host-CLI
 restore of an older backup. An empty table is seeded whole (19 domains); any
 other partial or unknown inventory is left to fail closed, and no existing
-row changes. The step is forward-only: an older binary rejects the extra row
+row changes. Every row of the exact prior set must also decode (owner, epoch,
+digest, state, receipt, and legacy owners for authority and audit); otherwise
+the step refuses with `composition_inventory_invalid`, inserts nothing, and
+state activation fails with that reason. #1020's own introductions keep their
+shipped insert-if-missing rule; only the state step is exact-prefix (an
+acknowledged deviation from the #1024 addendum). The step is forward-only: an older binary rejects the extra row
 with `composition_inventory_invalid`.
 **Take a host-CLI workspace backup before upgrading**; rolling the binary back
 means restoring that backup. A `state`, `authority` or `audit` row that is not

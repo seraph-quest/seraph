@@ -26,7 +26,9 @@ pytestmark = [needs_cordis, pytest.mark.asyncio]
 
 
 # #1020 adds the presets (cut over first; agent-loop's prerequisite) and guardian domains.
-MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN, "seraph.delegation.v1", "seraph.board-workers.v1"]
+# #1025 appends the scheduler lifecycle, then the dispatcher lifecycle (D3 order).
+MANIFEST = [PRESETS_DOMAIN, AGENT_LOOP_DOMAIN, GUARDIAN_DOMAIN, "seraph.delegation.v1", "seraph.board-workers.v1",
+            "seraph.scheduler.v1", "seraph.dispatch.v1"]
 
 
 def _by_domain(receipts):

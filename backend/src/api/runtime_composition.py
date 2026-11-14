@@ -70,6 +70,29 @@ async def transition_domain_owner(request: Request, domain: str, body: OwnerTran
     if body.confirm_domain != domain:
         raise HTTPException(status_code=422, detail={"code": "composition_confirmation_required",
                                                      "recovery_action": "confirm_domain"})
+    from src.runtime_plugins.lifecycle import LIFECYCLE_DOMAINS, runtime_lifecycle
+    if domain in LIFECYCLE_DOMAINS and runtime_lifecycle.managed:
+        # #1025: drain at E, flip, reactivate at E+1, as one bounded background
+        # lifecycle step; the drain may take the longest live attempt's own bound.
+        rows = {item["runtime_domain"]: item for item in await _domains()}
+        if rows.get(domain, {}).get("epoch") != body.expected_epoch:
+            raise HTTPException(status_code=409, detail={"code": "composition_owner_changed",
+                                                         "recovery_action": "reload_domains"})
+        try:
+            runtime_lifecycle.claim_transition(domain)
+        except CompositionBindingError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.reason_code,
+                                                         "recovery_action": "reload_domains"}) from exc
+        from fastapi.responses import JSONResponse
+        from src.utils.background import track_task
+        track_task(runtime_lifecycle.transition(domain, body.target,
+                                                actor=f"operator:{operator.principal.principal_id}",
+                                                expected_epoch=body.expected_epoch, reason=body.reason,
+                                                claimed=True),
+                   name=f"lifecycle-transition:{domain}")
+        return JSONResponse(status_code=202, content={
+            "transition": {"runtime_domain": domain, "target": body.target, "state": "draining"},
+            "lifecycle": runtime_lifecycle.status(domain), "domains": await _domains()})
     try:
         receipt = await transition_domain(domain, body.target, host=cordis_host,
                                           actor=f"operator:{operator.principal.principal_id}",

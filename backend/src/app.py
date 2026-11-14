@@ -68,6 +68,18 @@ async def _runtime_domains_or_unavailable() -> list[dict]:
                  "reason": "runtime_domains_status_unavailable",
                  "recovery": "Restart Seraph; the runtime inventory is unreadable."} for domain in DOMAINS]
 from src.runtime_plugins.bridge import cordis_host
+
+
+async def _lifecycle_runtime_or_unavailable(domain: str) -> dict:
+    """Scheduler/dispatch lifecycle owner and state (#1025); never fails the status read."""
+    try:
+        from src.runtime_plugins.lifecycle import lifecycle_runtime_status
+        return await lifecycle_runtime_status(domain)
+    except Exception:
+        logging.getLogger(__name__).warning("Lifecycle runtime status unavailable", exc_info=True)
+        return {"domain": domain, "state": "unavailable", "owner": None, "owner_epoch": None,
+                "reason": "lifecycle_runtime_status_unavailable",
+                "recovery": "Restart Seraph; the runtime inventory is unreadable."}
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
 from src.auth.middleware import OperatorAuthMiddleware
@@ -721,8 +733,6 @@ async def _lifespan_services(app: FastAPI):
         with current_task_service():
             from src.guardian.goal_discovery import current_goal_discovery
             async with current_goal_discovery():
-                init_scheduler()
-                await sync_scheduled_jobs()
                 try:
                     from src.observer.manager import context_manager
                     await context_manager.refresh()
@@ -748,9 +758,26 @@ async def _lifespan_services(app: FastAPI):
                             logging.getLogger(__name__).warning("Cordis owner cutover: %s", receipt)
                     except Exception:
                         logging.getLogger(__name__).exception("Cordis owner cutover deferred")
+                    # #1025: the host started and the boot cutover ran first, so gated
+                    # timers start only under the post-cutover epoch. The one scheduler
+                    # instance runs retention jobs whatever the owner rows say; the
+                    # scheduler and dispatch domains activate only on a ready owner.
+                    init_scheduler()
+                    await sync_scheduled_jobs()
+                    from src.runtime_plugins.lifecycle import runtime_lifecycle
+                    for status in await runtime_lifecycle.start(cordis_host,
+                                                                scheduler_enabled=bool(settings.scheduler_enabled)):
+                        if status.get("state") != "active":
+                            logging.getLogger(__name__).warning("Runtime lifecycle %s: %s (%s)", status["domain"],
+                                                                status["state"], status.get("reason"))
                     yield
                 finally:
                     session_manager.bind_task_continuity(None)
+                    try:
+                        from src.runtime_plugins.lifecycle import runtime_lifecycle
+                        await runtime_lifecycle.stop()
+                    except Exception:
+                        logging.getLogger(__name__).exception("Runtime lifecycle shutdown failed")
                     cordis_host.provider_reports_source = None
                     try:
                         await cordis_host.stop()
@@ -887,6 +914,9 @@ def create_app() -> FastAPI:
             # Scheduled guardian work and every runtime domain owner (#1020).
             "guardian_runtime": await _guardian_runtime_or_unavailable(),
             "runtime_domains": await _runtime_domains_or_unavailable(),
+            # Which owner runs scheduled work and WorkBoard dispatch, and why not (#1025).
+            "scheduler_runtime": await _lifecycle_runtime_or_unavailable("seraph.scheduler.v1"),
+            "dispatch_runtime": await _lifecycle_runtime_or_unavailable("seraph.dispatch.v1"),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

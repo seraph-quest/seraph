@@ -44,6 +44,7 @@ BUILD_FILES = (
     'src/contracts/research.ts',
     'src/contracts/conversation.ts',
     'src/contracts/scheduler.ts',
+    'src/contracts/dispatch.ts',
     'src/contracts/connections.ts',
     'src/contracts/agent_presets.ts',
     'src/contracts/agent_loop.ts',
@@ -65,6 +66,7 @@ BUILD_FILES = (
     'src/plugins/research/index.ts',
     'src/plugins/conversation/index.ts',
     'src/plugins/scheduler/index.ts',
+    'src/plugins/dispatch/index.ts',
     'src/plugins/connections/index.ts',
     'src/plugins/agent_presets/index.ts',
     'src/plugins/agent_loop/index.ts',
@@ -96,6 +98,7 @@ BUILD_FILES = (
     'dist/src/contracts/research.js',
     'dist/src/contracts/conversation.js',
     'dist/src/contracts/scheduler.js',
+    'dist/src/contracts/dispatch.js',
     'dist/src/contracts/connections.js',
     'dist/src/contracts/agent_presets.js',
     'dist/src/contracts/agent_loop.js',
@@ -117,6 +120,7 @@ BUILD_FILES = (
     'dist/src/plugins/research/index.js',
     'dist/src/plugins/conversation/index.js',
     'dist/src/plugins/scheduler/index.js',
+    'dist/src/plugins/dispatch/index.js',
     'dist/src/plugins/connections/index.js',
     'dist/src/plugins/agent_presets/index.js',
     'dist/src/plugins/agent_loop/index.js',
@@ -134,7 +138,7 @@ PACKAGE_FILES = (*BUILD_FILES, "dist/build-manifest.json")
 # Child gets no PATH/HOME/config or credentials. Absolute argv needs no lookup.
 CHILD_ENV = {"LANG": "C.UTF-8", "TZ": "UTC"}
 KNOWN_PLUGIN = "seraph.host-lifecycle@1.0.0"
-KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.state.v1', 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.connections.v1', 'seraph.agent-presets.v1', 'seraph.agent-loop.v1', 'seraph.guardian.v1', 'seraph.delegation.v1', 'seraph.board-workers.v1', 'seraph.source-extraction.v1', 'seraph.goal-plan.v1', 'seraph.guardian-research.v1')
+KNOWN_PLUGINS = (KNOWN_PLUGIN, 'seraph.state.v1', 'seraph.authority.v1', 'seraph.goals.v1', 'seraph.tasks.v1', 'seraph.capabilities.v1', 'seraph.inference.v1', 'seraph.memory.v1', 'seraph.artifacts.v1', 'seraph.audit.v1', 'seraph.research.v1', 'seraph.conversation.v1', 'seraph.scheduler.v1', 'seraph.dispatch.v1', 'seraph.connections.v1', 'seraph.agent-presets.v1', 'seraph.agent-loop.v1', 'seraph.guardian.v1', 'seraph.delegation.v1', 'seraph.board-workers.v1', 'seraph.source-extraction.v1', 'seraph.goal-plan.v1', 'seraph.guardian-research.v1')
 
 
 # Python always hosts state, authority and audit (#1024); their facades and the

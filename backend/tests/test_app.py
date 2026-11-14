@@ -872,7 +872,15 @@ async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db,
     assert all(not continuity._started for continuity in continuity_owners)
     assert continuity_stop.await_count == len(continuity_owners)
     application.shutdown_scheduler.assert_called_once()
-    host.start.assert_not_awaited()
-    host.stop.assert_not_awaited()
-    browser.start.assert_not_awaited()
-    browser.stop.assert_not_awaited()
+    if failure == "scheduled_jobs":
+        # #1025: the host starts and the boot cutover runs before the scheduler
+        # is built, so a scheduler failure stops exactly what was started.
+        host.start.assert_awaited_once()
+        host.stop.assert_awaited_once()
+        browser.start.assert_awaited_once()
+        browser.stop.assert_awaited_once()
+    else:
+        host.start.assert_not_awaited()
+        host.stop.assert_not_awaited()
+        browser.start.assert_not_awaited()
+        browser.stop.assert_not_awaited()

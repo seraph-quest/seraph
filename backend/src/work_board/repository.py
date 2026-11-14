@@ -1658,6 +1658,8 @@ class WorkBoardRepository:
 
         observed_at = now or _now()
         await _begin_sqlite_immediate(db)
+        from src.runtime_plugins.lifecycle import assert_tick_fence
+        await assert_tick_fence(db)  # #1025: only the live dispatch epoch blocks a Ready row
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)
@@ -2680,6 +2682,8 @@ class WorkBoardRepository:
             from src.work_board.opportunity_preference_native import stage_task_authority
             preference_stage = await stage_task_authority(db,preference_task)
         await _begin_sqlite_immediate(db)
+        from src.runtime_plugins.lifecycle import assert_tick_fence
+        await assert_tick_fence(db)  # #1025: only the live dispatch epoch promotes
         task = await self._find_task(db, task_id)
         if preference_stage is not None:
             from src.work_board.opportunity_preference_native import recheck_task_authority
@@ -2958,6 +2962,8 @@ class WorkBoardRepository:
             preference_stage = await stage_task_authority(db,preference_task)
         if _communication_publication is None:
             await _begin_sqlite_immediate(db)
+        from src.runtime_plugins.lifecycle import assert_tick_fence
+        await assert_tick_fence(db)  # #1025: a stale dispatch epoch claims no attempt
         task = await self._find_task(db, task_id)
         if preference_stage is not None:
             from src.work_board.opportunity_preference_native import recheck_task_authority

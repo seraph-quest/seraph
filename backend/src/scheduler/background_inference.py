@@ -24,6 +24,8 @@ SCHEMA_VERSION = "seraph.background-inference.v1"
 DISABLED_BY_OPERATOR = "disabled_by_operator"
 SETTINGS_UNREADABLE = "background_inference_settings_unreadable"
 _MAX_SETTINGS_BYTES = 16_384
+# The status record also holds lifecycle blocks of user cron jobs (#1025).
+_MAX_STATUS_BYTES = 262_144
 _lock = RLock()
 _last_status: dict[str, dict[str, object]] = {}
 # A switched-off job polled every second would otherwise write one audit row
@@ -196,7 +198,7 @@ def _load_status_locked() -> None:
     _status_loaded_from = path
     _last_status.clear()
     try:
-        if not path.exists() or path.stat().st_size > _MAX_SETTINGS_BYTES:
+        if not path.exists() or path.stat().st_size > _MAX_STATUS_BYTES:
             return
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -204,7 +206,7 @@ def _load_status_locked() -> None:
         return
     if isinstance(payload, dict) and payload.get("schema_version") == SCHEMA_VERSION:
         for job_id, value in (payload.get("jobs") or {}).items():
-            if job_id in _JOBS and isinstance(value, dict):
+            if _status_job_known(job_id) and isinstance(value, dict):
                 entry = {key: str(item) for key, item in value.items() if isinstance(item, (str, int))}
                 if "_audited_at" in entry:
                     # The private skip-audit marker is a datetime in memory (#1112).
@@ -293,6 +295,72 @@ def record_background_inference_succeeded(job_id: str) -> None:
         _load_status_locked()
         if (_last_status.get(job_id) or {}).get("status") == "blocked":
             _record_locked(job_id, {"status": "succeeded", "reason": "", "at": datetime.now(timezone.utc).isoformat()})
+
+
+def _status_job_known(job_id: object) -> bool:
+    """Inference toggles plus every lifecycle-gated scheduler job (#1025) share this one status record."""
+    if not isinstance(job_id, str):
+        return False
+    if job_id in _JOBS:
+        return True
+    from src.runtime_plugins.lifecycle import LifecycleBlocked, job_domain
+    try:
+        return job_domain(job_id) is not None
+    except LifecycleBlocked:
+        return False
+
+
+LIFECYCLE_SOURCE = "lifecycle"
+
+
+def record_scheduler_job_blocked(job_id: str, reason: str, recovery: str) -> None:
+    """A tick refused by its lifecycle domain (#1025): persisted, survives restart.
+
+    The domain announces its own transition into blocked once; repeated blocked
+    ticks only refresh the time. A guardian or operator status of the same job
+    is replaced by the newer lifecycle block.
+    """
+    if not _status_job_known(job_id):
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        _load_status_locked()
+        previous = _last_status.get(job_id) or {}
+        same = previous.get("status") == "blocked" and previous.get("reason") == reason
+        _record_locked(job_id, {"status": "blocked", "reason": reason, "recovery": recovery, "at": now,
+                                "since": previous.get("since") if same and previous.get("since") else now,
+                                "source": LIFECYCLE_SOURCE})
+
+
+def record_scheduler_job_ok(job_id: str) -> None:
+    """The first tick that ran under an active domain clears only a lifecycle block."""
+    with _lock:
+        _load_status_locked()
+        previous = _last_status.get(job_id) or {}
+        if previous.get("status") in {"blocked", "skipped"} and previous.get("source") == LIFECYCLE_SOURCE:
+            _record_locked(job_id, {"status": "succeeded", "reason": "", "at": datetime.now(timezone.utc).isoformat()})
+
+
+def record_scheduler_job_missed(job_id: str) -> None:
+    """APScheduler dropped a fire past its misfire grace; a later run replaces this."""
+    if not _status_job_known(job_id):
+        return
+    with _lock:
+        _load_status_locked()
+        previous = _last_status.get(job_id) or {}
+        if previous.get("status") == "blocked":
+            return  # a block stays the more specific record
+        _record_locked(job_id, {"status": "skipped", "reason": "missed_fire",
+                                "at": datetime.now(timezone.utc).isoformat(), "source": LIFECYCLE_SOURCE})
+
+
+def scheduler_job_blocks() -> list[dict[str, str]]:
+    """Every scheduler job whose last recorded status is a lifecycle block."""
+    with _lock:
+        _load_status_locked()
+        return [{"job_id": job_id, **{key: value for key, value in entry.items() if not key.startswith("_")}}
+                for job_id, entry in sorted(_last_status.items())
+                if entry.get("status") == "blocked" and entry.get("source") == LIFECYCLE_SOURCE]
 
 
 def background_inference_status() -> dict[str, object]:

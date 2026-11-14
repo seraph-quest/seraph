@@ -98,6 +98,12 @@
       "config": {}
     },
     {
+      "id": "seraph.dispatch.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
       "id": "seraph.connections.v1",
       "required": true,
       "dependencies": [],

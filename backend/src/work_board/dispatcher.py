@@ -110,6 +110,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # It contains only live server asyncio tasks; it is not persisted or exposed
 # to operators.
 _ACTIVE_WORKER_TASKS: dict[tuple[str, str], asyncio.Task[Any]] = {}
+from src.runtime_plugins.lifecycle import LifecycleBlocked  # noqa: E402 - import-time side-effect free
 _GOAL_SNAPSHOT_PREFLIGHT_ERRORS = frozenset(
     {
         "goal_snapshot_criterion_missing",
@@ -2949,8 +2950,22 @@ class WorkBoardDispatcher:
                 expired += int(mutation is not None)
         return expired
 
+    async def _lifecycle_step(self) -> None:
+        """#1025: each mutating step of a managed pass starts under the live dispatch epoch.
+
+        A step already inside its own transaction when the owner row moves
+        finishes at E; the next step refuses with ``composition_dependency_changed``.
+        Outside a lifecycle tick (tests, manual calls) this is a no-op.
+        """
+        from src.runtime_plugins.lifecycle import assert_tick_fence, current_tick
+        if current_tick() is None:
+            return
+        async with self.session_provider() as db:
+            await assert_tick_fence(db)
+
     async def run_pass(self) -> dict[str, Any]:
         observed_at = self.now()
+        await self._lifecycle_step()
         try:
             inbox_expired = await expire_inbox_items(limit=20)
             inbox_repaired = await repair_inbox_dispositions(limit=20)
@@ -2961,10 +2976,15 @@ class WorkBoardDispatcher:
             logger.exception("guardian inbox repair pass failed")
             inbox_expired = 0
             inbox_repaired = 0
+        await self._lifecycle_step()
         expired_reviews = await self._expire_review_windows(now=observed_at)
+        await self._lifecycle_step()
         await self.recover_expired_near_finance(now=observed_at)
+        await self._lifecycle_step()
         reconciled = await self.reconcile_pending_attempts(now=observed_at)
+        await self._lifecycle_step()
         linked_reconciled = await self.reconcile_linked_attempts(now=observed_at)
+        await self._lifecycle_step()
         try:
             await self._recover_linked_pipelines()
         except Exception:
@@ -2975,9 +2995,13 @@ class WorkBoardDispatcher:
             # managed tick, including after restart, without an operator session.
             try:
                 from src.workflows.repo_repair_stop import close_expired_repository_roots
+                await self._lifecycle_step()
                 await close_expired_repository_roots(source, self.jobs)
+            except LifecycleBlocked:
+                raise
             except Exception:
                 logger.warning("expired repository original closure unavailable")
+        await self._lifecycle_step()
         async with self.session_provider() as db:
             candidates = await self.repository.list_dispatch_candidates(
                 db,
@@ -5934,6 +5958,7 @@ class WorkBoardDispatcher:
             artifact_refs=projection["artifacts"])
 
     async def recover_research(self, owner, task_id, request):
+        require_dispatch_active()
         from src.work_board.research_control import bound, reserve_recovery
         from src.workflows.research_coordinator import continue_parent, freeze_quiescent
         async with self.session_provider() as db:
@@ -12770,6 +12795,15 @@ class WorkBoardDispatcher:
 
 
 _dispatcher = WorkBoardDispatcher()
+
+
+def require_dispatch_active() -> None:
+    """#1025: an API launch that enters the live-worker registry needs an active dispatch owner."""
+    from src.runtime_plugins.lifecycle import runtime_lifecycle
+    try:
+        runtime_lifecycle.require_dispatch_active()
+    except LifecycleBlocked as exc:
+        raise BoardError(exc.reason_code, exc.recovery, status_code=409) from exc
 
 
 async def run_work_board_dispatch() -> dict[str, Any]:

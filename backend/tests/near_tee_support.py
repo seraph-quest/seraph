@@ -180,14 +180,17 @@ _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route
 RESEARCH_REQUEST_BOUND_MICROUSD = 2_000
 
 
-def scripted_near_gateway(answer_for, *, uds_socket: str | None = None, cost_nano: int = 2_000):
+def scripted_near_gateway(answer_for, *, uds_socket: str | None = None, cost_nano: int = 2_000,
+                          passthrough=None):
     """An intercepted NEAR gateway whose completions are ``await answer_for(body)``.
 
     ``answer_for`` returns the assistant content (or raises, e.g. an
     ``httpx`` transport error to model a lost response). Catalog and billing
     requests are the shared fixture's. With ``uds_socket`` the real async
     transport stays live only for that owned local Unix socket (an owned
-    public-web fixture); every other real transport is refused.
+    public-web fixture); every other real transport is refused. With
+    ``passthrough`` (``async (request) -> httpx.Response``) a default client's
+    request to any host other than NEAR goes to that owned fixture instead.
     """
     import inspect
 
@@ -212,6 +215,8 @@ def scripted_near_gateway(answer_for, *, uds_socket: str | None = None, cost_nan
             return self
 
         async def handler(self, request):
+            if passthrough is not None and request.url.host != "cloud-api.near.ai":
+                return await passthrough(request)
             if request.method == "POST" and request.url.raw_path.decode() == "/v1/chat/completions":
                 assert request.url.host == "cloud-api.near.ai"
                 self.completions += 1

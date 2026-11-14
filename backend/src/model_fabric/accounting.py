@@ -418,6 +418,10 @@ class DurableInferenceBrokerMixin:
 
         created_job = None
         try:
+            if request.runtime_path == "audio_transcription":
+                # #1179 retired voice input: no audio transcription is ever
+                # reserved or contacted again, whatever the configuration.
+                raise InferenceAccountingError("audio_route_retired")
             if not isinstance(request.owner_id, str) or not request.owner_id.startswith(("operator:", "service:")) or len(request.owner_id) > 256:
                 raise InferenceAccountingError("accounting_job_authority_invalid")
             from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
@@ -457,10 +461,6 @@ class DurableInferenceBrokerMixin:
                 setup = configured.near_text if near else configured.openrouter_setup
                 bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
             from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION, route_slot_for_task_class
-            if request.runtime_path == "audio_transcription":
-                # #1179 retired voice input: no audio transcription is ever
-                # reserved or contacted again.
-                raise InferenceAccountingError("audio_route_retired")
             if tee_slot is not None:
                 pass
             elif near:

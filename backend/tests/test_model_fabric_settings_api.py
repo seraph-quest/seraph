@@ -197,6 +197,19 @@ async def test_put_get_configuration_becomes_canonical_profile_and_policy(client
 
 
 @pytest.mark.asyncio
+async def test_retired_audio_metadata_selection_is_refused(client, model_fabric_workspace):
+    """#1179: the audio documentation metadata selection was retired with voice input."""
+    before = read_model_fabric_configuration()
+    response = await client.put(
+        "/api/settings/model-fabric",
+        json={"audio_metadata_access": {"action": "disable"}, "expected_policy_revision": 1},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "audio_route_retired"
+    assert read_model_fabric_configuration() == before
+
+
+@pytest.mark.asyncio
 async def test_cloud_widening_without_acknowledgement_is_rejected(client, model_fabric_workspace):
     response = await client.put(
         "/api/settings/model-fabric",

@@ -1933,8 +1933,12 @@ is **Partial**:
   retired. The `audio_ingress_jobs` and `audio_consent_grants` tables are kept
   unused with their existing rows; nothing creates or advances them, and they are
   no longer listed as effective grants. Deleting a conversation still deletes its
-  historical audio rows, but Seraph no longer touches the retired worker's
-  short-lived quarantine files. A stored setup.v3 still saves, but its audio slot
+  historical audio rows. On each start a one-shot best-effort pass removes the
+  retired worker's fixed default quarantine directory
+  (`realpath($TMPDIR)/seraph-audio`): regular files, then empty directories. It
+  never follows or removes a symlink, refuses the whole directory if any entry
+  is a symlink or special file, never touches another path, never blocks
+  startup, and logs its counts. A stored setup.v3 still saves, but its audio slot
   can never be enabled again (`audio_route_retired`), and no
   `audio_transcription_v1` run can be admitted or contacted. Telegram voice notes
   keep their existing metadata-only, always-degraded handoff record.

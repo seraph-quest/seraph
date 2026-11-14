@@ -676,8 +676,12 @@ async def _lifespan_services(app: FastAPI):
                 "Routine install restart recovery failed; partial staging remains non-discoverable"
             )
         # #1179 retired voice input; the audio ingress worker and its restart
-        # cleanup are gone. Settled audio documentation staging (a historical
-        # liability record, not voice input) is still reconciled here.
+        # cleanup are gone. A one-shot best-effort pass removes recordings the
+        # retired worker may have left in its fixed default quarantine root.
+        from src.guardian.retired_audio_quarantine import cleanup_retired_audio_quarantine_at_startup
+        cleanup_retired_audio_quarantine_at_startup()
+        # Settled audio documentation staging (a historical liability record,
+        # not voice input) is still reconciled here.
         try:
             from src.model_fabric.repository import ModelFabricRepository
 

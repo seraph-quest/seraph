@@ -702,6 +702,9 @@ def main() -> int:
     )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    # Progress lines must reach the job log as each file ends, not at exit:
+    # a shard killed by the step timeout otherwise shows no timing at all.
+    sys.stdout.reconfigure(line_buffering=True)
 
     root = Path(__file__).resolve().parents[1]
     files = shard_for_index(root, shard_count=args.shard_count, shard_index=args.shard_index)

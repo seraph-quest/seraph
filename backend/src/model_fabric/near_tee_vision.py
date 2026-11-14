@@ -80,9 +80,10 @@ def vision_structured_basis(*, catalog_lists: bool, proof, failed_proof=None,
         return STRUCTURED_BASIS_CATALOG
     if proof is None or proof.proven_value != STRUCTURED_MODE_JSON_SCHEMA or not proof_is_fresh(proof, now=now):
         return None
-    if (failed_proof is not None and failed_proof.checked_at > proof.checked_at
+    if (failed_proof is not None and failed_proof.checked_at >= proof.checked_at
             and failed_proof.proven_value in (None, STRUCTURED_MODE_JSON_SCHEMA)):
-        # A newer failed json_schema check withdraws the proof-based basis.
+        # A newer (or same-instant: fail closed) failed json_schema check
+        # withdraws the proof-based basis.
         return None
     return STRUCTURED_BASIS_CAPABILITY_PROOF
 

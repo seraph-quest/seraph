@@ -306,3 +306,14 @@ def test_preflight_script_is_dependency_free_and_does_not_open_provider_sockets(
     )
     assert result.returncode == 0
     assert '"probe_performed": false' in result.stdout
+
+
+def test_keyless_cordis_cli_uses_the_backend_interpreter_not_a_bare_python3():
+    """#1168: under env -i a version-manager python3 shim fails without $HOME."""
+    import re
+
+    manage = (ROOT / "manage.sh").read_text()
+    assert "function cordis_cli_python()" in manage
+    assert '"$SCRIPT_DIR/backend/.venv/bin/python"' in manage
+    assert not re.search(r"^\s*python3 (-B )?-m src\.runtime_plugins\.cli", manage, re.M)
+    assert manage.count('"$(cordis_cli_python)"') == 2

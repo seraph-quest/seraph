@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Mapping, Any
 
-from src.model_fabric.effective_policy import current_inference_policy
 from src.work_board.pipeline_contracts import digest
 from src.work_board.pipelines import root_binding
 from src.work_board.research_contracts import PARENT_CAPABILITY, PARENT_KIND, ResearchDossierInput
@@ -208,8 +207,10 @@ def spec_for(task, attempt, inputs: Mapping[str, Any], *, deadline: datetime, st
     if task.capability_id != PARENT_CAPABILITY or not task.input_artifact_id:
         raise ValueError("research requires its server-bound typed input artifact")
     model = ResearchDossierInput.model_validate(dict(inputs))
-    configured, policy_digest = current_inference_policy()
-    setup = configured.openrouter_setup
+    from src.model_fabric.near_tee_vertical import vertical_inference_policy
+    # #1159: the NEAR TEE text slot serving the research child route binds the
+    # reviewed allowance (its request bound under the shared lane ceiling).
+    configured, policy_digest, setup = vertical_inference_policy("readonly_research_child")
     bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
     if type(bound) is not int or bound <= 0 or bound*len(model.perspectives) > setup.spend_ceiling_microusd:
         raise ValueError("fixed research slots exceed the existing reviewed allowance")

@@ -667,6 +667,14 @@ class GeneralTaskService:
         # Literal repository requests fail before inspection, artifact staging,
         # planning, or database access when an unrelated scope is supplied.
         reject_repository_scope(request.plan)
+        if request.plan is not None and any(step.tool_id == "repository_work" for step in request.plan.steps):
+            from src.model_fabric.near_tee_vertical import repository_repair_route_block
+            from src.model_fabric.retirement import inactive_route_label
+            if reason := repository_repair_route_block():
+                # #1159: no NEAR TEE adapter for the repair model step; no
+                # inspection, artifact, job, reservation or contact.
+                raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
+                    route_block=True, provider_contact="not_started")
         if request.input.communication_selection is not None and request.plan is None:
             raise BoardError("communication_fixed_plan_required", "Communications preparation requires its fixed source-only plan", status_code=422)
         if (request.input.document_source is not None or request.input.document_build is not None) and request.plan is None:

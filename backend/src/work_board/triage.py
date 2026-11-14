@@ -2,8 +2,9 @@
 
 Inference is advisory and produces a reviewable ``WorkBoardProposal`` row.
 Only the explicit acceptance path creates tasks and dependency links.  The
-module uses the existing strategist OpenRouter route and never falls back to a
-local model or executes a proposed capability while staging.
+module uses the governed strategist route (the NEAR TEE text slot, ADR-035)
+and never falls back to a local model or another provider, nor executes a
+proposed capability while staging.
 """
 
 from __future__ import annotations
@@ -236,11 +237,23 @@ def _route_binding() -> tuple[str, str]:
             "The governed OpenRouter workload policy is unavailable",
             status_code=409,
         ) from exc
-    from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
-    if reason := openrouter_only_route_block(_PROPOSAL_ROUTE):
-        # ADR-035: the proposal route is unusable (no active provider, a NEAR
-        # TEE slot reason, or no NEAR adapter yet); block with the stable cause
-        # before any proposal job, reservation or contact.
+    from src.model_fabric.retirement import (NO_ACTIVE_PROVIDER_REASON, inactive_route_label,
+        inactive_route_reason, openrouter_retired)
+    if reason := inactive_route_reason(_PROPOSAL_ROUTE):
+        # ADR-035: the proposal route is unusable (no active provider, a
+        # revoked egress or a NEAR TEE slot reason); block with the stable
+        # cause before any proposal job, reservation or contact.
+        raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
+            route_block=True)
+    from src.model_fabric.near_tee_vertical import near_tee_vertical_route
+    # #1159: the governed NEAR TEE text slot serves proposals. Its slot
+    # profile contract is the durable capability version, so a slot change
+    # before contact is a binding conflict like any other route change.
+    near_route = near_tee_vertical_route(_PROPOSAL_ROUTE)
+    if near_route is not None:
+        return _PROPOSAL_ROUTE, near_route.profile_contract_hash
+    if openrouter_retired():
+        reason = NO_ACTIVE_PROVIDER_REASON
         raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
             route_block=True)
     if bool(getattr(policy, "fallback_allowed", False)):
@@ -1439,7 +1452,13 @@ async def _invoke_governed_proposal(
     fencing_token: int,
     timeout_seconds: float = 120,
 ) -> str:
-    """Call one explicitly selected governed OpenRouter route only."""
+    """Call the one governed proposal route only (NEAR TEE; legacy OpenRouter in tests).
+
+    On NEAR TEE the shared completion path runs the transport inside the
+    durable job's broker lease and settles its reservation from NEAR billing;
+    no other slot, model or provider is tried.
+    """
+    from src.model_fabric.near_tee_vertical import is_near_tee_context
     tokens = set_runtime_context(
         principal.session_id,
         get_current_approval_mode(),
@@ -1458,7 +1477,7 @@ async def _invoke_governed_proposal(
                 max_tokens=1_024,
                 timeout=timeout_seconds,
                 runtime_path=context.runtime_path,
-                profile="openrouter",
+                profile=None if is_near_tee_context(context) else "openrouter",
                 request_context=context,
             )
         return _extract_completion_content(response)
@@ -2240,11 +2259,26 @@ async def create_proposal(
             job_id=proposal.admission_job_id,
             route_id=route_id,
         )
-        preflight_reason = await preflight_governed_completion_target_async(
-            runtime_path=route_id,
-            profile="openrouter",
-            request_context=prepared_prompt[2],
-        )
+        from src.model_fabric.near_tee_vertical import is_near_tee_context
+        if is_near_tee_context(prepared_prompt[2]):
+            # #1159: every NEAR TEE precontact gate (slot policy, consent,
+            # catalog receipt, credential, proofs) before durable admission;
+            # a sealed denial is a no-contact block with its stable code.
+            from src.model_fabric.near_tee import NearTeeDenied
+            from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call
+            try:
+                await prepare_near_tee_vertical_call(prepared_prompt[2], messages=prepared_prompt[0],
+                    temperature=0.1, max_tokens=1_024)
+            except NearTeeDenied as denied:
+                raise BoardError(denied.code, "The NEAR TEE proposal route was denied before provider contact",
+                    status_code=409) from denied
+            preflight_reason = None
+        else:
+            preflight_reason = await preflight_governed_completion_target_async(
+                runtime_path=route_id,
+                profile="openrouter",
+                request_context=prepared_prompt[2],
+            )
         if preflight_reason is not None:
             # This check is before durable job admission and before the
             # provider-contact marker.  Keep the external reason generic: the
@@ -2412,8 +2446,11 @@ async def create_proposal(
         )
     except (DurableJobAdmissionDenied, DurableJobError):
         reason = "proposal_admission_unavailable"
-    except Exception:
-        reason = "proposal_provider_contact_unknown"
+    except Exception as exc:
+        from src.model_fabric.near_tee_vertical import near_tee_failure_code
+        # A NEAR TEE known-cost failure (echo mismatch, empty output) settled
+        # from NEAR billing: no output is adopted; name its stable code.
+        reason = near_tee_failure_code(exc) or "proposal_provider_contact_unknown"
     if job_binding is not None:
         try:
             await _transition_proposal_job(

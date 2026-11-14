@@ -647,18 +647,35 @@ reasoning synthesis, streaming chat, chat-agent tool turns and Cordis
 configures it (#1147 PR3b/PR3c, **Partial**); screenshot vision resolves to the
 NEAR TEE vision slot (#1147 PR4, **Partial**); every other route (embeddings),
 and every route without a ready slot, reports blocked
-(`no_active_provider` or the slot's reason). The Work verticals whose model
-step still uses the retired OpenRouter adapter (Work Board card proposals,
-general-task, repository-work and specialist planning, Mail reply, Calendar
-meeting prep, research and guardian opportunity assessment) have no NEAR TEE
-path yet (#1159). They block before any job, reservation or contact with the
-same precedence as Settings' `inference_block_reason`: `provider_policy_revoked`,
-then the NEAR TEE slot's own reason (for example
-`near_tee_credential_required`), then `openrouter_retired` (retained OpenRouter
-configuration) or `no_active_provider`; when a NEAR TEE slot does serve the
-route they report `near_tee_route_unsupported` (#1156). Guardian opportunity
-candidates stay queued with that reason, without a durable job, until a route
-exists or their deadline closes them. The optional NEAR text Work
+(`no_active_provider` or the slot's reason). Work verticals move to the NEAR
+TEE text slot through one shared vertical helper (#1159, **Partial**): each
+keeps its durable job, reservation and adoption contract, runs every NEAR TEE
+precontact gate (sealed denials, catalog receipt, proofs, `x-no-aliasing`),
+and settles from NEAR billing inside its broker lease, with no fallback. On
+NEAR TEE now: general-task and specialist planning, Work Board card
+proposals, guardian opportunity assessment and plan generation, research
+dossiers (child synthesis and programme discovery requests), Mail reply
+drafts, Calendar meeting prep and communication preparation. Repository work
+stays blocked on NEAR TEE: its repair iteration model step
+(`repo_repair_source`, whose consented exact request body and code-egress
+consent are bound to the retired OpenRouter target) has no NEAR TEE adapter,
+so the `repository_work` tool is never offered. A frozen tool set or explicit
+plan naming it, and an admitted repository child (including on resume), is
+refused with `near_tee_route_unsupported` before any planning, reservation or
+contact. A repository-worded intent submitted without that tool is ordinary
+NEAR planning (charged) and cannot produce a repository step. A NEAR TEE answer that is not adopted (for
+example `near_tee_output_truncated` for a JSON draft cut at the slot's output
+bound) settles its NEAR cost and blocks the Mail or Calendar card with that
+code. Every vertical blocks
+before any job, reservation or contact with the same precedence as Settings'
+`inference_block_reason`: `provider_policy_revoked`, then the NEAR TEE slot's
+own reason (for example `near_tee_credential_required`), then
+`openrouter_retired` (retained OpenRouter configuration) or
+`no_active_provider`; the Work Board explains each code. A guardian plan
+route denial before admission blocks with its stable reason instead of
+`outcome_unknown`. Guardian opportunity candidates stay queued with that
+reason, without a durable job, until a NEAR TEE route exists (they then
+resume) or their deadline closes them. The optional NEAR text Work
 capability (ADR-025) is unchanged apart from the shared NEAR client. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
 native/companion boundaries named by each adapter. No paid model, real Google

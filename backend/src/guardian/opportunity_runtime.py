@@ -520,6 +520,16 @@ def assessment_context(row, goal, evidence):
     return messages, context
 
 
+def assessment_route_block():
+    """Why the assessment model step has no usable route, or None (#1159).
+
+    None when the NEAR TEE text slot serves ``strategist_agent`` (or in the
+    explicit legacy test mode); otherwise the shared inference-block reason.
+    """
+    from src.model_fabric.near_tee_vertical import vertical_route_block
+    return vertical_route_block("strategist_agent")
+
+
 async def _completion(row, goal, evidence, *, fence):
     """Exactly one governed preflight, broker, reservation and HTTP attempt."""
     from src import llm_runtime
@@ -530,13 +540,49 @@ async def _completion(row, goal, evidence, *, fence):
     from src.model_fabric.gpu_admission import GpuPriority
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
-    from src.model_fabric.retirement import openrouter_only_route_block
-    if route_block := openrouter_only_route_block("strategist_agent"):
+    if route_block := assessment_route_block():
         # ADR-035: defense in depth for an already claimed job (the route went
         # away after admission); a precontact block with the stable cause.
         raise OpportunityError(route_block)
     messages, context = assessment_context(row, goal, evidence)
     await assert_known_vault_values_absent(json.loads(messages[1]["content"]))
+
+    async def fresh_authority():
+        # Broker queue waiting grants no fresh source/Root/policy lifetime.
+        fresh_evidence = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
+        async with db_engine.get_session() as db:
+            current, (_, _, _, policy, _) = await _authority(db, row.id,
+                evidence=fresh_evidence, execution=True)
+            await _contact_limits(db, current, policy)
+        current_job = await durable_job_repository.get_job(row.job_id)
+        if (current_job is None or current_job["status"] != "running"
+                or current_job["lease"]["owner"] != RUNNER
+                or current_job["lease"]["fencing_token"] != fence):
+            raise OpportunityError("assessment_execution_fence_stale")
+
+    from src.model_fabric.near_tee_vertical import is_near_tee_context
+    if is_near_tee_context(context):
+        # #1159: the NEAR TEE text slot. Every precontact gate (structured
+        # output proof for the JSON response format included) runs before
+        # admission; the transport runs in the job-bound broker lease and
+        # NEAR billing settles the assessment reservation. No fallback.
+        from src.model_fabric.near_tee import NearTeeDenied, NearTeeError
+        from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call, run_near_tee_vertical_call
+        try:
+            call = await prepare_near_tee_vertical_call(context, messages=messages, temperature=0,
+                max_tokens=1024, response_format={"type": "json_object"})
+        except NearTeeDenied as denied:
+            raise OpportunityError(denied.code) from denied
+        with bind_remote_inference_receipt(repository=durable_job_repository, job_id=row.job_id,
+                owner=RUNNER, fencing_token=fence):
+            try:
+                return await run_near_tee_vertical_call(call, priority=GpuPriority.REPORTS_RESEARCH_MEMORY,
+                    before_contact=fresh_authority)
+            except NearTeeError as exc:
+                if exc.code == "near_tee_cost_liability":
+                    raise
+                # Contact happened and NEAR billing settled it; nothing adopted.
+                raise OpportunityError(exc.code) from exc
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
     profile = llm_runtime._provider_profile(profile_id)
     if profile is None:
@@ -557,17 +603,7 @@ async def _completion(row, goal, evidence, *, fence):
     hooks = PersistedRouteReceiptHooks(capability_proof_hashes=proofs)
 
     async def adapter(candidate, retry):
-        # Broker queue waiting grants no fresh source/Root/policy lifetime.
-        fresh_evidence = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
-        async with db_engine.get_session() as db:
-            current, (_, _, _, policy, _) = await _authority(db, row.id,
-                evidence=fresh_evidence, execution=True)
-            await _contact_limits(db, current, policy)
-        current_job = await durable_job_repository.get_job(row.job_id)
-        if (current_job is None or current_job["status"] != "running"
-                or current_job["lease"]["owner"] != RUNNER
-                or current_job["lease"]["fencing_token"] != fence):
-            raise OpportunityError("assessment_execution_fence_stale")
+        await fresh_authority()
         result, _ = await llm_runtime._governed_research_chat_completion(
             decision=decision, context=context, body=body, api_key=api_key)
         return result.choices[0].message.content
@@ -643,8 +679,7 @@ async def execute_assessment(opportunity_id):
     from src.guardian.opportunity_contracts import validate_assessment
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workflows.job_runtime import durable_job_repository
-    from src.model_fabric.retirement import openrouter_only_route_block
-    if route_block := openrouter_only_route_block("strategist_agent"):
+    if route_block := assessment_route_block():
         # ADR-035 (#1156): no durable job without a usable model route. The
         # candidate stays queued with the visible reason (recoverable once a
         # route exists); its deadline still closes it.
@@ -754,8 +789,7 @@ async def run_opportunity_tick():
         # hold queued candidates exactly like the toggle above (visible reason,
         # no job, blocked only at their deadline), so they resume once a route
         # exists instead of ending as a terminal block.
-        from src.model_fabric.retirement import openrouter_only_route_block
-        paused = openrouter_only_route_block("strategist_agent")
+        paused = assessment_route_block()
     cursor = None
     started = 0
     examined = 0

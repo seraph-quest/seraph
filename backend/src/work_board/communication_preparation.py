@@ -150,11 +150,11 @@ async def assert_preparation_run_current(db, run):
 
 def assert_current_preparation_policy(binding):
     """Physical policy staging outside canonical SQL writers."""
-    from src.model_fabric.effective_policy import current_inference_policy
+    from src.model_fabric.near_tee_vertical import vertical_inference_policy
     if type(binding) is not CommunicationPreparationBinding or binding._seal is not _PREPARATION_SEAL:
         raise BoardError("communication_preparation_seal_required", "Original source producer required", status_code=409)
     try:
-        current = current_inference_policy()[1]
+        current = vertical_inference_policy("strategist_agent")[1]
     except (PermissionError, ValueError) as error:
         raise BoardError("communication_preparation_policy_changed", "Review original source policy", status_code=409) from error
     if current != binding.policy_digest:
@@ -589,17 +589,30 @@ async def _publish_source(principal, child_id, fence, ordinal, dispatcher):
         await assert_source_current(db, owner, capability, source_input)
         # Stage the actual reviewed route before the SQL writer. The governed
         # accounting writer compares this exact policy digest before reserving.
-        configured, source_policy_digest = current_inference_policy()
-        setup = configured.openrouter_setup
-        if setup is None or configured.status != "ready" or configured.egress_revoked:
-            raise BoardError("communication_source_budget_unavailable", "Review source inference policy", status_code=409)
-        policy = openrouter_policy_for_setup(setup, "strategist_agent")
-        route = ((setup.routes or {}).get(route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class))
-            if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup)
-        if route is None or getattr(route, "enabled", True) is not True:
-            raise BoardError("communication_source_budget_unavailable", "Current source route required", status_code=409)
-        route_bound = getattr(route, "request_cost_bound_microusd", None) or setup.spend_ceiling_microusd
-        ceiling = getattr(policy, "max_cost_microusd", None)
+        from src.model_fabric.near_tee_vertical import near_tee_vertical_route, vertical_inference_policy
+        if near_tee_vertical_route("strategist_agent") is not None:
+            # #1159: the Mail/Calendar source step runs on the NEAR TEE text
+            # slot; its request bound and the route's reviewed ceiling fund it.
+            from src.model_fabric.configuration import effective_workload_policy
+            try:
+                _configured, source_policy_digest, near_setup = vertical_inference_policy("strategist_agent")
+            except PermissionError as error:
+                raise BoardError("communication_source_budget_unavailable", "Review source inference policy",
+                    status_code=409) from error
+            route_bound = near_setup.request_cost_bound_microusd
+            ceiling = getattr(effective_workload_policy("strategist_agent"), "max_cost_microusd", None)
+        else:
+            configured, source_policy_digest = current_inference_policy()
+            setup = configured.openrouter_setup
+            if setup is None or configured.status != "ready" or configured.egress_revoked:
+                raise BoardError("communication_source_budget_unavailable", "Review source inference policy", status_code=409)
+            policy = openrouter_policy_for_setup(setup, "strategist_agent")
+            route = ((setup.routes or {}).get(route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class))
+                if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION else setup)
+            if route is None or getattr(route, "enabled", True) is not True:
+                raise BoardError("communication_source_budget_unavailable", "Current source route required", status_code=409)
+            route_bound = getattr(route, "request_cost_bound_microusd", None) or setup.spend_ceiling_microusd
+            ceiling = getattr(policy, "max_cost_microusd", None)
         if type(route_bound) is not int or route_bound <= 0 or type(ceiling) is not int or ceiling <= 0:
             raise BoardError("communication_source_budget_unavailable", "Reviewed finite source route bound required", status_code=409)
         key = "communication:" + digest([child_id, native.creation_digest, ordinal])

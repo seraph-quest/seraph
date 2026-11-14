@@ -7,7 +7,7 @@ from pathlib import Path
 
 from config.settings import settings
 from src.db.models import InferenceCostReservation
-from src.model_fabric.effective_policy import current_inference_policy
+from src.model_fabric.near_tee_vertical import vertical_inference_policy
 from src.work_board.research_contracts import CHILD_KIND, PARENT_KIND, PROMPT_READY
 from src.workflows.inference_accounting import (InferenceAccountingError, _continuity_lock,
     _json, _operation_payload, _utc, integer_amount, period_id)
@@ -44,8 +44,7 @@ async def fund_fixed_group(jobs, *, parent_id, owner, fencing_token):
             if phase.get("phase") != "research_funding" or phase.get("creation_digest") != creation["creation_digest"]:
                 raise InferenceAccountingError("research_funding_phase_invalid")
             authority = json.loads(parent.declared_authority_json)
-            configured, policy_digest = current_inference_policy()
-            setup = configured.openrouter_setup
+            configured, policy_digest, setup = vertical_inference_policy("readonly_research_child")
             bound = integer_amount(setup.request_cost_bound_microusd or setup.spend_ceiling_microusd, positive=True)
             allowance = integer_amount(authority["research_allowance_microusd"], positive=True)
             slot_allowance = integer_amount(authority["research_slot_allowance_microusd"], positive=True)

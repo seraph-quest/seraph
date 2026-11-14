@@ -512,12 +512,12 @@ async def near_tee_transport(call: NearTeeCall) -> NearTeeOutcome:
             text = message.get("content") if message is not None else None
         else:
             text, failure = near_tee_answer(payload, model)
-            if failure is None and near_tee_finish_reason(payload) == "length" \
-                    and ("response_format" in call.body or call.slot_name == "vision"):
-                # A JSON answer (response_format, or the vision slot's strict
-                # JSON either mode) cut at the output bound is never a valid
-                # object; name it instead of a later parse error (#1167).
-                failure = "near_tee_output_truncated"
+        if failure is None and near_tee_finish_reason(payload) == "length" \
+                and ("response_format" in call.body or call.slot_name == "vision"):
+            # A JSON answer (response_format, or the vision slot's strict
+            # JSON either mode) cut at the output bound is never a valid
+            # object; name it instead of a later parse error (#1159, #1167).
+            failure = "near_tee_output_truncated"
         del raw, payload
         evidence = await read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
             deadline_at=deadline, no_aliasing=True, error=NearTeeError, prefix="near_tee",

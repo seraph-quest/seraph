@@ -1283,7 +1283,18 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > `/api/runtime/status` and Settings; this is expected and not a crash. The optional NEAR text Work
 > capability (ADR-025) is unchanged. Retained OpenRouter configuration,
 > credential, receipts, ledger rows and Unknown liabilities stay readable and
-> settleable through Inference accounting. The OpenRouter sections below
+> settleable through Inference accounting. Work verticals move to the NEAR
+> TEE text slot (#1159, **Partial**): general-task and specialist planning,
+> Work Board card proposals, guardian opportunity assessment and plans,
+> research dossiers, Mail reply drafts, Calendar meeting prep and
+> communication preparation run there, settling from NEAR billing with no
+> fallback. Repository work (repair) stays blocked on NEAR TEE: its tool is
+> not offered, and an explicit repository plan or admitted repository child
+> is refused with `near_tee_route_unsupported` before any contact. A
+> repository-worded request without that tool is planned (and charged) as
+> ordinary NEAR planning.
+> Without a ready slot each vertical blocks with its stable reason, which the
+> Work Board explains. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.
 > Chat reports the block as `route_reason: openrouter_retired`; Cordis
 > `inference.request` reports `openrouter_retired`. Without a NEAR TEE vision

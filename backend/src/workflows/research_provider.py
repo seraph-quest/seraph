@@ -25,12 +25,21 @@ def _timestamp(value):
 
 
 def _target():
+    """The reviewed fixed research route: the NEAR TEE text slot (#1159).
+
+    Returns ``(setup, policy_digest, target)``. On NEAR TEE ``target`` names
+    the slot profile and model only; the credential is captured by the NEAR
+    precontact gates. The retained OpenRouter profile is reachable only in
+    the explicit legacy test mode. No fallback between them.
+    """
     from src.llm_runtime import _provider_profile, _profile_options
-    from src.model_fabric.effective_policy import current_inference_policy
-    configured, policy_digest = current_inference_policy()
-    setup = configured.openrouter_setup
+    from src.model_fabric.near_tee_vertical import vertical_inference_policy
+    configured, policy_digest, setup = vertical_inference_policy("readonly_research_child")
     if setup.timeout_seconds > 45:
         raise ValueError("research requires a reviewed provider timeout at most 45 seconds")
+    if setup.near_tee:
+        return setup, policy_digest, {"near_tee": True, "profile": setup.profile_id,
+            "model_id": setup.model_id, "source": "primary", "options": {}}
     profile = _provider_profile(setup.profile_id)
     if profile is None or profile.provider_kind != "openrouter" or profile.transport_adapter != "openai_compatible_chat":
         raise ValueError("research requires its reviewed fixed OpenRouter chat profile")
@@ -43,6 +52,31 @@ def _target():
         "api_base": profile.api_base, "api_key": profile.api_key, "source": "primary",
         "options": {"provider": options["provider"]} if "provider" in options else {}}
     return setup, policy_digest, target
+
+
+def research_body(setup, target, messages):
+    """The exact stored request body for one research child prompt.
+
+    On NEAR TEE it is the exact NEAR TEE request body the precontact gates
+    build (model, bounded output, slot temperature, ``n=1``, no stream), so the
+    funded call and its accounting payload digest bind the same bytes.
+    """
+    from src.model_fabric.contracts import finalized_openai_compatible_body
+    max_tokens = min(1024, setup.max_output_tokens)
+    if target.get("near_tee"):
+        from src.model_fabric.near_tee import _transport_messages
+        return {"model": target["model_id"], "messages": _transport_messages(messages),
+            "max_tokens": max(1, max_tokens), "temperature": float(setup.temperature), "n": 1, "stream": False}
+    return finalized_openai_compatible_body(model_id=target["model_id"], messages=messages,
+        options=target["options"], temperature=setup.temperature, max_tokens=max_tokens, stream=False)
+
+
+async def _near_call(context, body, *, persist_denial=True):
+    """Every NEAR TEE precontact gate for the exact stored research body."""
+    from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call
+    return await prepare_near_tee_vertical_call(context, messages=body["messages"],
+        temperature=float(body["temperature"]), max_tokens=int(body["max_tokens"]),
+        persist_denial=persist_denial)
 
 
 async def _context(child, body, deadline):
@@ -72,7 +106,6 @@ async def _context(child, body, deadline):
 async def prepare_prompt(jobs, *, child_id, owner, fence, sources):
     """Persist exact bounded body and source manifest before paired funding."""
     from src.llm_runtime import _governed_preflight_target_async
-    from src.model_fabric.contracts import finalized_openai_compatible_body
     from src.security.trust_contract import canonical_digest
     child = await jobs.get_job(child_id)
     inputs = await current_inputs(jobs, child["parent_job_id"])
@@ -86,17 +119,23 @@ async def prepare_prompt(jobs, *, child_id, owner, fence, sources):
     setup, policy_digest, target = _target()
     if policy_digest != authority["model_policy_digest"]:
         raise ValueError("research original model policy changed")
-    body = finalized_openai_compatible_body(model_id=target["model_id"],
-        messages=prompt_messages(inputs.question, perspective.instruction, sources),
-        options=target["options"], temperature=setup.temperature,
-        max_tokens=min(1024, setup.max_output_tokens), stream=False)
+    body = research_body(setup, target, prompt_messages(inputs.question, perspective.instruction, sources))
     # The contact window starts with the exact prompt, includes funding and
     # queue wait, and survives restart without another 45-second allowance.
     deadline = min(_timestamp(child["deadline_at"]), time.time()+min(45, setup.timeout_seconds))
     context = await _context(child, body, deadline)
-    decision, _proofs = await _governed_preflight_target_async(target, context)
-    if decision is None or not decision.allowed:
-        raise PermissionError("research fixed route lacks current governed capability proof")
+    if target.get("near_tee"):
+        from src.model_fabric.near_tee import NearTeeDenied
+        try:
+            call = await _near_call(context, body)
+        except NearTeeDenied as denied:
+            raise PermissionError("research fixed route denied: " + denied.code) from denied
+        if call.body != body:
+            raise ValueError("research NEAR TEE request body differs from the stored prompt")
+    else:
+        decision, _proofs = await _governed_preflight_target_async(target, context)
+        if decision is None or not decision.allowed:
+            raise PermissionError("research fixed route lacks current governed capability proof")
     creation_digest = authority["parent_creation_digest"]
     source_artifact = await write_verified(jobs, job_id=child_id, owner=owner, fence=fence,
         creation_digest=creation_digest, slot=slot, kind="manifest", content=json_bytes(sources))
@@ -153,7 +192,18 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
             raw=raw, actual_cost=settled["actual_cost_microusd"])
         return artifact
     context = await _context(child, body, ready["contact_deadline_at"])
-    decision, proofs = await _governed_preflight_target_async(target, context)
+    near_call = None
+    if target.get("near_tee"):
+        from src.model_fabric.near_tee import NearTeeDenied
+        try:
+            near_call = await _near_call(context, body)
+        except NearTeeDenied as denied:
+            raise PermissionError("research funded route denied: " + denied.code) from denied
+        if canonical_digest(near_call.body) != ready["payload_digest"]:
+            raise ValueError("research funded prompt/profile binding changed")
+        context, decision, proofs = near_call.context, near_call.decision, near_call.proof_hashes
+    else:
+        decision, proofs = await _governed_preflight_target_async(target, context)
     if decision is None or not decision.allowed:
         raise PermissionError("research funded route is no longer governed")
     hooks = RouteReceiptSession(context=context)
@@ -174,11 +224,26 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
                 return await _governed_research_chat_completion(decision=decision,
                     context=context, body=body, api_key=target["api_key"])
 
+            def near_started():
+                nonlocal started
+                started = True
+
             try:
-                response, payload = await broker.execute(request, invoke)
+                if near_call is not None:
+                    # #1159: NEAR billing is read back inside this lease and
+                    # settles the paired child reservation; a known-cost
+                    # failure raises NearTeeError and adopts nothing.
+                    from src.model_fabric.near_tee_vertical import execute_near_tee_vertical_call
+                    response, _outcome = await execute_near_tee_vertical_call(near_call, request=request,
+                        broker=broker, hooks=hooks, on_started=near_started)
+                    payload = None
+                else:
+                    response, payload = await broker.execute(request, invoke)
             except BaseException:
                 if started:
-                    hooks.attempt_finished(outcome="failed", error_code="research_provider_incomplete", decision=decision)
+                    if hooks.attempt_active:
+                        hooks.attempt_finished(outcome="failed", error_code="research_provider_incomplete",
+                            decision=decision)
                     await hooks.finalize(outcome="failed")
                 else:
                     await hooks.finalize_denied(decision=decision, reason_codes=("research_contact_denied",))
@@ -189,8 +254,9 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
                 if receipt is not None:
                     await broker.persist_receipt(receipt, repository=jobs, owner=owner, fencing_token=fence)
                 raise
-            hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
-                usage=_token_usage_from_payload(payload))
+            if near_call is None:
+                hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
+                    usage=_token_usage_from_payload(payload))
             route = await hooks.finalize(outcome="succeeded")
             if not route.persisted:
                 raise RuntimeError("research route receipt persistence failed")
@@ -287,7 +353,6 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
     from src.approval.runtime import set_runtime_context, reset_runtime_context
     from src.security.trust_contract import TrustPrincipal, PrincipalType, AuthorityGrant
     from src.model_fabric.caller_context import build_canonical_inference_context
-    from src.model_fabric.contracts import finalized_openai_compatible_body
     from src.model_fabric.hooks import RouteReceiptSession
     from src.model_fabric.remote_inference_admission import (GpuAdmissionRequest, bind_remote_inference_receipt,
         prepare_bound_remote_inference, remote_inference_admission_broker as broker)
@@ -302,12 +367,9 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
         if (key in supplied) != (key in expected_strategy) or supplied.get(key) != expected_strategy.get(key):
             raise ValueError("programme_research_strategy_original_input_changed")
     setup, policy_digest, target = _target()
-    body = finalized_openai_compatible_body(model_id=target["model_id"],
-        messages=[{"role": "system", "content": instruction},
-            {"role": "user", "content": json_bytes({"public_brief": witness.public_brief,
-                "untrusted_public_data": supplied, "no_learning": True}).decode()}],
-        options=target["options"], temperature=setup.temperature,
-        max_tokens=min(1024, setup.max_output_tokens), stream=False)
+    body = research_body(setup, target, [{"role": "system", "content": instruction},
+        {"role": "user", "content": json_bytes({"public_brief": witness.public_brief,
+            "untrusted_public_data": supplied, "no_learning": True}).decode()}])
     raw_body = json_bytes(body)
     if len(raw_body) > 8192:
         raise ValueError("programme_serialized_prompt_context_unsupported")
@@ -328,7 +390,19 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
     context = replace(context, deadline_at=witness.plan.deadline_at.timestamp(),
         owner_budget_microusd=witness.plan.limits.cost_limit_microusd,
         requirements=replace(context.requirements, max_latency_ms=int(setup.timeout_seconds * 1000)))
-    decision, proofs = await _governed_preflight_target_async(target, context)
+    near_call = None
+    if target.get("near_tee"):
+        # #1159: every NEAR TEE precontact gate on the exact staged body.
+        from src.model_fabric.near_tee import NearTeeDenied
+        try:
+            near_call = await _near_call(context, body)
+        except NearTeeDenied as denied:
+            raise PermissionError("programme fixed route denied: " + denied.code) from denied
+        if near_call.body != body:
+            raise ValueError("programme NEAR TEE request body differs from the staged prompt")
+        context, decision, proofs = near_call.context, near_call.decision, near_call.proof_hashes
+    else:
+        decision, proofs = await _governed_preflight_target_async(target, context)
     if decision is None or not decision.allowed:
         raise PermissionError("programme fixed route lacks current governed capability proof")
     request = GpuAdmissionRequest.from_inference_context(context, operation_id=operation_id, uncertain_on_error=True)
@@ -353,11 +427,27 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
                     return await _governed_research_chat_completion(decision=decision, context=context,
                         body=body, api_key=target["api_key"])
 
+            async def near_inputs_current():
+                # Same recheck as the OpenRouter callback, before contact.
+                await physical_discovery_inputs(jobs, job_id)
+
+            def near_started():
+                nonlocal started
+                started = True
+
             try:
-                response, payload = await broker.execute(request, invoke)
+                if near_call is not None:
+                    from src.model_fabric.near_tee_vertical import execute_near_tee_vertical_call
+                    response, _outcome = await execute_near_tee_vertical_call(near_call, request=request,
+                        broker=broker, hooks=hooks, on_started=near_started, before_contact=near_inputs_current)
+                    payload = None
+                else:
+                    response, payload = await broker.execute(request, invoke)
             except BaseException:
                 if started:
-                    hooks.attempt_finished(outcome="failed", error_code="programme_provider_incomplete", decision=decision)
+                    if hooks.attempt_active:
+                        hooks.attempt_finished(outcome="failed", error_code="programme_provider_incomplete",
+                            decision=decision)
                     await hooks.finalize(outcome="failed")
                 else:
                     await hooks.finalize_denied(decision=decision, reason_codes=("programme_contact_denied",))
@@ -369,8 +459,9 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
                 except Exception:
                     pass  # Original unknown intent and ledger remain authoritative.
                 raise
-            hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
-                usage=_token_usage_from_payload(payload))
+            if near_call is None:
+                hooks.attempt_finished(outcome="succeeded", error_code=None, decision=decision,
+                    usage=_token_usage_from_payload(payload))
             route = await hooks.finalize(outcome="succeeded")
             if not route.persisted:
                 raise RuntimeError("programme route receipt persistence failed")

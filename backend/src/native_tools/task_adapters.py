@@ -78,7 +78,9 @@ def _repository_work_block_reason(mode):
         "repo-python-pytest-v1", "repo-python-pytest-publication-v1", "repo-node24-npm-v1",
     }:
         return "repository_executor_unsupported"
-    return None
+    from src.model_fabric.near_tee_vertical import repository_repair_route_block
+    # #1159: the iteration model step has no NEAR TEE adapter; never offer it.
+    return repository_repair_route_block()
 
 
 @dataclass(frozen=True)
@@ -165,6 +167,19 @@ def verify_task_tool_closure(witness, *, binding, fencing_token):
         approval_fingerprint=witness.approval_fingerprint)
 
 
+def _precontact_route_denial(error) -> bool:
+    """True only for the planner's sealed precontact route refusals.
+
+    ``GeneralTaskPlanner.propose`` raises these before it creates a planning
+    group, inference job or reservation and before broker admission, so no
+    provider was contacted: the route block (no active provider, revoked
+    egress, NEAR TEE slot reason) and a sealed NEAR TEE/selector denial.
+    """
+    from src.work_board.repository import BoardError
+    return (type(error) is BoardError and error.extra.get("provider_contact") == "not_started"
+        and isinstance(error.extra.get("reason_code"), str))
+
+
 @dataclass(frozen=True)
 class _InvocationCompletion:
     output: object
@@ -186,6 +201,20 @@ class TaskToolInvocation:
         if not self.closed:
             raise PermissionError("original native callback has not closed")
         return self._future.result().witness
+
+    @property
+    def precontact_route_reason(self):
+        """The stable route-block code of a proven no-contact closure, else None.
+
+        Only ``route_precontact`` witnesses carry one: the callback refused at
+        its route/precontact gate before any job, reservation or provider
+        contact (#1159).
+        """
+        if not self.closed or self.witness.outcome != "route_precontact":
+            return None
+        error = self._future.result().error
+        reason = getattr(error, "extra", {}).get("reason_code") or getattr(error, "code", None)
+        return str(reason)[:128] if reason else None
 
     def on_closed(self, callback):
         """Notify the private owner only after the original future returned."""
@@ -588,7 +617,11 @@ class ToolRegistry:
             from src.workflows.specialist_lifecycle import SpecialistWaitRequired
             if type(error) is SpecialistWaitRequired:
                 return _InvocationCompletion(None,error,error.witness)
-            witness = TaskToolClosureWitness(binding, "unknown", None, None, _CLOSURE_SEAL)
+            # #1159: a specialist planning route denial raised before any
+            # planning group, job, reservation or provider contact is proven
+            # no-contact, not an unknown effect.
+            outcome = "route_precontact" if _precontact_route_denial(error) else "unknown"
+            witness = TaskToolClosureWitness(binding, outcome, None, None, _CLOSURE_SEAL)
             return _InvocationCompletion(None, error, witness)
 
     async def _invoke_document_with_closure(self, descriptor, inputs, principal, job_id, fencing_token):

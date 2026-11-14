@@ -19,6 +19,14 @@ from tests.test_inference_accounting import accounting_db
 from tests.test_repo_work_contracts import selection
 
 
+@pytest.fixture(autouse=True)
+def _repository_repair_route_available(monkeypatch):
+    # Registration/admission mechanics given a usable repair route (#1159).
+    from tests.near_tee_support import assume_repository_repair_route_available
+    assume_repository_repair_route_available(monkeypatch)
+
+
+
 async def canonical_selector_update(**changes):
     """The actual existing settings writer, under its original short fence."""
     from src.api.settings import RepoSandboxSettingsRequest, _persist_repo_sandbox_selector_update

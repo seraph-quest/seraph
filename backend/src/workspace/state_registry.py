@@ -1598,6 +1598,13 @@ _RUNTIME_PATH_SPECS = (
     # A restored workspace holds no receipt and the slot fails closed until
     # the operator re-checks the catalog.
     ("near-tee-catalog-receipts.json", WorkspaceStateClass.CACHE),
+    # Background NEAR TEE catalog reads (#1178): informational, never
+    # consulted by dispatch, rewritten by the next read.
+    ("near-tee-catalog-observations.json", WorkspaceStateClass.CACHE),
+    # Which NEAR TEE credential fingerprint current capability proofs belong
+    # to (#1178). Canonical beside seraph.db proofs and the model-fabric
+    # settings so a restore keeps the pairing; written only by settings saves.
+    ("near-tee-credential-binding.json", WorkspaceStateClass.CANONICAL),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
     # Audio documentation source objects (ADR-033). Re-acquirable evidence, so
@@ -1624,14 +1631,17 @@ _OPTIONAL_RUNTIME_SECRET_PATHS = frozenset({"google_calendar_token.json"})
 # Evolution proposals and evaluator receipts are operator state written by the
 # harness runtime only after first use (its .lock sits beside the state file).
 # The extension lifecycle lock is an fcntl lock file: never archived.
-_OPTIONAL_RUNTIME_CANONICAL_PATHS = frozenset({"background-inference-settings.json", "evolution"})
+# The NEAR TEE credential binding appears on the first NEAR TEE key save.
+_OPTIONAL_RUNTIME_CANONICAL_PATHS = frozenset({"background-inference-settings.json", "evolution",
+                                               "near-tee-credential-binding.json"})
 _OPTIONAL_RUNTIME_TRANSIENT_PATHS = frozenset({
     ".seraph-extension-lifecycle.lock",
     # Written on the first scheduler tick; the .tmp exists only mid-write.
     "background-inference-status.json",
     "background-inference-status.tmp",
-    # Written by the first NEAR TEE catalog check.
+    # Written by the first NEAR TEE catalog check / background catalog read.
     "near-tee-catalog-receipts.json",
+    "near-tee-catalog-observations.json",
 })
 # Canonical runtime state agent file tools may neither read nor write: MCP
 # server and stdio proxy settings (inline credentials are possible, and an
@@ -1648,6 +1658,7 @@ _AGENT_READ_ONLY_RUNTIME_PATHS = frozenset(
         "extensions-state.json",
         "starter-packs.json",
         "model-fabric-settings.json",
+        "near-tee-credential-binding.json",
         "screen-analysis-settings.json",
         "background-inference-settings.json",
         # Operator proposal state; only the evolution runtime writes it.

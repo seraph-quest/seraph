@@ -683,8 +683,8 @@ def test_managed_restore_succeeds_with_the_background_inference_status_file(tmp_
     assert restore.returncode == 0, restore.stdout + restore.stderr
     assert json.loads(restore.stdout)["stage_receipt"]["restore_reconciliation"]["status"] == "ready"
 
-def test_managed_backup_and_restore_accept_the_near_tee_catalog_receipts(tmp_path):
-    """#1180: the NEAR TEE catalog receipt store is declared cache state.
+def test_managed_backup_and_restore_accept_the_near_tee_state_files(tmp_path):
+    """#1180: the NEAR TEE catalog stores are cache, the credential binding canonical.
 
     Undeclared, any workspace that had run a catalog check failed every backup
     with unknown_workspace_path. As cache it is never archived, so a restored
@@ -692,6 +692,9 @@ def test_managed_backup_and_restore_accept_the_near_tee_catalog_receipts(tmp_pat
     """
     root = _workspace(tmp_path)
     (root / "near-tee-catalog-receipts.json").write_text('{"schema_version": "x", "receipts": {}}')
+    (root / "near-tee-catalog-observations.json").write_text('{"schema_version": "x", "observations": {}}')
+    binding = '{"bound_since": 1.0, "fingerprint": "0123456789ab", "schema_version": "x"}'
+    (root / "near-tee-credential-binding.json").write_text(binding)
     environment = os.environ.copy()
     environment.update(_env(root))
     environment["PYTHONPATH"] = str(ROOT / "backend")
@@ -703,12 +706,17 @@ def test_managed_backup_and_restore_accept_the_near_tee_catalog_receipts(tmp_pat
     archive = json.loads(backup.stdout)["archive_path"]
     import zipfile
     with zipfile.ZipFile(archive) as bundle:
-        assert not any(name.endswith("near-tee-catalog-receipts.json") for name in bundle.namelist())
+        names = bundle.namelist()
+        assert not any(name.endswith(("near-tee-catalog-receipts.json", "near-tee-catalog-observations.json"))
+                       for name in names)
+        # The credential binding pairs with the archived proofs in seraph.db.
+        assert any(name.endswith("near-tee-credential-binding.json") for name in names)
     restore = subprocess.run(
         [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
         env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
     )
     assert restore.returncode == 0, restore.stdout + restore.stderr
+    assert (root / "near-tee-credential-binding.json").read_text() == binding
 
 
 def test_manage_prod_commands_use_host_bind_and_never_start_compose(tmp_path):

@@ -43,6 +43,8 @@ _READ_ONLY_PATHS = (
     "background-inference-status.json",
     "background-inference-status.tmp",
     "near-tee-catalog-receipts.json",
+    "near-tee-catalog-observations.json",
+    "near-tee-credential-binding.json",
     "local-runtime-profile-receipts/receipt.json",
     ".seraph-extension-snapshots/pack.json",
     "cache/entry.txt",

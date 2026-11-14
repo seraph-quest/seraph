@@ -231,12 +231,15 @@ maintenance handoff. See the
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
 **Partial**: the one Python scheduler and the WorkBoard dispatcher run only
 while their owner rows (`seraph.scheduler.v1`, new `seraph.dispatch.v1`) are
-ready at an epoch and, once cut over to Cordis at boot, while the reviewed child
-proves the domain's plugin. Retention and cleanup jobs are exempt. Timers keep
+ready at an epoch and, once cut over to Cordis (at boot only on the running
+reviewed child's proof; otherwise they stay on the identical legacy owner),
+while that child proves the domain's plugin. Retention and cleanup jobs are exempt. Timers keep
 their phase and a non-active domain refuses ticks at entry with a visible
 block; stale epochs are fenced inside the run, occurrence and board
-transactions; deactivation drains within the original bounds before cancelling;
-live operator transitions drain at E before the flip. `seraph.dispatch.v1` is
+transactions; deactivation drains within the original bounds, then stops
+leftover attempts through their own cleanup and `cancel_job_tree`, and never
+flips the owner while cleanup is unproven; live operator transitions drain at
+E before the flip; shutdown is bounded and closes admission first. `seraph.dispatch.v1` is
 added once to the exact post-#1024 inventory, forward-only. Verified with
 temporary state and the real reviewed child; external transport and inference
 denied. Partial because per-job blocks still use the background-inference JSON

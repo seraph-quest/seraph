@@ -699,3 +699,28 @@ def test_the_dispatch_introduction_refuses_a_corrupt_row_and_inserts_nothing(tmp
         events = connection.execute(text("SELECT COUNT(*) FROM audit_events")).scalar_one()
     assert DISPATCH_DOMAIN not in domains and events == 0
     engine.dispose()
+
+
+async def test_boot_without_the_cordis_proof_keeps_scheduler_and_dispatch_legacy_and_running(service_db):  # noqa: F811
+    from src.runtime_plugins.bridge import CordisHost
+    from src.runtime_plugins.cutover import CUTOVER_EVENT, run_boot_cutover
+    from src.runtime_plugins.ownership import inventory
+    receipts = {item["runtime_domain"]: item for item in await run_boot_cutover(CordisHost())}
+    assert receipts[SCHEDULER_DOMAIN] == {"runtime_domain": SCHEDULER_DOMAIN, "action": "deferred",
+                                          "reason": "cordis_boot_proof_missing"}
+    assert DISPATCH_DOMAIN not in receipts  # waits for its prerequisite; nothing marked
+    async with db_engine.get_session() as db:
+        rows = await inventory(db)
+    for domain in (SCHEDULER_DOMAIN, DISPATCH_DOMAIN):
+        assert (rows[domain].owner_kind, rows[domain].epoch, rows[domain].state) == ("legacy", 1, "ready")
+    marked = {event["runtime_domain"] for event in await _events(CUTOVER_EVENT)}
+    assert SCHEDULER_DOMAIN not in marked and DISPATCH_DOMAIN not in marked  # a later proven boot still cuts over
+    lifecycle = _lifecycle()
+    assert (await lifecycle.activate(SCHEDULER_DOMAIN))["state"] == "active"
+    assert (await lifecycle.activate(DISPATCH_DOMAIN))["state"] == "active"
+
+
+async def test_cordis_block_recovery_names_the_legacy_rollback_route():
+    from src.runtime_plugins.lifecycle import lifecycle_recovery
+    text = lifecycle_recovery("cordis_host_unavailable")
+    assert "legacy" in text and "/api/runtime/composition/domains/" in text

@@ -4387,6 +4387,8 @@ class WorkBoardRepository:
         observed_at = _utc_datetime(now) if now is not None else _now()
         lease_seconds = max(1, min(int(lease_seconds), 900))
         await _begin_sqlite_immediate(db)
+        from src.runtime_plugins.lifecycle import assert_tick_fence
+        await assert_tick_fence(db)  # #1025: only the live dispatch epoch reclaims an expired attempt
         task = await self._find_task(db, task_id)
         if task is None:
             raise BoardNotFound(task_id)

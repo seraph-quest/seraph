@@ -1155,10 +1155,15 @@ stores (`ScheduledJob`/`ScheduledJobRun`, governed occurrences,
 Startup order: provider worker, services, Cordis host start, boot owner
 cutover (manifest order ends with the scheduler, then dispatch, whose
 prerequisite is the scheduler), then the scheduler instance is built, user
-cron jobs are synced, and both domains activate. A fresh boot therefore cuts
-both domains over to Cordis once, like the #1019/#1020 domains; an operator
-rollback stays sticky. Without a running reviewed child a Cordis-owned domain
-stays `blocked` with the host's fix and there is no legacy fallback.
+cron jobs are synced, and both domains activate. Unlike the #1019/#1020
+domains, these two are cut over at boot only when this boot's reviewed child is
+admitting and proves the domain's plugin digest; otherwise they stay on the
+legacy owner (the identical Python mechanism), `ready` and unmarked
+(`deferred` / `cordis_boot_proof_missing`), and a later proven boot cuts them
+over once. An operator rollback stays sticky. Once a domain is Cordis-owned,
+losing the child blocks it with the host's fix and there is no automatic legacy
+fallback; the recovery text names the operator rollback route (dispatch before
+scheduler).
 
 Every job registered by `init_scheduler` and every `user_cron:*` job is gated by
 a closed classification: `work_board_dispatch` by dispatch, the other system
@@ -1187,12 +1192,20 @@ with `dispatch_owner_not_active` while dispatch is not active.
 
 Deactivation closes admission first, then drains in-flight work within the
 original bounds (scheduler wrappers 120 s; WorkBoard attempts
-`MAX_RUNTIME_SECONDS` plus a 30 s settlement window), then cancels what is
-left, so each attempt runs its own recovery path and stale-lease recovery
-leaves an unresolved effect unknown (never forced or retried), then audits
-`runtime_lifecycle_quiesced`. A lost Cordis host deactivates the domain at once.
-Backend shutdown closes admission and keeps today's bounded shutdown (no new
-wait). Restart is a fresh activation at the row's current epoch after
+`MAX_RUNTIME_SECONDS` plus a 30 s settlement window). An attempt still live
+past that bound goes through `WorkBoardDispatcher.drain_attempt_past_bound`:
+its capability's own cleanup hook, then `cancel_job_tree` (unresolved effects
+stay unknown, never forced or retried), then proof. A scheduler wrapper that
+owns no attempt is cancelled and awaited (its durable work keeps its lease).
+`runtime_lifecycle_quiesced` is audited only when nothing is alive and every
+cleanup is proven; otherwise `runtime_lifecycle_drain_unknown` names the
+unknown attempts, the domain stays blocked (`*_drain_cleanup_unknown`) while a
+cancelled task is alive, and a live transition stops before the flip. A lost
+Cordis host deactivates the domain at once. Backend shutdown sets a closing
+flag before any wait (nothing reactivates and post-stop ticks persist nothing;
+API launches are refused), cancels an in-flight live transition and waits at
+most 10 s per domain, and cancels no attempt (restart recovery owns the
+leases, as before). Restart is a fresh activation at the row's current epoch after
 stale-lease recovery; the missed-fire policy is unchanged (in-memory jobstore,
 interval jobs resume at their next interval, cron jobs within their grace,
 governed schedules reserve at most one latest due slot), so a cutover equals a
@@ -1221,8 +1234,10 @@ Proof limits: verified with temporary SQLite state and, for the Cordis owner,
 host loss and live transitions, the real reviewed child; external transport
 and inference denied. Not yet done: the durable `background_job_status` table
 (D2) replacing the JSON status record, Settings and cockpit banner rendering of
-the two domain statuses, and fence/race tests for governed occurrences and
-WorkBoard claims on a real board.
+the two domain statuses, fences inside each `run_pass` step's own transaction
+(today a separate read at each step boundary), and race tests for governed
+occurrences, WorkBoard claims and a pending approval at cutover on a real
+board.
 
 ### Cordis guardian research (#1008)
 

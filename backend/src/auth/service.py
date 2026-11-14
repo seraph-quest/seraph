@@ -81,15 +81,6 @@ def local_no_login_active() -> bool:
     )
 
 
-def operator_sessions_enforced() -> bool:
-    """Whether requests resolve to a persisted operator root.
-
-    True for password authentication and for the local no-login root; false
-    for the unconfigured fail-closed state and the explicit test bypass.
-    """
-    return auth_enabled() or local_no_login_active()
-
-
 def auth_mode() -> str:
     if auth_enabled():
         return AUTH_MODE_PASSWORD
@@ -135,37 +126,108 @@ def is_loopback_host(value: str | None) -> bool:
     return bool(address.is_loopback or (mapped is not None and mapped.is_loopback))
 
 
-def _argv_bind_options(argv: list[str]) -> tuple[str | None, bool]:
-    """Return the uvicorn ``--host`` value and whether a socket was inherited."""
-    host: str | None = None
-    inherited = False
+def _argv_options(argv: list[str]) -> dict[str, str | bool | None]:
+    """Parse the uvicorn bind-relevant options from the process arguments."""
+    options: dict[str, str | bool | None] = {
+        "host": None,
+        "inherited": False,
+        "workers": None,
+        "forwarded_allow_ips": None,
+    }
+    valued = {"--host": "host", "--workers": "workers", "--forwarded-allow-ips": "forwarded_allow_ips"}
     for index, item in enumerate(argv):
-        if item == "--host" and index + 1 < len(argv):
-            host = argv[index + 1]
-        elif item.startswith("--host="):
-            host = item.split("=", 1)[1]
-        elif item in {"--fd", "--uds"} or item.startswith(("--fd=", "--uds=")):
-            inherited = True
-    return host, inherited
+        if item in valued and index + 1 < len(argv):
+            options[valued[item]] = argv[index + 1]
+            continue
+        name, separator, value = item.partition("=")
+        if separator and name in valued:
+            options[valued[name]] = value
+        elif name in {"--fd", "--uds"}:
+            options["inherited"] = True
+    return options
 
 
-def local_bind_error(argv: list[str] | None = None) -> str | None:
-    """Explain why the backend bind is not provably loopback-only."""
+def _is_uvicorn_cli(argv: list[str]) -> bool:
+    """``uvicorn ...`` or ``python -m uvicorn ...`` (argv[0] is its __main__)."""
+    import os
+
+    if not argv:
+        return False
+    launcher = argv[0].replace("\\", "/")
+    return os.path.basename(launcher) == "uvicorn" or launcher.endswith("/uvicorn/__main__.py")
+
+
+def _is_gunicorn(argv: list[str], environ) -> bool:
+    import os
+
+    return bool(
+        (argv and "gunicorn" in os.path.basename(argv[0]))
+        or "GUNICORN_CMD_ARGS" in environ
+        or str(environ.get("SERVER_SOFTWARE", "")).lower().startswith("gunicorn")
+    )
+
+
+def _loopback_only_list(value: str) -> bool:
+    entries = [item.strip() for item in value.split(",") if item.strip()]
+    return bool(entries) and all(is_loopback_host(item) for item in entries)
+
+
+def local_bind_error(argv: list[str] | None = None, environ=None) -> str | None:
+    """Explain why the backend bind is not provably loopback-only.
+
+    Uvicorn binds its listener only after application startup, so the real
+    socket cannot be inspected here. The check therefore fails closed: the
+    mode is accepted only for a recognised uvicorn command line with an
+    explicit loopback ``--host``, a single worker and loopback-only proxy
+    trust. ``uvicorn.run(...)`` from Python, gunicorn, inherited ``--fd`` or
+    ``--uds`` listeners and a host taken only from ``UVICORN_HOST`` are all
+    refused because their bind is invisible to this process.
+    """
+    import os
     import sys
 
+    argv = list(sys.argv if argv is None else argv)
+    environ = os.environ if environ is None else environ
+    prefix = "OPERATOR_AUTH_LOCAL_NO_LOGIN"
     configured = settings.backend_bind_host.strip()
     if not configured:
         return (
-            "OPERATOR_AUTH_LOCAL_NO_LOGIN requires BACKEND_BIND_HOST to name the "
-            "loopback listener (the managed local launcher sets 127.0.0.1)"
+            f"{prefix} requires BACKEND_BIND_HOST to name the loopback listener "
+            "(the managed local launcher sets 127.0.0.1)"
         )
     if not is_loopback_host(configured):
-        return f"OPERATOR_AUTH_LOCAL_NO_LOGIN requires a loopback bind, not {configured!r}"
-    argv_host, inherited = _argv_bind_options(list(sys.argv if argv is None else argv))
-    if inherited:
-        return "OPERATOR_AUTH_LOCAL_NO_LOGIN cannot verify an inherited --fd/--uds listener"
-    if argv_host is not None and not is_loopback_host(argv_host):
-        return f"OPERATOR_AUTH_LOCAL_NO_LOGIN requires a loopback bind, not --host {argv_host!r}"
+        return f"{prefix} requires a loopback bind, not {configured!r}"
+    if _is_gunicorn(argv, environ):
+        return f"{prefix} cannot verify a gunicorn bind; use ./manage.sh -e dev local"
+    if not _is_uvicorn_cli(argv):
+        return (
+            f"{prefix} requires the uvicorn command line with an explicit loopback "
+            "--host (use ./manage.sh -e dev local)"
+        )
+    options = _argv_options(argv)
+    if options["inherited"]:
+        return f"{prefix} cannot verify an inherited --fd/--uds listener"
+    argv_host = options["host"]
+    if argv_host is None:
+        return f"{prefix} requires an explicit loopback --host on the uvicorn command line"
+    if not is_loopback_host(str(argv_host)):
+        return f"{prefix} requires a loopback bind, not --host {argv_host!r}"
+    env_host = str(environ.get("UVICORN_HOST", "") or "").strip()
+    if env_host and not is_loopback_host(env_host):
+        return f"{prefix} requires a loopback bind, not UVICORN_HOST={env_host!r}"
+    workers = options["workers"] or environ.get("UVICORN_WORKERS") or environ.get("WEB_CONCURRENCY")
+    if workers not in (None, ""):
+        try:
+            worker_count = int(str(workers))
+        except ValueError:
+            return f"{prefix} cannot verify worker count {workers!r}"
+        if worker_count > 1:
+            return f"{prefix} requires a single backend worker"
+    forwarded = options["forwarded_allow_ips"]
+    if forwarded is None:
+        forwarded = environ.get("FORWARDED_ALLOW_IPS")
+    if forwarded is not None and not _loopback_only_list(str(forwarded)):
+        return f"{prefix} requires loopback-only FORWARDED_ALLOW_IPS/--forwarded-allow-ips"
     return None
 
 
@@ -932,6 +994,21 @@ async def authenticate_local_operator() -> AuthenticatedOperator:
 
 
 async def _ensure_local_root() -> tuple[AuthenticatedOperator, bool]:
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        return await _create_local_root()
+    except IntegrityError:
+        # Another process won the unique marker; adopt its root.
+        now = datetime.now(timezone.utc)
+        async with get_session() as db:
+            record = await _read_local_root(db)
+            if record is not None and _local_root_usable(record, now):
+                return await _operator_from_record(db, record), False
+        raise
+
+
+async def _create_local_root() -> tuple[AuthenticatedOperator, bool]:
     from src.db.models import OperatorIdentity
 
     async with _local_root_lock():

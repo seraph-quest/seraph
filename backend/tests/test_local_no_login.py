@@ -64,6 +64,11 @@ def _enable_local_mode(monkeypatch) -> None:
     )
     monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
     monkeypatch.setattr("sys.argv", ["uvicorn", "src.app:create_app", "--factory", "--host", "127.0.0.1"])
+    for name in (
+        "UVICORN_HOST", "UVICORN_WORKERS", "WEB_CONCURRENCY", "FORWARDED_ALLOW_IPS",
+        "GUNICORN_CMD_ARGS", "SERVER_SOFTWARE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -147,10 +152,59 @@ def test_loopback_peer_forms():
         assert local_peer_error(peer) == "local_peer_forbidden"
 
 
+UVICORN_MAIN = "/venv/lib/python3.12/site-packages/uvicorn/__main__.py"
+
+
+@pytest.mark.parametrize(
+    ("argv", "environ", "message"),
+    [
+        # backend/main.py: uvicorn.run(host="0.0.0.0") with argv ["main.py"].
+        (["main.py"], {}, "uvicorn command line"),
+        (["python", "-c", "import uvicorn; uvicorn.run(app, host='0.0.0.0')"], {}, "uvicorn command line"),
+        # A host only from UVICORN_HOST, or none at all, is not verifiable.
+        (["uvicorn", "src.app:create_app", "--factory"], {"UVICORN_HOST": "0.0.0.0"}, "explicit loopback --host"),
+        (["uvicorn", "src.app:create_app", "--factory"], {}, "explicit loopback --host"),
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1"], {"UVICORN_HOST": "0.0.0.0"}, "UVICORN_HOST"),
+        # gunicorn -b binds are invisible to this process.
+        (["/venv/bin/gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8003"], {}, "gunicorn"),
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1"], {"GUNICORN_CMD_ARGS": "-b 0.0.0.0:8003"}, "gunicorn"),
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1"], {"SERVER_SOFTWARE": "gunicorn/22.0.0"}, "gunicorn"),
+        # Multiple workers.
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1", "--workers", "2"], {}, "single backend worker"),
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1"], {"WEB_CONCURRENCY": "4"}, "single backend worker"),
+        # Proxy trust beyond loopback lets remote clients claim a loopback peer.
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1", "--forwarded-allow-ips", "*"], {}, "FORWARDED_ALLOW_IPS"),
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1"], {"FORWARDED_ALLOW_IPS": "*"}, "FORWARDED_ALLOW_IPS"),
+        (["uvicorn", "src.app:create_app", "--host", "127.0.0.1"], {"FORWARDED_ALLOW_IPS": "127.0.0.1,10.0.0.0/8"}, "FORWARDED_ALLOW_IPS"),
+    ],
+)
+def test_refuses_unverifiable_or_widened_launch(local_mode, argv, environ, message):
+    error = local_bind_error(argv, environ)
+    assert error is not None and message in error
+
+
+@pytest.mark.parametrize(
+    ("argv", "environ"),
+    [
+        ([UVICORN_MAIN, "src.app:create_app", "--factory", "--host", "127.0.0.1", "--port", "8004"], {}),
+        (["/venv/bin/uvicorn", "src.app:create_app", "--host=::1", "--workers=1"], {"UVICORN_HOST": "127.0.0.1"}),
+        (["uvicorn", "src.app:create_app", "--host", "localhost"], {"FORWARDED_ALLOW_IPS": "127.0.0.1,::1"}),
+    ],
+)
+def test_managed_style_uvicorn_launch_is_accepted(local_mode, argv, environ):
+    assert local_bind_error(argv, environ) is None
+
+
+def test_main_py_entrypoint_is_refused(local_mode, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["main.py"])
+    with pytest.raises(RuntimeError, match="uvicorn command line"):
+        validate_auth_configuration()
+
+
 @pytest.mark.parametrize("bind_host", ["127.0.0.1", "localhost", "::1", "[::1]", "127.0.0.2"])
 def test_loopback_bind_forms_are_accepted(local_mode, monkeypatch, bind_host):
     monkeypatch.setattr(settings, "backend_bind_host", bind_host)
-    assert local_bind_error(["uvicorn", "--host", "127.0.0.1"]) is None
+    assert local_bind_error(["uvicorn", "--host", "127.0.0.1"], {}) is None
 
 
 def test_refuses_without_loopback_origin(local_mode, monkeypatch):
@@ -220,6 +274,52 @@ async def test_mutation_requires_allowed_loopback_origin(local_mode, app, async_
         assert response.json()["detail"]["code"] == "origin_forbidden"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"x-forwarded-for": "192.168.1.9"},
+        # A LAN client spoofing a loopback hop before the proxy appends its own.
+        {"x-forwarded-for": "127.0.0.1, 192.168.1.9"},
+        {"x-real-ip": "10.0.0.7"},
+        {"forwarded": 'for="[2001:db8::1]:4711";proto=http'},
+        {"forwarded": "for=unknown"},
+    ],
+)
+async def test_non_loopback_forwarded_hop_is_refused(local_mode, app, async_db, headers):
+    async with _client(app) as client:
+        response = await client.get("/api/auth/session", headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "local_peer_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_vite_xfwd_chain_through_uvicorn_proxy_headers(local_mode, app, async_db):
+    """The Vite proxy (xfwd) -> uvicorn ProxyHeadersMiddleware -> local check chain."""
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    proxied = ProxyHeadersMiddleware(app, trusted_hosts="127.0.0.1")
+    transport = ASGITransport(app=proxied, client=("127.0.0.1", 51000))
+    async with AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        lan = await client.get("/api/auth/session", headers={"x-forwarded-for": "192.168.1.9"})
+        spoofed = await client.get("/api/auth/session", headers={"x-forwarded-for": "127.0.0.1, 192.168.1.9"})
+        local = await client.get("/api/auth/session", headers={"x-forwarded-for": "127.0.0.1"})
+    assert lan.status_code == 403
+    assert spoofed.status_code == 403
+    assert local.status_code == 200
+    assert local.json()["local_no_login"] is True
+
+
+@pytest.mark.asyncio
+async def test_cross_site_fetch_metadata_is_refused(local_mode, app, async_db):
+    async with _client(app) as client:
+        cross = await client.get("/api/auth/session", headers={"sec-fetch-site": "cross-site"})
+        same = await client.get("/api/auth/session", headers={"sec-fetch-site": "same-origin"})
+    assert cross.status_code == 403
+    assert cross.json()["detail"]["code"] == "cross_site_forbidden"
+    assert same.status_code == 200
+
+
 def test_configured_non_loopback_origin_is_ignored_in_local_mode(local_mode, monkeypatch):
     monkeypatch.setattr(
         settings, "operator_auth_allowed_origins", "http://127.0.0.1:3001,https://seraph.lan",
@@ -229,9 +329,9 @@ def test_configured_non_loopback_origin_is_ignored_in_local_mode(local_mode, mon
 
 
 class _FakeWebSocket:
-    def __init__(self, *, peer="127.0.0.1", host=HOST, origin: str | None = ORIGIN):
+    def __init__(self, *, peer="127.0.0.1", host=HOST, origin: str | None = ORIGIN, extra=None):
         self.client = type("Client", (), {"host": peer, "port": 5})()
-        self.headers = {"host": host}
+        self.headers = {"host": host, **(extra or {})}
         if origin is not None:
             self.headers["origin"] = origin
         self.cookies = {}
@@ -245,6 +345,8 @@ class _FakeWebSocket:
         (_FakeWebSocket(host="evil.example"), "origin_forbidden"),
         (_FakeWebSocket(origin=None), "mutation_origin_required"),
         (_FakeWebSocket(origin="https://evil.example"), "origin_forbidden"),
+        (_FakeWebSocket(extra={"x-forwarded-for": "192.168.1.9"}), "local_peer_forbidden"),
+        (_FakeWebSocket(extra={"sec-fetch-site": "cross-site"}), "cross_site_forbidden"),
     ],
 )
 async def test_websocket_handshake_refusals(local_mode, async_db, socket, code):
@@ -303,6 +405,22 @@ async def test_identity_is_stable_across_restarts(local_mode, async_db):
     assert second.principal.principal_id == first.principal.principal_id
     assert second.operator_identity_id == first.operator_identity_id
     assert second_start["principal_id"] == first.principal.principal_id
+
+
+@pytest.mark.asyncio
+async def test_root_creation_adopts_a_concurrent_process_winner(local_mode, async_db, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+    import src.auth.service as service
+
+    winner = await authenticate_local_operator()
+
+    async def lost_race():
+        raise IntegrityError("INSERT operator_sessions", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(service, "_create_local_root", lost_race)
+    adopted, created = await service._ensure_local_root()
+    assert created is False
+    assert adopted.session_id == winner.session_id
 
 
 @pytest.mark.asyncio

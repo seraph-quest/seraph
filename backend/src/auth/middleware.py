@@ -116,13 +116,61 @@ def validate_request_boundary(*, host: str, origin: str | None, method: str) -> 
 
 
 def local_peer_error(peer: str | None) -> str | None:
-    """No-login requests must come from a loopback socket peer.
-
-    The socket peer is used directly; forwarding headers are never trusted
-    for this decision.
-    """
+    """No-login requests must come from a loopback peer."""
     if not is_loopback_host(peer):
         return "local_peer_forbidden"
+    return None
+
+
+def _header_values(headers, name: str) -> list[str]:
+    getlist = getattr(headers, "getlist", None)
+    if callable(getlist):
+        return [str(value) for value in getlist(name)]
+    value = headers.get(name) if hasattr(headers, "get") else None
+    return [str(value)] if value is not None else []
+
+
+def _forwarded_for_hosts(value: str) -> list[str]:
+    hosts: list[str] = []
+    for element in value.split(","):
+        for pair in element.split(";"):
+            key, separator, raw = pair.strip().partition("=")
+            if not separator or key.strip().lower() != "for":
+                continue
+            host = raw.strip().strip('"')
+            if host.startswith("["):
+                host = host[1:].split("]", 1)[0]
+            elif host.count(":") == 1:
+                host = host.split(":", 1)[0]
+            hosts.append(host)
+    return hosts
+
+
+def local_request_error(peer: str | None, headers, *, allow_cross_site: bool = False) -> str | None:
+    """The no-login per-request origin checks beyond Host/Origin (#1161).
+
+    - The peer uvicorn reports must be loopback.  A loopback reverse proxy
+      such as the Vite dev server forwards the real client in
+      ``X-Forwarded-For`` (``xfwd``); every forwarded hop must be loopback
+      too, so a LAN client reaching an exposed proxy is refused even if the
+      backend's proxy-header handling is disabled.
+    - ``Sec-Fetch-Site: cross-site`` is refused, covering Origin-less
+      browser requests such as no-cors GETs and image loads.
+    """
+    peer_error = local_peer_error(peer)
+    if peer_error:
+        return peer_error
+    forwarded: list[str] = []
+    for value in _header_values(headers, "x-forwarded-for"):
+        forwarded.extend(item.strip() for item in value.split(","))
+    forwarded.extend(item.strip() for item in _header_values(headers, "x-real-ip"))
+    for value in _header_values(headers, "forwarded"):
+        forwarded.extend(_forwarded_for_hosts(value))
+    if any(not is_loopback_host(item) for item in forwarded):
+        return "local_peer_forbidden"
+    sites = {value.strip().lower() for value in _header_values(headers, "sec-fetch-site")}
+    if "cross-site" in sites and not allow_cross_site:
+        return "cross_site_forbidden"
     return None
 
 
@@ -183,7 +231,7 @@ async def authenticate_websocket(websocket) -> AuthenticatedOperator:
             raise AuthFailure("auth_not_configured")
         local = True
         client = getattr(websocket, "client", None)
-        peer_error = local_peer_error(getattr(client, "host", None))
+        peer_error = local_request_error(getattr(client, "host", None), websocket.headers)
         if peer_error:
             raise AuthFailure(peer_error)
     boundary_error = validate_request_boundary(
@@ -214,7 +262,19 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
             # Local single-operator mode (#1161): no login, but every request
             # must come from a loopback peer and pass the Host/Origin boundary.
             local = True
-            peer_error = local_peer_error(request.client.host if request.client else None)
+            from src.workflows.selected_context_contract import COMPANION_ORIGIN, PAIRED_PATHS
+            # The paired MV3 companion is a cross-site extension by design; its
+            # exact origin and pairing bearer are checked on that closed path.
+            companion = (
+                request.method == "POST"
+                and request.url.path in PAIRED_PATHS
+                and request.headers.get("origin") == COMPANION_ORIGIN
+            )
+            peer_error = local_request_error(
+                request.client.host if request.client else None,
+                request.headers,
+                allow_cross_site=companion,
+            )
             if peer_error:
                 return JSONResponse({"detail": {"code": peer_error}}, status_code=403)
         from src.workflows.selected_context_contract import COMPANION_ORIGIN, PAIRED_PATHS

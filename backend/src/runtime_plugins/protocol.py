@@ -13,8 +13,15 @@ MAX_SAFE_INTEGER = 9_007_199_254_740_991
 MAX_PENDING = 32
 CONTROL_TIMEOUT = 5.0
 ORDINARY_TIMEOUT = 30.0
-CONTROL_METHODS = frozenset({"bootstrap.hello", "runtime.ready", "runtime.status", "runtime.quiesce", "runtime.shutdown", "invocation.cancel"})
+# Host-to-child provider reports (#1024): Python hosts the providers and only
+# reports their readiness; the child never sends a provider request.
+PROVIDER_METHODS = frozenset({"provider.readiness", "provider.quiesce"})
+CONTROL_METHODS = frozenset({"bootstrap.hello", "runtime.ready", "runtime.status", "runtime.quiesce", "runtime.shutdown",
+                             "invocation.cancel", *PROVIDER_METHODS})
 METHODS = CONTROL_METHODS
+PROVIDER_DOMAINS = frozenset(f"seraph.{name}.v1" for name in (
+    "state", "authority", "audit", "tasks", "goals", "memory", "artifacts"))
+PROVIDER_REPORT_FIELDS = frozenset({"domain", "state", "epoch", "composition_digest", "reason_code"})
 FIELDS = frozenset({"protocol", "boot_nonce", "request_id", "seq", "kind", "method", "invocation_ref", "composition_epoch", "composition_digest", "package_digest", "deadline_at", "payload"})
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -22,6 +29,20 @@ TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 class ProtocolError(ValueError):
     """A boot must be fenced; malformed input must never dispatch."""
+
+
+def validate_provider_report(value: Any, method: str) -> dict[str, Any]:
+    """The closed provider frame: no handle, key or credential can cross IPC."""
+    report = closed(value, PROVIDER_REPORT_FIELDS)
+    states = {"quiescing"} if method == "provider.quiesce" else {"active", "degraded", "failed"}
+    if (type(report["domain"]) is not str or report["domain"] not in PROVIDER_DOMAINS
+            or type(report["state"]) is not str or report["state"] not in states
+            or type(report["composition_digest"]) is not str or not HEX64.fullmatch(report["composition_digest"])
+            or (report["reason_code"] is not None and (type(report["reason_code"]) is not str
+                                                       or not TOKEN.fullmatch(report["reason_code"])))):
+        raise ProtocolError("invalid provider report")
+    integer(report["epoch"], 1)
+    return report
 
 
 def rpc_deadline(method: str, *, now: int, original_deadline: int | None = None) -> int:
@@ -139,7 +160,15 @@ def validate_frame(value: Any) -> dict[str, Any]:
     if kind == "request":
         if method == "runtime.ready":
             raise ProtocolError("ready is a response only")
-        closed(payload, set())
+        if method in PROVIDER_METHODS:
+            validate_provider_report(payload, method)
+        else:
+            closed(payload, set())
+    elif method in PROVIDER_METHODS:
+        closed(payload, {"domain", "state"})
+        expected = "quiescing" if method == "provider.quiesce" else "recorded"
+        if type(payload["domain"]) is not str or payload["domain"] not in PROVIDER_DOMAINS or payload["state"] != expected:
+            raise ProtocolError("invalid provider acknowledgement")
     elif method == "runtime.ready":
         closed(payload, {"state", "plugins"})
         if payload["state"] != "ready":

@@ -11,7 +11,6 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config.settings import settings
-from src.db import init_db, close_db
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.llm_runtime import effective_runtime_model_id, provider_profile_statuses, provider_profiles, resolve_runtime_profile
@@ -31,6 +30,11 @@ from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.runtime_plugins.agent_turns import chat_runtime_status
+
+
+async def _provider_readiness(app) -> dict | None:
+    worker = getattr(app.state, "provider_worker", None)
+    return None if worker is None else await worker.readiness()
 
 
 async def _chat_runtime_or_unavailable() -> dict:
@@ -498,19 +502,49 @@ def _augment_near_tee_readiness(route_status: dict[str, object], fabric_status: 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if settings.deployment_environment.strip().lower() not in {"prod", "production"}:
-        async with _lifespan_services(app):
-            yield
-        return
-    # The container preflight proves the /app/data bind.  Hold the same
-    # lock inode for the whole backend lifetime so host backup/restore
-    # cannot observe or replace a live workspace generation.  The lease is
-    # released on every exit, including a failed startup.
-    from src.workspace.production import runtime_workspace_owner
+    # Python hosts the mandatory providers (#1024): the worker takes the
+    # workspace owner lease (production: the container preflight proves the
+    # /app/data bind, and the same lock inode is held for the whole backend
+    # lifetime so host backup/restore cannot observe or replace a live
+    # generation), then activates state, authority, audit and tasks or aborts.
+    from src.runtime_plugins.worker import ProviderWorker, attach
 
-    with runtime_workspace_owner(settings.workspace_dir):
+    worker = attach(ProviderWorker(
+        hold_workspace_lock=settings.deployment_environment.strip().lower() in {"prod", "production"}))
+    app.state.provider_worker = worker
+    shutdown_error: Exception | None = None
+    try:
+        worker.acquire_workspace()
+    except BaseException:
+        worker.detach()
+        raise
+    # One outer try/finally from here: every failure point releases the lock,
+    # disposes the engine and disconnects MCP.
+    try:
+        await worker.activate()
         async with _lifespan_services(app):
             yield
+    finally:
+        try:
+            mcp_manager.disconnect_all()
+        finally:
+            try:
+                await drain_tracked_tasks(timeout_seconds=5.0)
+            except Exception as exc:
+                shutdown_error = exc
+            finally:
+                try:
+                    worker.close_gate()
+                finally:
+                    try:
+                        await worker.close_state()
+                    finally:
+                        try:
+                            worker.release_workspace()
+                        finally:
+                            worker.detach()
+    if shutdown_error is not None:
+        raise shutdown_error
 
 
 async def _reconcile_operator_auth_mode() -> None:
@@ -543,7 +577,9 @@ async def _reconcile_operator_auth_mode() -> None:
 
 @asynccontextmanager
 async def _lifespan_services(app: FastAPI):
-    await init_db()
+    """Start and stop the services; their ``.stop()`` calls run with the gate open."""
+    # The provider worker's activation already ran init_db (#1024), so the
+    # #1161 auth-mode reconcile runs here, against the open state gate.
     await _reconcile_operator_auth_mode()
     from src.conversation.task_context import TaskContinuityService
     from src.work_board.repository import WorkBoardRepository
@@ -730,6 +766,8 @@ async def _lifespan_services(app: FastAPI):
                     try:
                         if settings.cordis_node_path and cordis_host.node_path is None:
                             cordis_host.node_path = Path(settings.cordis_node_path)
+                        # Every (re)start reports what Python hosts to the facades (#1024).
+                        cordis_host.provider_reports_source = app.state.provider_worker.current_reports
                         await cordis_host.start()
                     except Exception:
                         logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
@@ -744,6 +782,7 @@ async def _lifespan_services(app: FastAPI):
                     yield
                 finally:
                     session_manager.bind_task_continuity(None)
+                    cordis_host.provider_reports_source = None
                     try:
                         await cordis_host.stop()
                     finally:
@@ -773,16 +812,6 @@ async def _lifespan_services(app: FastAPI):
                             _dispatcher.connection_sync_runtime = None
                     finally:
                         shutdown_scheduler()
-    mcp_manager.disconnect_all()
-    shutdown_error: Exception | None = None
-    try:
-        await drain_tracked_tasks(timeout_seconds=5.0)
-    except Exception as exc:
-        shutdown_error = exc
-    finally:
-        await close_db()
-    if shutdown_error is not None:
-        raise shutdown_error
 
 
 def create_app() -> FastAPI:
@@ -882,6 +911,8 @@ def create_app() -> FastAPI:
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
             "cordis_runtime": await cordis_host.refresh_status(),
+            # Python-hosted providers, rechecked now (#1024).
+            "providers": await _provider_readiness(app),
             # Which agent loop chat runs on, from the agent-loop owner row (#1019).
             "chat_runtime": await _chat_runtime_or_unavailable(),
             # Scheduled guardian work and every runtime domain owner (#1020).

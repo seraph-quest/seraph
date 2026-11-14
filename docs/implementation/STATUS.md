@@ -15,12 +15,19 @@ Epic #736 foundation. Some implementations remain transitional while macOS and
 Linux remain peer core-host targets. New capabilities remain **Planned** until
 merged to `develop` with the required validation receipts.
 
-**Cordis runtime migration: Planned.**
+**Cordis runtime migration: Partial.**
 [ADR-026](./decisions/026-all-plugin-cordis-architecture.md) records the accepted
-all-plugin composition target. The existing Python/FastAPI runtime and React
-cockpit remain the implementation described here. The architecture documentation
-adds no Cordis dependency, runtime plugin loader or stored-data migration;
-existing extension/capability-pack support does not establish that migration.
+all-plugin composition target. Parts of it run on `develop` (each entry below
+states its own proof limits): an optional reviewed Cordis child process
+(`runtime/cordis`) hosting typed service facades over Python owners (#1007,
+#1018), guardian research (#1008), the chat agent loop (#1019), and presets,
+guardian, delegation and Board worker turns (#1020). Each runtime domain
+changes owner only through its fenced `RuntimeCompositionState` epoch. The
+Python/FastAPI backend remains the parent process and the owner of canonical
+state, authority, audit, scheduling and interfaces; A3 ownership of state,
+scheduling and interfaces (#1024–#1026) is not complete. Without Node or a
+built package only Cordis-dependent work blocks. Existing extension and
+capability-pack support is separate from this migration.
 
 **Bounded iterative repository work: Partial; original-producer crash recovery: Planned.**
 [ADR-030](./decisions/030-bounded-iterative-repository-work.md) (#1009) ships one
@@ -198,6 +205,26 @@ bounded Vault-redacted output and job-bound accounting;
 `connections.invokeBoundAdapter` validates the current connection reference and
 a closed operation table, then fails closed (no adapter is composed yet). See the
 [guide section](./12-current-app-guide.md#cordis-governed-capabilities-and-inference-1018).
+
+**Python-hosted mandatory providers** from
+[#1024](https://github.com/seraph-quest/seraph/issues/1024) (A3.1) is
+**Partial**: the backend
+activates the state, authority, audit and tasks providers before anything else
+and aborts startup on any failure; goals, memory and artifacts may degrade to
+typed blocks. `get_session` refuses typed once state failed or shutdown began,
+and every startup failure releases the workspace lease, engine and MCP. The
+`seraph.state.v1` domain joins the composition inventory (one audited row added
+only to the exact pre-#1024 18-domain inventory, forward-only: take a host-CLI
+backup before upgrading), new bindings are schema 3 under manifest v2 while
+schema 1 and 2 bindings decode byte-identically, and state, authority and audit
+never move to Cordis. The Cordis state, authority and audit facades are mandatory with fixed
+dependencies and only record closed host-to-child provider reports. Verified
+locally with temporary state and the real reviewed child; external network and
+inference denied. Partial because the Cordis facades only report readiness
+and own no activation of the Python-hosted providers (operator decision on
+#1024), and backup/restore stay with the host CLI with no in-process
+maintenance handoff. See the
+[guide section](./12-current-app-guide.md#python-hosted-mandatory-providers-1024).
 
 **Cordis guardian research** from
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal

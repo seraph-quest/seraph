@@ -61,6 +61,11 @@ class HostBlocked(RuntimeError):
     """Only Cordis-dependent work is blocked; current Python core remains usable."""
 
 
+# A boot whose provider reports cannot be produced or acknowledged never admits (#1024).
+_PROVIDER_REPORT_BLOCKS = frozenset({"provider_reports_unavailable", "provider_report_invalid",
+                                     "provider_report_not_acknowledged"})
+
+
 @dataclass
 class Pending:
     frame: dict[str, Any]
@@ -98,6 +103,10 @@ class CordisHost:
         self._plugins: list[dict[str, Any]] = []
         self._readiness_checked_at: int | None = None
         self.stderr_bytes = 0
+        # Host-reported provider readiness the child acknowledged (#1024), and
+        # the host's source of fresh reports, sent after every (re)start.
+        self._provider_reports: dict[str, dict[str, Any]] = {}
+        self.provider_reports_source: Any = None
 
     @property
     def admitting(self) -> bool:
@@ -192,6 +201,7 @@ class CordisHost:
                 self.service_dispatch = NativeServiceDispatcher()
             self.state, self.reason = "starting", None
             self.boot_nonce = secrets.token_hex(32)
+            self._provider_reports = {}
             self._readiness_checked_at = None
             self._in_seq = self._out_seq = 0
             self._pending.clear()
@@ -216,6 +226,22 @@ class CordisHost:
                 response = await self._rpc("bootstrap.hello", internal=True)
                 self._plugins = response["payload"]["plugins"]
                 self._verify_plugins(self._plugins)
+                if self.provider_reports_source is not None:
+                    # Every boot's facades learn what Python currently hosts
+                    # before the host admits anything (#1024); a source or
+                    # report failure blocks this boot and stops the child.
+                    try:
+                        reports = await self.provider_reports_source()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - typed block, child stopped below
+                        raise HostBlocked("provider_reports_unavailable") from exc
+                    from .protocol import validate_provider_report
+                    try:
+                        reports = [validate_provider_report(dict(report), "provider.readiness") for report in reports]
+                    except (ProtocolError, TypeError, ValueError) as exc:
+                        raise HostBlocked("provider_report_invalid") from exc
+                    await self._send_provider_reports(reports)
                 self.state, self.reason = "ready", None
                 return True
             except asyncio.CancelledError:
@@ -223,7 +249,12 @@ class CordisHost:
                 self.state, self.reason = "blocked", "startup_cancelled"
                 await self._stop_owned(preserve_blocked=True)
                 raise
-            except (OSError, HostBlocked, ProtocolError, asyncio.TimeoutError):
+            except HostBlocked as exc:
+                self.state, self.reason = "blocked", self.reason or (
+                    exc.args[0] if exc.args and exc.args[0] in _PROVIDER_REPORT_BLOCKS else "child_failed")
+                await self._stop_owned(preserve_blocked=True)
+                return False
+            except (OSError, ProtocolError, asyncio.TimeoutError):
                 self.state, self.reason = "blocked", self.reason or "child_failed"
                 await self._stop_owned(preserve_blocked=True)
                 return False
@@ -368,6 +399,29 @@ class CordisHost:
             raise HostBlocked("control_not_public")
         return (await self._rpc(method, invocation_ref=invocation_ref, deadline_at=deadline_at))["payload"]
 
+    async def report_providers(self, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Report Python-hosted provider readiness to the child's facades.
+
+        Frames flow host to child only and carry the closed five-field report;
+        the child never initiates one and nothing it answers can activate or
+        deactivate a provider.
+        """
+        if not self.admitting:
+            raise HostBlocked(self.reason or "runtime_not_ready")
+        return await self._send_provider_reports(reports)
+
+    async def _send_provider_reports(self, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from .protocol import validate_provider_report
+        acknowledged = []
+        for report in reports:
+            report = validate_provider_report(dict(report), "provider.readiness")
+            response = await self._rpc("provider.readiness", internal=True, payload=report)
+            if response["payload"] != {"domain": report["domain"], "state": "recorded"}:
+                raise HostBlocked("provider_report_not_acknowledged")
+            self._provider_reports[report["domain"]] = report
+            acknowledged.append(response["payload"])
+        return acknowledged
+
     async def refresh_status(self, *, deadline_at: int | None = None) -> dict[str, Any]:
         """One current-boot readback, bounded below the browser's five seconds.
 
@@ -506,6 +560,15 @@ class CordisHost:
         drain_deadline = min([now + 10_000, *[pending.frame["deadline_at"] for pending in self._pending.values()]])
         if process.returncode is None and not preserve_blocked:
             try:
+                for report in list(self._provider_reports.values()):
+                    # Best effort: the facades report quiescing; providers stay
+                    # Python-owned, and a lost report never blocks shutdown.
+                    try:
+                        await self._rpc("provider.quiesce", internal=True, deadline_at=drain_deadline,
+                                        payload={**report, "state": "quiescing", "reason_code": "host_stopping"})
+                    except (HostBlocked, ProtocolError):
+                        break
+                self._provider_reports.clear()
                 await self._rpc("runtime.quiesce", internal=True, deadline_at=drain_deadline)
                 response = await self._rpc("runtime.shutdown", internal=True, deadline_at=drain_deadline)
                 payload = response["payload"]

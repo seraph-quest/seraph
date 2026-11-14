@@ -602,8 +602,9 @@ def _make_local_sync_client(monkeypatch):
     ]
     patches = [patch(target, _get_session) for target in targets]
     patches += [
-        patch("src.app.init_db", _init_db),
-        patch("src.app.close_db", _close_db),
+        # #1024: the provider worker owns init_db/close_db in the lifespan.
+        patch("src.runtime_plugins.worker.init_db", _init_db),
+        patch("src.runtime_plugins.worker.close_db", _close_db),
         patch("src.app.init_scheduler", return_value=None),
         patch("src.app.shutdown_scheduler"),
         patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)),

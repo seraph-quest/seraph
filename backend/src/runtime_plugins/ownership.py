@@ -15,16 +15,25 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+from types import MappingProxyType
 
 from sqlalchemy import select, text, update
 from src.db.models import AuditEvent, RuntimeCompositionState, WorkflowRunState
 
 from .contracts import METHOD_DOMAINS
 
-DOMAINS = tuple(f"seraph.{name}.v1" for name in (
-    "authority", "goals", "tasks", "capabilities", "inference", "memory",
-    "artifacts", "audit", "research", "conversation", "scheduler",
-    "connections", "agent-presets", "agent-loop", "guardian", "delegation", "source-extraction", "board-workers"))
+# Every domain an inventory held before #1024, frozen as a literal: the
+# Python-hosted state domain is introduced only onto exactly this set.
+PRE_STATE_DOMAINS = (
+    "seraph.authority.v1", "seraph.goals.v1", "seraph.tasks.v1", "seraph.capabilities.v1", "seraph.inference.v1",
+    "seraph.memory.v1", "seraph.artifacts.v1", "seraph.audit.v1", "seraph.research.v1", "seraph.conversation.v1",
+    "seraph.scheduler.v1", "seraph.connections.v1", "seraph.agent-presets.v1", "seraph.agent-loop.v1",
+    "seraph.guardian.v1", "seraph.delegation.v1", "seraph.source-extraction.v1", "seraph.board-workers.v1")
+STATE_DOMAIN = "seraph.state.v1"
+DOMAINS = (*PRE_STATE_DOMAINS, STATE_DOMAIN)
+# Python always hosts these owners (#1024 operator decision): their rows are
+# always the legacy owner with the fixed legacy digest, never Cordis.
+PYTHON_HOSTED_DOMAINS = frozenset({STATE_DOMAIN, "seraph.authority.v1", "seraph.audit.v1"})
 # Domains added after an install's inventory was first seeded, with the issue
 # that introduced them. Boot inserts each missing one once as its legacy owner
 # (``introduce_domains_sync``); a missing original domain is never repaired.
@@ -33,7 +42,10 @@ DOMAIN_INTRODUCTIONS = {"seraph.agent-presets.v1": "1020", "seraph.guardian.v1":
 PRESETS_DOMAIN = "seraph.agent-presets.v1"
 STATES = frozenset({"ready", "draining", "blocked"})
 OWNER_KINDS = frozenset({"legacy", "cordis"})
-MANIFEST_VERSION = "runtime-service-methods.v1"
+# Binding schemas 1 and 2 (#1019, #1020) use the v1 method manifest; schema 3
+# (#1024) adds the state owner to every method under the v2 manifest.
+MANIFEST_VERSION_V1 = "runtime-service-methods.v1"
+MANIFEST_VERSION = "runtime-service-methods.v2"
 RECOVERY_EVENT = "runtime_composition_recovery"
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
 _REF = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -41,6 +53,8 @@ _MAX_EPOCH = 2**63 - 1
 _ACTIVE_STATUSES = ("running", "awaiting_approval", "paused")
 # Not yet started: blocked visibly by an epoch change, never left stranded.
 _UNSTARTED_STATUSES = ("accepted", "queued")
+# Unresolved effects: an undecodable binding here also refuses quiescence (#1024).
+_LIABILITY_STATUSES = ("unknown_external_effect", "cost_liability")
 
 
 class CompositionBindingError(ValueError):
@@ -129,19 +143,87 @@ def method_closure(origin_method: str, native_branch: str) -> tuple[str, ...]:
 
 # Binding schema 1 is #1019's: no method depended on the presets owner. A chat step
 # admitted then is read (inspect, recovery, the job CAS) exactly as it was written.
-# Schema 2 (#1020) adds the presets owner to every turn step; every new admission
-# writes schema 2, and an origin introduced by #1020 exists only in schema 2.
-BINDING_SCHEMA = 2
+# Schema 2 (#1020) adds the presets owner to every turn step, and an origin
+# introduced by #1020 exists only from schema 2. Schema 3 (#1024) makes every
+# method depend on the Python-hosted state owner under manifest v2; every new
+# admission writes schema 3. A schema 1 or 2 binding still decodes and
+# re-encodes byte-identically, so its job CAS predicates keep matching.
+BINDING_SCHEMA = 3
+BINDING_SCHEMAS = frozenset({1, 2, BINDING_SCHEMA})
 TURN_STEP_METHODS = frozenset({"agent-loop.startTurn", "guardian.startTurn", "board-workers.startTurn"})
 SCHEMA_2_ORIGINS = frozenset({"guardian.startTurn", "delegation.startChild", "board-workers.startTurn"})
 
 
-def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool = True) -> tuple[str, ...]:
+# Frozen literal copy of the rules every binding schema 1 and 2 was written
+# under (manifest v1, goal_bound=False), captured from 055ae90d; never derived
+# from the live rules, so later rule edits cannot change how an old binding
+# decodes. Schema 1 (#1019) differs only in that turn steps did not bind the
+# presets owner. Methods introduced after #1024 exist in schema 3 only.
+METHOD_DEPENDENCIES_V1 = MappingProxyType({
+    "agent-loop.cancelTurn": ("seraph.agent-loop.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "agent-loop.inspectTurn": ("seraph.agent-loop.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "agent-loop.startTurn": ("seraph.agent-loop.v1", "seraph.agent-presets.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "artifacts.adopt": ("seraph.artifacts.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "artifacts.read": ("seraph.artifacts.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "artifacts.stage": ("seraph.artifacts.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "audit.append": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "authority.resolve": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "board-workers.startTurn": ("seraph.agent-presets.v1", "seraph.authority.v1", "seraph.board-workers.v1", "seraph.tasks.v1"),
+    "capabilities.describe": ("seraph.authority.v1", "seraph.capabilities.v1", "seraph.tasks.v1"),
+    "capabilities.invoke": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.capabilities.v1", "seraph.tasks.v1"),
+    "capabilities.list": ("seraph.authority.v1", "seraph.capabilities.v1", "seraph.tasks.v1"),
+    "connections.inspect": ("seraph.authority.v1", "seraph.connections.v1", "seraph.tasks.v1"),
+    "connections.invokeBoundAdapter": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.connections.v1", "seraph.tasks.v1"),
+    "conversation.accept": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "conversation.append": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "conversation.cancel": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "conversation.read": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "delegation.startChild": ("seraph.agent-loop.v1", "seraph.agent-presets.v1", "seraph.authority.v1", "seraph.delegation.v1", "seraph.tasks.v1"),
+    "goals.read": ("seraph.authority.v1", "seraph.goals.v1", "seraph.tasks.v1"),
+    "guardian.startTurn": ("seraph.agent-presets.v1", "seraph.authority.v1", "seraph.guardian.v1", "seraph.tasks.v1"),
+    "inference.request": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.inference.v1", "seraph.tasks.v1"),
+    "memory.applyReviewed": ("seraph.audit.v1", "seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "memory.forget": ("seraph.audit.v1", "seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "memory.propose": ("seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "memory.retrieve": ("seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "research.buildPlan": ("seraph.authority.v1", "seraph.research.v1", "seraph.tasks.v1"),
+    "research.executeAccepted": ("seraph.authority.v1", "seraph.research.v1", "seraph.source-extraction.v1", "seraph.tasks.v1"),
+    "scheduler.disable": ("seraph.authority.v1", "seraph.scheduler.v1", "seraph.tasks.v1"),
+    "scheduler.dispatchDue": ("seraph.authority.v1", "seraph.scheduler.v1", "seraph.tasks.v1"),
+    "scheduler.register": ("seraph.authority.v1", "seraph.scheduler.v1", "seraph.tasks.v1"),
+    "source-extraction.extract": ("seraph.authority.v1", "seraph.source-extraction.v1", "seraph.tasks.v1"),
+    "tasks.admit": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.cancel": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.checkpoint": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.inspect": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.settle": ("seraph.authority.v1", "seraph.tasks.v1"),
+})
+METHOD_DEPENDENCIES_V1_SCHEMA1 = MappingProxyType({**METHOD_DEPENDENCIES_V1,
+    "agent-loop.startTurn": ("seraph.agent-loop.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "board-workers.startTurn": ("seraph.authority.v1", "seraph.board-workers.v1", "seraph.tasks.v1"),
+    "guardian.startTurn": ("seraph.authority.v1", "seraph.guardian.v1", "seraph.tasks.v1"),
+})
+
+
+def manifest_version_for(schema_version: int) -> str:
+    """The method manifest a binding schema was written under."""
+    return MANIFEST_VERSION if schema_version >= BINDING_SCHEMA else MANIFEST_VERSION_V1
+
+
+def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool = True,
+                        state: bool = True) -> tuple[str, ...]:
     """Mandatory owners of one method; a missing owner denies the call."""
     domain = METHOD_DOMAINS.get(method)
     if domain is None or type(goal_bound) is not bool:
         raise CompositionBindingError("composition_method_unsupported")
-    names = {"seraph.authority.v1", "seraph.tasks.v1", domain}
+    if not state:
+        # Schema 1 and 2 bindings: the frozen manifest-v1 tables, never the live rules.
+        frozen = (METHOD_DEPENDENCIES_V1 if presets else METHOD_DEPENDENCIES_V1_SCHEMA1).get(method)
+        if frozen is None:
+            raise CompositionBindingError("composition_method_unsupported")
+        return tuple(sorted({*frozen, "seraph.goals.v1"})) if goal_bound else frozen
+    # Schema 3 (manifest v2): every method depends on the Python-hosted state owner (#1024).
+    names = {STATE_DOMAIN, "seraph.authority.v1", "seraph.tasks.v1", domain}
     if goal_bound or method == "goals.read":
         names.add("seraph.goals.v1")
     if method in {"artifacts.adopt", "audit.append"}:
@@ -164,18 +246,19 @@ def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool 
 
 
 def closure_dependencies(origin_method: str, native_branch: str, *, goal_bound: bool = False,
-                         presets: bool = True) -> tuple[str, ...]:
+                         presets: bool = True, state: bool = True) -> tuple[str, ...]:
     domains: set[str] = set()
     for method in method_closure(origin_method, native_branch):
-        domains.update(method_dependencies(method, goal_bound=goal_bound, presets=presets))
+        domains.update(method_dependencies(method, goal_bound=goal_bound, presets=presets, state=state))
     return tuple(sorted(domains))
 
 
-def method_manifest_digest(origin_method: str, native_branch: str, *, presets: bool = True) -> str:
+def method_manifest_digest(origin_method: str, native_branch: str, *, presets: bool = True,
+                           state: bool = True) -> str:
     methods = method_closure(origin_method, native_branch)
-    source = {"schema_version": MANIFEST_VERSION, "origin_method": origin_method,
+    source = {"schema_version": MANIFEST_VERSION if state else MANIFEST_VERSION_V1, "origin_method": origin_method,
               "native_branch": native_branch, "allowed_child_methods": list(methods),
-              "child_dependencies": [[method, list(method_dependencies(method, presets=presets))]
+              "child_dependencies": [[method, list(method_dependencies(method, presets=presets, state=state))]
                                      for method in methods]}
     return hashlib.sha256(_canonical(source).encode()).hexdigest()
 
@@ -194,7 +277,7 @@ class RuntimeCompositionBinding:
 
     def __post_init__(self):
         keys = tuple(item.runtime_domain for item in self.dependency_vector)
-        if (type(self.schema_version) is not int or self.schema_version not in {1, BINDING_SCHEMA}
+        if (type(self.schema_version) is not int or self.schema_version not in BINDING_SCHEMAS
                 or (self.schema_version == 1 and self.origin_method in SCHEMA_2_ORIGINS)
                 or type(self.goal_bound) is not bool
                 or METHOD_DOMAINS.get(self.origin_method) != self.runtime_domain
@@ -202,7 +285,7 @@ class RuntimeCompositionBinding:
                 or self.allowed_child_methods != method_closure(self.origin_method, self.native_branch)
                 or keys != tuple(sorted(set(keys)))
                 or keys != closure_dependencies(self.origin_method, self.native_branch, goal_bound=self.goal_bound,
-                                                presets=self.presets_bound)):
+                                                presets=self.presets_bound, state=self.state_bound)):
             raise CompositionBindingError("composition_binding_invalid")
         if (self.host_package_digest is None) != (self.host_composition_digest is None) or any(
                 value is not None and (type(value) is not str or _SHA.fullmatch(value) is None)
@@ -212,7 +295,16 @@ class RuntimeCompositionBinding:
     @property
     def presets_bound(self) -> bool:
         """Whether this binding's schema has turn steps depend on the presets owner (#1020)."""
+        return self.schema_version >= 2
+
+    @property
+    def state_bound(self) -> bool:
+        """Whether this binding's schema has every method depend on the state owner (#1024)."""
         return self.schema_version >= BINDING_SCHEMA
+
+    @property
+    def method_manifest_version(self) -> str:
+        return manifest_version_for(self.schema_version)
 
     def allows(self, method: str) -> bool:
         return method in self.allowed_child_methods
@@ -227,9 +319,10 @@ class RuntimeCompositionBinding:
         return dict(schema_version=self.schema_version, runtime_domain=self.runtime_domain,
                     origin_method=self.origin_method,
                     native_branch=self.native_branch, allowed_child_methods=list(self.allowed_child_methods),
-                    method_manifest_version=MANIFEST_VERSION,
+                    method_manifest_version=self.method_manifest_version,
                     method_manifest_digest=method_manifest_digest(self.origin_method, self.native_branch,
-                                                                  presets=self.presets_bound),
+                                                                  presets=self.presets_bound,
+                                                                  state=self.state_bound),
                     host_package_digest=self.host_package_digest,
                     host_composition_digest=self.host_composition_digest, goal_bound=self.goal_bound,
                     dependency_vector=[item.payload() for item in self.dependency_vector])
@@ -271,9 +364,10 @@ class RuntimeCompositionBinding:
                          tuple(CompositionDependency(**item) for item in value["dependency_vector"]),
                          value["host_package_digest"], value["host_composition_digest"],
                          value["goal_bound"], value["schema_version"])
-            if (value["method_manifest_version"] != MANIFEST_VERSION
+            if (value["method_manifest_version"] != result.method_manifest_version
                     or value["method_manifest_digest"] != method_manifest_digest(
-                        result.origin_method, result.native_branch, presets=result.presets_bound)
+                        result.origin_method, result.native_branch, presets=result.presets_bound,
+                        state=result.state_bound)
                     or value["binding_digest"] != result.binding_digest):
                 raise ValueError("digest")
             return result
@@ -283,6 +377,10 @@ class RuntimeCompositionBinding:
 
 def _checked_row(row) -> CompositionDependency:
     dependency = CompositionDependency(row.runtime_domain, row.owner_kind, row.epoch, row.composition_digest)
+    if row.runtime_domain in PYTHON_HOSTED_DOMAINS and (
+            row.owner_kind != "legacy" or row.composition_digest != legacy_composition_digest(row.runtime_domain)):
+        # A tampered or restored row can never hand a Python-hosted owner to Cordis.
+        raise CompositionBindingError("composition_inventory_invalid")
     if row.state not in STATES or (row.recovery_receipt_ref is not None
                                    and (type(row.recovery_receipt_ref) is not str
                                         or not _REF.fullmatch(row.recovery_receipt_ref))):
@@ -433,6 +531,58 @@ def introduce_domains_sync(connection) -> list[str]:
     return added
 
 
+def introduce_state_domain_sync(connection) -> bool:
+    """Add the Python-hosted ``seraph.state.v1`` row to an exact pre-#1024 inventory.
+
+    A chained exact-prefix step after ``introduce_domains_sync`` (#1024
+    addendum), never insert-if-missing: it runs only when the inventory is
+    exactly ``PRE_STATE_DOMAINS``, inserts one legacy row (epoch 1, the fixed
+    legacy digest, ``ready``) plus one audit event, and changes no existing
+    row. An empty table is seeded whole by ``seed_legacy_inventory_sync``; any
+    other partial or unknown inventory is left alone and keeps failing closed.
+    It runs inside ``init_db``'s immediate writer, so also on the first start
+    after a host-CLI restore of a pre-#1024 backup. Forward-only: an older
+    binary rejects the extra row with ``composition_inventory_invalid``. An
+    exact-set inventory with any row that does not decode raises
+    ``composition_inventory_invalid`` (failing ``init_db`` and so the state
+    provider) and inserts nothing.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from types import SimpleNamespace
+    rows = [SimpleNamespace(**row._mapping) for row in connection.execute(text(
+        "SELECT runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref "
+        "FROM runtime_composition_states"))]
+    names = [row.runtime_domain for row in rows]
+    if len(names) != len(PRE_STATE_DOMAINS) or set(names) != set(PRE_STATE_DOMAINS):
+        return False
+    # The exact prior set must also decode in full (owner, epoch, digest, state,
+    # receipt, and legacy owners for authority and audit) before anything is
+    # added: a corrupt inventory is refused typed and nothing is inserted.
+    try:
+        for row in rows:
+            _checked_row(row)
+    except CompositionBindingError as exc:
+        raise CompositionBindingError("composition_inventory_invalid") from exc
+    inserted = connection.execute(text(
+        "INSERT INTO runtime_composition_states "
+        "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "
+        "SELECT :domain, 'legacy', 1, :digest, 'ready', NULL WHERE NOT EXISTS "
+        "(SELECT 1 FROM runtime_composition_states WHERE runtime_domain = :domain)"),
+        {"domain": STATE_DOMAIN, "digest": legacy_composition_digest(STATE_DOMAIN)}).rowcount
+    if inserted != 1:
+        return False
+    connection.execute(text(
+        "INSERT INTO audit_events (id, session_id, actor, event_type, tool_name, risk_level, policy_mode, summary, "
+        "details_json, created_at) VALUES (:id, NULL, 'system', 'runtime_composition_domain_introduced', NULL, "
+        "'low', 'full', :summary, :details, :at)"),
+        {"id": str(uuid4()), "summary": f"Runtime domain {STATE_DOMAIN} introduced as its legacy owner",
+         "details": _canonical({"runtime_domain": STATE_DOMAIN, "owner_kind": "legacy", "epoch": 1,
+                                "introduced_by": "1024", "prior_domains": len(PRE_STATE_DOMAINS)}),
+         "at": datetime.now(timezone.utc).replace(tzinfo=None)})
+    return True
+
+
 def _boot_proved(runtime_domain: str, owner_kind: str, composition_digest: str, boot_host) -> bool:
     if owner_kind == "legacy":
         return composition_digest == legacy_composition_digest(runtime_domain)
@@ -486,6 +636,9 @@ async def transition_owner(db, *, runtime_domain: str, expected: CompositionDepe
     if _LIFECYCLE_FENCE_DEPTH.get() <= 0 or not db.in_transaction():
         raise CompositionBindingError("composition_stopped_writer_required")
     incoming = CompositionDependency(runtime_domain, owner_kind, epoch, composition_digest)
+    if runtime_domain in PYTHON_HOSTED_DOMAINS and owner_kind != "legacy":
+        # Python always hosts state, authority and audit (#1024).
+        raise CompositionBindingError("composition_owner_not_transferable")
     if (type(expected) is not CompositionDependency or expected.runtime_domain != runtime_domain
             or expected_state not in STATES or state not in STATES):
         raise CompositionBindingError("composition_expected_binding_required")
@@ -509,15 +662,17 @@ async def transition_owner(db, *, runtime_domain: str, expected: CompositionDepe
     if state == "blocked":
         # Quiesce: an epoch change never strands a live leased attempt that
         # was admitted against the prior owner.
-        active = (await db.execute(select(WorkflowRunState.composition_binding_json).where(
+        active = (await db.execute(select(WorkflowRunState.status, WorkflowRunState.composition_binding_json).where(
             WorkflowRunState.composition_binding_json.is_not(None),
-            WorkflowRunState.status.in_(_ACTIVE_STATUSES)))).scalars().all()
-        for raw in active:
+            WorkflowRunState.status.in_((*_ACTIVE_STATUSES, *_LIABILITY_STATUSES))))).all()
+        for status, raw in active:
             try:
                 bound = RuntimeCompositionBinding.from_json(raw)
-            except CompositionBindingError:
-                continue
-            if expected in bound.dependency_vector:
+            except CompositionBindingError as exc:
+                # An undecodable binding on live or liability work is never
+                # skipped (#1024): the operator resolves that one job first.
+                raise CompositionBindingError("composition_not_quiescent") from exc
+            if status in _ACTIVE_STATUSES and expected in bound.dependency_vector:
                 raise CompositionBindingError("composition_not_quiescent")
         unstarted = (await db.execute(select(WorkflowRunState.run_identity, WorkflowRunState.composition_binding_json)
                                       .where(WorkflowRunState.composition_binding_json.is_not(None),

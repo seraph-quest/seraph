@@ -294,7 +294,9 @@ async def test_a_failed_production_startup_releases_the_owner_lease(monkeypatch,
     async def failing_init_db():
         assert production.runtime_workspace_owner_held()
         raise RuntimeError("database unavailable")
-    monkeypatch.setattr(app_module, "init_db", failing_init_db)
+    # The Python-hosted state provider runs init_db after the lease (#1024).
+    from src.runtime_plugins import worker as worker_module
+    monkeypatch.setattr(worker_module, "init_db", failing_init_db)
     # Keep every lease object alive, so only an explicit exit (never garbage collection) can release it.
     leases = []
     real_owner = production.runtime_workspace_owner
@@ -303,9 +305,11 @@ async def test_a_failed_production_startup_releases_the_owner_lease(monkeypatch,
         leases.append(real_owner(path))
         return leases[-1]
     monkeypatch.setattr(production, "runtime_workspace_owner", kept_owner)
-    with pytest.raises(RuntimeError, match="database unavailable"):
+    with pytest.raises(worker_module.ProviderActivationError) as failed:
         async with app_module.lifespan(FastAPI()):
             pass
+    assert failed.value.reason_code == "state_init_db_failed"
+    assert str(failed.value.__cause__) == "database unavailable"
     assert len(leases) == 1 and not production.runtime_workspace_owner_held()
     # The lock itself is free again: a second owner can take it.
     with real_owner(root):

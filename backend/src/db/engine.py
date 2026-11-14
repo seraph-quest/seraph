@@ -158,6 +158,39 @@ _session_factory_override: ContextVar[Callable[[], AsyncSession] | None] = Conte
 )
 
 
+class StateProviderUnavailable(RuntimeError):
+    """The canonical state provider is failed or shutting down (#1024)."""
+
+    def __init__(self, reason_code: str = "state_provider_unavailable"):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+# Tri-state ``get_session`` gate owned by the provider worker (#1024).
+# ``None``: no worker is attached (tests, host CLIs, migrations, any process
+# that never constructs the worker) and the gate is open, as before. While a
+# worker is attached it is open in ``activating`` (init_db and the activation
+# predicates need sessions) and ``active``; ``failed`` and ``deactivating``
+# refuse typed before a session is yielded.
+_STATE_GATE: list[str | None] = [None, None]
+
+
+def set_state_gate(state: str | None, reason_code: str | None = None) -> None:
+    if state not in {None, "activating", "active", "failed", "deactivating"}:
+        raise ValueError("unknown state gate")
+    _STATE_GATE[:] = [state, reason_code]
+
+
+def state_gate() -> tuple[str | None, str | None]:
+    return _STATE_GATE[0], _STATE_GATE[1]
+
+
+def _require_state_gate_open() -> None:
+    state, reason = _STATE_GATE
+    if state in {"failed", "deactivating"}:
+        raise StateProviderUnavailable(reason or f"state_provider_{state}")
+
+
 @contextmanager
 def override_session_factory(
     factory: Callable[[], AsyncSession],
@@ -2132,11 +2165,15 @@ async def init_db() -> None:
         # Seed the fixed Cordis composition inventory only into an empty table
         # (fresh or pre-feature workspace). A partial inventory stays partial
         # so missing mandatory owners keep denying service invocations.
-        from src.runtime_plugins.ownership import introduce_domains_sync, seed_legacy_inventory_sync
+        from src.runtime_plugins.ownership import (introduce_domains_sync, introduce_state_domain_sync,
+                                                   seed_legacy_inventory_sync)
         await conn.run_sync(seed_legacy_inventory_sync)
         # Domains introduced after an inventory existed (#1020) are added once
         # as their legacy owner; nothing else in a partial inventory changes.
         await conn.run_sync(introduce_domains_sync)
+        # Then the Python-hosted state domain (#1024), only onto the exact
+        # pre-#1024 inventory: a chained exact-prefix step, never insert-if-missing.
+        await conn.run_sync(introduce_state_domain_sync)
 
     # Reconcile legacy Done-parent links once the additive board schema exists.
     # The helper only materializes proof-backed handoffs; rows without an
@@ -2165,8 +2202,16 @@ async def close_db() -> None:
 
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Yield an async DB session."""
-    factory = _session_factory_override.get() or async_session_factory
+    """Yield an async DB session.
+
+    The default factory passes the state provider gate first; an explicit
+    ``override_session_factory`` scope (isolated evaluation databases) is a
+    named bypass.
+    """
+    factory = _session_factory_override.get()
+    if factory is None:
+        _require_state_gate_open()
+        factory = async_session_factory
     async with factory() as session:
         try:
             yield session

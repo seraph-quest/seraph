@@ -77,8 +77,8 @@ def _make_sync_client_with_db():
         "src.api.ws.get_session",
     ]
     patches = [patch(t, _get_session) for t in targets]
-    patches.append(patch("src.app.init_db", _test_init_db))
-    patches.append(patch("src.app.close_db", _test_close_db))
+    patches.append(patch("src.runtime_plugins.worker.init_db", _test_init_db))
+    patches.append(patch("src.runtime_plugins.worker.close_db", _test_close_db))
     patches.append(patch("src.app.init_scheduler", return_value=None))
     patches.append(patch("src.app.shutdown_scheduler"))
     patches.append(patch("src.memory.flush.flush_session_memory", AsyncMock(return_value=None)))

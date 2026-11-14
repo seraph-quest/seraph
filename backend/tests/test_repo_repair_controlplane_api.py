@@ -17,7 +17,7 @@ from src.api.workflows import RepoRepairEgressConsentRequest
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_inference_accounting import accounting_db
 
-# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 pytestmark = pytest.mark.openrouter_legacy
 
 

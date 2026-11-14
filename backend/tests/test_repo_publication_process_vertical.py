@@ -26,7 +26,7 @@ from src.workflows.job_runtime import durable_job_repository as jobs
 from tests.test_repo_publication_vertical import actual_repair, selected_connection, request_for, ORIGIN
 from tests.repo_publication_support import GitDataTransport
 
-# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 pytestmark = pytest.mark.openrouter_legacy
 
 

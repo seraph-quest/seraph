@@ -15,7 +15,7 @@ from src.vault.repository import vault_repository
 from tests import test_repo_repair_local_vertical as native
 from tests.repo_publication_support import GitDataTransport
 
-# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 pytestmark = pytest.mark.openrouter_legacy
 
 ORIGIN = {"Origin": "http://localhost:3001"}

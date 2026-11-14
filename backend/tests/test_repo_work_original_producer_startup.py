@@ -13,7 +13,7 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 
-# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 pytestmark = pytest.mark.openrouter_legacy
 
 

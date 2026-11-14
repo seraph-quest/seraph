@@ -22,7 +22,7 @@ from tests.test_general_task_planner import accounting_db, prepare, forbid_exter
 from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
-# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 pytestmark = pytest.mark.openrouter_legacy
 
 

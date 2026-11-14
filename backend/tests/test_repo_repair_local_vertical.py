@@ -53,7 +53,7 @@ from src.workflows.job_runtime import durable_job_repository
 from tests.conftest import _PATCH_TARGETS
 from tests.test_inference_accounting import accounting_db
 
-# ADR-035: the repository repair iteration has no NEAR TEE adapter; it pins the intercepted historical OpenRouter step
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 pytestmark = pytest.mark.openrouter_legacy
 
 

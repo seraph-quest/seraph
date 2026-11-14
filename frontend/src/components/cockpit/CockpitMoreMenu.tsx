@@ -32,18 +32,29 @@ export function CockpitMoreMenu({ items }: CockpitMoreMenuProps) {
     const onPointer = (event: PointerEvent) => {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
     };
+    // Escape closes the menu wherever focus is while it is open.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
     document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
     menuRef.current?.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
-    return () => document.removeEventListener("pointerdown", onPointer);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const entries = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role=menuitem]") ?? []);
     const index = entries.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === "Escape") {
-      event.preventDefault();
+    if (event.key === "Tab") {
+      // Tab leaves the menu: close it and let focus move on naturally.
       setOpen(false);
-      triggerRef.current?.focus();
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
       entries[(index + 1) % entries.length]?.focus();

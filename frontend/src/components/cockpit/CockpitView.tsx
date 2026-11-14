@@ -138,6 +138,8 @@ interface ObserverState {
   screen_context?: string | null;
   active_goals_summary?: string;
   data_quality?: string;
+  /** #1172: why data_quality is not "good" (comma-separated codes). */
+  data_quality_reason?: string | null;
   upcoming_events?: Array<{ summary?: string; start?: string }>;
 }
 
@@ -7464,6 +7466,13 @@ function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
   return workflowArtifactInputs(workflow).length > 0;
 }
 
+/** One page of pending approvals; a full page means there may be more (#1172). */
+const PENDING_APPROVALS_PAGE = 8;
+
+function pendingApprovalCountLabel(count: number): string {
+  return count >= PENDING_APPROVALS_PAGE ? `${PENDING_APPROVALS_PAGE}+` : String(count);
+}
+
 const COCKPIT_SECTION_LABELS = Object.fromEntries(
   COCKPIT_SECTIONS.map((section) => [section.id, section.label]),
 ) as Record<CockpitSection, string>;
@@ -8386,7 +8395,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     return results.map((result) => result ?? { ok: false, payload: null });
   }, []);
 
+  // Shell-visible data (runtime, observer, approvals, policy modes) is read by
+  // both the bounded shell refresh and the full cockpit refresh. Each read
+  // takes a generation; an older response never overwrites newer state (#1172).
+  const shellDataGenerationRef = useRef({ next: 0, applied: 0 });
+  const beginShellDataRead = useCallback(() => {
+    shellDataGenerationRef.current.next += 1;
+    return shellDataGenerationRef.current.next;
+  }, []);
+  const claimShellDataWrite = useCallback((generation: number) => {
+    if (generation < shellDataGenerationRef.current.applied) return false;
+    shellDataGenerationRef.current.applied = generation;
+    return true;
+  }, []);
+
   const refreshCockpitNow = useCallback(async (isCancelled: () => boolean = () => false) => {
+    const shellGeneration = beginShellDataRead();
     const [
       authResult,
       runtimeStatusResult,
@@ -8405,7 +8429,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       () => fetchCockpitJson(`${API_URL}/api/runtime/status`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/observer/state`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/audit/events?limit=12`, 5000, isCancelled),
-      () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=8`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=${PENDING_APPROVALS_PAGE}`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/capabilities/overview`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/extensions`, 5000, isCancelled),
       () => sessionId
@@ -8420,6 +8444,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ], isCancelled);
 
     if (isCancelled()) return;
+    const ownsShellData = claimShellDataWrite(shellGeneration);
     const authPayload = authResult.ok && authResult.payload && typeof authResult.payload === "object"
       ? authResult.payload as {
         authenticated?: unknown;
@@ -8457,22 +8482,22 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       setRuntimeOwners({ guardian: normalizeGuardianRuntime(raw.guardian_runtime ?? null),
         domains: normalizeRuntimeDomains(raw.runtime_domains ?? null) });
     }
-    if (runtimeStatusPayload) {
+    if (ownsShellData && runtimeStatusPayload) {
       storeRuntimeReceipt(runtimeStatusPayload);
       setRuntimeReceipt({ status: runtimeStatusPayload, source: "runtime_status" });
-    } else {
+    } else if (ownsShellData) {
       setRuntimeReceipt((current) => (current ? { ...current, source: "retained" } : null));
     }
-    if (observerResult.ok) {
+    if (ownsShellData && observerResult.ok) {
       setObserverState((observerResult.payload as ObserverState | null) ?? {});
     }
     if (auditResult.ok) {
       setAuditEvents(Array.isArray(auditResult.payload) ? auditResult.payload : []);
     }
-    if (approvalsResult.ok && Array.isArray(approvalsResult.payload)) {
+    if (ownsShellData && approvalsResult.ok && Array.isArray(approvalsResult.payload)) {
       setPendingApprovals(normalizePendingApprovals(approvalsResult.payload));
       setApprovalLoadState("ready");
-    } else {
+    } else if (ownsShellData) {
       // A failed approval read must not leave stale effect buttons actionable.
       setPendingApprovals([]);
       setApprovalLoadState("stale");
@@ -8521,16 +8546,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setBrowserProviders(normalizeBrowserProviders(browserProvidersResult.payload));
     setBrowserSessions(normalizeBrowserSessions(browserSessionsResult.payload));
     setBrowserJournal(normalizeBrowserJournal(browserSessionsResult.payload));
-    if (toolModeResult.ok && toolModeResult.payload && typeof toolModeResult.payload === "object") {
+    if (ownsShellData && toolModeResult.ok && toolModeResult.payload && typeof toolModeResult.payload === "object") {
       setToolPolicyMode(((toolModeResult.payload as { mode?: string }).mode ?? "unknown") as ToolPolicyMode | "unknown");
     }
-    if (mcpModeResult.ok && mcpModeResult.payload && typeof mcpModeResult.payload === "object") {
+    if (ownsShellData && mcpModeResult.ok && mcpModeResult.payload && typeof mcpModeResult.payload === "object") {
       setMcpPolicyMode(((mcpModeResult.payload as { mode?: string }).mode ?? "unknown") as McpPolicyMode | "unknown");
     }
-    if (approvalModeResult.ok && approvalModeResult.payload && typeof approvalModeResult.payload === "object") {
+    if (ownsShellData && approvalModeResult.ok && approvalModeResult.payload && typeof approvalModeResult.payload === "object") {
       setApprovalMode(((approvalModeResult.payload as { mode?: string }).mode ?? "unknown") as ApprovalMode | "unknown");
     }
-  }, [fetchCockpitBatch, fetchCockpitJson, sessionId]);
+  }, [beginShellDataRead, claimShellDataWrite, fetchCockpitBatch, fetchCockpitJson, sessionId]);
 
   // Keep one metadata batch in flight while coalescing the latest request
   // raised by a navigation/effect transition. A cancelled effect never
@@ -8843,15 +8868,16 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   // batch only reads the runtime, observer, approval and policy endpoints the
   // shell displays, and never runs while the full batch is active.
   const refreshShellStatus = useCallback(async (isCancelled: () => boolean = () => false) => {
+    const generation = beginShellDataRead();
     const [runtimeStatusResult, observerResult, approvalsResult, toolModeResult, mcpModeResult, approvalModeResult] = await fetchCockpitBatch([
       () => fetchCockpitJson(`${API_URL}/api/runtime/status`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/observer/state`, 5000, isCancelled),
-      () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=8`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=${PENDING_APPROVALS_PAGE}`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/settings/tool-policy-mode`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/settings/mcp-policy-mode`, 5000, isCancelled),
       () => fetchCockpitJson(`${API_URL}/api/settings/approval-mode`, 5000, isCancelled),
     ], isCancelled, 3);
-    if (isCancelled()) return;
+    if (isCancelled() || !claimShellDataWrite(generation)) return;
     const runtimeStatusPayload = runtimeStatusResult.ok ? normalizeRuntimeStatus(runtimeStatusResult.payload) : null;
     if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
       const raw = runtimeStatusResult.payload as { guardian_runtime?: unknown; runtime_domains?: unknown };
@@ -8880,7 +8906,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     if (mcpMode) setMcpPolicyMode(mcpMode as McpPolicyMode | "unknown");
     const approvalModeValue = modeOf(approvalModeResult);
     if (approvalModeValue) setApprovalMode(approvalModeValue as ApprovalMode | "unknown");
-  }, [fetchCockpitBatch, fetchCockpitJson]);
+  }, [beginShellDataRead, claimShellDataWrite, fetchCockpitBatch, fetchCockpitJson]);
 
   const fullCockpitRefreshActive = advancedWorkspaceOpen || activeSection === "work" || activeSection === "connections";
   useEffect(() => {
@@ -10602,6 +10628,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       latestResponseRole: latestResponse?.role ?? null,
       ambientState,
       dataQuality: observerState?.data_quality ?? null,
+      dataQualityReason: observerState?.data_quality_reason ?? null,
       recentInterventionCount: recentInterventions.length,
       operatorStatus,
     }),
@@ -10630,6 +10657,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       isAgentBusy,
       latestResponse?.role,
       observerState?.data_quality,
+      observerState?.data_quality_reason,
       operatorStatus,
       pendingApprovals.length,
       queuedInsights.length,
@@ -10661,7 +10689,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       deriveConnectionItem(connectionStatus),
       chatItem,
       derivePolicyItem(toolPolicyMode, mcpPolicyMode, approvalMode),
-      deriveContextItem(observerState?.data_quality ?? null, observerState !== null),
+      deriveContextItem(observerState?.data_quality ?? null, observerState !== null, observerState?.data_quality_reason ?? null),
       deriveDesktopItem(daemonPresence, presenceMetadataState, deepPaneLoadState.presence === "stale"),
       deriveInterruptionItem(
         observerState?.attention_budget_remaining ?? null,
@@ -16641,7 +16669,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               onClick={() => openApprovalsPane()}
               title="Review approvals that are blocking Seraph"
             >
-              {pendingApprovals.length} approval{pendingApprovals.length === 1 ? "" : "s"} waiting
+              {pendingApprovalCountLabel(pendingApprovals.length)} approval{pendingApprovals.length === 1 ? "" : "s"} waiting
             </button>
           ) : null}
           <CockpitStatusMenu
@@ -16769,7 +16797,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               {approvalLoadState === "ready" ? (
                 pendingApprovals.length > 0 ? (
                   <button type="button" className="cockpit-attention-row cockpit-attention-row--warning" onClick={() => openApprovalsPane()}>
-                    <span className="cockpit-attention-count">{pendingApprovals.length}</span>
+                    <span className="cockpit-attention-count">{pendingApprovalCountLabel(pendingApprovals.length)}</span>
                     <span>approval{pendingApprovals.length === 1 ? "" : "s"} waiting</span>
                   </button>
                 ) : (
@@ -22314,6 +22342,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           activity={seraphActivity}
           roleLabel={labelForRole}
           ageLabel={formatAge}
+          onOpenApprovals={openApprovalsPane}
           onboarding={onboardingCompleted === false && onSkipOnboarding && !onboardingNoticeDismissed ? (
             <div className="cockpit-dock-banner" role="group" aria-label="Onboarding actions">
               <span className="cockpit-dock-banner-text">Setup questions are running in this chat.</span>

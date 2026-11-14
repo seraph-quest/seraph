@@ -521,6 +521,10 @@
   color: var(--cockpit-muted);
 }
 
+:root[data-theme="light"] .cockpit-attention-count {
+  color: #ffffff;
+}
+
 .cockpit-attention-count {
   min-width: 22px;
   padding: 0 6px;
@@ -787,6 +791,17 @@
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.cockpit-dock-message-action {
+  margin-top: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--cockpit-state-warning-border);
+  background: transparent;
+  color: var(--cockpit-text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
 }
 
 .cockpit-dock-empty {

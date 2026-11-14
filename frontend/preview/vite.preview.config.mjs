@@ -16,7 +16,9 @@
 // identifiers, secrets, free text, home paths and LAN addresses redacted.
 // operator_continuation (the Home snapshot fixture from src/lib), goals_*,
 // and work-board_* are synthetic and labelled as
-// preview data. Fixtures do not have to agree with each other.
+// preview data. observer_state.data_quality_reason ("unscoped_fallback") was
+// added by hand to show the #1172 backend field. Fixtures do not have to
+// agree with each other.
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,8 +60,13 @@ function previewMockApi() {
         res.end(JSON.stringify({ detail: "preview_fixture_missing" }));
       });
     },
-    transformIndexHtml() {
-      return [{ tag: "script", injectTo: "head-prepend", children: PREVIEW_GUARD }];
+    transformIndexHtml(html) {
+      // Offline preview: drop the Google Fonts stylesheet so the page makes no
+      // third-party request; the cockpit falls back to local fonts.
+      return {
+        html: html.replace(/<link[^>]*fonts\.googleapis\.com[^>]*>/g, ""),
+        tags: [{ tag: "script", injectTo: "head-prepend", children: PREVIEW_GUARD }],
+      };
     },
   };
 }

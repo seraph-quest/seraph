@@ -21,6 +21,8 @@ export interface CockpitConversationDockProps {
   activity: ConversationActivity;
   roleLabel: (message: ChatMessage) => string;
   ageLabel: (timestamp: number) => string;
+  /** Opens the approvals surface for an approval request in the thread. */
+  onOpenApprovals?: (approvalId?: string) => void;
   /** Onboarding prompt/skip controls while onboarding is active. */
   onboarding?: ReactNode;
   /** Push-to-talk control. */
@@ -42,7 +44,7 @@ export interface CockpitConversationDockProps {
 export function CockpitConversationDock(props: CockpitConversationDockProps) {
   const {
     open, onToggle, sessionTitle, sessions, currentSessionId, onSwitchSession, onNewSession,
-    messages, isAgentBusy, activity, roleLabel, ageLabel, onboarding, voice,
+    messages, isAgentBusy, activity, roleLabel, ageLabel, onOpenApprovals, onboarding, voice,
     composerValue, onComposerChange, onSubmit, inputRef, placeholder, submitDisabled,
   } = props;
   const feedRef = useRef<HTMLDivElement | null>(null);
@@ -124,6 +126,15 @@ export function CockpitConversationDock(props: CockpitConversationDockProps) {
               <span className="cockpit-dock-message-age">{ageLabel(message.timestamp)}</span>
             </div>
             <div className="cockpit-dock-message-body">{message.content}</div>
+            {message.role === "approval" && onOpenApprovals ? (
+              <button
+                type="button"
+                className="cockpit-dock-message-action"
+                onClick={() => onOpenApprovals(message.approvalId)}
+              >
+                Review approval
+              </button>
+            ) : null}
           </article>
         ))}
         {isAgentBusy ? (

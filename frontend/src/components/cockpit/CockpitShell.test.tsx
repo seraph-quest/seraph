@@ -48,8 +48,9 @@ const runtimeStatus = {
   },
 };
 
-const observerState = {
+const observerState: Record<string, unknown> = {
   data_quality: "degraded",
+  data_quality_reason: "unscoped_fallback",
   attention_budget_remaining: 5,
   tool_policy_mode: "full",
   approval_mode: "high_risk",
@@ -108,12 +109,13 @@ const goal: GoalInfo = {
 };
 
 const fetchMock = vi.fn();
+let currentObserverState: Record<string, unknown> = observerState;
 
 function respond(url: string): unknown {
   if (url.includes("/api/operator/continuation?")) return homeFixture();
   if (url.endsWith("/api/auth/session")) return context.session;
   if (url.endsWith("/api/runtime/status")) return runtimeStatus;
-  if (url.endsWith("/api/observer/state")) return observerState;
+  if (url.endsWith("/api/observer/state")) return currentObserverState;
   if (url.endsWith("/api/observer/continuity")) return continuity;
   if (url.includes("/api/approvals/pending")) return [];
   if (url.includes("/api/settings/tool-policy-mode")) return { mode: "full" };
@@ -139,6 +141,7 @@ const onSend = vi.fn();
 beforeEach(() => {
   fetchMock.mockReset();
   onSend.mockReset();
+  currentObserverState = observerState;
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("WebSocket", class { close() {} send() {} });
   fetchMock.mockImplementation(async (input: RequestInfo | URL) => new Response(JSON.stringify(respond(String(input)))));
@@ -259,7 +262,8 @@ describe("cockpit shell (#1172)", () => {
     expect(desktop).toHaveTextContent("DAEMON_ENABLED=false");
     expect(within(desktop).getByRole("button", { name: "Open Settings → Native" })).toBeInTheDocument();
     const context = screen.getByTestId("cockpit-status-item-context");
-    expect(context).toHaveTextContent("Partial");
+    expect(context).toHaveTextContent("Not refreshed yet for this session");
+    expect(context).toHaveTextContent("No action needed");
     expect(context).not.toHaveTextContent(/degraded seam|execution failure/i);
     // The old unknown chips are gone; nothing reads "unknown" without a reason.
     expect(screen.queryByText(/desktop unknown|bundle unknown|budget \?|state pending/i)).not.toBeInTheDocument();
@@ -297,5 +301,104 @@ describe("cockpit shell (#1172)", () => {
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     await act(async () => { fireEvent.click(screen.getByRole("menuitem", { name: "Skip onboarding" })); });
     expect(skip).toHaveBeenCalledTimes(1);
+  });
+
+  it("raises the header summary for a real observer source fault", async () => {
+    currentObserverState = { ...observerState, data_quality: "degraded", data_quality_reason: "source_error:git" };
+    renderShell();
+    const trigger = await screen.findByTestId("cockpit-status-trigger");
+    await waitFor(() => expect(trigger).toHaveTextContent("1 needs attention"));
+    fireEvent.click(trigger);
+    const context = screen.getByTestId("cockpit-status-item-context");
+    expect(context).toHaveTextContent("Needs attention");
+    expect(context).toHaveTextContent("failed: git");
+    expect(context).not.toHaveTextContent("No action needed");
+    expect(screen.getByTestId("cockpit-seraph-activity")).toHaveTextContent("Context degraded");
+  });
+
+  it("never lets an older shell status response overwrite a newer one", async () => {
+    let releaseFirst!: () => void;
+    let runtimeCalls = 0;
+    const older = { ...runtimeStatus, effective_runtime: { ...runtimeStatus.effective_runtime, model_label: "Older-Model" } };
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/runtime/status")) {
+        runtimeCalls += 1;
+        if (runtimeCalls === 1) {
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+          return new Response(JSON.stringify(older));
+        }
+      }
+      return new Response(JSON.stringify(respond(url)));
+    });
+    renderShell();
+    const trigger = await screen.findByTestId("cockpit-status-trigger");
+    fireEvent.click(trigger);
+    const chat = screen.getByTestId("cockpit-status-item-chat_model");
+    await act(async () => { fireEvent.click(within(chat).getByRole("button", { name: "Check again" })); });
+    await waitFor(() => expect(screen.getByTestId("cockpit-status-item-chat_model")).toHaveTextContent("DeepSeek-V4.1-Flash-1017"));
+    await act(async () => { releaseFirst(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId("cockpit-status-item-chat_model")).toHaveTextContent("DeepSeek-V4.1-Flash-1017");
+    expect(screen.getByTestId("cockpit-status-item-chat_model")).not.toHaveTextContent("Older-Model");
+  });
+
+  it("shows a full approvals page as N+ rather than an exact count", async () => {
+    const approvals = Array.from({ length: 8 }, (_, index) => ({
+      id: `approval-${index}`, status: "pending", tool_name: "write_file", summary: "Write a file", risk_level: "high",
+      created_at: "2026-11-14T10:00:00Z", expires_at: null,
+    }));
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/approvals/pending")) return new Response(JSON.stringify(approvals));
+      return new Response(JSON.stringify(respond(url)));
+    });
+    renderShell();
+    expect(await screen.findByRole("button", { name: /8\+ approvals waiting/ })).toBeInTheDocument();
+    expect(within(screen.getByTestId("cockpit-attention")).getByText("8+")).toBeInTheDocument();
+  });
+
+  it("moves focus into the status dialog and returns it on Escape without reaching global shortcuts", async () => {
+    const globalEscape = vi.fn();
+    window.addEventListener("keydown", globalEscape);
+    try {
+      renderShell();
+      const trigger = await screen.findByTestId("cockpit-status-trigger");
+      expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
+      fireEvent.click(trigger);
+      const dialog = screen.getByRole("dialog", { name: "System status" });
+      expect(dialog).toHaveFocus();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      expect(screen.queryByRole("dialog", { name: "System status" })).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+      expect(globalEscape).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("keydown", globalEscape);
+    }
+  });
+
+  it("closes the More menu on Tab and on Escape wherever focus is", async () => {
+    renderShell();
+    const more = await screen.findByRole("button", { name: "More actions" });
+    fireEvent.click(more);
+    const first = screen.getAllByRole("menuitem")[0];
+    expect(first).toHaveFocus();
+    fireEvent.keyDown(first, { key: "Tab" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    fireEvent.click(more);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(more).toHaveFocus();
+  });
+
+  it("links an approval request in the conversation to the approvals pane", async () => {
+    useChatStore.setState({
+      messages: [{ id: "a1", role: "approval", content: "Approve writing report.md?", timestamp: Date.now(), sessionId: "conversation", approvalId: "approval-1" }],
+    });
+    renderShell();
+    const dock = await screen.findByTestId("cockpit-conversation-dock");
+    await act(async () => { fireEvent.click(within(dock).getByRole("button", { name: "Review approval" })); });
+    expect(await screen.findByText("Pending approvals", { selector: ".cockpit-window-title" })).toBeInTheDocument();
   });
 });

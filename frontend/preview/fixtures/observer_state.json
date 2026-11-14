@@ -27,5 +27,6 @@
  "observer_confidence": "partial",
  "salience_level": "low",
  "salience_reason": "background",
- "interruption_cost": "low"
+ "interruption_cost": "low",
+ "data_quality_reason": "unscoped_fallback"
 }

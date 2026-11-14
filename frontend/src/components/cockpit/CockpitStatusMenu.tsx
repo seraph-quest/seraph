@@ -27,18 +27,29 @@ export function CockpitStatusMenu({ items, summary, headline, onAction }: Cockpi
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
   const panelId = useId();
+
+  const close = (restoreFocus: boolean) => {
+    setOpen(false);
+    if (restoreFocus) triggerRef.current?.focus();
+  };
 
   useEffect(() => {
     if (!open) return;
+    // Move focus into the dialog so keyboard users land on its content.
+    panelRef.current?.focus();
     const onPointer = (event: PointerEvent) => {
       if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
     };
+    // Escape belongs to this popover only while it is open and no other
+    // overlay already handled the key; it does not reach global shortcuts.
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
     };
     document.addEventListener("pointerdown", onPointer);
     document.addEventListener("keydown", onKey);
@@ -55,6 +66,7 @@ export function CockpitStatusMenu({ items, summary, headline, onAction }: Cockpi
         type="button"
         className={`cockpit-status-trigger cockpit-status-trigger--${summary.tone}`}
         aria-expanded={open}
+        aria-haspopup="dialog"
         aria-controls={panelId}
         aria-label={`System status: ${summary.label}. ${headline}`}
         title="Show system status details"
@@ -66,7 +78,15 @@ export function CockpitStatusMenu({ items, summary, headline, onAction }: Cockpi
         <span className="cockpit-status-trigger-summary">{summary.label}</span>
       </button>
       {open ? (
-        <section id={panelId} className="cockpit-status-panel" role="dialog" aria-label="System status" data-testid="cockpit-status-panel">
+        <section
+          id={panelId}
+          ref={panelRef}
+          tabIndex={-1}
+          className="cockpit-status-panel"
+          role="dialog"
+          aria-label="System status"
+          data-testid="cockpit-status-panel"
+        >
           <header className="cockpit-status-panel-header">
             <h2>System status</h2>
             <span className={`cockpit-status-badge cockpit-status-badge--${summary.tone}`}>{summary.label}</span>
@@ -88,8 +108,11 @@ export function CockpitStatusMenu({ items, summary, headline, onAction }: Cockpi
                       type="button"
                       className="cockpit-status-item-action"
                       onClick={() => {
-                        onAction(item.action!);
-                        if (item.action!.kind === "settings") setOpen(false);
+                        const action = item.action!;
+                        onAction(action);
+                        // Settings opens its own panel; other actions keep the
+                        // popover open to show the refreshed state.
+                        if (action.kind === "settings") close(false);
                       }}
                     >
                       {item.action.label}

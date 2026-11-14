@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   chatFabricRouteDegraded,
+  classifyObserverContext,
   daemonConfiguredOff,
   deriveChatRuntimeIdentity,
   deriveConnectionItem,
@@ -149,18 +150,48 @@ describe("expected configuration vs faults", () => {
     expect(item.action).toMatchObject({ kind: "load-presence" });
   });
 
-  it("reports observer data_quality=degraded as partial context, not a fault", () => {
-    const item = deriveContextItem("degraded", true);
+  it("reports an operator scope that has not refreshed yet as expected (info)", () => {
+    const item = deriveContextItem("degraded", true, "unscoped_fallback");
     expect(item.tone).toBe("info");
-    expect(item.value).toBe("Partial");
+    expect(item.value).toBe("Not refreshed yet for this session");
     expect(item.reason).toMatch(/Chat and work are unaffected/);
+  });
+
+  it.each([
+    ["degraded", "source_error:git", /failed: git/],
+    ["degraded", "source_degraded:goals", /reported degraded: goals/],
+    ["degraded", "source_error:time,source_degraded:goals", /failed: time; reported degraded: goals/],
+    ["stale", "source_error:time", /failed: time/],
+    ["stale", "no_active_sources", /no observer source is enabled/],
+    ["stale", null, /No observer source refreshed successfully/],
+  ])("reports observer %s (%s) as a warning that names the source", (quality, reason, pattern) => {
+    const item = deriveContextItem(quality, true, reason);
+    expect(item.tone).toBe("warning");
+    expect(item.reason).toMatch(pattern);
+    expect(summarizeShellStatus([deriveConnectionItem("connected"), item])).toMatchObject({ tone: "warning", label: "1 needs attention" });
+  });
+
+  it("never calls degraded context without a reason expected (older backend)", () => {
+    const item = deriveContextItem("degraded", true, null);
+    expect(item.tone).toBe("warning");
+    expect(item.value).toBe("Partial · reason not reported");
+    expect(item.reason).toMatch(/may be a fault/);
+  });
+
+  it("classifies observer context from data_quality and its reason", () => {
+    expect(classifyObserverContext("good", null).kind).toBe("good");
+    expect(classifyObserverContext(null, null).kind).toBe("unknown");
+    expect(classifyObserverContext("degraded", "unscoped_fallback").kind).toBe("not_refreshed");
+    expect(classifyObserverContext("degraded", "unscoped_fallback,source_error:git").kind).toBe("fault");
+    expect(classifyObserverContext("degraded", "something_new").kind).toBe("unexplained");
+    expect(classifyObserverContext("stale", null).kind).toBe("fault");
   });
 
   it("does not raise the overall status for expected configuration", () => {
     const summary = summarizeShellStatus([
       deriveConnectionItem("connected"),
       deriveDesktopItem(configuredOff, "confirmed"),
-      deriveContextItem("degraded", true),
+      deriveContextItem("degraded", true, "unscoped_fallback"),
     ]);
     expect(summary).toEqual({ tone: "ok", label: "All systems ready", attentionCount: 0 });
   });
@@ -178,6 +209,7 @@ describe("expected configuration vs faults", () => {
       deriveDesktopItem(null, "unavailable"),
       deriveContextItem(null, false),
       deriveContextItem("stale", true),
+      deriveContextItem("degraded", true),
       deriveVersionItem("SERAPH_PRIME_v1", null, null),
     ];
     for (const item of items) {

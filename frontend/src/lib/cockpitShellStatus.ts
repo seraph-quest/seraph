@@ -319,7 +319,58 @@ export function deriveDesktopItem(
   };
 }
 
-export function deriveContextItem(dataQuality: string | null | undefined, observerLoaded: boolean): ShellStatusItem {
+export type ObserverContextKind = "unknown" | "good" | "not_refreshed" | "unexplained" | "fault";
+
+export interface ObserverContextClass {
+  kind: ObserverContextKind;
+  /** Sources that raised or have no runner. */
+  erroredSources: string[];
+  /** Sources that reported themselves degraded. */
+  degradedSources: string[];
+  noActiveSources: boolean;
+}
+
+/**
+ * Classify `/api/observer/state.data_quality` with its `data_quality_reason`
+ * (#1172). Only an operator scope that has not been refreshed yet is an
+ * expected state; a failing, degraded or missing source is a fault. A
+ * backend that reports no reason cannot be called expected.
+ */
+export function classifyObserverContext(
+  dataQuality: string | null | undefined,
+  reason: string | null | undefined,
+): ObserverContextClass {
+  const reasons = (reason ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  const erroredSources = reasons.filter((entry) => entry.startsWith("source_error:")).map((entry) => entry.slice("source_error:".length));
+  const degradedSources = reasons.filter((entry) => entry.startsWith("source_degraded:")).map((entry) => entry.slice("source_degraded:".length));
+  const noActiveSources = reasons.includes("no_active_sources");
+  const base = { erroredSources, degradedSources, noActiveSources };
+  if (!dataQuality) return { kind: "unknown", ...base };
+  if (dataQuality === "good") return { kind: "good", ...base };
+  const quality = dataQuality.toLowerCase();
+  if (quality === "stale" || quality.includes("failed") || quality.includes("outage")
+    || erroredSources.length || degradedSources.length || noActiveSources) {
+    return { kind: "fault", ...base };
+  }
+  if (reasons.length && reasons.every((entry) => entry === "unscoped_fallback")) return { kind: "not_refreshed", ...base };
+  return { kind: "unexplained", ...base };
+}
+
+export function describeObserverFault(context: ObserverContextClass): string {
+  const parts = [
+    context.erroredSources.length ? `failed: ${context.erroredSources.join(", ")}` : null,
+    context.degradedSources.length ? `reported degraded: ${context.degradedSources.join(", ")}` : null,
+    context.noActiveSources ? "no observer source is enabled" : null,
+  ].filter(Boolean);
+  return parts.length ? `Observer sources ${parts.join("; ")}.` : "No observer source refreshed successfully.";
+}
+
+export function deriveContextItem(
+  dataQuality: string | null | undefined,
+  observerLoaded: boolean,
+  dataQualityReason: string | null = null,
+): ShellStatusItem {
+  const source = "/api/observer/state · data_quality";
   if (!observerLoaded || !dataQuality) {
     return {
       id: "context",
@@ -331,28 +382,40 @@ export function deriveContextItem(dataQuality: string | null | undefined, observ
       action: { kind: "refresh", label: "Check again" },
     };
   }
-  if (dataQuality === "good") {
+  const context = classifyObserverContext(dataQuality, dataQualityReason);
+  if (context.kind === "good") {
     return { id: "context", label: "Context signals", value: "Complete", tone: "ok", reason: null, source: "/api/observer/state", action: null };
   }
-  if (dataQuality === "degraded") {
+  if (context.kind === "not_refreshed") {
     return {
       id: "context",
       label: "Context signals",
-      value: "Partial",
+      value: "Not refreshed yet for this session",
       tone: "info",
-      reason: "Some observer sources (time, calendar, git or goals) have not refreshed for this operator session yet, so proactive timing uses less context. Chat and work are unaffected.",
-      source: "/api/observer/state · data_quality",
+      reason: "The observer has not refreshed its sources for this operator session yet, so proactive timing uses less context until it does. Chat and work are unaffected.",
+      source,
+      action: { kind: "refresh", label: "Check again" },
+    };
+  }
+  if (context.kind === "fault") {
+    return {
+      id: "context",
+      label: "Context signals",
+      value: dataQuality === "stale" ? "Unavailable" : "Degraded",
+      tone: "warning",
+      reason: `${describeObserverFault(context)} Proactive timing and guidance have less context until the sources recover; chat and work are unaffected. Observer sources are managed by the Core Observer Sources package (Extension studio); check the backend log for the failing source.`,
+      source: `${source} · data_quality_reason`,
       action: { kind: "refresh", label: "Check again" },
     };
   }
   return {
     id: "context",
     label: "Context signals",
-    value: humanize(dataQuality),
+    value: "Partial · reason not reported",
     tone: "warning",
-    reason: "No observer source refreshed successfully, so proactive guidance has no current context. Chat and work are unaffected.",
-    source: "/api/observer/state · data_quality",
-    action: { kind: "settings", label: "Open Settings → Guardian", section: "guardian" },
+    reason: "Some observer sources did not refresh and this backend does not report why, so this may be a fault. Chat and work are unaffected; proactive timing uses less context.",
+    source,
+    action: { kind: "refresh", label: "Check again" },
   };
 }
 

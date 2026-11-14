@@ -1,4 +1,5 @@
 import type { AgentAnimationState, ConnectionStatus, MessageRole } from "../../types";
+import { classifyObserverContext, describeObserverFault } from "../../lib/cockpitShellStatus";
 
 export type SeraphPresenceState =
   | "offline"
@@ -39,6 +40,8 @@ export interface SeraphPresenceSnapshot {
   latestResponseRole?: MessageRole | null;
   ambientState?: string | null;
   dataQuality?: string | null;
+  /** `/api/observer/state.data_quality_reason` (#1172). */
+  dataQualityReason?: string | null;
   recentInterventionCount: number;
   operatorStatus?: string | null;
 }
@@ -66,11 +69,6 @@ function containsAny(value: string | null | undefined, parts: string[]): boolean
   }
   const normalized = value.toLowerCase();
   return parts.some((part) => normalized.includes(part));
-}
-
-/** Observer context is partial (not failed) when some sources did not refresh. */
-export function observerContextPartial(dataQuality: string | null | undefined): boolean {
-  return containsAny(dataQuality, ["degraded", "stale"]) && !containsAny(dataQuality, ["failed", "outage"]);
 }
 
 export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): SeraphPresenceDescriptor {
@@ -107,7 +105,6 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
   if (
     snapshot.recentTraceRole === "error"
     || containsAny(snapshot.operatorStatus, ["error", "failed", "fault"])
-    || containsAny(snapshot.dataQuality, ["failed", "outage"])
     || snapshot.continuityHealth === "degraded"
   ) {
     return {
@@ -118,6 +115,20 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
         : "Seraph is running with a degraded seam or recent execution failure.",
       tone: "error",
       cadenceMs: 520,
+    };
+  }
+
+  // Observer context faults (#1172): a failing, degraded or missing observer
+  // source, or no source refreshing at all. This limits proactive context;
+  // it is a warning, consistent with the shell status popover.
+  const observerContext = classifyObserverContext(snapshot.dataQuality, snapshot.dataQualityReason);
+  if (observerContext.kind === "fault") {
+    return {
+      state: "error",
+      label: "Context degraded",
+      detail: `${describeObserverFault(observerContext)} Chat and work are unaffected; proactive timing has less context.`,
+      tone: "warning",
+      cadenceMs: 700,
     };
   }
 
@@ -161,15 +172,23 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
     };
   }
 
-  // Observer data quality "degraded"/"stale" means some context sources (time,
-  // calendar, git, goals) have not refreshed for this operator scope. It
-  // limits proactive timing context; it is not an execution fault (#1172).
-  if (observerContextPartial(snapshot.dataQuality)) {
+  // An operator scope the observer has not refreshed yet is expected; a
+  // partial context without a reported reason may be a fault (#1172).
+  if (observerContext.kind === "not_refreshed") {
     return {
       state: "idle",
       label: "Partial context",
-      detail: "Some observer context sources have not refreshed for this session. Chat and work are unaffected; proactive timing uses less context.",
+      detail: "The observer has not refreshed its sources for this session yet. Chat and work are unaffected; proactive timing uses less context.",
       tone: "neutral",
+      cadenceMs: 1100,
+    };
+  }
+  if (observerContext.kind === "unexplained") {
+    return {
+      state: "idle",
+      label: "Partial context",
+      detail: "Some observer sources did not refresh and the backend did not report why. Chat and work are unaffected; proactive timing uses less context.",
+      tone: "warning",
       cadenceMs: 1100,
     };
   }

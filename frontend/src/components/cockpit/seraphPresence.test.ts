@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deriveSeraphPresenceMetadataState,
   deriveSeraphPresenceState,
+  type SeraphPresenceSnapshot,
   type SeraphPresenceLoadState,
 } from "./seraphPresence";
 
@@ -74,8 +75,9 @@ describe("deriveSeraphPresenceState", () => {
     expect(descriptor.tone).toBe("active");
   });
 
-  it("treats failed observer quality as faulted", () => {
-    const descriptor = deriveSeraphPresenceState({
+  // #1172: the backend emits data_quality good|degraded|stale with a
+  // data_quality_reason; these cases use only values it actually emits.
+  const observerSnapshot = (dataQuality: string, dataQualityReason: string | null): SeraphPresenceSnapshot => ({
       connectionStatus: "connected",
       animationState: "idle",
       isAgentBusy: false,
@@ -93,43 +95,44 @@ describe("deriveSeraphPresenceState", () => {
       recentTraceTool: null,
       latestResponseRole: null,
       ambientState: "idle",
-      dataQuality: "failed",
+      dataQuality,
+      dataQualityReason,
       recentInterventionCount: 0,
       operatorStatus: null,
     });
 
+  it.each([
+    ["stale", "source_error:time"],
+    ["stale", "no_active_sources"],
+    ["degraded", "source_error:git,source_degraded:goals"],
+    ["degraded", "source_degraded:calendar"],
+  ])("treats observer %s with %s as a context fault (warning)", (dataQuality, reason) => {
+    const descriptor = deriveSeraphPresenceState(observerSnapshot(dataQuality, reason));
     expect(descriptor.state).toBe("error");
-    expect(descriptor.tone).toBe("error");
+    expect(descriptor.label).toBe("Context degraded");
+    expect(descriptor.tone).toBe("warning");
+    expect(descriptor.detail).toMatch(/Observer sources|observer source/);
   });
 
-  it("reports degraded observer context as partial, not as a fault (#1172)", () => {
-    const descriptor = deriveSeraphPresenceState({
-      connectionStatus: "connected",
-      animationState: "idle",
-      isAgentBusy: false,
-      pendingApprovalCount: 0,
-      pendingNotificationCount: 0,
-      queuedInsightCount: 0,
-      degradedRouteCount: 0,
-      degradedSourceAdapterCount: 0,
-      attentionImportedFamilyCount: 0,
-      attentionPresenceSurfaceCount: 0,
-      actionableThreadCount: 0,
-      continuityHealth: "ready",
-      recommendedFocus: null,
-      recentTraceRole: null,
-      recentTraceTool: null,
-      latestResponseRole: null,
-      ambientState: "idle",
-      dataQuality: "degraded",
-      recentInterventionCount: 0,
-      operatorStatus: null,
-    });
+  it("treats stale observer context without a reason as a fault", () => {
+    const descriptor = deriveSeraphPresenceState(observerSnapshot("stale", null));
+    expect(descriptor.label).toBe("Context degraded");
+    expect(descriptor.tone).toBe("warning");
+  });
 
+  it("reports an operator scope that has not refreshed yet as expected partial context", () => {
+    const descriptor = deriveSeraphPresenceState(observerSnapshot("degraded", "unscoped_fallback"));
     expect(descriptor.state).not.toBe("error");
     expect(descriptor.label).toBe("Partial context");
     expect(descriptor.tone).toBe("neutral");
     expect(descriptor.detail).toMatch(/Chat and work are unaffected/);
+  });
+
+  it("does not call degraded context without a reason expected", () => {
+    const descriptor = deriveSeraphPresenceState(observerSnapshot("degraded", null));
+    expect(descriptor.label).toBe("Partial context");
+    expect(descriptor.tone).toBe("warning");
+    expect(descriptor.detail).toMatch(/did not report why/);
   });
 
   it("treats degraded continuity reach as a fault even without data-quality errors", () => {

@@ -102,11 +102,38 @@ def validate_model_route_proof(proof: ModelRouteProof) -> None:
         raise ValueError("capability proof hash does not match its exact binding")
 
 
+# NEAR TEE slot profiles (ADR-035 amendment 2026-11-14, #1178): a passing
+# capability check is a one-time setup gate. It stays valid until its binding
+# changes (profile hash: model and slot settings; credential, see
+# ``near_tee_credential_bound_since``), never by age. ``expires_at`` is still
+# stored for schema compatibility and is advisory only for these profiles.
+NEAR_TEE_PROOF_PROFILE_PREFIX = "near_tee."
+
+
+def proof_expires_by_time(proof: ModelRouteProof) -> bool:
+    """Whether ``expires_at`` gates this proof (every profile but NEAR TEE slots)."""
+    return not str(proof.profile_id).startswith(NEAR_TEE_PROOF_PROFILE_PREFIX)
+
+
 def proof_is_fresh(proof: ModelRouteProof, *, now: float | None = None) -> bool:
-    """Return whether a valid passing proof is fresh at the requested instant."""
+    """Return whether a valid passing proof is current at the requested instant.
+
+    NEAR TEE slot proofs do not age out (#1178); other profiles keep their
+    proof expiry.
+    """
     try:
         validate_model_route_proof(proof)
     except ValueError:
         return False
+    if proof.outcome != "passed":
+        return False
+    if not proof_expires_by_time(proof):
+        return True
     checked_at = time.time() if now is None else float(now)
-    return proof.outcome == "passed" and proof.checked_at <= checked_at < proof.expires_at
+    return proof.checked_at <= checked_at < proof.expires_at
+
+
+def proof_aged_out(proof: ModelRouteProof, *, now: float | None = None) -> bool:
+    """A passing, exactly bound proof that only expired by time (never NEAR TEE)."""
+    checked_at = time.time() if now is None else float(now)
+    return proof.outcome == "passed" and proof_expires_by_time(proof) and proof.expires_at <= checked_at

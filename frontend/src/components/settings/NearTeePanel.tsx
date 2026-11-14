@@ -3,7 +3,7 @@ import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import {
   NEAR_TEE_API_BASE, NEAR_TEE_DISCLOSURE, NEAR_TEE_SCREENSHOT_DISCLOSURE, NEAR_TEE_TEXT_MODELS, NEAR_TEE_VISION_MODELS,
-  normalizeModelFabricSettings,
+  catalogBasisText, normalizeModelFabricSettings,
 } from "../../lib/modelFabric";
 import type { ModelFabricSettingsStatus, NearTeeSetupInput, NearTeeSetupStatus, NearTeeSlotName, NearTeeSlotStatus } from "../../lib/modelFabric";
 import { NearTeeEmbeddingSection } from "./NearTeeEmbeddingSection";
@@ -184,7 +184,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
         max_output_tokens: number(draft.maxOutput, "Maximum output tokens", 65_536),
         timeout_seconds: number(draft.timeout, vision ? "Request timeout (vision: background job budget)" : "Request timeout", maxTimeout, false),
         request_cost_bound_microusd: reserve,
-        catalog_ttl_hours: number(draft.ttl, "Catalog receipt lifetime", 24),
+        catalog_ttl_hours: number(draft.ttl, "Catalog refresh hours", 24),
         plaintext_provider_egress_acknowledged: draft.enabled && acknowledged,
         // Sent only to grant (true) or to withdraw (false); omitted, an
         // unchanged slot keeps its current screenshot consent.
@@ -263,6 +263,8 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     {vision && <p className="mt-1 text-[9px] text-retro-text/60">{NEAR_TEE_SCREENSHOT_DISCLOSURE} The daemon makes no cloud call: it uploads captures to this backend, which analyses them on this slot.</p>}
     {slot?.reason_code && <p className="mt-1 text-[9px]">Blocked: {readable(slot.reason_code)}</p>}
     <p className="mt-1 text-[9px]">{slot?.tee_hosting_label ?? (receipt ? `Catalog receipt ${receipt.outcome} at ${receipt.checked_at_iso ?? "unknown time"}${receipt.reason_code ? " · " + readable(receipt.reason_code) : ""}` : "No catalog receipt yet.")}</p>
+    {passedReceipt && slot?.catalog_receipt_current && <p className="mt-1 text-[9px]">{catalogBasisText(slot)}</p>}
+    {slot?.catalog_warning && <p role="status" className="mt-1 text-[9px]">Warning: {slot.catalog_warning.message}</p>}
     {passedReceipt && receipt?.readiness_basis === "absent_flag_attested" && <p className="mt-1 text-[9px]">Readiness inferred: NEAR's catalog omits isReady; the record is vllm, attestation-supported and verifiable. An explicit not-ready flag would block.</p>}
     {vision && passedReceipt && <p className="mt-1 text-[9px]">{structuredBasis === "catalog" ? "Structured outputs listed in the catalog: JSON schema requests."
       : structuredBasis === "capability_proof" ? "Catalog omits structured outputs; a current capability check established JSON schema requests."
@@ -281,7 +283,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
       <label>Maximum output tokens<input className={inputClass + " mt-1 w-full"} aria-label={label("maximum output tokens")} type="number" min={1} value={draft.maxOutput} onChange={e => update("maxOutput", e.target.value)} /></label>
       <label>Request timeout · seconds{vision ? ` · at most ${maxTimeout} (background job budget)` : ""}<input className={inputClass + " mt-1 w-full"} aria-label={label("request timeout")} type="number" min={1} max={maxTimeout} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
       <label>Per-request reserve · USD<input className={inputClass + " mt-1 w-full"} aria-label={label("per-request reserve USD")} inputMode="decimal" value={draft.reserveUsd} onChange={e => update("reserveUsd", e.target.value)} /></label>
-      <label>Catalog receipt lifetime · hours<input className={inputClass + " mt-1 w-full"} aria-label={label("catalog receipt hours")} type="number" min={1} max={24} value={draft.ttl} onChange={e => update("ttl", e.target.value)} /></label>
+      <label>Catalog refresh · every hours (background, never blocks)<input className={inputClass + " mt-1 w-full"} aria-label={label("catalog refresh hours")} type="number" min={1} max={24} value={draft.ttl} onChange={e => update("ttl", e.target.value)} /></label>
       <p className="sm:col-span-2 text-[9px] text-retro-text/60">Uses the shared inference lane ceiling{laneCeilingMicrousd ? ` ($${usd(laneCeilingMicrousd)})` : " (not published yet)"}. The reserve must cover maximum input and output{vision ? " and the image" : ""} at NEAR's catalog prices.</p>
       {draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label={"Acknowledge " + label("plaintext access")} checked={acknowledged} onChange={e => setAcknowledged(e.target.checked)} /><span>I acknowledge that NEAR receives these requests in plaintext. Seraph does not verify attestation and there is no end-to-end encryption.</span></label>}
       {vision && draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge screenshots sent to NEAR in plaintext" checked={screenshotAcknowledged} onChange={e => setScreenshotAcknowledged(e.target.checked)} /><span>I consent to sending my screenshots to the NEAR gateway in plaintext for analysis. This is separate from the text slot consent.</span></label>}

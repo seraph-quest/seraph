@@ -257,6 +257,7 @@ export interface NearTeeSlotInput {
   timeout_seconds: number;
   temperature?: number | null;
   request_cost_bound_microusd: number;
+  /** Background catalog refresh cadence hint in hours (#1178); not an expiry. */
   catalog_ttl_hours: number;
   /** Embedding slot only: inputs per request (1-64). */
   max_batch_size?: number | null;
@@ -278,7 +279,8 @@ export interface NearTeeSetupInput {
 export interface NearTeeCatalogReceipt {
   model_id: string | null;
   checked_at_iso: string | null;
-  expires_at: string | null;
+  /** What produced the receipt: "setup_check" (the explicit catalog check). Never expires (#1178). */
+  basis?: string | null;
   outcome: "passed" | "failed" | string;
   reason_code: string | null;
   required_cost_microusd: number | null;
@@ -296,6 +298,18 @@ export interface NearTeeCatalogReceipt {
   image_price_usd?: string | null;
 }
 
+export interface NearTeeCatalogWarning {
+  reason_code: string;
+  since: string;
+  message: string;
+}
+
+export interface NearTeeCatalogBackgroundRead {
+  last_attempt_at: string | null;
+  last_attempt_outcome: "read" | "read_failed" | string | null;
+  last_attempt_error: string | null;
+}
+
 export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_provider_egress_acknowledged" | "screenshot_plaintext_egress_acknowledged"> {
   profile_id: string;
   consent_current: boolean;
@@ -303,6 +317,13 @@ export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_pro
   reason_code: string | null;
   catalog_receipt: NearTeeCatalogReceipt | null;
   catalog_receipt_current: boolean;
+  /** Newest passing catalog read of this binding: the setup check or a background read (#1178). */
+  catalog_last_confirmed_at?: string | null;
+  catalog_last_confirmed_basis?: "setup_check" | "background_read" | null;
+  /** A background read reported a disqualifying change. Informational: never blocks (#1178). */
+  catalog_warning?: NearTeeCatalogWarning | null;
+  /** The latest background read attempt. */
+  catalog_background_read?: NearTeeCatalogBackgroundRead | null;
   tee_hosted_per_catalog: boolean;
   tee_hosting_label: string | null;
   capability_check_timeout_seconds: number;
@@ -601,7 +622,7 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
     consent_current: row.consent_current, status: row.status as NearTeeSlotStatus["status"],
     reason_code: text(row.reason_code),
     catalog_receipt: receipt ? { model_id: text(receipt.model_id), checked_at_iso: text(receipt.checked_at_iso),
-      expires_at: text(receipt.expires_at), outcome: String(receipt.outcome ?? "unknown"),
+      basis: text(receipt.basis), outcome: String(receipt.outcome ?? "unknown"),
       reason_code: text(receipt.reason_code),
       required_cost_microusd: typeof receipt.required_cost_microusd === "number" ? receipt.required_cost_microusd : null,
       structured_outputs: receipt.structured_outputs === true,
@@ -613,6 +634,20 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
       output_price_usd_per_million: decimalText(receipt.output_price_usd_per_million),
       image_price_usd: decimalText(receipt.image_price_usd) } : null,
     catalog_receipt_current: row.catalog_receipt_current === true,
+    catalog_last_confirmed_at: text(row.catalog_last_confirmed_at),
+    catalog_last_confirmed_basis: row.catalog_last_confirmed_basis === "setup_check"
+      || row.catalog_last_confirmed_basis === "background_read" ? row.catalog_last_confirmed_basis : null,
+    catalog_warning: (() => {
+      const warning = recordOf(row.catalog_warning);
+      return warning && typeof warning.reason_code === "string" && typeof warning.since === "string"
+        && typeof warning.message === "string"
+        ? { reason_code: warning.reason_code, since: warning.since, message: warning.message } : null;
+    })(),
+    catalog_background_read: (() => {
+      const read = recordOf(row.catalog_background_read);
+      return read ? { last_attempt_at: text(read.last_attempt_at), last_attempt_outcome: text(read.last_attempt_outcome),
+        last_attempt_error: text(read.last_attempt_error) } : null;
+    })(),
     tee_hosted_per_catalog: row.tee_hosted_per_catalog === true,
     tee_hosting_label: text(row.tee_hosting_label),
     capability_check_timeout_seconds: integer("capability_check_timeout_seconds", 1, 180)
@@ -1037,4 +1072,18 @@ export function retainModelFabricSettings(value: ModelFabricSettingsStatus): voi
   } catch {
     // Retention is best effort; the live settings endpoint remains authoritative.
   }
+}
+
+/** Basis and last confirmation of a passing NEAR TEE setup receipt (#1178): no expiry. */
+export function catalogBasisText(slot: NearTeeSlotStatus | null | undefined): string {
+  const readable = (value: string) => value.replace(/_/g, " ");
+  const receipt = slot?.catalog_receipt;
+  const setup = `Catalog basis: setup check at ${receipt?.checked_at_iso ?? "unknown time"}`;
+  const confirmed = slot?.catalog_last_confirmed_at
+    ? ` · last confirmed ${slot.catalog_last_confirmed_at}${slot.catalog_last_confirmed_basis === "background_read" ? " (background read)" : ""}`
+    : "";
+  const read = slot?.catalog_background_read?.last_attempt_outcome === "read_failed"
+    ? ` · latest background read failed (${readable(slot.catalog_background_read.last_attempt_error ?? "unknown")}); the last confirmation stays in force`
+    : "";
+  return setup + confirmed + read + ". Stays valid until the model or slot settings change.";
 }

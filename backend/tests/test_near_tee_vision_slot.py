@@ -473,10 +473,10 @@ async def test_precontact_denials_block_without_contact(client, model_fabric_wor
     assert (await _details(large))[2]["status"] == "blocked"
     assert (await _details(large))[2]["reason"] == "remote_inference_blocked:near_tee_vision_input_too_large"
 
-    # Stale catalog receipt: blocked before contact.
+    # Catalog receipt no longer bound to this profile: blocked before contact.
+    # (#1178: an old receipt alone no longer blocks; only a binding change.)
     receipts = read_catalog_receipts()
-    receipts["vision"]["checked_at"] -= 25 * 3600
-    receipts["vision"]["expires_at"] = time.time() - 1
+    receipts["vision"]["profile_hash"] = "0" * 64
     write_catalog_receipts(receipts)
     stale = await _upload(shots, monkeypatch, capture_id="cap-vision-0007", color=(4, 5, 6))
     await _analyze(operator)

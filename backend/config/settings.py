@@ -163,6 +163,9 @@ class Settings(BaseSettings):
 
     # Phase 3 — Scheduler & Proactivity
     scheduler_enabled: bool = True
+    # ADR-035 amendment #1178: background, informational re-read of NEAR's
+    # public catalog for enabled NEAR TEE slots (never blocks dispatch).
+    near_tee_catalog_refresh_enabled: bool = True
     proactivity_level: int = 3  # 1-5 scale
     morning_briefing_hour: int = 8
     evening_review_hour: int = 21

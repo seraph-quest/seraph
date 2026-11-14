@@ -5,7 +5,7 @@ title: "ADR-035: NEAR TEE-hosted inference only"
 
 # ADR-035: NEAR TEE-hosted inference only
 
-**Status:** Accepted under [#1148](https://github.com/seraph-quest/seraph/issues/1148), effective on the independently reviewed merge to `develop`; runtime capability **Planned** (implemented by [#1147](https://github.com/seraph-quest/seraph/issues/1147) slices PR3a–PR4). [Development Status](../STATUS.md) owns the effective route until those slices ship. No provider probe, catalog read or inference is authorized by this decision.
+**Status:** Accepted under [#1148](https://github.com/seraph-quest/seraph/issues/1148), effective on the independently reviewed merge to `develop`; runtime capability **Planned** (implemented by [#1147](https://github.com/seraph-quest/seraph/issues/1147) slices PR3a–PR4). [Development Status](../STATUS.md) owns the effective route until those slices ship. No provider probe, catalog read or inference is authorized by this decision; the 2026-11-14 amendment (#1178) adds only the background, keyless, informational read of NEAR's public catalog record for enabled slots.
 
 **Decision class:** Superseding provider target. Supersedes [ADR-006](./006-openrouter-only-inference-phase.md)'s provider choice and [ADR-024](./024-purpose-specific-openrouter-routes.md)'s OpenRouter route slots for new inference; absorbs [ADR-025](./025-near-https-text-inference.md); amends [ADR-008](./008-portable-core-and-consented-context.md), [ADR-026](./026-all-plugin-cordis-architecture.md) and [ADR-033](./033-governed-optional-audio-route.md). ADR-001's inference-only boundary, ADR-006's accounting continuity (#909), ADR-024's slot, publication, proof-key and namespace mechanics, and ADR-026's composition remain in force except where named below.
 
@@ -114,11 +114,13 @@ context), response SHA-256 and pass/fail reason. A pass requires `vllm`,
 attestation and verifiable true, readiness true, the slot's modality and
 features (readiness: see the amendment below), and `request_cost_bound_microusd >= max_input_tokens x input price +
 max_output_tokens x output price` at the receipt prices (reasoning tokens count
-within `max_output_tokens`). TTL is operator-set 1–24 hours, default 24. Precontact dispatch
-re-validates locally (receipt passing, same id and profile hash, unexpired);
-otherwise the slot blocks with `near_tee_catalog_receipt_stale` or the failure
-reason. Dispatch never refreshes the catalog. The receipt is an additional
-hosting gate, not a capability proof. Tests intercept this transport.
+within `max_output_tokens`). Precontact dispatch re-validates locally (receipt
+passing, same id, profile hash and configuration revision); otherwise the slot
+blocks with `near_tee_catalog_receipt_stale` or the failure reason. Dispatch
+never refreshes the catalog. The receipt is part of the slot's one-time setup
+gate, not a capability proof, and does not expire by age (amendment
+2026-11-14, #1178, below; it replaced an operator-set 1–24 h TTL). Tests
+intercept this transport.
 
 **Amendment 2026-11-14 ([#1167](https://github.com/seraph-quest/seraph/issues/1167), operator direction).**
 NEAR's record for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (read 2026-11-14)
@@ -135,8 +137,9 @@ probe the same day showed chat, strict json_schema output, tool calling and a
   inferred. This applies to every slot, the embedding slot included (its
   evidence gate is unchanged).
 - Structured output: the catalog's `structured_outputs` is recorded as a fact,
-  not a capability. Callers needing structured output keep needing a fresh
-  `structured_output` proof at dispatch. The vision slot sends json_schema when
+  not a capability. Callers needing structured output keep needing a current
+  `structured_output` proof at dispatch (bound to the exact profile; never
+  aged out since #1178). The vision slot sends json_schema when
   the catalog lists the feature or, when it omits it, a current passing
   json_schema `structured_output` proof on the exact profile exists and no
   newer failed json_schema check contradicts it; otherwise it uses strictly
@@ -151,10 +154,54 @@ probe the same day showed chat, strict json_schema output, tool calling and a
 - Every other gate (model echo, `x-no-aliasing`, billing readback, Unknown
   liability, cost bound, modality, context, output limit) is unchanged.
 
+**Amendment 2026-11-14 ([#1178](https://github.com/seraph-quest/seraph/issues/1178), operator decision).**
+The operator directed that no time-based guard may block chat: a slot that
+passed its catalog check and capability checks was blocked within 24 hours
+although nothing had changed, which the operator called an outage. A model
+does not suddenly lose abilities, and real failures (model removed or swapped,
+outage) are caught on every request by the model echo check and the request
+failing. Therefore:
+
+- The explicit catalog check and the capability checks are a **one-time
+  setup gate**, required when a slot is first set up and again only when its
+  binding changes. The catalog receipt is bound to the canonical model, the
+  complete profile hash (model and slot settings) and the configuration
+  revision (every settings save); a capability proof is bound to the
+  complete profile hash and the NEAR credential (a new key requires the checks
+  again; a save that fails, or a return to the key just replaced, restores
+  that key's binding). The credential binding fails open when its record is
+  missing or unreadable: a wrong key is caught per request by NEAR's own auth
+  refusal; the binding only tracks deliberate key changes. Neither expires by age. Stored receipts that carry an `expires_at`
+  and stored proofs with an `expires_at` stay valid while their binding
+  matches; the capability-check `proof_ttl_seconds` field is still accepted
+  and stored but is advisory for NEAR TEE slot profiles. Other profiles keep
+  their proof expiry.
+- A slot whose checks failed is not set up. A later failed operator-run check
+  does not withdraw an earlier pass, except the #1167 rule above: a newer
+  failed json_schema check withdraws the vision slot's proof-based json_schema
+  mode.
+- Seraph re-reads NEAR's public catalog record in the background (no key, no
+  operator content, no consent, no broker lease; the catalog check's own
+  timeout and byte cap) shortly after startup and then every
+  `min(catalog_ttl_hours, 6)` hours; `catalog_ttl_hours` is now this refresh
+  cadence hint, not an expiry. Background reads are **informational only**.
+  They are stored apart from the setup receipts, update the slot's "last
+  confirmed" time (and the TEE label's "as of" time), and never block
+  dispatch, even when NEAR reports the model not ready, removed, not attested,
+  not verifiable, repriced above the bound or with a modality or context that
+  no longer fits: Settings then shows a warning ("NEAR catalog reports
+  &lt;model&gt; not ready since &lt;time&gt;"). A failed read (network error, HTTP
+  status, unparseable record) changes nothing and is shown as a failed
+  background read; the last confirmation stays in force.
+- Every other gate is unchanged: model echo, `x-no-aliasing`, billing
+  readback, Unknown liability, cost bound, consent and the serial lane.
+  ADR-036 is unaffected.
+
 ### Capability proofs kept
 
 The existing manual capability proof endpoint (`POST /api/settings/model-fabric/canary`,
-complete-profile-hash key, expiry) extends to NEAR TEE slot profiles; new
+complete-profile-hash key; for NEAR TEE slots, credential-bound and without
+age expiry since the #1178 amendment above) extends to NEAR TEE slot profiles; new
 operator-facing labels call it a "capability check". After merge, the operator
 may run separately consented, cost-bounded per-slot **mechanics** checks for
 `text`, `streaming`, `tool_use`, `structured_output`, `vision`, `embedding`,
@@ -162,8 +209,9 @@ may run separately consented, cost-bounded per-slot **mechanics** checks for
 quality score, corpus, judge or comparison. `latency_ms` is checked only against
 the slot's own timeout and is never ranked across models. They are not
 evals, are never a merge, release or code-activation gate, and run only through
-the broker and ledger. As under ADR-006/024, a missing or stale proof blocks
-only the dependent workload at dispatch. Implementation tests use intercepted
+the broker and ledger. As under ADR-006/024, a missing proof (or, for NEAR TEE
+slots, one whose binding changed) blocks only the dependent workload at
+dispatch; a NEAR TEE proof is never stale by age (#1178). Implementation tests use intercepted
 transport only.
 
 ### Billing
@@ -287,7 +335,8 @@ reviewed superseding change.
 Docs: both docs scripts, docs typecheck/build, path/link and contradiction
 checks, independent Critic review. Implementation slices intercept all NEAR
 HTTP, including the catalog check, and make no live or paid calls. Negative
-tests: stale or failed catalog receipt blocks the slot; model echo mismatch;
+tests: a failed or rebound catalog receipt blocks the slot (age does not,
+#1178); model echo mismatch;
 missing `x-no-aliasing`; non-allowlisted model; zero OpenRouter contact on all
 routes; daemon makes no cloud call; global revoke blocks NEAR; missing billing
 becomes Unknown and keeps the lease blocked until fenced settlement, with the
@@ -301,7 +350,10 @@ operator approval.
 
 The NEAR gateway sees plaintext for every inference purpose; the TEE label is
 NEAR's catalog claim at a dated time, not Seraph-verified confidentiality.
-Model choice narrows to the allowlist; since the 2026-11-14 amendment DeepSeek
+Since the #1178 amendment a set-up slot is never blocked by the age of its
+catalog receipt or capability checks; a model NEAR withdraws shows as a
+Settings warning and fails at request time (echo or HTTP error) rather than
+being blocked in advance. Model choice narrows to the allowlist; since the 2026-11-14 amendment DeepSeek
 passes the catalog check with inferred readiness, and its structured output
 rests on capability proofs, not catalog metadata. One Unknown NEAR cost blocks all inference,
 chat included, until the operator settles it. Semantic recall is lexical until re-indexing.

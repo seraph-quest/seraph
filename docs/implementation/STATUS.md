@@ -804,8 +804,18 @@ slot and no save resurrects revoked consent.
 An explicit, authenticated **catalog check** reads only NEAR's
 `/v1/model/{id}` record (no inference, no operator content, no credential) and
 stores a content-safe receipt bound to the slot's complete profile hash and the
-current configuration revision, with an operator TTL (1–24 h); any later
-settings save requires a new check. It parses NEAR's catalog record shape
+current configuration revision; any later settings save requires a new
+check. Since the ADR-035 amendment 2026-11-14 ([#1178](https://github.com/seraph-quest/seraph/issues/1178))
+the receipt and the capability checks are a one-time setup gate that never
+expires by age: a receipt stays in force while model, profile hash and
+revision match, and a NEAR TEE proof while its profile hash and the NEAR
+credential match (a new key needs the checks again; `proof_ttl_seconds` is
+advisory for these slots). Seraph re-reads NEAR's public catalog in the
+background (keyless, no consent, no broker lease) at startup and every
+`min(catalog_ttl_hours, 6)` hours; those reads only update "last confirmed"
+and raise a non-blocking Settings warning when NEAR reports a disqualifying
+change (a failed read keeps the last confirmation); they never block
+dispatch, which the model echo and request errors still police. It parses NEAR's catalog record shape
 (`metadata.architecture` modalities, `maxOutputLength`; an absent output limit
 allows at most 8192 output tokens). Readiness (#1167, ADR-035 amendment
 2026-11-14): `isReady: true` passes, an explicit `isReady: false` fails
@@ -815,11 +825,11 @@ otherwise eligible record (`vllm`, attestation supported, verifiable); the
 receipt records `is_ready: null` and `readiness_basis: absent_flag_attested`
 and Settings says readiness was inferred (this is how
 `deepseek-ai/DeepSeek-V4.1-Flash-1017` passes). Dispatch re-validates the receipt locally and never
-refreshes it; a missing, failed, changed or expired receipt blocks the slot.
-Dispatch also needs fresh capability-check proofs (operator-triggered,
+refreshes it; a missing, failed or rebound receipt blocks the slot (age
+never does). Dispatch also needs current capability-check proofs (operator-triggered,
 cost-bounded mechanics only, through the broker and ledger). Structured
 callers (`general_task_planner`, `strategist_agent`, `session_consolidation`)
-need a fresh `structured_output` proof whatever NEAR's catalog lists; the
+need a current `structured_output` proof whatever NEAR's catalog lists; the
 catalog's `structured_outputs` feature is recorded as a fact, not a
 capability, and Settings shows the text slot's structured-output state
 (`structured_output_capability`) with a **Run structured output check**
@@ -914,8 +924,9 @@ the slot then needs a prompt-JSON check): the check
 endpoint accepts `structured_mode: "json_schema"` for that (Settings: **Run
 JSON-schema structured output check**; `prompt_json` is refused with
 `near_tee_vision_structured_mode_conflict` while the catalog lists the
-feature). Without either the slot uses prompt-JSON (fail closed); once the
-proof expires it falls back to prompt-JSON and needs a new check. Settings
+feature). Without either the slot uses prompt-JSON (fail closed); the proof
+does not expire by age (#1178), and a profile or credential change returns the
+slot to prompt-JSON until a new check. Settings
 reports `structured_output_basis` (`catalog`, `capability_proof` or none). Each
 screenshot is one request of at most 8 MiB: the canonical id with
 `x-no-aliasing: true`, the image as a base64 data URL `image_url` part, and

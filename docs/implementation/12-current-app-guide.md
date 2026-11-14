@@ -1607,7 +1607,8 @@ In **Settings → NEAR TEE · text slot**:
    the allowlist (`z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`,
    `deepseek-ai/DeepSeek-V4.1-Flash-1017`, `Qwen/Qwen3.6-35B-A3B-FP8`), set
    maximum input and output tokens, timeout, per-request reserve and catalog
-   receipt lifetime, tick the plaintext acknowledgement and save. Saving and
+   refresh hours (how often Seraph re-reads NEAR's public catalog in the
+   background; not an expiry), tick the plaintext acknowledgement and save. Saving and
    refreshing never call NEAR.
 3. Press **Run catalog check**. It reads NEAR's catalog record for the model
    only (no inference) and passes only for `providerType=vllm`, attestation
@@ -1616,8 +1617,8 @@ In **Settings → NEAR TEE · text slot**:
    omits `isReady` (as for `deepseek-ai/DeepSeek-V4.1-Flash-1017`), readiness
    is inferred from the vllm, attested and verifiable fields and the slot
    shows "Readiness inferred"; an explicit not-ready flag still fails. The
-   receipt expires after its lifetime and after any later settings save, so
-   re-run the check after saving.
+   receipt does not expire with time; any later settings save needs the check
+   again, so re-run it after saving.
 4. Press **Run capability check**: three billed, mechanics-only requests
    (text, health, latency) through the shared lane, producing the proofs that
    dispatch requires. Streaming chat and agent tool turns need their own
@@ -1628,6 +1629,20 @@ In **Settings → NEAR TEE · text slot**:
    callers such as the task planner, strategist and session consolidation use
    the slot; without a current proof they are blocked before contact, whatever
    NEAR's catalog lists.
+
+These checks are a one-time setup (ADR-035 amendment 2026-11-14, #1178): once
+passed they stay valid until the model, a slot setting or the NEAR key
+changes; age never blocks the slot. A save that fails does not count as a key
+change; a wrong key is caught per request by NEAR's own auth refusal, and the
+key binding only tracks deliberate key changes. Settings shows each slot's catalog basis
+("setup check at &lt;time&gt;") and when NEAR's catalog last confirmed it.
+Seraph re-reads the public catalog record in the background shortly after
+startup and then every few hours (at most 6, sooner with a lower refresh
+setting). A failed read keeps the last confirmation. If NEAR reports the model
+not ready, removed, not attested or otherwise unfit, Settings shows a warning
+("NEAR catalog reports &lt;model&gt; not ready since &lt;time&gt;") but requests
+are not blocked; a request to a model that is really gone fails on its own
+(model echo or provider error).
 
 Reasoning models (the receipt lists `reasoning`, e.g. DeepSeek V4.1 Flash,
 GLM 5.3 Flash, Qwen3.8) spend reasoning tokens inside the maximum output:
@@ -1703,8 +1718,8 @@ conservatively against the input limit) below chat priority, and the validated
 analysis feeds the screenshot digest and the end-of-day report. Until it
 succeeds, a daemon upload's on-device text is the digest content. An invalid
 answer, echo mismatch or empty output is recorded as **failed** (cost
-settled); a missing consent, stale receipt, missing proof or oversized input is
-**blocked** with its reason and makes no NEAR contact; a missing billing record
+settled); a missing consent, missing or rebound receipt, missing proof or
+oversized input is **blocked** with its reason and makes no NEAR contact; a missing billing record
 is an Unknown liability that blocks the whole lane until settled. The daemon
 makes no cloud call; it reads `daemon_cloud_provider: null` from the screen
 settings and only uploads. Screenshots are plaintext to the NEAR gateway; the
@@ -1726,7 +1741,7 @@ Once the gate is cleared, the operator flow is:
 
 1. In **Settings → NEAR TEE → embedding slot**, pick `Qwen/Qwen3-Embedding-0.6B`,
    set maximum input tokens per request, inputs per request (1–64), timeout,
-   per-request reserve and catalog lifetime, acknowledge that memory text is
+   per-request reserve and catalog refresh hours, acknowledge that memory text is
    sent to NEAR in plaintext and save (saving never calls NEAR).
 2. **Run catalog check** (shared with the text and vision slots), then **Run embedding
    capability check**: three billed mechanics requests that also measure the

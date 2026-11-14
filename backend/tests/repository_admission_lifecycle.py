@@ -10,6 +10,9 @@ from tests.test_general_task_planner import accounting_db
 
 @pytest_asyncio.fixture
 async def repository_admission_signer(accounting_db, monkeypatch):
+    # Repository admission mechanics given a usable repair route (#1159).
+    from tests.near_tee_support import assume_repository_repair_route_available
+    assume_repository_repair_route_available(monkeypatch)
     from src.model_fabric import effective_policy
     from src.work_board.historical_method import historical_method_service
     from tests import test_repo_work_original_limits as original_limits

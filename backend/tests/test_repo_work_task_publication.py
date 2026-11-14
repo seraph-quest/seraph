@@ -24,6 +24,10 @@ from tests.test_repo_work_contracts import selection
 
 
 async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False, task_limits=None, work_limits=None, goal_limits=None):
+    # Repository publication/source mechanics given a usable repair route;
+    # its refusal on NEAR TEE is pinned in test_near_tee_vertical_journeys (#1159).
+    from tests.near_tee_support import assume_repository_repair_route_available
+    assume_repository_repair_route_available(monkeypatch)
     _, owner = await prepare(accounting_db, monkeypatch)
     workspace, _, factory = accounting_db
     if goal_capacity is not None:

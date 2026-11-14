@@ -21,7 +21,7 @@ import { MoltbookConnectionPanel } from "./settings/MoltbookConnectionPanel";
 import { ForgejoTitlePanel } from "./settings/ForgejoTitlePanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
-import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
+import { isLocalNoLoginSession, LocalNoLoginBadge, useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
 import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
@@ -715,10 +715,12 @@ export function SettingsPanel() {
                 <div className="cockpit-settings-copy">
                   <div className="cockpit-settings-label">Operator session</div>
                   <div className="cockpit-settings-note">
-                    {operatorAuth.session.principal_id} · expires {new Date(operatorAuth.session.idle_expires_at).toLocaleString()}
+                    {isLocalNoLoginSession(operatorAuth.session)
+                      ? <>{operatorAuth.session.principal_id} · <LocalNoLoginBadge /></>
+                      : <>{operatorAuth.session.principal_id} · expires {new Date(operatorAuth.session.idle_expires_at).toLocaleString()}</>}
                   </div>
                 </div>
-                <div className="flex gap-1">
+                {!isLocalNoLoginSession(operatorAuth.session) && <div className="flex gap-1">
                   <button
                     type="button"
                     className="cockpit-settings-choice"
@@ -733,7 +735,7 @@ export function SettingsPanel() {
                   >
                     Sign out
                   </button>
-                </div>
+                </div>}
               </div>
             )}
           </div>

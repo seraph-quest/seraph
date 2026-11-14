@@ -82,8 +82,8 @@ async def _lifecycle_runtime_or_unavailable(domain: str) -> dict:
                 "recovery": "Restart Seraph; the runtime inventory is unreadable."}
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
-from src.auth.middleware import OperatorAuthMiddleware
-from src.auth.service import auth_mode_status, validate_auth_configuration
+from src.auth.middleware import OperatorAuthMiddleware, auth_failure_handler
+from src.auth.service import AuthFailure, auth_mode_status, validate_auth_configuration
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -864,6 +864,9 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=error.status, content={"detail": {
             "code": error.code, "automatic_retry": False, "recovery_action": "explicit_review_or_discard"}})
     app.add_exception_handler(SelectedContextError, selected_context_failure)
+    # A route or service that lets an AuthFailure escape answers its typed
+    # 4xx/503 with the reason code, never a bare 500 (#1175).
+    app.add_exception_handler(AuthFailure, auth_failure_handler)
 
     # Keep the authentication boundary outside API handlers so model and
     # capability authority cannot depend on model discretion. WebSocket

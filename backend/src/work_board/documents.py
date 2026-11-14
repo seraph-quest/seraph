@@ -223,10 +223,11 @@ async def reconcile_reader(db, owner, identifier, revision):
 async def current_source_root(db, owner, operator):
     """Native consumers also prove the live canonical Root, never a label."""
     from src.db.models import OperatorSession
-    from src.auth.service import _aware
+    from src.auth.service import _aware, local_root_marker_valid
     root = await db.get(OperatorSession, owner.session_id, populate_existing=True)
     stamp = datetime.now(timezone.utc)
     if (root is None or root.principal_id != owner.principal_id or root.is_bearer_tombstone
+        or not local_root_marker_valid(root.token_hash)
         or root.revoked_at is not None or stamp >= _aware(root.idle_expires_at)
         or stamp >= _aware(root.absolute_expires_at)):
         raise BoardError("document_current_root_required", "Sign in and select a document under the current Root", status_code=409)

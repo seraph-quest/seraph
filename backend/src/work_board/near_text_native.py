@@ -46,6 +46,7 @@ def finite_goal_budget(goal):
 
 async def seal_input_authority(db,owner,request):
     """Capture original authenticated authority before the input publication writer."""
+    from src.auth.service import local_root_marker_valid
     from src.memory.repository import _effect_mac_key
     from src.model_fabric.effective_policy import current_near_text_policy
     try:
@@ -60,6 +61,7 @@ async def seal_input_authority(db,owner,request):
         raise BoardError('near_output_limit_exceeded','The configured output limit must be respected',status_code=422)
     root=await db.get(OperatorSession,owner.session_id,populate_existing=True)
     if (root is None or root.principal_id!=owner.principal_id or not root.token_hash
+        or not local_root_marker_valid(root.token_hash)
         or root.revoked_at is not None or root.replaced_by_id is not None or root.is_bearer_tombstone
         or min(utc(root.idle_expires_at),utc(root.absolute_expires_at))<=now()):
         raise BoardError('near_root_inactive','The original authenticated Root is required',status_code=403)
@@ -129,6 +131,7 @@ async def stage_provider_contact(db,task,attempt,inputs,*,run=None):
 
 async def recheck_provider_contact(db,run,*,witness,require_run=True,require_execution=True,require_lease=True,contact_operation_id=None):
     """Supplied-session SQL/token checks; no filesystem, key getter or provider await."""
+    from src.auth.service import local_root_marker_valid
     if not isinstance(witness,NearContactWitness) or witness.seal is not SEAL:
         raise BoardError('near_contact_authority_required','The staged native authority is required')
     task=await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id==witness.task_id).execution_options(populate_existing=True))
@@ -148,7 +151,8 @@ async def recheck_provider_contact(db,run,*,witness,require_run=True,require_exe
         or row.bound_task_id!=task.task_id or row.state not in {'bound','consumed'}
         or _metadata_digest(row)!=witness.input_metadata_digest or row.metadata_digest!=witness.input_metadata_digest
         or canonical(json.loads(row.document_metadata_json))!=witness.metadata_bytes
-        or root.token_hash!=witness.root_token_hash or root.principal_id!=witness.owner_principal_id
+        or root.token_hash!=witness.root_token_hash or not local_root_marker_valid(root.token_hash)
+        or root.principal_id!=witness.owner_principal_id
         or root.revoked_at is not None or root.replaced_by_id is not None or root.is_bearer_tombstone
         or budget is None or str(getattr(goal.status,'value',goal.status))!='active'):
         raise BoardError('near_authority_changed','The original native authority changed')

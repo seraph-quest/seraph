@@ -30,14 +30,9 @@ class PolicyHandle:
 
 
 def _policy_facts(configured):
-    from src.model_fabric.effective_policy import inference_policy_from_configuration
-    try:
-        _,digest = inference_policy_from_configuration(configured)
-        return configured.egress_revision,digest,None
-    except PermissionError:
-        digest = hashlib.sha256(json.dumps({"blocked":configured.status,"revoked":configured.egress_revoked,
-            "epoch":configured.egress_revision},sort_keys=True,separators=(",",":")).encode()).hexdigest()
-        return configured.egress_revision,digest,"provider_policy_unavailable"
+    # The same pure programme binding the programme owner uses (#1180).
+    from src.guardian.goal_programmes import programme_policy_facts
+    return programme_policy_facts(configured)
 
 
 def _us(column):

@@ -364,3 +364,23 @@ async def test_correction_between_preflight_and_native_contact_adoption_cas(prog
         # same exact original binding; no transition can be committed here.
         with pytest.raises(GoalProgrammeError):
             await service.validate_current_binding(db=db, binding=binding, policy=policy)
+
+
+def test_programme_policy_binds_the_near_tee_research_route(tmp_path, monkeypatch):
+    """#1180: a NEAR TEE-only configuration (ADR-035) binds programmes to the
+    research route's NEAR TEE policy; with no route the binding is blocked."""
+    from config.settings import settings
+    from src.guardian.goal_programmes import stage_programme_policy
+    from src.model_fabric.effective_policy import current_near_tee_policy
+    from src.model_fabric.configuration import ModelFabricConfiguration, write_model_fabric_configuration
+    from tests.near_tee_support import write_near_tee_text_configuration
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path.parent / f"{tmp_path.name}-lifecycle"))
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=tmp_path))
+    write_model_fabric_configuration(ModelFabricConfiguration(status="ready", egress_revision=1))
+    assert stage_programme_policy().blocked_reason == "provider_policy_unavailable"
+    configured = write_near_tee_text_configuration(egress_revision=2)
+    policy = stage_programme_policy()
+    assert policy.blocked_reason is None and policy.epoch == configured.egress_revision == 2
+    assert policy.digest == current_near_tee_policy("text")[1]

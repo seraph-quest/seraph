@@ -683,6 +683,42 @@ def test_managed_restore_succeeds_with_the_background_inference_status_file(tmp_
     assert restore.returncode == 0, restore.stdout + restore.stderr
     assert json.loads(restore.stdout)["stage_receipt"]["restore_reconciliation"]["status"] == "ready"
 
+def test_managed_backup_and_restore_accept_the_near_tee_state_files(tmp_path):
+    """#1180: the NEAR TEE catalog stores are cache, the credential binding canonical.
+
+    Undeclared, any workspace that had run a catalog check failed every backup
+    with unknown_workspace_path. As cache it is never archived, so a restored
+    workspace holds no receipt and the slot fails closed until re-checked.
+    """
+    root = _workspace(tmp_path)
+    (root / "near-tee-catalog-receipts.json").write_text('{"schema_version": "x", "receipts": {}}')
+    (root / "near-tee-catalog-observations.json").write_text('{"schema_version": "x", "observations": {}}')
+    binding = '{"bound_since": 1.0, "fingerprint": "0123456789ab", "schema_version": "x"}'
+    (root / "near-tee-credential-binding.json").write_text(binding)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "near-catalog.zip"],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert backup.returncode == 0, backup.stdout + backup.stderr
+    archive = json.loads(backup.stdout)["archive_path"]
+    import zipfile
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+        assert not any(name.endswith(("near-tee-catalog-receipts.json", "near-tee-catalog-observations.json"))
+                       for name in names)
+        # The credential binding pairs with the archived proofs in seraph.db.
+        assert any(name.endswith("near-tee-credential-binding.json") for name in names)
+    restore = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert restore.returncode == 0, restore.stdout + restore.stderr
+    assert (root / "near-tee-credential-binding.json").read_text() == binding
+
+
 def test_manage_prod_commands_use_host_bind_and_never_start_compose(tmp_path):
     root = _workspace(tmp_path)
     env_file = ROOT / ".env.prod"
@@ -1057,7 +1093,8 @@ def test_background_inference_toggles_survive_backup_and_restore(tmp_path, monke
     assert error is None and all(defaults.values())
 
 
-@pytest.mark.parametrize("writer", ["extension-lock", "evolution-state"])
+@pytest.mark.parametrize("writer", ["extension-lock", "evolution-state", "near-catalog-receipts",
+                                    "near-catalog-observations", "near-credential-binding"])
 def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monkeypatch, writer):
     from config.settings import settings
     from src.workspace.state_registry import production_workspace_inventory
@@ -1069,6 +1106,20 @@ def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monke
         with _extension_effect_guard():
             pass
         assert (root / ".seraph-extension-lifecycle.lock").exists()
+    elif writer.startswith("near-"):
+        # The real NEAR TEE writers (#1178/#1180), through their own staging.
+        from src.model_fabric import near_tee_catalog
+        from src.model_fabric.configuration import record_near_tee_credential_binding
+        if writer == "near-catalog-receipts":
+            near_tee_catalog.write_catalog_receipts({})
+            assert (root / "near-tee-catalog-receipts.json").exists()
+        elif writer == "near-catalog-observations":
+            near_tee_catalog.write_catalog_observations({})
+            assert (root / "near-tee-catalog-observations.json").exists()
+        else:
+            record_near_tee_credential_binding("0123456789ab", now=1.0)
+            assert (root / "near-tee-credential-binding.json").exists()
+        assert not list(root.glob(".near-tee-*.tmp"))  # staging never survives a write
     else:
         from src.evolution.runtime import EvolutionRuntime
         runtime = EvolutionRuntime(EvolutionRuntime.default_path(root))

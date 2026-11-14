@@ -92,7 +92,8 @@ def test_unsupported_preflight_never_creates_stage_or_mutates_original(apt, case
         (apt / helper.DEB822).write_text('URIs: ' + helper.URI + '\n# field comment\n https://unexpected/\n\nURIs: ' + helper.URI + '\n')
     else: apt.chmod(0o777)
     before = mirror_state(apt)
-    with pytest.raises((RuntimeError, OSError)):
+    # Every preflight refusal is the pre-mutation class the CLI may skip.
+    with pytest.raises(helper.UnsupportedLiveInput):
         helper.publish(apt)
     assert mirror_state(apt) == before
     assert not list(apt.glob('.seraph-apt-*'))
@@ -137,8 +138,10 @@ def test_prepublication_failure_cleans_only_owned_stage(apt, monkeypatch, case):
                 elif case == 'deb_drift': (apt / helper.DEB822).write_text('changed Deb822 fixture')
             return real_read(tree, path, limit)
         monkeypatch.setattr(helper, 'read_file', injected)
-    with pytest.raises((RuntimeError, OSError)):
+    with pytest.raises((RuntimeError, OSError)) as raised:
         helper.publish(apt)
+    # Failures after a stage exists are never downgraded to a CLI skip.
+    assert not isinstance(raised.value, helper.UnsupportedLiveInput)
     after = mirror_state(apt)
     if case == 'original_drift':
         assert after[0] == helper.ORIGINAL[::-1] and after[1:] == before[1:]
@@ -174,4 +177,38 @@ def test_cli_context_rejects_before_fixed_path_access(monkeypatch, case):
     monkeypatch.setattr(helper.platform, 'freedesktop_os_release', lambda: {'ID':'ubuntu', 'VERSION_ID':'22.04' if case == 'wrong_ubuntu' else '24.04'})
     monkeypatch.setattr(helper, 'publish', lambda *a: pytest.fail('fixed production path reached'))
     with pytest.raises(RuntimeError):
+        helper.main()
+
+
+def _hosted_cli(monkeypatch):
+    monkeypatch.setattr(helper.sys, 'argv', ['prepare_ci_apt_mirrors.py'])
+    monkeypatch.setattr(helper.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(helper.sys, 'platform', 'linux')
+    monkeypatch.setattr(helper.os, 'uname', lambda: type('U', (), {'machine': 'x86_64'})())
+    monkeypatch.setattr(helper.sys, 'flags', type('Flags', (), {'isolated':1, 'no_site':1, 'dont_write_bytecode':1})())
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    monkeypatch.setenv('RUNNER_ENVIRONMENT', 'github-hosted')
+    monkeypatch.setenv('ImageOS', 'ubuntu24')
+    monkeypatch.setattr(helper.platform, 'freedesktop_os_release', lambda: {'ID':'ubuntu', 'VERSION_ID':'24.04'})
+
+
+def test_cli_reports_unrecognised_runner_mirror_file_and_leaves_apt_untouched(apt, monkeypatch, capsys):
+    """#1180: some ubuntu24 runners carry a different mirror file; skip, never mutate."""
+    _hosted_cli(monkeypatch)
+    (apt / helper.MIRROR).write_bytes(helper.ORIGINAL + b'https://extra.example/ubuntu/\tpriority:4\n')
+    before = mirror_state(apt)
+    monkeypatch.setattr(helper, 'APT', apt)
+    helper.main()
+    out = capsys.readouterr().out
+    assert '"phase": "mirror_priority_skipped"' in out and '"apt_mutated": false' in out
+    assert '::warning::' in out
+    assert mirror_state(apt) == before
+    assert not list(apt.glob('.seraph-apt-*'))
+
+
+def test_cli_still_aborts_on_failure_after_staging(apt, monkeypatch):
+    _hosted_cli(monkeypatch)
+    monkeypatch.setattr(helper, 'APT', apt)
+    monkeypatch.setattr(helper.os, 'fsync', lambda *a: (_ for _ in ()).throw(OSError('fixture fsync failure')))
+    with pytest.raises(OSError, match='fixture fsync failure'):
         helper.main()

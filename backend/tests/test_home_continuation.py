@@ -25,13 +25,14 @@ from src.api.work_board import router as work_router
 
 async def test_actual_programme_passive_states_and_policy_publication(accounting_db,monkeypatch,forbid_external_inference):
     from pathlib import Path
-    from tests.test_inference_accounting import setup_configuration
+    from tests.near_tee_support import write_near_tee_text_configuration
     from src.guardian.goal_programmes import GoalProgrammeService
     from src.goals.contracts import GoalProgrammeRequest,GoalProgrammeAccept
     from src.model_fabric.configuration import read_model_fabric_configuration
     from src.model_fabric.effective_policy import revoke_effective_policy
     from types import SimpleNamespace
-    setup_configuration()
+    # ADR-035: the programme's research route is the NEAR TEE text slot.
+    write_near_tee_text_configuration()
     client,operator = await home_setup(accounting_db,monkeypatch)
     goal = await GoalRepository().create('Private programme title',description='PRIVATE_PROGRAMME_BODY',
         owner_principal_id=operator.principal.principal_id,owner_session_id=operator.session_id)
@@ -62,7 +63,7 @@ async def test_actual_programme_passive_states_and_policy_publication(accounting
                 body = response.json()
                 assert body['programme_status']['items'],response.text
                 row = body['programme_status']['items'][0]
-                assert row['programme_id']==accepted['id'] and row['state']==expected
+                assert row['programme_id']==accepted['id'] and row['state']==expected, (row, accepted.get('state'), home_projection._policy)
                 assert 'PRIVATE_PROGRAMME_BODY' not in response.text and 'Track public release notes' not in response.text
                 assert len([s for s in statements if s.lstrip().upper().startswith(('SELECT','WITH'))])<=18
                 assert not any(s.lstrip().upper().startswith(('INSERT','UPDATE','DELETE')) for s in statements)
@@ -75,15 +76,20 @@ async def test_actual_programme_passive_states_and_policy_publication(accounting
             # Actual common policy writer refreshes the passive handle; no GET file read.
             configured = read_model_fabric_configuration()
             await revoke_effective_policy(SimpleNamespace(state=SimpleNamespace(operator=operator)),
-                SimpleNamespace(grant_id='provider_policy:openrouter',expected_revision=configured.egress_revision,
+                SimpleNamespace(grant_id='provider_policy:near_tee',expected_revision=configured.egress_revision,
                     idempotency_key='home-policy-revoke'))
             blocked = await read('blocked')
             assert blocked['next_digest_at'] is None
             from dataclasses import replace
             from src.model_fabric.configuration import write_model_fabric_configuration
             revoked = read_model_fabric_configuration()
+            # Restored egress at a new epoch; the NEAR TEE slot's purpose
+            # consent is re-given at that revision, as the settings flow does.
+            restored_revision = revoked.egress_revision+1
+            slot = replace(revoked.near_tee.slots["text"],purpose_consent_revision=restored_revision)
             write_model_fabric_configuration(replace(revoked,egress_revoked=False,
-                egress_revision=revoked.egress_revision+1,egress_revocation_key=None))
+                egress_revision=restored_revision,egress_revocation_key=None,
+                near_tee=replace(revoked.near_tee,slots={"text":slot})))
             paused = await read('paused')
             assert paused['next_digest_at'] is None
             await GoalRepository().update(goal.id,description='Changed private source',expected_revision=1)

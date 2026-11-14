@@ -3,13 +3,13 @@
 Real Auth, SQLite, durable jobs, programme authority, artifact owners and the
 real reviewed Cordis child (research service, goal-plan provider, guardian
 consumer and source-format providers). Public search/source HTTP and model
-inference use fixed in-memory transport responses; Python socket connects and
-DNS are denied, and the child has no network configuration.
+inference (ADR-035: the NEAR TEE text slot, through the intercepted NEAR
+gateway) use fixed in-memory responses; Python socket connects and DNS are
+denied, and the child has no network configuration.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import socket
@@ -19,13 +19,13 @@ import pytest
 from fastapi import FastAPI
 
 from tests.cordis_research import needs_cordis, package_variant, research_host
-from tests.test_inference_accounting import accounting_db, setup_configuration  # noqa: F401
+from tests.near_tee_support import prepare_near_tee_vertical
+from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import ResponseBytes, real_auth  # noqa: F401
 from src.auth.middleware import OperatorAuthMiddleware
 from src.workflows.job_runtime import DurableJobRepository
 
-# ADR-035: research inference runs over the intercepted historical OpenRouter route (canary + transport)
-pytestmark = [needs_cordis, pytest.mark.asyncio, pytest.mark.openrouter_legacy]
+pytestmark = [needs_cordis, pytest.mark.asyncio]
 
 HTML = b"<html><head><style>p{}</style></head><body><h1>Release 2</h1><p>Shipped &amp; dated.</p><script>x()</script></body></html>"
 RSS = (b'<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>Release feed</title>'
@@ -71,28 +71,25 @@ class Fixture:
         return [method for method, _ in self.frames]
 
 
-@asynccontextmanager
-async def discovery(accounting_db, monkeypatch, fixture, *, package_root=None, hooks=None):  # noqa: F811
-    from config.settings import settings
-    from src.api import auth, goals, model_fabric_settings
-    from src.guardian.discovery_search import DiscoverySearch
-    from src.guardian.goal_discovery import GoalDiscoveryService
-    from src.guardian.goal_programmes import goal_programme_service
-    from src.model_fabric.configuration import write_model_fabric_configuration
-    root, _, factory = accounting_db
-    configured = setup_configuration()
-    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
-        replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
-        egress_revision=configured.egress_revision + 1))
-    monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
-    jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
+# The NEAR TEE slot reserves its catalog-priced bound per request (the
+# catalog check requires >= 1711 micro-USD for this slot), so the programme's
+# inference budget funds that reserve; NEAR bills 2 micro-USD per request.
+_REQUEST_BOUND = 2_000
+_PROGRAMME_BUDGET = 20_000
 
-    class ModelBoundary(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request):
-            body = json.loads(request.content)
-            answer = "CANARY_OK"
-            if len(body["messages"]) > 1:
+
+def research_gateway(fixture):
+    """The intercepted NEAR gateway answering the discovery roles' prompts."""
+    from tests.test_near_tee_text_slot import NearFixture
+
+    class Gateway(NearFixture):
+        def __init__(self):
+            super().__init__()
+            self.cost_nano = 2_000
+
+        def handler(self, request):
+            if request.method == "POST" and request.url.raw_path.decode() == "/v1/chat/completions":
+                body = json.loads(request.content)
                 fixture.calls.append(body)
                 supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
                 if supplied.get("task") == "plan_queries":
@@ -105,10 +102,27 @@ async def discovery(accounting_db, monkeypatch, fixture, *, package_root=None, h
                         "claims": [{"text": "The public fixture describes the selected release.",
                             "citations": [{key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
                         "uncertainty": ["Fixture execution is not a semantic truth claim."], "contradictions": [], "no_learning": True})
-            payload = {"id": "fixture-1008", "choices": [{"message": {"role": "assistant", "content": answer}}],
-                       "usage": {"cost": "0.000002", "prompt_tokens": 10, "completion_tokens": 10}}
-            return httpx.Response(200, request=request, headers={"content-type": "application/json"},
-                                  stream=ResponseBytes(json.dumps(payload).encode()))
+                self.answer = {"role": "assistant", "content": answer}
+                self.body_id = f"chatcmpl-discovery-{len(fixture.calls)}"
+            return super().handler(request)
+    return Gateway()
+
+
+@asynccontextmanager
+async def discovery(accounting_db, monkeypatch, fixture, *, package_root=None, hooks=None):  # noqa: F811
+    from config.settings import settings
+    from src.api import auth, goals, model_fabric_settings
+    from src.guardian.discovery_search import DiscoverySearch
+    from src.guardian.goal_discovery import GoalDiscoveryService
+    from src.guardian.goal_programmes import goal_programme_service
+    from src.model_fabric.configuration import write_model_fabric_configuration
+    root, _, factory = accounting_db
+    monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
+    jobs = DurableJobRepository()
+    # ADR-035: research inference runs on the NEAR TEE text slot; the model is
+    # the intercepted NEAR gateway (any other host fails the test).
+    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=research_gateway(fixture),
+                                    capabilities=("text",), request_cost_bound_microusd=_REQUEST_BOUND)
 
     class PublicBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -123,11 +137,6 @@ async def discovery(accounting_db, monkeypatch, fixture, *, package_root=None, h
                                   stream=ResponseBytes(raw))
 
     original_client = httpx.AsyncClient
-
-    def clients(**kwargs):
-        kwargs.setdefault("transport", ModelBoundary())
-        return original_client(**kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", clients)
     _deny_sockets(monkeypatch)
 
     def resolver(host, port):
@@ -152,14 +161,10 @@ async def discovery(accounting_db, monkeypatch, fixture, *, package_root=None, h
                                        headers={"origin": "http://localhost:3001"}) as client:
                 assert (await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})).status_code == 200
                 enrolled = await client.post("/api/auth/ownership/enroll")
-                for capability in ("text", "latency_ms", "health"):
-                    canary = await client.post("/api/settings/model-fabric/canary", json={
-                        "profile_id": "openrouter", "capability": capability, "timeout_seconds": 30})
-                    assert canary.json()["outcome"] == "passed", canary.text
                 goal_id = (await client.post("/api/goals", json={"title": "PRIVATE_GOAL_TITLE_CANARY",
                                                                   "description": "PRIVATE_GOAL_DESCRIPTION_CANARY"})).json()["id"]
                 request = {"expected_goal_revision": 1, "expected_grant_revision": 0,
-                           "public_brief": "Track public product release evidence", "budget": {"max_inference_microusd": 500}}
+                           "public_brief": "Track public product release evidence", "budget": {"max_inference_microusd": _PROGRAMME_BUDGET}}
                 base = f"/api/goals/{goal_id}/programmes"
                 preview = await client.post(base + "/preview", json=request)
                 programme = (await client.post(base + "/accept", json={**request, "review_digest": preview.json()["review_digest"],

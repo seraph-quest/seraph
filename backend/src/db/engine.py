@@ -169,8 +169,9 @@ class StateProviderUnavailable(RuntimeError):
 # Tri-state ``get_session`` gate owned by the provider worker (#1024).
 # ``None``: no worker is attached (tests, host CLIs, migrations, any process
 # that never constructs the worker) and the gate is open, as before. While a
-# worker is attached it is open only in ``active``; ``failed`` and
-# ``deactivating`` refuse typed before a session is yielded.
+# worker is attached it is open in ``activating`` (init_db and the activation
+# predicates need sessions) and ``active``; ``failed`` and ``deactivating``
+# refuse typed before a session is yielded.
 _STATE_GATE: list[str | None] = [None, None]
 
 

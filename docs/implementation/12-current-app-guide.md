@@ -1068,16 +1068,19 @@ the lease. Shutdown runs the service `.stop()` calls with the gate still open,
 then MCP disconnect and the task drain, then closes the gate, then `close_db`,
 then releases the lease.
 
-`seraph.state.v1` is a runtime domain and every method depends on it
-(manifest `runtime-service-methods.v2`). Persisted bindings carry their
-manifest version: a v1 binding decodes and re-encodes byte-identically through
-the frozen `METHOD_DEPENDENCIES_V1` table, so its job CAS predicates still
-match; new bindings are v2. Startup adds the legacy `seraph.state.v1` row (with
-a `runtime_composition_state_domain_added` audit event) only to an inventory
-that is exactly the previous 14 domains, including on the first start after a
-host-CLI restore of an older backup; an empty table is seeded whole and any
-other partial inventory is left to fail closed. The migration is forward-only:
-an older binary rejects the extra row with `composition_inventory_invalid`.
+`seraph.state.v1` is a runtime domain and every method depends on it. New
+admissions write binding schema 3 under manifest `runtime-service-methods.v2`.
+Persisted schema 1 (#1019) and schema 2 (#1020) bindings keep manifest v1 and
+decode and re-encode byte-identically, so their job CAS predicates still
+match; committed fixtures captured before #1024 pin that. Startup adds the
+legacy `seraph.state.v1` row with one `runtime_composition_domain_introduced`
+audit event (`introduced_by: "1024"`) as a chained exact-prefix step after
+#1020's domain introductions: only an inventory that is then exactly the
+previous 18 domains gains it, including on the first start after a host-CLI
+restore of an older backup. An empty table is seeded whole (19 domains); any
+other partial or unknown inventory is left to fail closed, and no existing
+row changes. The step is forward-only: an older binary rejects the extra row
+with `composition_inventory_invalid`.
 **Take a host-CLI workspace backup before upgrading**; rolling the binary back
 means restoring that backup. A `state`, `authority` or `audit` row that is not
 the legacy owner with the fixed legacy digest (a tampered or foreign restored

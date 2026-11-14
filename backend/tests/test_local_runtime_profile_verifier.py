@@ -139,7 +139,7 @@ async def test_local_runtime_profile_verifier_blocks_active_local_transport(tmp_
     assert calls == []
     assert receipt["status"] == "blocked"
     assert receipt["operator_visible"] is True
-    assert receipt["reason_code"] == "local_runtime_profile_probe_disabled_openrouter_only"
+    assert receipt["reason_code"] == "local_runtime_profile_probe_disabled_near_tee_only"
     assert receipt["profiles"] == []
     assert receipt["backend"]["probes"] == []
     assert receipt["admission"] == {
@@ -164,7 +164,7 @@ async def test_local_runtime_profile_verifier_blocks_active_local_transport(tmp_
     assert proof["status"] == "blocked"
     assert proof["safe_for_single_backend_profile_routing"] is False
     assert proof["operator_visible"] is True
-    assert proof["reason_code"] == "local_runtime_profile_probe_disabled_openrouter_only"
+    assert proof["reason_code"] == "local_runtime_profile_probe_disabled_near_tee_only"
 
 
 async def test_verify_local_runtime_profiles_marks_ambiguous_without_structured_reasoning(tmp_path, monkeypatch):

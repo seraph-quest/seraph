@@ -301,6 +301,31 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
     expect((await screen.findAllByText(/Complete the goal's success criterion, verifier, and evidence/)).length).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["openrouter_retired", /OpenRouter is retired \(ADR-035\); nothing was contacted/],
+    ["no_active_provider", /No active inference provider; nothing was contacted/],
+    ["near_tee_route_unsupported", /not yet available on NEAR TEE \(tracked in #1159\)/],
+  ])("explains the ADR-035 route block %s with its stable code", async (code, text) => {
+    const blocked = task({
+      status: "blocked",
+      title: "Route blocked capability",
+      block_kind: "capability",
+      block_reason: code,
+      requires_review: false,
+      reviewer_id: null,
+      review_expires_at: null,
+      latest_attempt: null,
+    });
+    const state = { task: blocked, detail: detail(blocked) };
+    installBoardTransport(fetchMock, state);
+
+    render(<WorkBoardPanel {...owner} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Route blocked capability" }));
+    const shown = await screen.findAllByText(text);
+    expect(shown.length).toBeGreaterThan(0);
+    expect(shown.some((item) => item.textContent?.includes(`${code} · `))).toBe(true);
+  });
+
   it("keeps manual block reasons within the backend 500-character contract", async () => {
     const todo = task({
       status: "todo",

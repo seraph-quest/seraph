@@ -6,6 +6,7 @@ import pytest_asyncio
 
 from src.models.schemas import WSResponse
 from src.scheduler.connection_manager import BroadcastResult, ConnectionManager
+from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
 
 # ── ConnectionManager ──────────────────────────────────────
@@ -250,12 +251,22 @@ class TestSchedulerEngine:
         assert observed[0].job_id != observed[1].job_id
         assert get_current_trust_principal() is None
 
-    @pytest.mark.openrouter_legacy  # ADR-035: the grant check sits behind the retired-route denial in canonical context
     @pytest.mark.asyncio
-    async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self):
+    async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self, model_fabric_workspace):
+        """ADR-035 retired world: with a usable NEAR TEE text slot the route is
+        active, so the canonical context reaches the identity fence, and a
+        non-model scheduler job is refused for lacking model_inference."""
         from src.approval.runtime import get_current_trust_principal
         from src.model_fabric.caller_context import build_canonical_inference_context
+        from src.model_fabric.configuration import effective_workload_policy
+        from src.model_fabric.retirement import openrouter_retired
         from src.scheduler.engine import _async_job_wrapper
+        from tests.near_tee_support import write_near_tee_text_configuration
+
+        assert openrouter_retired() is True
+        write_near_tee_text_configuration()
+        assert effective_workload_policy("daily_briefing").allowed_provider_kinds == ("near_tee",)
+        observed = []
 
         async def non_model_job():
             principal = get_current_trust_principal()
@@ -269,13 +280,26 @@ class TestSchedulerEngine:
                     timeout_seconds=10,
                     job_id=principal.job_id,
                 )
+            observed.append("non_model")
 
-        wrapper = _async_job_wrapper(
-            non_model_job,
-            asyncio.get_running_loop(),
-            job_id="screen_cleanup",
-        )
-        await wrapper()
+        async def model_job():
+            # Control: the same route with the model grant passes the fence,
+            # so the refusal above is the grant check, not a route denial.
+            principal = get_current_trust_principal()
+            context = build_canonical_inference_context(
+                "daily_briefing",
+                payload="private briefing",
+                output_tokens=100,
+                timeout_seconds=10,
+                job_id=principal.job_id,
+            )
+            assert context.allowed_provider_kinds == ("near_tee",)
+            observed.append("model")
+
+        await _async_job_wrapper(non_model_job, asyncio.get_running_loop(), job_id="screen_cleanup")()
+        await _async_job_wrapper(model_job, asyncio.get_running_loop(), job_id="daily_briefing",
+            allow_model_inference=True)()
+        assert observed == ["non_model", "model"]
 
     def test_shutdown_when_not_running(self):
         from src.scheduler.engine import shutdown_scheduler

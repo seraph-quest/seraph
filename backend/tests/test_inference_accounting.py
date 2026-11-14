@@ -22,27 +22,12 @@ from src.security.trust_contract import EgressClass
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError, account_charge_microusd
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
+from tests.async_wait_support import started_or_raise
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
 # witness mechanics that still settle retained liabilities; retired-route
 # denial is covered in test_openrouter_retirement.py.
 pytestmark = pytest.mark.openrouter_legacy
-
-
-async def started_or_raise(started: asyncio.Event, task: asyncio.Task) -> None:
-    """Wait for a provider callback to start, failing fast if its task ends first.
-
-    A precontact denial (for example a retired route) finishes the task before
-    the callback runs; waiting on ``started`` alone would then never return.
-    """
-    waiter = asyncio.ensure_future(started.wait())
-    try:
-        await asyncio.wait({waiter, task}, return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        waiter.cancel()
-    if not started.is_set():
-        task.result()
-        raise AssertionError("provider task finished before its callback started")
 
 
 @pytest_asyncio.fixture

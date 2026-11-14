@@ -829,9 +829,9 @@ async def _analyze_with_local_vlm(image_path: Path, artifacts: dict[str, Any]) -
 
     Keeping this name avoids an import-time break for archived tooling while
     making the former local wrapper route impossible to execute.  Active
-    screenshot analysis has one provider path: the governed OpenRouter route.
+    screenshot analysis has one provider path: the governed NEAR TEE vision slot (ADR-035).
     """
-    raise ScreenshotSemanticAnalysisError("local_vlm_disabled_openrouter_only")
+    raise ScreenshotSemanticAnalysisError("local_vlm_disabled_near_tee_only")
 
 
 async def _run_governed_vlm_adapter(*, context, profile: ProviderProfile, transport):

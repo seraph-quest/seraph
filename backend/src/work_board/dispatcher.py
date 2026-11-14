@@ -1370,6 +1370,16 @@ _STABLE_REASON_CODES = frozenset(
 )
 
 
+# Capabilities whose execution needs one model step on a canonical route
+# (ADR-035 inactive-route preflight). General tasks are checked by their
+# planner; their accepted native execution makes no model call.
+_CAPABILITY_MODEL_ROUTES = {
+    "work.mail-reply-draft.v1": "strategist_agent",
+    "calendar.meeting-prep.v1": "strategist_agent",
+    "work.research-dossier.v1": "readonly_research_child",
+}
+
+
 def _stable_reason_code(value: Any, *, fallback: str = "execution_blocked") -> str:
     """Map adapter/runtime failures to a closed, non-sensitive code set."""
 
@@ -2960,14 +2970,19 @@ class WorkBoardDispatcher:
                 # change between passes.  Close that gate before claim so no
                 # execution attempt is counted for a pre-admission denial.
                 if task.status is WorkBoardStatus.ready:
+                    # ADR-035 route blocks keep their stable code (rendered by
+                    # the cockpit), like GoalSnapshot gates keep their text.
+                    from src.model_fabric.retirement import ROUTE_BLOCK_REASONS
+                    keep_reason = (readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        or readiness_error in ROUTE_BLOCK_REASONS)
                     block_kind = (
                         "capability"
-                        if readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        if keep_reason
                         else _stable_reason_code(readiness_error, fallback="capability")
                     )
                     block_reason = (
                         readiness_reason or readiness_error
-                        if readiness_error in _GOAL_SNAPSHOT_PREFLIGHT_ERRORS
+                        if keep_reason
                         else _stable_reason_code(readiness_error, fallback="capability")
                     )
                     async with self.session_provider() as db:
@@ -4455,6 +4470,14 @@ class WorkBoardDispatcher:
         with staged_captured_source_identity():
 
             capability = _text(task.capability_id)
+            model_route = _CAPABILITY_MODEL_ROUTES.get(capability)
+            if model_route is not None:
+                from src.model_fabric.retirement import openrouter_only_route_block
+                if route_block := openrouter_only_route_block(model_route):
+                    # ADR-035: a capability whose model step has no usable
+                    # route stays blocked before claim. The stable code is the
+                    # operator-visible reason; the cockpit renders its text.
+                    return route_block, route_block
             try:
                 if capability == "agent.task.v1":
                     from src.work_board.contracts import GeneralTaskEnvelope
@@ -5913,6 +5936,12 @@ class WorkBoardDispatcher:
                     return {"admitted": True, "completed": True, "blocked": False}
                 return {"admitted": True, "completed": False, "blocked": True}
         else:
+            from src.model_fabric.retirement import openrouter_only_route_block
+            if route_block := openrouter_only_route_block("readonly_research_child"):
+                # ADR-035 claim-time gate (the route can change after
+                # preflight): no native root, source read or contact.
+                await self._close_unadmitted_or_block(claim, route_block, retryable_input=True)
+                return {"admitted": False, "completed": False, "blocked": True}
             from src.work_board.research_parent import stage_native_projection
             strategy = await self._research_strategy(task)
             if runtime_seconds is None:
@@ -6083,6 +6112,12 @@ class WorkBoardDispatcher:
             job_id = _text(expected.get("job_id"))
             projection = admitted_projection
         except BoardError as exc:
+            if exc.extra.get("route_block"):
+                # ADR-035: no usable model route; nothing was admitted. Close
+                # the claim with the stable code as the operator-visible reason.
+                await self._close_unadmitted_or_block(claim, exc.code, retryable_input=True)
+                result["blocked"] = True
+                return result
             if _text(task.capability_id) == "calendar.meeting-prep.v1" and exc.code in {
                 "calendar_model_route_unavailable",
                 "calendar_binding_unavailable",
@@ -7751,6 +7786,18 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
+            from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
+
+            if route_block := openrouter_only_route_block("strategist_agent"):
+                # ADR-035: name the cause before any durable admission.
+                raise BoardError(
+                    route_block,
+                    inactive_route_label(route_block),
+                    status_code=409,
+                    reason_code=route_block,
+                    recovery_action="restore_prerequisite",
+                    route_block=True,
+                )
             policy = effective_workload_policy("strategist_agent")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)
@@ -8166,6 +8213,18 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
+            from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
+
+            if route_block := openrouter_only_route_block("strategist_agent"):
+                # ADR-035: name the cause before any durable admission.
+                raise BoardError(
+                    route_block,
+                    inactive_route_label(route_block),
+                    status_code=409,
+                    reason_code=route_block,
+                    recovery_action="restore_prerequisite",
+                    route_block=True,
+                )
             policy = effective_workload_policy("strategist_agent")
             provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)

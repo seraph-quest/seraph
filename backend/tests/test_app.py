@@ -258,7 +258,7 @@ async def test_runtime_status_reports_openrouter_and_historical_vlm_metadata(cli
     assert effective["inference_readiness"]["provider"] is None
     assert {"openrouter_retired", "no_active_provider"} <= set(effective["inference_readiness"]["reasons"])
     assert payload["vlm_runtime"]["active"] is False
-    assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_openrouter_only"
+    assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_near_tee_only"
     assert payload["vlm_runtime"]["live_probe"]["checked"] is False
     assert payload["vlm_runtime"]["live_probe"]["reason"] == "deferred_fast_metadata"
     assert "secret-token" not in str(payload)
@@ -286,7 +286,7 @@ async def test_runtime_status_does_not_activate_direct_gpu_text(client):
     assert payload["effective_runtime"]["route_label"] == "openrouter"
     assert payload["effective_runtime"]["provider_label"] == "openrouter"
     assert payload["vlm_runtime"]["active"] is False
-    assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_openrouter_only"
+    assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_near_tee_only"
     assert payload["vlm_runtime"]["live_probe"]["checked"] is False
     assert payload["vlm_runtime"]["live_probe"]["reason"] == "deferred_fast_metadata"
 

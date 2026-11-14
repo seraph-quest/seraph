@@ -1132,6 +1132,98 @@ or `cost_liability` jobs and never replays their effects. Backup and restore
 stay with the host CLI against a stopped backend; there is no in-process
 maintenance handoff.
 
+### Scheduler and dispatcher lifecycle (#1025)
+
+Two runtime domains own a lifecycle, not a store: `seraph.scheduler.v1` (the
+timers of system jobs, user cron jobs and governed schedules) and
+`seraph.dispatch.v1` (the WorkBoard dispatcher loop and its live-worker
+registry). `seraph.tasks.v1` stays the Python-hosted job ledger every method
+depends on; the dispatcher has its own domain so a dispatch owner change never
+bumps the tasks epoch. `runtime_plugins/lifecycle.py` activates the retained
+Python provider of a domain (the one `AsyncIOScheduler` and
+`WorkBoardDispatcher.run_pass`) only while its owner row is `ready` at epoch E
+and, for a `cordis` owner, the admitting host proves exactly that domain's
+reviewed plugin digest in this boot. The legacy owner uses the same path with
+no Cordis precondition. Each activation writes a `runtime_lifecycle_activated`
+audit event; a second activation in the same process is a no-op. The Cordis
+`seraph.scheduler.v1` plugin remains the forward-only scheduler facade and the
+new `seraph.dispatch.v1` plugin is a readiness-only facade (no methods, timers,
+store or execution). Neither starts a timer or executes work, and the existing
+stores (`ScheduledJob`/`ScheduledJobRun`, governed occurrences,
+`WorkflowRunState`, `WorkBoardTask`/`WorkBoardAttempt`) stay the only queues.
+
+Startup order: provider worker, services, Cordis host start, boot owner
+cutover (manifest order ends with the scheduler, then dispatch, whose
+prerequisite is the scheduler), then the scheduler instance is built, user
+cron jobs are synced, and both domains activate. A fresh boot therefore cuts
+both domains over to Cordis once, like the #1019/#1020 domains; an operator
+rollback stays sticky. Without a running reviewed child a Cordis-owned domain
+stays `blocked` with the host's fix and there is no legacy fallback.
+
+Every job registered by `init_scheduler` and every `user_cron:*` job is gated by
+a closed classification: `work_board_dispatch` by dispatch, the other system
+jobs and user cron jobs (including `run_source_watch`) by the scheduler.
+Retention and cleanup jobs (`screen_cleanup`, `audio_ingress_cleanup`,
+`cordis_mail_retention`) are exempt and keep running while a domain is blocked
+or Cordis is missing. An unclassified system job is refused at registration.
+Timers keep their phase: a tick whose domain is not active returns at entry
+(before the background-inference toggle, any admission or contact) and records
+a visible block, rather than the scheduler being paused and resumed; an
+`EVENT_JOB_MISSED` listener records `skipped / missed_fire`. A non-active
+domain is re-evaluated on a gated tick at most every 5 s, so a restarted host
+or a finished transition resumes work without a restart. `SCHEDULER_ENABLED=false`
+shows the scheduler domain as `disabled`, never `blocked`, with no notification.
+
+Fences: a tick carries its activation in a context variable, and its durable
+effects re-check the exact ready owner (`domain_ready` `EXISTS` on
+`runtime_composition_states`) inside their own transaction: the
+`ScheduledJobRun` insert, governed `reserve_occurrence` and
+`claim_occurrence`, and WorkBoard `promote_task_ready`, `claim_ready_task` and
+`block_ready_task`. `run_pass` also checks at each mutating step boundary. A
+moved row refuses with `composition_dependency_changed` before any contact.
+API and manual writes outside a tick are not gated. API launches that enter the
+live-worker registry (research recovery, document comparison retry) refuse
+with `dispatch_owner_not_active` while dispatch is not active.
+
+Deactivation closes admission first, then drains in-flight work within the
+original bounds (scheduler wrappers 120 s; WorkBoard attempts
+`MAX_RUNTIME_SECONDS` plus a 30 s settlement window), then cancels what is
+left, so each attempt runs its own recovery path and stale-lease recovery
+leaves an unresolved effect unknown (never forced or retried), then audits
+`runtime_lifecycle_quiesced`. A lost Cordis host deactivates the domain at once.
+Backend shutdown closes admission and keeps today's bounded shutdown (no new
+wait). Restart is a fresh activation at the row's current epoch after
+stale-lease recovery; the missed-fire policy is unchanged (in-memory jobstore,
+interval jobs resume at their next interval, cron jobs within their grace,
+governed schedules reserve at most one latest due slot), so a cutover equals a
+restart for timer phase.
+
+Live operator transitions of these two domains through
+`POST /api/runtime/composition/domains/{domain}/owner` return `202` and run as
+one background step: drain at E while the row is still `ready`, then the
+fenced `transition_domain` writer (`ready → draining → blocked@E+1 → ready` in
+one transaction), then reactivation at E+1. Only one transition per domain runs
+at a time. A failure leaves the domain visibly blocked with its fix.
+
+Visibility: `/api/runtime/status` gains `scheduler_runtime` and
+`dispatch_runtime` (`state`, `reason`, `recovery`, the row's `owner`,
+`owner_epoch` and `owner_state`, in-flight and live-worker counts, and the
+scheduler's `blocked_jobs`). Entering `blocked` raises one notification and one
+Activity entry per domain; repeated blocked ticks only update the job's
+persisted status, and the first activation after a block writes one
+`recovered` Activity entry. Per-job lifecycle blocks are stored in the same
+status record as the background-inference toggles
+(`background-inference-status.json`), so Settings → Background inference shows
+them for inference jobs; a lifecycle block is cleared only by that job's next
+tick under an active domain.
+
+Proof limits: verified with temporary SQLite state and, for the Cordis owner,
+host loss and live transitions, the real reviewed child; external transport
+and inference denied. Not yet done: the durable `background_job_status` table
+(D2) replacing the JSON status record, Settings and cockpit banner rendering of
+the two domain statuses, and fence/race tests for governed occurrences and
+WorkBoard claims on a real board.
+
 ### Cordis guardian research (#1008)
 
 [#1008](https://github.com/seraph-quest/seraph/issues/1008) runs the C2.2

@@ -44,13 +44,14 @@ def assume_assessment_route_available(monkeypatch) -> None:
     """Precondition for guardian tick/recovery mechanics tests (#1156).
 
     Those tests pin how the tick starts, recovers and fences assessments
-    given a usable assessment route. The guardian vertical has no NEAR TEE
-    adapter yet (#1159), so in the retired world its candidates are held
-    queued; that hold is covered by test_vertical_no_provider_journeys. No
-    provider transport is enabled by this: model calls stay mocked/forbidden.
+    given a usable assessment route, independent of provider setup. With
+    #1159 the route is the NEAR TEE text slot (its journey is pinned in
+    test_near_tee_vertical_journeys); without one, candidates are held queued
+    (test_vertical_no_provider_journeys). No provider transport is enabled by
+    this: model calls stay mocked/forbidden.
     """
-    from src.model_fabric import retirement
-    monkeypatch.setattr(retirement, "openrouter_only_route_block", lambda _runtime_path: None)
+    from src.guardian import opportunity_runtime
+    monkeypatch.setattr(opportunity_runtime, "assessment_route_block", lambda: None)
 
 
 # ── Ready NEAR TEE text slot for vertical journeys (#1159) ─────────────

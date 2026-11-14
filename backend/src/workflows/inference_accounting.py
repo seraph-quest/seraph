@@ -341,7 +341,6 @@ class InferenceAccountingRepositoryMixin:
                     if never_contacted and run.job_kind in {"calendar_meeting_prep", "mail_reply_draft"} and _utc(row.deadline_at) > observed:
                         from src.db.models import WorkBoardAttempt, WorkBoardTask, WorkBoardInputArtifact
                         from src.work_board.dispatcher import _parse_typed_input
-                        from src.model_fabric.effective_policy import current_inference_policy
                         from src.workflows.job_runtime import _assert_canonical_goal_fence
                         attempt = (await db.execute(select(WorkBoardAttempt).where(WorkBoardAttempt.workflow_run_id == row.job_id))).scalar_one_or_none()
                         task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == attempt.task_id))).scalar_one_or_none() if attempt is not None else None
@@ -360,7 +359,7 @@ class InferenceAccountingRepositoryMixin:
                                 or json.loads(run.artifact_receipts_json) or json.loads(run.checkpoint_receipts_json)):
                                 raise ValueError("typed reconstruction authority unavailable")
                             _parse_typed_input(task)
-                            if current_inference_policy()[1] != row.policy_digest:
+                            if _current_policy_digest_for(row) != row.policy_digest:
                                 raise ValueError("provider policy changed")
                             from src.auth.service import authenticate_session
                             operator = await authenticate_session(run.session_id, touch=False)
@@ -419,12 +418,11 @@ class InferenceAccountingRepositoryMixin:
         return recovered
 
     async def _accounting_resume_claim_allowed(self, db, run) -> bool:
-        from src.model_fabric.effective_policy import current_inference_policy
         rows = list((await db.execute(select(InferenceCostReservation).where(InferenceCostReservation.job_id == run.run_identity))).scalars())
         return bool(run.job_kind in {"calendar_meeting_prep", "mail_reply_draft", "audio_transcription_v1"} and len(rows) == 1
             and rows[0].state == "reserved" and rows[0].recovery_reason == "typed_owner_precontact_resume"
             and _utc(rows[0].deadline_at) > datetime.now(timezone.utc)
-            and rows[0].policy_digest == current_inference_policy()[1])
+            and rows[0].policy_digest == _current_policy_digest_for(rows[0]))
 
     async def inference_precontact_resume_allowed(self, job_id: str) -> bool:
         async with self._session() as db:
@@ -1229,3 +1227,20 @@ class InferenceAccountingRepositoryMixin:
         except inference_ledger.LedgerVerificationError as exc:
             raise InferenceAccountingError("accounting_continuity_unavailable") from exc
         return rows
+
+
+def _current_policy_digest_for(row) -> str | None:
+    """The current owner policy digest for a reservation's own provider (#1159).
+
+    A NEAR TEE row compares against the NEAR TEE slot authority projection;
+    any other row against the retained OpenRouter projection. ``None`` when
+    that policy is not current (never equal to a stored digest).
+    """
+    from src.model_fabric.accounting import near_tee_profile_slot
+    from src.model_fabric.effective_policy import current_inference_policy, current_near_tee_policy
+    try:
+        if (slot := near_tee_profile_slot(row.runtime_path, row.profile_id)) is not None:
+            return current_near_tee_policy(slot)[1]
+        return current_inference_policy()[1]
+    except PermissionError:
+        return None

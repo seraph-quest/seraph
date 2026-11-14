@@ -334,3 +334,506 @@ async def test_work_board_card_proposal_missing_near_proof_is_sealed_precontact(
     assert (await jobs.inference_accounting_snapshot())["operations"] == []
     async with sessions() as db:
         assert list((await db.execute(select(WorkflowRunState))).scalars()) == []
+
+
+# ── Guardian opportunity assessment ──────────────────────────────
+
+
+from tests.test_work_board_m6_provider_free_journey import isolated_runtime  # noqa: E402,F401
+
+
+async def _guardian_world(isolated_runtime, monkeypatch, tmp_path, *, plans_per_day=0):
+    from pathlib import Path
+    from src.guardian.opportunity_runtime import read_snapshot
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    from tests import test_guardian_opportunity_policy as policy_fixture
+    if plans_per_day:
+        # The reviewed policy also permits plan proposals for this Goal.
+        original = policy_fixture.setup_policy
+
+        async def setup_policy(runtime, **kwargs):
+            sessions, goal, watch, request, body = await original(runtime, **kwargs)
+            policy = body.policy.model_copy(update={"max_plan_proposals_per_utc_day": plans_per_day})
+            return sessions, goal, watch, request, body.model_copy(update={"policy": policy})
+        monkeypatch.setattr(policy_fixture, "setup_policy", setup_policy)
+    sessions, goal, _watch, _request, row, packet = await policy_fixture.publish_source(isolated_runtime)
+    # The model-fabric receipt/proof store binds its session at import.
+    monkeypatch.setattr("src.model_fabric.repository.get_session", sessions)
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "guardian-lifecycle"))
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(settings.workspace_dir)))
+    offered = read_snapshot(packet.opportunity_snapshot_artifact_id, packet.opportunity_snapshot_sha256)
+    return sessions, row, offered
+
+
+def assessment_answer(offered):
+    source = offered.sources[0]
+    return {"role": "assistant", "content": json.dumps({"schema_version": "seraph.opportunity.assessment.v1",
+        "relevance": 3, "confidence": "medium", "summary": "A relevant cited public release is available.",
+        "reason": "The supplied public release changed and warrants an operator review.",
+        "citations": [{"source_id": source.source_key, "start_line": 1,
+            "end_line": len(source.excerpt.split("\n")), "span_sha256": source.excerpt_sha256}],
+        "suggested_blueprint": "public-browser-check", "abstain_reason": None})}
+
+
+@pytest.mark.asyncio
+async def test_guardian_assessment_reaches_near_and_settles_from_near_billing(isolated_runtime, monkeypatch,
+        tmp_path):
+    from src.db.models import GuardianOpportunity
+    from src.guardian import opportunity_runtime
+    from src.workflows.job_runtime import DurableJobRepository
+    sessions, row, offered = await _guardian_world(isolated_runtime, monkeypatch, tmp_path)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+    assert opportunity_runtime.assessment_route_block() is None
+    near.answer = assessment_answer(offered)
+    await opportunity_runtime.execute_assessment(row.id)
+    async with sessions() as db:
+        final = await db.get(GuardianOpportunity, row.id)
+    assert final.status == "proposed", (final.status, final.reason_code)
+    body = assert_near_contract(near_inference_requests(near))
+    assert body["temperature"] == 0 and body["response_format"] == {"type": "json_object"}
+    assert "seraph.opportunity.assessment.v1" in body["messages"][0]["content"]
+    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.text"
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and rows[0]["job_id"] == final.job_id
+    job = await jobs.get_job(final.job_id)
+    # The broker's admission receipt is adopted into the assessment job, then
+    # the verified assessment write.
+    assert job["status"] == "succeeded" and [effect["effect_type"] for effect in job["effects"]] == [
+        "remote_inference_admission", "workspace_write"]
+
+
+@pytest.mark.asyncio
+async def test_guardian_assessment_near_echo_mismatch_blocks_with_settled_cost(isolated_runtime, monkeypatch,
+        tmp_path):
+    from src.db.models import GuardianOpportunity
+    from src.guardian import opportunity_runtime
+    from src.workflows.job_runtime import DurableJobRepository
+    sessions, row, offered = await _guardian_world(isolated_runtime, monkeypatch, tmp_path)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+    near.answer = assessment_answer(offered)
+    near.echo_model = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    await opportunity_runtime.execute_assessment(row.id)
+    async with sessions() as db:
+        final = await db.get(GuardianOpportunity, row.id)
+    # Contact happened and its known NEAR cost settled: an honest block.
+    assert (final.status, final.reason_code) == ("blocked", "near_tee_model_mismatch")
+    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled"
+
+
+@pytest.mark.asyncio
+async def test_guardian_held_candidate_resumes_on_near_route_and_blocks_at_deadline(isolated_runtime,
+        monkeypatch, tmp_path):
+    """#1156 follow-up: a candidate held queued for a route block resumes once
+    the NEAR TEE route exists; a held candidate still closes at its deadline."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import GuardianOpportunity
+    from src.guardian import opportunity_runtime
+    from src.workflows.job_runtime import DurableJobRepository
+    sessions, row, offered = await _guardian_world(isolated_runtime, monkeypatch, tmp_path)
+    # No provider: held queued with the visible reason, no durable job.
+    tick = await opportunity_runtime.run_opportunity_tick()
+    async with sessions() as db:
+        held = await db.get(GuardianOpportunity, row.id)
+    assert tick["started"] == 0
+    assert (held.status, held.reason_code, held.job_id) == ("queued", retirement.NO_ACTIVE_PROVIDER_REASON, None)
+    # A NEAR TEE route appears: the next tick starts the held candidate.
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+    near.answer = assessment_answer(offered)
+    tick = await opportunity_runtime.run_opportunity_tick()
+    assert tick["started"] == 1
+    await asyncio.gather(*list(opportunity_runtime._executions.values()))
+    async with sessions() as db:
+        resumed = await db.get(GuardianOpportunity, row.id)
+    assert resumed.status == "proposed", (resumed.status, resumed.reason_code)
+    assert len(near_inference_requests(near)) == 2
+
+
+@pytest.mark.asyncio
+async def test_guardian_held_candidate_blocks_at_deadline_while_held(isolated_runtime, monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from src.db.models import GuardianOpportunity
+    from src.guardian import opportunity_runtime
+    sessions, row, _offered = await _guardian_world(isolated_runtime, monkeypatch, tmp_path)
+    await opportunity_runtime.run_opportunity_tick()
+    async with sessions() as db:
+        held = await db.get(GuardianOpportunity, row.id)
+        assert (held.status, held.reason_code) == ("queued", retirement.NO_ACTIVE_PROVIDER_REASON)
+        held.assessment_deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db.add(held)
+    tick = await opportunity_runtime.run_opportunity_tick()
+    async with sessions() as db:
+        closed = await db.get(GuardianOpportunity, row.id)
+    assert tick["started"] == 0
+    assert (closed.status, closed.reason_code, closed.job_id) == ("blocked", "assessment_deadline_expired", None)
+
+
+async def _assessed_opportunity(isolated_runtime, monkeypatch, tmp_path):
+    """A proposed opportunity assessed on NEAR, ready for plan generation."""
+    from src.db.models import GuardianOpportunity
+    from src.guardian import opportunity_runtime
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_work_board_m6_provider_free_journey import SESSION
+    monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
+    sessions, row, offered = await _guardian_world(isolated_runtime, monkeypatch, tmp_path, plans_per_day=1)
+    monkeypatch.setattr("src.work_board.triage.get_session", sessions)
+    async with sessions() as db:
+        adapter = type(db)
+
+    async def scalars(self, statement, *args, **kwargs):
+        # The isolated synchronous-SQLite adapter mirrors AsyncSession.scalars.
+        return self._session.scalars(statement, *args, **kwargs)
+    monkeypatch.setattr(adapter, "scalars", scalars, raising=False)
+
+    def begin(self):
+        # ... and AsyncSession.begin (the Work input-artifact writer uses it).
+        return self._NestedTransaction(self._session) if self._session.in_transaction() else _Begin(self._session)
+    monkeypatch.setattr(adapter, "begin", begin, raising=False)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+    near.answer = assessment_answer(offered)
+    await opportunity_runtime.execute_assessment(row.id)
+    async with sessions() as db:
+        opportunity = await db.get(GuardianOpportunity, row.id)
+    assert opportunity.status == "proposed", (opportunity.status, opportunity.reason_code)
+    from src.auth.service import authenticate_token
+    # The isolated root's bearer: plan generation rechecks the exact token.
+    operator = await authenticate_token("m6-provider-free-root", touch=False)
+    assert operator.session_id == SESSION
+    source = offered.sources[0]
+    near.answer = {"role": "assistant", "content": json.dumps({"schema_version": "seraph.opportunity.plan.v1",
+        "blueprint_id": "public-browser-check", "title": "Review the cited public release",
+        "reason": "Read the bound public source and retain a local result.",
+        "citations": [{"source_id": source.source_key, "start_line": 1,
+            "end_line": len(source.excerpt.split("\n")), "span_sha256": source.excerpt_sha256}]})}
+    request = {"expected_opportunity_revision": opportunity.revision,
+        "expected_goal_revision": opportunity.goal_revision, "idempotency_key": "4d6f1f0e-5b7a-4c1e-9f1d-1159a0000001"}
+    return sessions, jobs, near, operator, opportunity, request
+
+
+class _Begin:
+    def __init__(self, session):
+        self._session = session
+        self._transaction = None
+
+    async def __aenter__(self):
+        self._transaction = self._session.begin()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            self._transaction.commit()
+        else:
+            self._transaction.rollback()
+        return None
+
+
+@pytest.mark.asyncio
+async def test_guardian_plan_generation_reaches_near_and_settles_from_near_billing(isolated_runtime, monkeypatch,
+        tmp_path):
+    from src.db.models import WorkBoardProposal
+    from src.guardian import opportunity_plans
+    sessions, jobs, near, operator, opportunity, request = await _assessed_opportunity(isolated_runtime,
+        monkeypatch, tmp_path)
+    result = await opportunity_plans.generate_plan(operator=operator, opportunity_id=opportunity.id, request=request)
+    assert result["reason_code"] is None, result
+    plan_requests = near_inference_requests(near)[2:]
+    body = assert_near_contract(plan_requests)
+    assert body["response_format"] == {"type": "json_object"} and body["max_tokens"] == 1024
+    assert "seraph.opportunity.plan.v1" in body["messages"][0]["content"]
+    async with sessions() as db:
+        proposal = (await db.execute(select(WorkBoardProposal))).scalar_one()
+    assert proposal.status == "proposed" and proposal.provider_contact_state == "succeeded", (
+        proposal.status, proposal.provider_contact_state, proposal.proposal_json)
+    assert json.loads(proposal.proposal_json)["blueprint_id"] == "public-browser-check"
+    rows = [row for row in near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+        if row["job_id"] == proposal.admission_job_id]
+    assert len(rows) == 1 and rows[0]["state"] == "settled"
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD
+    assert (await jobs.get_job(proposal.admission_job_id))["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_guardian_plan_route_denial_is_an_honest_block_not_outcome_unknown(isolated_runtime, monkeypatch,
+        tmp_path):
+    """#1156 open risk: a route denial before admission names its reason."""
+    from src.db.models import WorkBoardProposal
+    from src.guardian import opportunity_plans
+    from src.model_fabric import caller_context
+    from src.model_fabric.contracts import NoCompliantModelRouteError
+    sessions, jobs, near, operator, opportunity, request = await _assessed_opportunity(isolated_runtime,
+        monkeypatch, tmp_path)
+    before = len(near.requests)
+
+    def denied(*_args, **_kwargs):
+        raise NoCompliantModelRouteError(("near_tee_receipt_stale",))
+    monkeypatch.setattr(caller_context, "build_canonical_inference_context", denied)
+    result = await opportunity_plans.generate_plan(operator=operator, opportunity_id=opportunity.id, request=request)
+    async with sessions() as db:
+        proposal = (await db.execute(select(WorkBoardProposal))).scalar_one()
+    assert json.loads(proposal.proposal_json)["blocked_reason"] == "near_tee_receipt_stale", proposal.proposal_json
+    assert proposal.provider_contact_started is False and len(near.requests) == before
+    assert result["reason_code"] in (None, "near_tee_receipt_stale")
+
+
+# ── Research dossier (two children, one public source) ───────────
+
+
+class ResearchNearFixture:
+    """The NEAR fixture plus the one named public source behind its pin."""
+
+    def __new__(cls):
+        from tests.test_near_tee_text_slot import NearFixture
+        from tests.test_research_native_vertical import SOURCE_FIXTURE, SOURCE_HOST, SOURCE_PATH, SOURCE_PIN
+
+        class _Fixture(NearFixture):
+            def __init__(self):
+                super().__init__()
+                self.source_reads = []
+
+            def handler(self, request):
+                import httpx
+                if request.url.host == SOURCE_PIN:
+                    assert request.method == "GET" and request.url.path == SOURCE_PATH
+                    assert request.headers["host"] == SOURCE_HOST
+                    self.source_reads.append(str(request.url))
+                    return httpx.Response(200, headers={"content-type": "text/plain;charset=utf-8"},
+                        content=SOURCE_FIXTURE)
+                if request.url.path == "/v1/chat/completions":
+                    # Answer each perspective with exact citations of its quote.
+                    supplied = json.loads(json.loads(request.content)["messages"][1]["content"])
+                    source = supplied["untrusted_quoted_sources"][0]
+                    self.answer = {"role": "assistant", "content": json.dumps({"schema_version": 1,
+                        "perspective": supplied["perspective_instruction"],
+                        "claims": [{"text": "The selected public text establishes this attributed evidence.",
+                            "citations": [{key: source[key] for key in
+                                ("source_id", "first_line", "last_line", "span_sha256")}]}],
+                        "uncertainty": ["Mechanical citation validation does not establish semantic truth."],
+                        "contradictions": [], "no_learning": True})}
+                    self.body_id = "chatcmpl-research-" + str(len(self.requests))
+                return super().handler(request)
+        return _Fixture()
+
+
+def install_research_source(monkeypatch):
+    """The named public source resolves to its fixed pin (no live DNS)."""
+    from src.browser import pinned_transport
+    from tests.test_research_native_vertical import SOURCE_HOST, SOURCE_PIN
+    monkeypatch.setattr(settings, "browser_site_allowlist", SOURCE_HOST)
+
+    def named_source_dns(host, port):
+        assert host == SOURCE_HOST and port == 443
+        return [SOURCE_PIN]
+    monkeypatch.setattr(pinned_transport, "_blocking_default_resolver", named_source_dns)
+
+
+@pytest.mark.asyncio
+async def test_research_dossier_children_reach_near_and_settle_from_near_billing(accounting_db, monkeypatch):
+    from src.db.models import WorkBoardStatus, WorkBoardTask, WorkflowRunState
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.work_board.repository import WorkBoardRepository
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_vertical_no_provider_journeys import _seed_research, _todo_capability_task
+    install_research_source(monkeypatch)
+    sessions = accounting_db[2].accounting_sessions
+    operator, owner = await operator_owner(monkeypatch)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, capabilities=("text",),
+        near=ResearchNearFixture())
+    assert retirement.inactive_route_reason("readonly_research_child") is None
+    goal_id, typed_input = await _seed_research(sessions, owner)
+    task_id = await _todo_capability_task(sessions, owner, capability="work.research-dossier.v1",
+        goal_id=goal_id, typed_input=typed_input, key="research-near")
+    dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=jobs, session_provider=sessions,
+        runner_id="service:work-board")
+    receipt = await dispatcher.run_pass()
+    async with sessions() as db:
+        task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+        runs = list((await db.execute(select(WorkflowRunState))).scalars())
+    assert near.source_reads, "the public source was read through its pin"
+    inference = near_inference_requests(near)
+    assert inference, (receipt, task.status, task.block_reason)
+    # Two perspectives: one NEAR completion + billing readback per child.
+    assert_near_contract(inference[:2])
+    assert [request.url.raw_path.decode() for request in inference] == [
+        "/v1/chat/completions", "/v1/billing/costs"] * 2
+    bodies = [json.loads(request.content) for request in inference[::2]]
+    assert all(body["max_tokens"] == 1024 and "response_format" not in body for body in bodies)
+    snapshot = await jobs.inference_accounting_snapshot()
+    rows = near_settled_rows(snapshot, "readonly_research_child")
+    assert len(rows) == 2 and {row["state"] for row in rows} == {"settled"}, rows
+    assert all(row["profile_id"] == "near_tee.text" and row["actual_cost_microusd"] == NEAR_COST_MICROUSD
+        for row in rows)
+    assert snapshot["unknown_microusd"] == 0
+    children = [run for run in runs if run.job_kind == "readonly_research_child"]
+    parent = next(run for run in runs if run.job_kind == "research_dossier")
+    assert [run.status for run in children] == ["succeeded", "succeeded"], [(r.job_kind, r.status) for r in runs]
+    assert parent.status == "succeeded", parent.status
+    # The verified dossier is adopted and the card completes.
+    assert receipt.get("completed", 0) == 1 and task.status is WorkBoardStatus.done, (receipt, task.status)
+
+
+# ── Mail reply draft ─────────────────────────────────────────────
+
+
+MAIL_OUTPUT = {"subject": "Re: Architecture review", "body": "Thanks — I will follow up next week.",
+    "caveats": ["Review before sending."]}
+
+
+@pytest.mark.asyncio
+async def test_mail_reply_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch):
+    from src.db.models import WorkBoardStatus, WorkBoardTask
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.work_board.repository import WorkBoardRepository
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests import test_mail_reply_vertical as mail
+    monkeypatch.setattr(mail.vault_crypto, "_fernet", None)
+    sessions = accounting_db[2].accounting_sessions
+    await mail._seed(sessions, monkeypatch)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+    near.answer = {"role": "assistant", "content": json.dumps(MAIL_OUTPUT)}
+    created = await mail.mail_api.create_reply_task(mail._request(mail._reply_body("reply-near")))
+    assert created.status_code == 201, created.body
+    task_id = json.loads(created.body)["task_id"]
+
+    class SourceAdapter:
+        reads = 0
+
+        def __init__(self, _connection, *, contact_observer=None, **_kwargs):
+            self.contact_observer = contact_observer
+
+        async def get_message_full(self, _provider_message_id):
+            type(self).reads += 1
+            if self.contact_observer:
+                self.contact_observer()
+            return mail._body(type(self).reads)
+    monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", SourceAdapter)
+    dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=jobs, session_provider=sessions,
+        runner_id="service:work-board")
+    receipt = await dispatcher.run_pass()
+    async with sessions() as db:
+        task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+    assert receipt["completed"] == 1 and task.status is WorkBoardStatus.done, (receipt, task.block_reason)
+    assert SourceAdapter.reads == 2
+    body = assert_near_contract(near_inference_requests(near))
+    assert body["response_format"] == {"type": "json_object"}
+    assert "Draft a safe email reply" in body["messages"][0]["content"]
+    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.text"
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD
+    job = await jobs.get_job(rows[0]["job_id"])
+    assert job["job_kind"] == "mail_reply_draft" and job["status"] == "succeeded"
+
+
+# ── Calendar meeting prep ────────────────────────────────────────
+
+
+def _find_key(value, key):
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            if (found := _find_key(item, key)) is not None:
+                return found
+    return None
+
+
+class CalendarNearFixture:
+    """The NEAR fixture answering meeting prep for the offered event identity."""
+
+    def __new__(cls):
+        from tests.test_near_tee_text_slot import NearFixture
+
+        class _Fixture(NearFixture):
+            def handler(self, request):
+                if request.url.path == "/v1/chat/completions":
+                    offered = json.loads(json.loads(request.content)["messages"][-1]["content"])
+                    self.answer = {"role": "assistant", "content": json.dumps({"schema_version": 1,
+                        "event_key": _find_key(offered, "event_key"),
+                        "event_revision": _find_key(offered, "event_revision"),
+                        "summary": "Review the architecture decisions and open risks.",
+                        "agenda": ["Decisions", "Risks"], "questions": ["What remains unresolved?"],
+                        "risks": ["Unbounded scope"], "preparation_steps": ["Read the current design notes"]})}
+                return super().handler(request)
+        return _Fixture()
+
+
+@pytest.mark.asyncio
+async def test_calendar_meeting_prep_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch):
+    from types import SimpleNamespace
+    from src.db.models import WorkBoardStatus, WorkBoardTask
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    from src.work_board.repository import WorkBoardRepository
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_calendar_manual_vertical import _provider_event
+    from tests.test_vertical_no_provider_journeys import _seed_calendar, _todo_capability_task
+    sessions = accounting_db[2].accounting_sessions
+    operator, owner = await operator_owner(monkeypatch)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=CalendarNearFixture())
+    goal_id, typed_input = await _seed_calendar(sessions, owner)
+    task_id = await _todo_capability_task(sessions, owner, capability="calendar.meeting-prep.v1",
+        goal_id=goal_id, typed_input=typed_input, key="calendar-near")
+    calendar_reads = []
+
+    from src.integrations.google_calendar import vault_repository
+    vault_read = vault_repository.get
+
+    async def vault_get(key, *args, **kwargs):
+        # The shared vault object also serves the NEAR key; only the Calendar
+        # OAuth secret is a fixture.
+        if key != "vault:calendar-no-provider":
+            return await vault_read(key, *args, **kwargs)
+        return json.dumps({"client_id": "calendar-client", "refresh_token": "calendar-refresh"})
+
+    async def calendar_request(url, **kwargs):
+        calendar_reads.append((str(kwargs.get("method", "GET")), url))
+        if kwargs.get("method") == "POST":
+            return SimpleNamespace(status_code=200, headers={"content-type": "application/json"},
+                content=b'{"access_token":"calendar-access"}')
+        return SimpleNamespace(status_code=200, headers={"content-type": "application/json"},
+            content=json.dumps(_provider_event()).encode())
+    monkeypatch.setattr("src.integrations.google_calendar.vault_repository.get", vault_get)
+    monkeypatch.setattr("src.integrations.google_calendar.request_pinned_https", calendar_request)
+    repository = WorkBoardRepository()
+    # The Calendar capability executes through the direct durable adapter
+    # once its card is claimed (as the managed Calendar schedule does).
+    async with sessions() as db:
+        current = await repository.get_task(db, owner, task_id)
+        promoted = await repository.promote_task_ready(db, task_id, expected_revision=current.task_revision,
+            actor_principal_id=owner.principal_id, actor_session_id=owner.session_id)
+        await db.commit()
+    async with sessions() as db:
+        claim = await repository.claim_ready_task(db, task_id, expected_revision=promoted.task.task_revision,
+            lease_owner="service:work-board", lease_seconds=300, actor_principal_id="service:work-board",
+            actor_session_id="service-session:work-board")
+        await db.commit()
+    dispatcher = WorkBoardDispatcher(repository=repository, jobs=jobs, session_provider=sessions)
+    result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
+    async with sessions() as db:
+        task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+    assert result["completed"] is True and task.status is WorkBoardStatus.done, (result, task.block_reason)
+    assert len([read for read in calendar_reads if read[0] == "GET"]) == 2  # two event reads around the model
+    body = assert_near_contract(near_inference_requests(near))
+    assert body["response_format"] == {"type": "json_object"} and body["max_tokens"] == 1024
+    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.text"
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD
+    job = await jobs.get_job(rows[0]["job_id"])
+    assert job["job_kind"] == "calendar_meeting_prep" and job["status"] == "succeeded"
+
+
+def test_every_route_block_reason_has_work_board_text():
+    """#1156 follow-up: each stable route-block code a card can carry has its
+    cockpit explanation (provider_policy_revoked and the NEAR slot codes)."""
+    from pathlib import Path
+    panel = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "components" / "cockpit"
+        / "WorkBoardPanel.tsx").read_text()
+    block = panel[panel.index("const BLOCK_REASON_TEXT"):panel.index("const blockReasonText")]
+    missing = sorted(code for code in retirement.ROUTE_BLOCK_REASONS if f"  {code}: \"{code} · " not in block)
+    assert missing == []

@@ -373,6 +373,10 @@ async def test_mail_reply_blocks_with_retired_reason(accounting_db, monkeypatch,
     from src.workflows.job_runtime import DurableJobRepository
     from tests import test_mail_reply_vertical as mail
 
+    if world == "near_serves_route":
+        # #1159: Mail reply runs on NEAR TEE; the NEAR journey is the contract.
+        from tests.test_near_tee_vertical_journeys import test_mail_reply_reaches_near_and_settles_from_near_billing
+        return await test_mail_reply_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch)
     monkeypatch.setattr(mail.vault_crypto, "_fernet", None)
     tmp_path, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
@@ -463,9 +467,22 @@ async def test_guardian_opportunity_assessment_held_queued_with_route_reason(iso
     if world == "retained_openrouter":
         with historical_openrouter():
             setup_configuration(ceiling=25_000, bound=1000)
-    write_world(world)
+    monkeypatch.setattr("src.model_fabric.repository.get_session", sessions)
+    near = await write_world_async(world, monkeypatch)
     _assert_world(world)
     assert row.status == "queued" and row.job_id is None
+    if near is not None:
+        # #1159: NEAR TEE serves the assessment; the candidate is assessed
+        # (contract pinned in the NEAR journeys), never held.
+        from src.guardian.opportunity_runtime import read_snapshot
+        from tests.test_near_tee_vertical_journeys import assessment_answer
+        near.answer = assessment_answer(read_snapshot(_packet.opportunity_snapshot_artifact_id,
+            _packet.opportunity_snapshot_sha256))
+        await opportunity_runtime.execute_assessment(row.id)
+        async with sessions() as db:
+            final = await db.get(GuardianOpportunity, row.id)
+        assert final.status == "proposed" and final.job_id is not None, (final.status, final.reason_code)
+        return
     reason = EXPECTED[world]
     with no_provider_contact():
         await opportunity_runtime.execute_assessment(row.id)
@@ -570,6 +587,11 @@ async def test_calendar_and_research_block_with_retired_reason(accounting_db, mo
     from src.workflows.job_runtime import DurableJobRepository
     from tests.test_inference_accounting import setup_configuration
 
+    if world == "near_serves_route" and capability == "calendar.meeting-prep.v1":
+        # #1159: Calendar meeting prep runs on NEAR TEE; the NEAR journey is the contract.
+        from tests.test_near_tee_vertical_journeys import (
+            test_calendar_meeting_prep_reaches_near_and_settles_from_near_billing as calendar_on_near)
+        return await calendar_on_near(accounting_db, monkeypatch)
     tmp_path, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
     operator = await _operator_session(monkeypatch)
@@ -577,12 +599,30 @@ async def test_calendar_and_research_block_with_retired_reason(accounting_db, mo
     if world == "retained_openrouter":
         with historical_openrouter():
             setup_configuration(ceiling=25_000, bound=1000)
-    write_world(world)
+    near = None
+    if world == "near_serves_route" and capability == "work.research-dossier.v1":
+        # #1159: research runs on NEAR TEE (contract pinned in the NEAR journeys).
+        from tests.near_tee_support import prepare_near_tee_vertical
+        from tests.test_near_tee_vertical_journeys import ResearchNearFixture, install_research_source
+        install_research_source(monkeypatch)
+        near = await prepare_near_tee_vertical(monkeypatch, capabilities=("text",), near=ResearchNearFixture())
+    else:
+        write_world(world)
     _assert_world(world)
     seed = _seed_calendar if capability.startswith("calendar") else _seed_research
     goal_id, typed_input = await seed(sessions, owner)
     task_id = await _todo_capability_task(sessions, owner, capability=capability, goal_id=goal_id,
         typed_input=typed_input, key=f"{capability}-no-provider")
+
+    if near is not None:
+        dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=DurableJobRepository(),
+            session_provider=sessions, runner_id="service:work-board")
+        receipt = await dispatcher.run_pass()
+        async with sessions() as db:
+            task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+        assert receipt.get("completed") == 1 and task.status is WorkBoardStatus.done, (receipt, task.block_reason)
+        assert near.source_reads and len([r for r in near.requests if r.method == "POST"]) == 4
+        return
 
     async def forbidden_source(*_args, **_kwargs):
         raise AssertionError("no source read may happen without an active model route")

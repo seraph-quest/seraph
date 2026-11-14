@@ -108,6 +108,15 @@ const BLOCK_REASON_TEXT: Record<string, string> = {
   openrouter_retired: "openrouter_retired · OpenRouter is retired (ADR-035); nothing was contacted. Configure the NEAR TEE slot in Settings.",
   no_active_provider: "no_active_provider · No active inference provider; nothing was contacted. Configure the NEAR TEE slot in Settings.",
   near_tee_route_unsupported: "near_tee_route_unsupported · This capability is not yet available on NEAR TEE (tracked in #1159); nothing was contacted.",
+  provider_policy_revoked: "provider_policy_revoked · Inference egress is revoked in Settings; nothing was contacted. Restore it in Settings, then unblock.",
+  // NEAR TEE text slot reasons (#1159): local checks before any contact.
+  near_tee_slot_unconfigured: "near_tee_slot_unconfigured · The NEAR TEE text slot is not configured; nothing was contacted. Configure it in Settings.",
+  near_tee_slot_disabled: "near_tee_slot_disabled · The NEAR TEE text slot is disabled; nothing was contacted. Enable it in Settings.",
+  near_tee_purpose_consent_required: "near_tee_purpose_consent_required · The NEAR TEE slot needs its purpose consent; nothing was contacted. Grant it in Settings.",
+  near_tee_credential_required: "near_tee_credential_required · The NEAR TEE API key is missing; nothing was contacted. Add it in Settings.",
+  near_tee_embedding_evidence_required: "near_tee_embedding_evidence_required · The NEAR TEE embedding slot awaits its ADR-035 evidence; nothing was contacted.",
+  inference_lane_required: "inference_lane_required · Publish the shared inference lane ceiling in Settings; nothing was contacted.",
+  near_tee_request_reserve_exceeds_lane_ceiling: "near_tee_request_reserve_exceeds_lane_ceiling · The NEAR TEE request bound exceeds the lane ceiling; nothing was contacted. Adjust it in Settings.",
 };
 const blockReasonText = (reason: string | null | undefined) => (reason ? BLOCK_REASON_TEXT[reason] ?? reason : reason);
 

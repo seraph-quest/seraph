@@ -1380,6 +1380,44 @@ _CAPABILITY_MODEL_ROUTES = {
 }
 
 
+def _route_provider(context: Any) -> str:
+    """The provider class of a governed Mail/Calendar context (#1159)."""
+    from src.model_fabric.near_tee_vertical import is_near_tee_context
+    return "near_tee" if is_near_tee_context(context) else "openrouter"
+
+
+def _strategist_output_tokens(requested: int) -> int:
+    """The output bound a Mail/Calendar request declares (#1159).
+
+    On NEAR TEE it never exceeds the text slot's reviewed output bound, so the
+    route's capability check admits it; the transport clamps to the same bound.
+    """
+    from src.model_fabric.near_tee_vertical import near_tee_vertical_route
+    route = near_tee_vertical_route("strategist_agent")
+    return min(int(requested), route.max_output_tokens) if route is not None else int(requested)
+
+
+def _strategist_model_route_ready(policy: Any) -> bool:
+    """Mail/Calendar: the governed strategist route without fallback.
+
+    #1159: the NEAR TEE text slot (its sole provider kind) or, in the explicit
+    legacy test mode only, the retained OpenRouter route.
+    """
+    from src.model_fabric.retirement import openrouter_retired
+    provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
+    ceiling = getattr(policy, "max_cost_microusd", None)
+    allowed = ({"near_tee"},) if openrouter_retired() else ({"near_tee"}, {"openrouter"})
+    return (not bool(getattr(policy, "fallback_allowed", False)) and provider_kinds in allowed
+        and not isinstance(ceiling, bool) and isinstance(ceiling, int) and ceiling > 0)
+
+
+def _capability_route_block(capability: str, model_route: str) -> str | None:
+    """#1159: every model-backed board capability runs on the NEAR TEE text
+    slot; the shared route-block precedence names why it cannot (no contact)."""
+    from src.model_fabric.near_tee_vertical import vertical_route_block
+    return vertical_route_block(model_route)
+
+
 def _stable_reason_code(value: Any, *, fallback: str = "execution_blocked") -> str:
     """Map adapter/runtime failures to a closed, non-sensitive code set."""
 
@@ -4472,8 +4510,7 @@ class WorkBoardDispatcher:
             capability = _text(task.capability_id)
             model_route = _CAPABILITY_MODEL_ROUTES.get(capability)
             if model_route is not None:
-                from src.model_fabric.retirement import openrouter_only_route_block
-                if route_block := openrouter_only_route_block(model_route):
+                if route_block := _capability_route_block(capability, model_route):
                     # ADR-035: a capability whose model step has no usable
                     # route stays blocked before claim. The stable code is the
                     # operator-visible reason; the cockpit renders its text.
@@ -4517,9 +4554,21 @@ class WorkBoardDispatcher:
                         output_tokens=min(1024, setup.max_output_tokens), timeout_seconds=min(45, setup.timeout_seconds),
                         principal=principal, session_id=task.owner_session_id, job_id=principal.job_id,
                         request_id="research-prerequisite:"+task.task_id)
-                    decision, _proofs = await _governed_preflight_target_async(target, context)
-                    if decision is None or not decision.allowed:
-                        return "research_model_route_unavailable", "The fixed research route needs current governed capability proof"
+                    if target.get("near_tee"):
+                        # #1159: every NEAR TEE precontact gate (local; no
+                        # denial receipt for this read-only prerequisite).
+                        from src.model_fabric.near_tee import NearTeeDenied
+                        from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call
+                        try:
+                            await prepare_near_tee_vertical_call(context, messages=[{"role": "user",
+                                "content": "research prerequisite"}], temperature=setup.temperature,
+                                max_tokens=min(1024, setup.max_output_tokens), persist_denial=False)
+                        except NearTeeDenied:
+                            return "research_model_route_unavailable", "The fixed research route needs current governed capability proof"
+                    else:
+                        decision, _proofs = await _governed_preflight_target_async(target, context)
+                        if decision is None or not decision.allowed:
+                            return "research_model_route_unavailable", "The fixed research route needs current governed capability proof"
                     snapshot = await self.jobs.inference_accounting_snapshot()
                     if snapshot["status"] != "ready" or snapshot.get("overrun_max_cost_microusd", 0):
                         return "research_accounting_blocked", "Resolve existing accounting continuity or provider overrun before research"
@@ -5936,8 +5985,8 @@ class WorkBoardDispatcher:
                     return {"admitted": True, "completed": True, "blocked": False}
                 return {"admitted": True, "completed": False, "blocked": True}
         else:
-            from src.model_fabric.retirement import openrouter_only_route_block
-            if route_block := openrouter_only_route_block("readonly_research_child"):
+            from src.model_fabric.near_tee_vertical import vertical_route_block
+            if route_block := vertical_route_block("readonly_research_child"):
                 # ADR-035 claim-time gate (the route can change after
                 # preflight): no native root, source read or contact.
                 await self._close_unadmitted_or_block(claim, route_block, retryable_input=True)
@@ -6025,9 +6074,9 @@ class WorkBoardDispatcher:
                 await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
                     owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
                     session_id=run.session_id, authority=run.declared_authority_json)
-                from src.model_fabric.effective_policy import current_inference_policy
+                from src.model_fabric.near_tee_vertical import vertical_inference_policy
                 authority = json.loads(run.declared_authority_json)
-                if authority["model_policy_digest"] != current_inference_policy()[1]:
+                if authority["model_policy_digest"] != vertical_inference_policy("readonly_research_child")[1]:
                     raise ValueError("original research model policy changed")
                 projection = _serialize(run)
                 if checkpoint(projection, "research:creation") is not None:
@@ -7786,9 +7835,10 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
-            from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
+            from src.model_fabric.near_tee_vertical import vertical_route_block
+            from src.model_fabric.retirement import inactive_route_label
 
-            if route_block := openrouter_only_route_block("strategist_agent"):
+            if route_block := vertical_route_block("strategist_agent"):
                 # ADR-035: name the cause before any durable admission.
                 raise BoardError(
                     route_block,
@@ -7799,15 +7849,8 @@ class WorkBoardDispatcher:
                     route_block=True,
                 )
             policy = effective_workload_policy("strategist_agent")
-            provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)
-            if (
-                bool(getattr(policy, "fallback_allowed", False))
-                or provider_kinds != {"openrouter"}
-                or isinstance(ceiling, bool)
-                or not isinstance(ceiling, int)
-                or ceiling <= 0
-            ):
+            if not _strategist_model_route_ready(policy):
                 raise BoardError(
                     "mail_model_route_unavailable",
                     "The governed Mail reply model route is unavailable",
@@ -8029,7 +8072,7 @@ class WorkBoardDispatcher:
                 context = build_canonical_inference_context(
                     "strategist_agent",
                     payload=payload,
-                    output_tokens=2048,
+                    output_tokens=_strategist_output_tokens(2048),
                     timeout_seconds=MAIL_RUNTIME_SECONDS,
                     principal=principal,
                     session_id=task.owner_session_id,
@@ -8056,7 +8099,7 @@ class WorkBoardDispatcher:
                         model_kwargs = build_model_kwargs(temperature=0.2, max_tokens=2048, runtime_path="strategist_agent")
                         route_metadata = {
                             "runtime_path": "strategist_agent",
-                            "provider": "openrouter",
+                            "provider": _route_provider(context),
                             "model": str(model_kwargs.get("model_id") or "")[:256],
                             "upstream_provider": "unknown",
                             "profile_id": str(model_kwargs.get("runtime_profile") or "")[:256],
@@ -8213,9 +8256,10 @@ class WorkBoardDispatcher:
             from src.model_fabric.configuration import effective_workload_policy
             from src.workflows.job_runtime import _digest as _durable_digest
 
-            from src.model_fabric.retirement import inactive_route_label, openrouter_only_route_block
+            from src.model_fabric.near_tee_vertical import vertical_route_block
+            from src.model_fabric.retirement import inactive_route_label
 
-            if route_block := openrouter_only_route_block("strategist_agent"):
+            if route_block := vertical_route_block("strategist_agent"):
                 # ADR-035: name the cause before any durable admission.
                 raise BoardError(
                     route_block,
@@ -8226,15 +8270,8 @@ class WorkBoardDispatcher:
                     route_block=True,
                 )
             policy = effective_workload_policy("strategist_agent")
-            provider_kinds = set(getattr(policy, "allowed_provider_kinds", ()) or ())
             ceiling = getattr(policy, "max_cost_microusd", None)
-            if (
-                bool(getattr(policy, "fallback_allowed", False))
-                or provider_kinds != {"openrouter"}
-                or isinstance(ceiling, bool)
-                or not isinstance(ceiling, int)
-                or ceiling <= 0
-            ):
+            if not _strategist_model_route_ready(policy):
                 raise BoardError(
                     "calendar_model_route_unavailable",
                     "The governed strategist route is unavailable",
@@ -8779,7 +8816,7 @@ class WorkBoardDispatcher:
                 lease_owner = _text(lease.get("owner")) or self.runner_id
                 principal = TrustPrincipal(principal_id=task.owner_principal_id, principal_type=PrincipalType.OPERATOR, authenticated=True, revoked=False, grants=(AuthorityGrant.MODEL_INFERENCE,), session_id=task.owner_session_id, operator_session_id=task.owner_session_id, job_id=job_id)
                 payload = {"event": event_payload, "capability_id": capability_id, "event_key": event_payload.get("event_key"), "event_revision": event_payload.get("event_revision")}
-                context = build_canonical_inference_context("strategist_agent", payload=payload, output_tokens=2048, timeout_seconds=120, principal=principal, session_id=task.owner_session_id, job_id=job_id, request_id=f"calendar:{job_id}", redaction_applied=True)
+                context = build_canonical_inference_context("strategist_agent", payload=payload, output_tokens=_strategist_output_tokens(2048), timeout_seconds=120, principal=principal, session_id=task.owner_session_id, job_id=job_id, request_id=f"calendar:{job_id}", redaction_applied=True)
                 if communication_binding is not None:
                     context = replace(context, deadline_at=min(context.deadline_at,
                         communication_binding.source_deadline_at.timestamp()))
@@ -8793,7 +8830,7 @@ class WorkBoardDispatcher:
                         model_kwargs = build_model_kwargs(temperature=0.2, max_tokens=2048, runtime_path="strategist_agent")
                         route_metadata = {
                             "runtime_path": "strategist_agent",
-                            "provider": "openrouter",
+                            "provider": _route_provider(context),
                             "model": str(model_kwargs.get("model_id") or "")[:256],
                             # The governed profile proves the provider class;
                             # the upstream gateway is not asserted until a
@@ -8940,7 +8977,7 @@ class WorkBoardDispatcher:
                         # operator projection.
                         effective_route = {
                             "runtime_path": "strategist_agent",
-                            "provider": "openrouter",
+                            "provider": _route_provider(context),
                             "model": actual_model,
                             "upstream_provider": upstream_provider,
                             "profile_id": actual_profile_id,

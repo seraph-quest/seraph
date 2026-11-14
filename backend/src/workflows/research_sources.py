@@ -18,7 +18,7 @@ from src.workflows.research_native import checkpoint
 async def current_inputs_in_db(jobs, db, parent_id):
     """Current native authority in the caller's canonical writer transaction."""
     from src.auth.service import authenticate_principal
-    from src.model_fabric.effective_policy import current_inference_policy
+    from src.model_fabric.near_tee_vertical import vertical_inference_policy
     from src.work_board.input_artifacts import resolve_input_artifact_for_task
     from src.work_board.pipelines import root_binding
     from src.work_board.pipeline_contracts import digest
@@ -34,7 +34,7 @@ async def current_inputs_in_db(jobs, db, parent_id):
     if (parent.job_kind != PARENT_KIND or parent.status not in {"running", "paused"}
         or parent.deadline_at.replace(tzinfo=timezone.utc) <= datetime.now(timezone.utc)
         or authority.get("live_root_digest") != digest(root_binding())
-        or authority.get("model_policy_digest") != current_inference_policy()[1]
+        or authority.get("model_policy_digest") != vertical_inference_policy("readonly_research_child")[1]
         or authority.get("source_egress_acknowledged") is not True):
         raise ValueError("original research Root/Goal/source-egress authority changed")
     attempts = list((await db.scalars(select(WorkBoardAttempt).where(WorkBoardAttempt.workflow_run_id == parent_id))).all())
@@ -150,18 +150,15 @@ async def canonical_sources_in_db(jobs, db, child, inputs, *, require_current_lo
 
 
 async def verify_current_prompt_in_db(jobs, db, child):
-    from src.model_fabric.contracts import finalized_openai_compatible_body
     from src.security.trust_contract import canonical_digest
     from src.work_board.research_artifacts import prompt_messages
-    from src.workflows.research_provider import _target
+    from src.workflows.research_provider import _target, research_body
     inputs = await current_inputs_in_db(jobs, db, child["parent_job_id"])
     sources = await canonical_sources_in_db(jobs, db, child, inputs)
     ready = checkpoint(child, "research:prompt-ready")
     setup, policy_digest, target = _target()
-    expected = finalized_openai_compatible_body(model_id=target["model_id"],
-        messages=prompt_messages(inputs.question, inputs.perspectives[ready["slot"]].instruction, sources),
-        options=target["options"], temperature=setup.temperature,
-        max_tokens=min(1024, setup.max_output_tokens), stream=False)
+    expected = research_body(setup, target,
+        prompt_messages(inputs.question, inputs.perspectives[ready["slot"]].instruction, sources))
     body = json.loads(read(ready["file_path"], ready["content_sha256"]))
     if (body != expected or canonical_digest(body) != ready["payload_digest"]
         or ready["policy_digest"] != policy_digest or ready["creation_digest"] != child["declared_authority"]["parent_creation_digest"]

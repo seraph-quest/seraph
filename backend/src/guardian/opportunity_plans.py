@@ -622,12 +622,31 @@ async def _run_plan_generation(owner, operator, opportunity_id, proposal_id, sou
         assert_public_judgment_text(messages[1]["content"])
         principal = replace(bind_operator_principal(operator, operator.session_id), job_id=proposal.admission_job_id)
         remaining = min(45, (expires_at-now()).total_seconds())
-        context = build_canonical_inference_context(route, payload=messages, output_tokens=1024,
-            timeout_seconds=remaining, principal=principal, session_id=owner.session_id,
-            job_id=proposal.admission_job_id, redaction_applied=True, transformation_digest=digest(json_bytes(messages)))
-        reason = await triage.preflight_governed_completion_target_async(runtime_path=route, profile="openrouter", request_context=context)
-        if reason is not None:
-            raise OpportunityError("openrouter_route_unavailable")
+        from src.model_fabric.contracts import NoCompliantModelRouteError
+        try:
+            context = build_canonical_inference_context(route, payload=messages, output_tokens=1024,
+                timeout_seconds=remaining, principal=principal, session_id=owner.session_id,
+                job_id=proposal.admission_job_id, redaction_applied=True,
+                transformation_digest=digest(json_bytes(messages)))
+        except NoCompliantModelRouteError as exc:
+            # #1159: a route denial before admission is a known no-contact
+            # block with its stable reason, never ``outcome_unknown``.
+            raise OpportunityError((exc.reason_codes or ("route_unavailable",))[0]) from exc
+        from src.model_fabric.near_tee_vertical import is_near_tee_context
+        if is_near_tee_context(context):
+            # All NEAR TEE precontact gates before durable admission.
+            from src.model_fabric.near_tee import NearTeeDenied
+            from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call
+            try:
+                await prepare_near_tee_vertical_call(context, messages=messages, temperature=0, max_tokens=1024,
+                    response_format={"type": "json_object"})
+            except NearTeeDenied as denied:
+                raise OpportunityError(denied.code) from denied
+        else:
+            reason = await triage.preflight_governed_completion_target_async(runtime_path=route,
+                profile="openrouter", request_context=context)
+            if reason is not None:
+                raise OpportunityError("openrouter_route_unavailable")
         job_binding = await triage._admit_proposal_job(owner=owner, task=card, proposal=proposal)
         if job_binding is None:
             raise OpportunityError("proposal_admission_reconciliation_required")
@@ -655,8 +674,11 @@ async def _run_plan_generation(owner, operator, opportunity_id, proposal_id, sou
     except (OpportunityError, BoardError, ValueError) as exc:
         reason = getattr(exc, "code", "invalid_plan_result")
         await _block_plan(owner, proposal_id, reason, job_binding)
-    except Exception:
-        await _block_plan(owner, proposal_id, "outcome_unknown", job_binding)
+    except Exception as exc:
+        from src.model_fabric.near_tee_vertical import near_tee_failure_code
+        # A NEAR TEE known-cost failure settled from NEAR billing names its
+        # code; anything else after admission stays ``outcome_unknown``.
+        await _block_plan(owner, proposal_id, near_tee_failure_code(exc) or "outcome_unknown", job_binding)
     finally:
         _contact_source.reset(contact_token)
         _plan_operator.reset(operator_token)
@@ -675,6 +697,39 @@ async def _invoke_plan_completion(owner, proposal_id, messages, context, binding
     from src.model_fabric.gpu_admission import GpuPriority
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
+    from src.model_fabric.near_tee_vertical import is_near_tee_context
+    if is_near_tee_context(context):
+        # #1159: the NEAR TEE text slot; the transport runs in the proposal
+        # job's broker lease and NEAR billing settles its reservation.
+        from src.model_fabric.near_tee import NearTeeDenied, NearTeeError
+        from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call, run_near_tee_vertical_call
+        try:
+            call = await prepare_near_tee_vertical_call(context, messages=messages, temperature=0, max_tokens=1024,
+                response_format={"type": "json_object"})
+        except NearTeeDenied as denied:
+            raise OpportunityError(denied.code) from denied
+
+        async def fresh_source():
+            # Queue waiting cannot reuse stale physical proof.
+            async with db_engine.get_session() as db:
+                proposal = await db.get(WorkBoardProposal, proposal_id)
+                opportunity = await _owned_opportunity(db, owner, proposal.opportunity_id)
+                _contact_source.set(await stage_plan_source(db, opportunity))
+            _plan_operator.set((owner, operator, server_witness))
+        token = _contact_source.set(_contact_source.get(None))
+        operator_token = _plan_operator.set(_plan_operator.get(None))
+        try:
+            with bind_remote_inference_receipt(repository=durable_job_repository, job_id=binding[0],
+                    owner=binding[1], fencing_token=binding[2]):
+                return await run_near_tee_vertical_call(call, priority=GpuPriority.REPORTS_RESEARCH_MEMORY,
+                    before_contact=fresh_source)
+        except NearTeeError as exc:
+            if exc.code == "near_tee_cost_liability":
+                raise
+            raise OpportunityError(exc.code) from exc
+        finally:
+            _contact_source.reset(token)
+            _plan_operator.reset(operator_token)
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
     profile = llm_runtime._provider_profile(profile_id)
     if profile is None:

@@ -652,18 +652,22 @@ TEE text slot through one shared vertical helper (#1159, **Partial**): each
 keeps its durable job, reservation and adoption contract, runs every NEAR TEE
 precontact gate (sealed denials, catalog receipt, proofs, `x-no-aliasing`),
 and settles from NEAR billing inside its broker lease, with no fallback. On
-NEAR TEE now: general-task, repository-work and specialist planning, and
-Work Board card proposals. Still without a NEAR TEE path: Mail reply,
-Calendar meeting prep, research and guardian opportunity assessment. Every
-vertical blocks before any job, reservation or contact with the same
-precedence as Settings' `inference_block_reason`: `provider_policy_revoked`,
-then the NEAR TEE slot's own reason (for example
-`near_tee_credential_required`), then `openrouter_retired` (retained
-OpenRouter configuration) or `no_active_provider`; a vertical still without
-a NEAR TEE path reports `near_tee_route_unsupported` when a slot does serve
-its route (#1156). Guardian opportunity candidates stay queued with that
-reason, without a durable job, until a route exists or their deadline closes
-them. The optional NEAR text Work
+NEAR TEE now: general-task, repository-work and specialist planning, Work
+Board card proposals, guardian opportunity assessment and plan generation,
+research dossiers (child synthesis and programme discovery requests), Mail
+reply drafts, Calendar meeting prep and communication preparation. Still
+without a NEAR TEE path: the repository repair iteration model step
+(`repo_repair_source`, whose consented exact request body and code-egress
+consent are bound to the retired OpenRouter target). Every vertical blocks
+before any job, reservation or contact with the same precedence as Settings'
+`inference_block_reason`: `provider_policy_revoked`, then the NEAR TEE slot's
+own reason (for example `near_tee_credential_required`), then
+`openrouter_retired` (retained OpenRouter configuration) or
+`no_active_provider`; the Work Board explains each code. A guardian plan
+route denial before admission blocks with its stable reason instead of
+`outcome_unknown`. Guardian opportunity candidates stay queued with that
+reason, without a durable job, until a NEAR TEE route exists (they then
+resume) or their deadline closes them. The optional NEAR text Work
 capability (ADR-025) is unchanged apart from the shared NEAR client. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
 native/companion boundaries named by each adapter. No paid model, real Google

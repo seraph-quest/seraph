@@ -305,6 +305,14 @@ describe("WorkBoardPanel M4 review and triage controls", () => {
     ["openrouter_retired", /OpenRouter is retired \(ADR-035\); nothing was contacted/],
     ["no_active_provider", /No active inference provider; nothing was contacted/],
     ["near_tee_route_unsupported", /not yet available on NEAR TEE \(tracked in #1159\)/],
+    ["provider_policy_revoked", /Inference egress is revoked in Settings; nothing was contacted/],
+    ["near_tee_slot_unconfigured", /NEAR TEE text slot is not configured; nothing was contacted/],
+    ["near_tee_slot_disabled", /NEAR TEE text slot is disabled; nothing was contacted/],
+    ["near_tee_purpose_consent_required", /needs its purpose consent; nothing was contacted/],
+    ["near_tee_credential_required", /NEAR TEE API key is missing; nothing was contacted/],
+    ["near_tee_embedding_evidence_required", /awaits its ADR-035 evidence; nothing was contacted/],
+    ["inference_lane_required", /shared inference lane ceiling in Settings; nothing was contacted/],
+    ["near_tee_request_reserve_exceeds_lane_ceiling", /request bound exceeds the lane ceiling; nothing was contacted/],
   ])("explains the ADR-035 route block %s with its stable code", async (code, text) => {
     const blocked = task({
       status: "blocked",

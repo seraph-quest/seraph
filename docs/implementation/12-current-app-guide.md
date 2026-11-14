@@ -1285,9 +1285,12 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > credential, receipts, ledger rows and Unknown liabilities stay readable and
 > settleable through Inference accounting. Work verticals move to the NEAR
 > TEE text slot (#1159, **Partial**): general-task, repository-work and
-> specialist planning and Work Board card proposals run there today; the
-> remaining verticals block with `near_tee_route_unsupported` when a slot
-> serves their route. The OpenRouter sections below
+> specialist planning, Work Board card proposals, guardian opportunity
+> assessment and plans, research dossiers, Mail reply drafts, Calendar
+> meeting prep and communication preparation run there, settling from NEAR
+> billing with no fallback. The repository repair iteration model step does
+> not yet. Without a ready slot each blocks with its stable reason, which the
+> Work Board explains. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.
 > Chat reports the block as `route_reason: openrouter_retired`; Cordis
 > `inference.request` reports `openrouter_retired`. Without a NEAR TEE vision

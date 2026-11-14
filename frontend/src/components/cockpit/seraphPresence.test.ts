@@ -74,7 +74,7 @@ describe("deriveSeraphPresenceState", () => {
     expect(descriptor.tone).toBe("active");
   });
 
-  it("treats degraded memory/runtime quality as faulted", () => {
+  it("treats failed observer quality as faulted", () => {
     const descriptor = deriveSeraphPresenceState({
       connectionStatus: "connected",
       animationState: "idle",
@@ -93,13 +93,43 @@ describe("deriveSeraphPresenceState", () => {
       recentTraceTool: null,
       latestResponseRole: null,
       ambientState: "idle",
-      dataQuality: "memory degraded",
+      dataQuality: "failed",
       recentInterventionCount: 0,
       operatorStatus: null,
     });
 
     expect(descriptor.state).toBe("error");
     expect(descriptor.tone).toBe("error");
+  });
+
+  it("reports degraded observer context as partial, not as a fault (#1172)", () => {
+    const descriptor = deriveSeraphPresenceState({
+      connectionStatus: "connected",
+      animationState: "idle",
+      isAgentBusy: false,
+      pendingApprovalCount: 0,
+      pendingNotificationCount: 0,
+      queuedInsightCount: 0,
+      degradedRouteCount: 0,
+      degradedSourceAdapterCount: 0,
+      attentionImportedFamilyCount: 0,
+      attentionPresenceSurfaceCount: 0,
+      actionableThreadCount: 0,
+      continuityHealth: "ready",
+      recommendedFocus: null,
+      recentTraceRole: null,
+      recentTraceTool: null,
+      latestResponseRole: null,
+      ambientState: "idle",
+      dataQuality: "degraded",
+      recentInterventionCount: 0,
+      operatorStatus: null,
+    });
+
+    expect(descriptor.state).not.toBe("error");
+    expect(descriptor.label).toBe("Partial context");
+    expect(descriptor.tone).toBe("neutral");
+    expect(descriptor.detail).toMatch(/Chat and work are unaffected/);
   });
 
   it("treats degraded continuity reach as a fault even without data-quality errors", () => {

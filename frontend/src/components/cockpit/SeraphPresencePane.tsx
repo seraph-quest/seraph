@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import Seraph, { type SeraphState, type SeraphTelemetryEntry } from "./Seraph";
 import {
   deriveSeraphPresenceState,
+  observerContextPartial,
   type SeraphPresenceDescriptor,
   type SeraphPresenceSnapshot,
   type SeraphPresenceState,
@@ -32,7 +33,7 @@ function contextLabel(snapshot: SeraphPresenceSnapshot): string {
   if (snapshot.metadataState === "unavailable") return "UNKNOWN";
   if (snapshot.connectionStatus === "error") return "FAULT";
   if (snapshot.connectionStatus !== "connected") return "OFFLINE";
-  if ((snapshot.dataQuality ?? "").toLowerCase().includes("degraded")) return "DEGRADED";
+  if (observerContextPartial(snapshot.dataQuality)) return "PARTIAL";
   if (snapshot.isAgentBusy) return "ACTIVE";
   return "GOOD";
 }
@@ -44,6 +45,9 @@ function withFreshness(snapshot: SeraphPresenceSnapshot, value: string): string 
 function contextHint(snapshot: SeraphPresenceSnapshot): string {
   if (snapshot.metadataState === "unavailable") {
     return "continuity unavailable · load to confirm";
+  }
+  if (observerContextPartial(snapshot.dataQuality)) {
+    return withFreshness(snapshot, "some observer sources not refreshed");
   }
   return withFreshness(snapshot, (snapshot.dataQuality ?? (
     snapshot.connectionStatus === "connected" ? "live link" : "direct fallback"

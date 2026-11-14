@@ -68,6 +68,11 @@ function containsAny(value: string | null | undefined, parts: string[]): boolean
   return parts.some((part) => normalized.includes(part));
 }
 
+/** Observer context is partial (not failed) when some sources did not refresh. */
+export function observerContextPartial(dataQuality: string | null | undefined): boolean {
+  return containsAny(dataQuality, ["degraded", "stale"]) && !containsAny(dataQuality, ["failed", "outage"]);
+}
+
 export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): SeraphPresenceDescriptor {
   if (snapshot.connectionStatus === "error") {
     return {
@@ -102,7 +107,7 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
   if (
     snapshot.recentTraceRole === "error"
     || containsAny(snapshot.operatorStatus, ["error", "failed", "fault"])
-    || containsAny(snapshot.dataQuality, ["degraded", "failed", "outage"])
+    || containsAny(snapshot.dataQuality, ["failed", "outage"])
     || snapshot.continuityHealth === "degraded"
   ) {
     return {
@@ -153,6 +158,19 @@ export function deriveSeraphPresenceState(snapshot: SeraphPresenceSnapshot): Ser
       detail: "The current thread just produced an assistant response.",
       tone: "success",
       cadenceMs: 700,
+    };
+  }
+
+  // Observer data quality "degraded"/"stale" means some context sources (time,
+  // calendar, git, goals) have not refreshed for this operator scope. It
+  // limits proactive timing context; it is not an execution fault (#1172).
+  if (observerContextPartial(snapshot.dataQuality)) {
+    return {
+      state: "idle",
+      label: "Partial context",
+      detail: "Some observer context sources have not refreshed for this session. Chat and work are unaffected; proactive timing uses less context.",
+      tone: "neutral",
+      cadenceMs: 1100,
     };
   }
 

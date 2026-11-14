@@ -107,7 +107,6 @@ export interface OpenRouterSetupValue {
   cloud_egress_acknowledged: true;
   vision_egress_acknowledged?: true;
   embedding_egress_acknowledged?: true;
-  audio_egress_acknowledged?: true;
   spend_ceiling_microusd: number;
   max_queued: number;
   max_inflight: 1;

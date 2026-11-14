@@ -115,7 +115,6 @@ import {
   type ShellStatusItem,
 } from "../../lib/cockpitShellStatus";
 import "./CockpitShell.css";
-import { PttAudioControl, type PttTaskRecovery } from "../chat/PttAudioControl";
 import { TelegramCaptureControl } from "./TelegramCaptureControl";
 import { ChannelOutputReview } from "./ChannelOutputReview";
 import { ChannelTaskReview } from "./ChannelTaskReview";
@@ -7958,7 +7957,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     new URLSearchParams(window.location.search).get("channel_review"));
   const channelReviewTaskRef = useRef<string | null>(null);
   const [discardChannelReviewTaskId, setDiscardChannelReviewTaskId] = useState<string | null>(null);
-  const pttTaskRecoveryRef = useRef<PttTaskRecovery | null>(null);
   useEffect(() => {
     const refreshHandle = () => {
       const query = new URLSearchParams(window.location.search);
@@ -8182,13 +8180,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const loadGoalLoop = useQuestStore((s) => s.loadGoalLoop);
   const refreshGoals = useQuestStore((s) => s.refresh);
   const activeGoalsForCockpit = useMemo(() => activeGoalCandidates(goalTree), [goalTree]);
-  useEffect(() => {
-    const retained = pttTaskRecoveryRef.current;
-    if (retained && (retained.scope !== JSON.stringify([operatorAuth.principalId, operatorAuth.sessionId, sessionId])
-      || activeGoalsForCockpit.find(goal => goal.id === retained.task.input.goal_ref)?.revision !== retained.task.goal_revision)) {
-      pttTaskRecoveryRef.current = null;
-    }
-  }, [operatorAuth.principalId, operatorAuth.sessionId, sessionId, activeGoalsForCockpit]);
   const currentGoal = useMemo(() => findCurrentGoal(goalTree), [goalTree]);
 
   const handleResetWorkspace = useCallback(() => {
@@ -22363,17 +22354,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           ) : onboardingActionStatus ? (
             <div className="cockpit-dock-banner" role="status">{onboardingActionStatus}</div>
           ) : null}
-          voice={(
-            <PttAudioControl
-              taskRecovery={pttTaskRecoveryRef}
-              sessionId={sessionId}
-              disabled={isAgentBusy}
-              ownerPrincipalId={operatorAuth.principalId}
-              ownerSessionId={operatorAuth.sessionId}
-              goals={activeGoalsForCockpit}
-              onTaskCreated={(taskId) => { setFocusTaskId(taskId); selectCockpitSection("work"); }}
-                    />
-          )}
           composerValue={composer}
           onComposerChange={setComposer}
           onSubmit={handleSubmit}

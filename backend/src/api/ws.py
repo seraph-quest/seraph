@@ -55,6 +55,7 @@ from src.auth.middleware import authenticate_websocket, is_auth_storage_busy
 from src.auth.service import (
     AuthFailure,
     auth_enabled,
+    local_no_login_active,
     authenticate_websocket_session,
     bind_operator_principal,
 )
@@ -347,7 +348,7 @@ async def websocket_work_board_events(websocket: WebSocket):
     )
     auth_revoked = asyncio.Event()
     revocation_guard = Event()
-    auth_session_id = operator.session_id if auth_enabled() else None
+    auth_session_id = operator.session_id if (auth_enabled() or local_no_login_active()) else None
     revocation_task = asyncio.create_task(
         watch_operator_session(websocket, auth_session_id, auth_revoked, revocation_guard),
         name=f"work-board-auth-watch:{operator.session_id[:8]}",
@@ -575,7 +576,7 @@ async def websocket_chat(websocket: WebSocket):
     )
     auth_revoked = asyncio.Event()
     revocation_guard = Event()
-    auth_session_id = operator.session_id if auth_enabled() else None
+    auth_session_id = operator.session_id if (auth_enabled() or local_no_login_active()) else None
 
     revocation_task = asyncio.create_task(
         watch_operator_session(websocket, auth_session_id, auth_revoked, revocation_guard),

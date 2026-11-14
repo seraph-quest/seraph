@@ -1895,7 +1895,9 @@ with the exact LAN hostname/IP and browser origin (for example,
 `seraph.lan,192.168.1.50` and `https://seraph.lan`). The same boundary is
 enforced for unsafe HTTP requests and WebSocket upgrades. An authenticated
 operator may use model-fabric setup and canaries from that configured LAN
-boundary; loopback is only the unauthenticated local-development shortcut.
+boundary. Loopback is not an authentication shortcut: without a configured
+credential every API route stays locked unless the explicit local no-login
+mode below is enabled.
 
 The login/session/refresh/logout endpoints are the canonical provisioning
 surface for the current single-operator deployment. Host headers with ports
@@ -1910,6 +1912,78 @@ core locked until the managed backend is restarted. Browser API requests use
 credentialed cookies across the local frontend/backend ports; raw passwords and
 session tokens never enter frontend state. Multi-operator identity ownership
 remains outside the current single-operator boundary.
+
+### Local single-operator mode without login (#1161, branch-local)
+
+On the #1161 branch, one operator running Seraph on their own machine may opt
+out of the password with `OPERATOR_AUTH_LOCAL_NO_LOGIN=true` in `.env.dev`
+(default `false`; never enable it in a committed environment file). Startup
+refuses the mode with a named error unless all of these hold:
+`DEPLOYMENT_ENVIRONMENT=development`; neither `OPERATOR_AUTH_SECRET` nor
+`OPERATOR_AUTH_SECRET_HASH` is set; the test bypass is off;
+`BACKEND_BIND_HOST` names a loopback address (the managed
+`./manage.sh -e dev local` launcher exports `127.0.0.1` beside its
+`--host 127.0.0.1`); and the Host and Origin allow-lists each contain a
+loopback entry. Uvicorn binds its socket only after application startup, so
+the bind check fails closed on the process command line: it accepts only a
+`uvicorn` (or `python -m uvicorn`) invocation with an explicit loopback
+`--host`, at most one worker (`--workers`, `UVICORN_WORKERS`,
+`WEB_CONCURRENCY`), no inherited `--fd`/`--uds` listener, no non-loopback
+`UVICORN_HOST`, and loopback-only proxy trust (`--forwarded-allow-ips` /
+`FORWARDED_ALLOW_IPS`, so `*` is refused). `uvicorn.run(...)` entry points
+such as `backend/main.py` and gunicorn are refused because their bind is
+invisible to the process. The per-request checks below remain the enforcing
+boundary. Docker development is not supported because container peers are not
+loopback.
+
+Every request is still checked. The peer must be loopback, and every hop in
+`X-Forwarded-For`, `X-Real-IP` and `Forwarded` must be loopback too
+(`403 local_peer_forbidden`). The Vite dev server proxies `/api` and `/ws`
+with `xfwd`, so if it is exposed on a LAN (for example
+`SERAPH_DEV_SERVER_HOST=0.0.0.0`) the remote client's address reaches the
+backend and is refused instead of appearing as the loopback proxy. A browser
+request marked `Sec-Fetch-Site: cross-site` is refused
+(`403 cross_site_forbidden`), which covers Origin-less no-cors GETs and image
+loads; only the paired selected-text companion's exact closed ingress is
+exempt. `Host` must be in
+`OPERATOR_AUTH_ALLOWED_HOSTS` and itself a loopback name, so configured LAN or
+`test` names are refused; state-changing requests and the WebSocket handshake
+need an `Origin` from `OPERATOR_AUTH_ALLOWED_ORIGINS` with a loopback host, and
+any `Origin` a browser sends on a safe request must pass the same check. This
+blocks cross-site pages and DNS rebinding (the Vite dev server additionally
+rejects unknown Host headers).
+
+Requests resolve to one persisted local operator root: an ordinary
+`OperatorSession` row with an `operator:root:*` principal, the normal operator
+grants (not the test-bypass identity) and a bound `OperatorIdentity`. It has
+no bearer token and no expiry, is created once and is reused across restarts,
+so conversation, Work, browser and WebSocket ownership stay stable and the
+existing revocation watches poll it like any other root. Login, refresh,
+logout and ownership credential changes (enroll, recovery-code rotation,
+forget-device, identity revoke) answer `409 local_no_login_active`. When the
+mode is later switched off, the root has no authority (session, principal and
+WebSocket checks refuse it) and the next startup revokes it; re-enabling binds
+a new root to the same live identity, so earlier work is reachable through the
+read-only ownership recovery contract rather than revived authority.
+Capability-journal and attachment-receipt MAC roots in this mode derive from
+the workspace vault key, never a password hash.
+
+Startup records an `operator_auth_mode` audit event with `local_no_login=true`,
+the principal and the declared bind, and `/api/runtime/status` exposes
+`operator_auth: {mode, local_no_login, login_required}`. `/api/auth/session`
+adds `auth_mode: "local_no_login"` and `local_no_login: true` only in this
+mode, so the password contract is unchanged. The cockpit gate goes straight
+into the cockpit with a visible **No login (local only)** badge (also shown in
+Settings in place of Refresh/Sign out) and offers no login or setup screen.
+
+**Risk:** any local process, browser extension or page that passes the
+loopback, Host and Origin checks has full operator authority, including model
+inference, capability execution and artifact transfer. A loopback reverse
+proxy that drops or rewrites `X-Forwarded-For` (unlike the managed Vite proxy)
+would let its remote clients appear local, so do not put any other proxy in
+front of the backend in this mode. Use it only on a
+single-user machine you control; production and test configuration are
+unchanged and still require their credential or explicit test bypass.
 
 On the #895 corrective branch, a refresh rotates only the bearer hash while
 retaining the active `OperatorSession.id` and absolute expiry. The retired hash

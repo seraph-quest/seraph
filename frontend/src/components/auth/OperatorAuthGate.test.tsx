@@ -424,4 +424,68 @@ describe("OperatorAuthGate", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Older work remains stored but is blocked");
     expect(screen.getByTestId("principal")).toBeInTheDocument();
   });
+
+  describe("local single-operator mode without login", () => {
+    const localSession = {
+      ...authenticatedSession,
+      principal_id: "operator:root:local-root",
+      session_id: "local-root-session",
+      idle_expires_at: "2999-01-01T00:00:00Z",
+      absolute_expires_at: "2999-01-01T00:00:00Z",
+      operator_identity_id: "local-identity",
+      auth_mode: "local_no_login",
+      local_no_login: true,
+    };
+
+    it("goes straight into the cockpit with a visible no-login badge and no login or setup screen", async () => {
+      fetchMock.mockResolvedValue(response(localSession));
+
+      render(
+        <OperatorAuthGate>
+          <ProtectedProbe />
+        </OperatorAuthGate>,
+      );
+
+      expect(await screen.findByTestId("principal")).toHaveTextContent("operator:root:local-root");
+      expect(screen.getByRole("status")).toHaveTextContent("No login (local only)");
+      expect(screen.queryByLabelText("Operator password")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Operator setup required/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Operator ownership and recovery" })).not.toBeInTheDocument();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/api/auth/session");
+    });
+
+    it("never calls login, refresh or logout endpoints and keeps the stable root", async () => {
+      fetchMock.mockResolvedValue(response(localSession));
+
+      render(
+        <OperatorAuthGate>
+          <ProtectedProbe />
+        </OperatorAuthGate>,
+      );
+
+      expect(await screen.findByTestId("session-id")).toHaveTextContent("local-root-session");
+      fireEvent.click(screen.getByRole("button", { name: "refresh session" }));
+      fireEvent.click(screen.getByRole("button", { name: "sign out" }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+      expect(urls.every((url) => url.endsWith("/api/auth/session"))).toBe(true);
+      expect(screen.getByTestId("session-id")).toHaveTextContent("local-root-session");
+      expect(screen.queryByLabelText("Operator password")).not.toBeInTheDocument();
+    });
+
+    it("does not show the badge for an ordinary password session", async () => {
+      fetchMock.mockResolvedValue(response(authenticatedSession));
+
+      render(
+        <OperatorAuthGate>
+          <ProtectedProbe />
+        </OperatorAuthGate>,
+      );
+
+      expect(await screen.findByTestId("principal")).toHaveTextContent("operator:single");
+      expect(screen.queryByText("No login (local only)")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Operator ownership and recovery" })).toBeInTheDocument();
+    });
+  });
 });

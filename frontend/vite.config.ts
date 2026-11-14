@@ -18,13 +18,19 @@ export default defineConfig({
     host: devServerHost,
     port: 5173,
     proxy: {
+      // xfwd forwards the real client address in X-Forwarded-For. The backend
+      // trusts proxy headers only from loopback, so a LAN client reaching an
+      // exposed dev server is never mistaken for a loopback operator (local
+      // no-login mode refuses any non-loopback forwarded hop; #1161).
       "/api": {
         target: apiProxyTarget,
         changeOrigin: true,
+        xfwd: true,
       },
       "/ws": {
         target: websocketProxyTarget,
         ws: true,
+        xfwd: true,
       },
     },
     watch: {

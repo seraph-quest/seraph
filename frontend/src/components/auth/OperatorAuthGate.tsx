@@ -3,7 +3,10 @@ import type { FormEvent, ReactNode } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import { AUTH_REQUIRED_EVENT } from "../../lib/operatorAuthEvents";
+import { isLocalNoLoginSession, LocalNoLoginBadge } from "./localNoLogin";
 import { OperatorOwnershipRecovery } from "./OperatorOwnershipRecovery";
+
+export { isLocalNoLoginSession, LOCAL_NO_LOGIN_BADGE, LocalNoLoginBadge } from "./localNoLogin";
 
 type AuthView = "checking" | "login" | "setup" | "unavailable" | "authenticated";
 
@@ -16,7 +19,11 @@ export interface OperatorSession {
   ownership_continuity: "stable" | "legacy_rebind_required";
   ownership_recovery_action: "review_and_recreate_work_in_current_scope" | null;
   operator_identity_id?: string | null;
+  /** Present only in the opt-in local single-operator mode without login. */
+  auth_mode?: "local_no_login";
+  local_no_login?: true;
 }
+
 
 type SessionRead =
   | { kind: "authenticated"; session: OperatorSession }
@@ -437,6 +444,10 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
 
   const refreshSession = useCallback(async () => {
     if (logoutFenceRef.current) return false;
+    if (isLocalNoLoginSession(sessionRef.current)) {
+      // No bearer exists to rotate; re-read the stable local root instead.
+      return (await reconcileSession(sessionRef.current)) === "same_root";
+    }
     if (refreshRef.current) return refreshRef.current;
     const baseline = sessionRef.current;
     const generation = authGenerationRef.current;
@@ -480,6 +491,8 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
   }, [beginGeneration, publishSession, reconcileSession]);
 
   const logout = useCallback(async () => {
+    // Local no-login mode has no session to end; the backend refuses logout.
+    if (isLocalNoLoginSession(sessionRef.current)) return;
     logoutFenceRef.current = true;
     const generation = beginGeneration(true);
     setLoginError(null);
@@ -506,7 +519,7 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
   }, [beginGeneration]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || isLocalNoLoginSession(session)) return;
     const refreshDelay = Math.max(
       Math.min(new Date(session.idle_expires_at).getTime() - Date.now() - 60_000, 15 * 60_000),
       30_000,
@@ -534,7 +547,13 @@ export function OperatorAuthGate({ children }: { children: ReactNode }) {
   }
   return (
     <OperatorAuthContext.Provider value={contextValue}>
-      <OperatorOwnershipRecovery key={session.session_id} session={session} onSessionChanged={refreshSession} />
+      {isLocalNoLoginSession(session) ? (
+        <div className="cockpit-auth-local-strip border-b border-amber-400/30 px-4 py-1 text-xs">
+          <LocalNoLoginBadge />
+        </div>
+      ) : (
+        <OperatorOwnershipRecovery key={session.session_id} session={session} onSessionChanged={refreshSession} />
+      )}
       {session.ownership_continuity === "legacy_rebind_required" && (
         <div
           role="status"

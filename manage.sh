@@ -709,7 +709,9 @@ function start_local_backend() {
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1
-        export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend
+        # BACKEND_BIND_HOST states the listener below; local no-login mode
+        # (OPERATOR_AUTH_LOCAL_NO_LOGIN) refuses to start unless it is loopback.
+        export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend BACKEND_BIND_HOST=127.0.0.1
         exec uv run python -B -m uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
     ' seraph-local-backend "$SCRIPT_DIR/backend" "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR" "$LOCAL_UV_CACHE_DIR" "$LOCAL_DEFAULT_MODEL" "$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_BACKEND_LOG_FILE" 2>&1 &
     local pid=$!

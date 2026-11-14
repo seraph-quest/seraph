@@ -12,8 +12,6 @@ from src.workflows.research_coordinator import continue_parent, freeze_quiescent
 from src.workflows.research_waits import pause_parent
 from src.work_board.research_contracts import WAIT_SOURCES
 
-# ADR-035: pins the native research phase freeze whose model step runs over the intercepted historical OpenRouter route
-pytestmark = pytest.mark.openrouter_legacy
 
 
 async def closed_phase(accounting_db):

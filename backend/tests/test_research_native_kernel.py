@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from tests.test_inference_accounting import accounting_db, setup_configuration
+from tests.near_tee_support import write_near_tee_text_configuration
+from tests.test_inference_accounting import accounting_db
 from src.db.models import Goal, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask, WorkflowRunState
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
@@ -20,8 +21,6 @@ from src.workflows.research_native import create_fixed_children
 from src.workflows.research_accounting import fund_fixed_group
 from src.workflows.research_waits import pause_parent, resume_parent
 
-# ADR-035: pins the native research kernel whose model step runs over the intercepted historical OpenRouter route
-pytestmark = pytest.mark.openrouter_legacy
 
 
 @pytest.fixture(autouse=True)
@@ -41,16 +40,28 @@ def inputs():
         "source_egress_acknowledged":True,"no_learning":True}
 
 
-async def create_kernel(accounting_db, *, strategy=None, admit_only=False, prepare_only=False, reviewed_route=False):
+async def create_kernel(accounting_db, *, strategy=None, admit_only=False, prepare_only=False, reviewed_route=False,
+                        provider="near_tee"):
+    """``provider="openrouter"`` only for openrouter_legacy tests that pin the historical route."""
     _root,_engine,factory=accounting_db
-    configured = setup_configuration()
-    if reviewed_route:
-        from dataclasses import replace
-        from src.api import model_fabric_settings
-        from src.model_fabric.configuration import write_model_fabric_configuration
-        write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
-            replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
-            egress_revision=configured.egress_revision+1))
+    if provider == "near_tee":
+        # ADR-035: research children run on the NEAR TEE text slot (a 100
+        # micro-USD request bound under a 1000 micro-USD lane, as before).
+        configured = write_near_tee_text_configuration(request_cost_bound_microusd=100, ceiling_microusd=1000)
+        if reviewed_route:
+            # A newer reviewed setup of the same slot (research needs <= 45 s).
+            write_near_tee_text_configuration(request_cost_bound_microusd=100, ceiling_microusd=1000,
+                timeout_seconds=30, egress_revision=configured.egress_revision+1)
+    else:
+        from tests.test_inference_accounting import setup_configuration
+        configured = setup_configuration()
+        if reviewed_route:
+            from dataclasses import replace
+            from src.api import model_fabric_settings
+            from src.model_fabric.configuration import write_model_fabric_configuration
+            write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
+                replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
+                egress_revision=configured.egress_revision+1))
     jobs=DurableJobRepository()
     await jobs.configure_inference_accounting(1000)
     from src.auth.service import create_session

@@ -33,7 +33,7 @@ async def test_original_strategy_denies_before_actual_governed_preflight(account
     from src.api import model_fabric_settings
     from src.model_fabric.effective_policy import current_inference_policy
     from src.model_fabric.configuration import write_model_fabric_configuration
-    jobs, task, attempt, spec, _, _ = await create_kernel(accounting_db)
+    jobs, task, attempt, spec, _, _ = await create_kernel(accounting_db, provider="openrouter")
     configured, _ = current_inference_policy()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
@@ -96,7 +96,6 @@ def test_typed_binding_preserves_original_non_json_data_until_rejection(mutation
     with pytest.raises(ValueError): strategy_projection(binding)
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_active_native_projection_survives_only_exact_owner_proof(accounting_db):
     jobs, task, attempt, spec, parent, creation = await create_kernel(accounting_db)
@@ -112,7 +111,6 @@ async def test_active_native_projection_survives_only_exact_owner_proof(accounti
             _safe_durable_authority(candidate, native_research_projection=proof, native_job_kind=kind)
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_unavailable_original_accounting_group_fails_closed(accounting_db, monkeypatch):
     from contextlib import contextmanager
@@ -129,7 +127,6 @@ async def test_unavailable_original_accounting_group_fails_closed(accounting_db,
             await original_group_binds(db, run, typed_inputs=inputs())
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["secret", "missing_vault", "assignment", "authority", "normalized"])
 async def test_secret_scan_rejects_before_admission_writer(accounting_db, monkeypatch, mode):
@@ -154,7 +151,6 @@ async def test_secret_scan_rejects_before_admission_writer(accounting_db, monkey
     assert (await jobs.get_job(spec.identity.job_id))["authority_digest"] == _digest(spec.declared_authority)
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_creation_marker_downgrade_and_mutation_fail_original_binding(accounting_db):
     jobs, task, attempt, spec, _, _ = await create_kernel(accounting_db)
@@ -218,7 +214,6 @@ async def test_creation_marker_downgrade_and_mutation_fail_original_binding(acco
         child.authority_digest = _digest(json.loads(original_child_authority))
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy_binding", ["none", "active", "absent"])
 async def test_genuine_pre_injection_legacy_identity_requires_exact_schema1_group(accounting_db, legacy_binding):
@@ -301,7 +296,6 @@ async def test_active_original_strategy_actual_authenticated_vertical(accounting
 @pytest.mark.parametrize("changed", ["extend", "shorten", "attempt_start", "runtime_bool", "runtime_missing",
     "admission_missing", "admission_duplicate", "admission_digest", "admission_fence", "creation_cutoff",
     "creation_admission", "goal_grant", "goal_revision"])
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 async def test_original_cutoff_and_grant_drift_denies_recovery_without_mutation(accounting_db, changed):
     from datetime import timedelta
     from src.db.models import Goal, WorkBoardAttempt
@@ -368,7 +362,6 @@ async def test_original_cutoff_and_grant_drift_denies_recovery_without_mutation(
         assert persisted.ended_at is None and persisted.lease_owner is None
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changed", ["attempt_start", "task_input", "task_capability", "attempt_task", "goal_revision", "goal_grant"])
 async def test_native_admission_writer_rechecks_original_canonical_snapshot(accounting_db, changed):
@@ -419,7 +412,8 @@ async def test_existing_active_replay_and_readiness_never_consult_current_resolv
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.repository import BoardDispatchClaim
     from src.workflows.research_native import checkpoint
-    jobs, task, attempt, spec, _, creation = await create_kernel(accounting_db, strategy=active(), reviewed_route=True)
+    jobs, task, attempt, spec, _, creation = await create_kernel(accounting_db, strategy=active(), reviewed_route=True,
+                                                                       provider="openrouter")
     calls, probes = [], []
     async def resolve(*args):
         calls.append(True)
@@ -447,7 +441,6 @@ async def test_existing_active_replay_and_readiness_never_consult_current_resolv
     assert (await jobs.inference_accounting_snapshot())["operation_count"] == 0
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: research strategy replay/preflight over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unsafe", [None, "positive_attempt", "fence", "effect", "lease", "child", "proof"])
 async def test_admission_before_link_crash_continues_only_original_unclaimed_parent(accounting_db, monkeypatch, unsafe):

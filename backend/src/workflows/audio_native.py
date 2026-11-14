@@ -2,6 +2,12 @@
 
 There is no audio execution table/queue here. WorkflowRunState owns execution;
 AudioIngressJob contains the immutable capture and private review projection.
+
+#1179 (2026-11-14) retired voice input. Nothing admits or executes an
+``audio_transcription_v1`` run any more (admission returns
+``audio_route_retired``). What remains here only reads and fences historical
+runs, so generic accounting/recovery and Work-board origin checks can still
+settle or display them. A physical source read is never possible again.
 """
 from __future__ import annotations
 
@@ -109,26 +115,6 @@ class AudioNativeAdmissionBindingV1:
         return cls(**value)
 
 
-def validate_spec(spec, binding):
-    from src.workflows.job_runtime import DurableJobAdmissionDenied
-    if type(binding) is not AudioNativeAdmissionBindingV1:
-        raise DurableJobAdmissionDenied("audio_native_binding_required")
-    identity = spec.identity
-    if (identity.job_kind != KIND or identity.owner_kind != "user"
-        or identity.job_id != binding.workflow_job_id
-        or identity.owner_principal_id != binding.owner_principal_id
-        or identity.capability_version != "audio-transcription-v1"
-        or identity.idempotency_scope != "audio-ingress"
-        or spec.session_id != binding.conversation_session_id
-        or spec.operator_session_id != binding.original_root_id
-        or any(getattr(spec, k) is not None for k in ("goal_id", "goal_revision", "plan_revision", "parent_job_id", "source_task_id"))
-        or spec.max_attempts != 1 or spec.resource_claims != ("remote_inference",)
-        or spec.budget_microusd != binding.audio_budget_microusd
-        or utc(spec.deadline_at) != utc(binding.original_deadline_at)
-        or spec.declared_authority.get(AUTHORITY_KEY) != binding.payload()):
-        raise DurableJobAdmissionDenied("audio_native_spec_mismatch")
-
-
 async def current_capture(db, binding, *, require_current=True, physical=False):
     from src.workflows.job_runtime import DurableJobLeaseError
     row = await db.get(AudioIngressJob, binding.audio_job_id, populate_existing=True)
@@ -160,53 +146,10 @@ async def current_capture(db, binding, *, require_current=True, physical=False):
         if evidence.pricing.reserve_microusd > binding.audio_budget_microusd:
             raise DurableJobLeaseError("audio_original_budget_insufficient")
     if physical:
-        from src.conversation.identity import validate_attachment_refs
-        from src.guardian.audio_worker import AudioIngressWorker
-        from pathlib import Path
-        refs = validate_attachment_refs([json.loads(row.attachment_ref_json)], owner_principal_id=binding.owner_principal_id)
-        if (len(refs) != 1 or refs[0].get("attachment_id") != row.attachment_id
-            or refs[0].get("content_hash") != row.audio_payload_digest or refs[0].get("session_id") != row.session_id
-            or refs[0].get("capture_consent_reference") != binding.capture_grant_ref
-            or refs[0].get("model_consent_reference") != binding.model_grant_ref):
-            raise DurableJobLeaseError("audio_attachment_binding_stale")
-        if not row.raw_path:
-            raise DurableJobLeaseError("audio_source_missing")
-        # All ancestors and final bytes must still be physical local files.
-        path = Path(row.raw_path)
-        for parent in (*path.parents, path):
-            if parent.is_symlink():
-                raise DurableJobLeaseError("audio_source_symlink")
-        raw = AudioIngressWorker._read_quarantine_bytes(path)
-        if len(raw) != row.audio_size_bytes or hashlib.sha256(raw).hexdigest() != row.audio_payload_digest:
-            raise DurableJobLeaseError("audio_source_digest_stale")
+        # The retired audio worker owned the quarantine bytes; a historical
+        # run can never re-read them or reach provider contact.
+        raise DurableJobLeaseError("audio_route_retired")
     return row
-
-
-async def guard_admission(db, spec, binding):
-    from src.workflows.job_runtime import DurableJobIdempotencyConflict, DurableJobLeaseError
-    validate_spec(spec, binding)
-    row = await current_capture(db, binding, physical=True)
-    if spec.identity.idempotency_key != row.request_id:
-        raise DurableJobIdempotencyConflict("audio_request_identity_changed")
-    exact = canonical(binding.payload())
-    grant = (await db.execute(select(AudioConsentGrant).where(AudioConsentGrant.reference == binding.model_grant_ref))).scalars().one()
-    if row.workflow_job_id is not None:
-        if row.workflow_job_id != binding.workflow_job_id or row.execution_binding_digest != digest(binding.payload()) or grant.audio_execution_binding_json != exact:
-            raise DurableJobIdempotencyConflict("audio_execution_binding_changed")
-        return row
-    if row.admission_operation_id or row.transport_lease_id or row.status not in {"queued", "blocked", "awaiting_consent"} or grant.audio_execution_binding_json is not None:
-        raise DurableJobLeaseError("audio_capture_not_fresh")
-    changed = await db.execute(update(AudioConsentGrant).where(AudioConsentGrant.id == grant.id, AudioConsentGrant.audio_execution_binding_json.is_(None), AudioConsentGrant.state == "active").values(audio_execution_binding_json=exact).execution_options(synchronize_session=False))
-    if changed.rowcount != 1:
-        raise DurableJobIdempotencyConflict("audio_grant_binding_conflict")
-    return row
-
-
-async def bind_capture(db, row, binding):
-    from src.workflows.job_runtime import DurableJobIdempotencyConflict
-    changed = await db.execute(update(AudioIngressJob).where(AudioIngressJob.id == row.id, AudioIngressJob.revision == row.revision, AudioIngressJob.workflow_job_id.is_(None)).values(workflow_job_id=binding.workflow_job_id, execution_binding_digest=digest(binding.payload()), revision=AudioIngressJob.revision + 1).execution_options(synchronize_session=False))
-    if changed.rowcount != 1:
-        raise DurableJobIdempotencyConflict("audio_pair_admission_conflict")
 
 
 async def guard_audio_pair(db, run, *, require_current=True, physical=False):
@@ -225,20 +168,11 @@ async def guard_audio_pair(db, run, *, require_current=True, physical=False):
     return binding, row
 
 
-async def advance_audio_pair(db, run, audio, *, changes=None, task_capture_reservation=None):
+async def advance_audio_pair(db, run, audio, *, changes=None):
     from src.workflows.job_runtime import DurableJobLeaseError
     if audio is None:
         return
     allowed = {"status", "transcript", "transcript_digest", "confirmed_transcript_digest", "result_digest", "error_code", "provider_status", "transport_status", "cleanup_status", "raw_path", "normalized_path", "admission_operation_id"}
-    if task_capture_reservation is not None:
-        from src.work_board.channel_capture import ChannelCaptureReservationV1
-        if type(task_capture_reservation) is not ChannelCaptureReservationV1:
-            raise DurableJobLeaseError("audio_task_capture_reservation_required")
-        original = json.loads(audio.metadata_json or "{}")
-        updated = dict(original, **{"channel_task_capture.v1": task_capture_reservation.model_dump(mode="json")})
-        if changes != {"metadata_json": canonical(updated)}:
-            raise DurableJobLeaseError("audio_task_capture_metadata_invalid")
-        allowed.add("metadata_json")
     if set(changes or {}) - allowed:
         raise DurableJobLeaseError("audio_pair_changes_invalid")
     values = dict(changes or {}, revision=AudioIngressJob.revision + 1, updated_at=datetime.now(timezone.utc))

@@ -484,13 +484,13 @@ async def test_audio_documentation_metadata_reads_never_contact_openrouter(clien
         assert raised.value.code == OPENROUTER_RETIRED_REASON and raised.value.status == 409
         with pytest.raises(DocumentationError, match=OPENROUTER_RETIRED_REASON):
             await stage(None, None, None)
+        # #1179 removed the audio documentation endpoint with voice input.
         response = await client.post("/api/settings/model-fabric/audio-documentation", json={
             "action": "acquire_selected_profile_metadata", "expected_egress_revision": 1,
             "expected_audio_profile_hash": "a" * 64, "metadata_selection_ref": "selection-fixture",
             "expected_metadata_selection_digest": "b" * 64,
             "official_supplement_catalog_id": "openrouter-audio-guide.v1"})
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"]["code"] == OPENROUTER_RETIRED_REASON
+    assert response.status_code in {404, 405}, response.text
 
 
 @pytest.mark.asyncio

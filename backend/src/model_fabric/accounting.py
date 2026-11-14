@@ -226,7 +226,6 @@ class _AccountingHandle:
     ephemeral: bool
     contacted: bool = False
     committed_denial: object | None = None
-    audio_native: object | None = None
     profile_id: str | None = None
 
 
@@ -239,31 +238,6 @@ class _SettlementContext:
 
 
 _current_settlement: ContextVar[_SettlementContext | None] = ContextVar("inference_settlement_owner", default=None)
-
-
-def assert_audio_contact_accounting(context) -> None:
-    """Require the actual broker's already-committed original contact owner."""
-    from .contracts import InferenceRequestContext
-    from .remote_inference_admission import RemoteInferenceReceiptBinding, current_remote_inference_receipt_binding
-    from src.workflows.audio_native import AudioNativeAdmissionBindingV1
-    current = _current_settlement.get()
-    binding = current_remote_inference_receipt_binding()
-    if type(context) is not InferenceRequestContext or current is None or type(binding) is not RemoteInferenceReceiptBinding:
-        raise InferenceAccountingError("audio_native_contact_required")
-    handle, native = current.handle, current.handle.audio_native
-    if (type(native) is not AudioNativeAdmissionBindingV1 or handle.ephemeral or not handle.contacted
-        or handle.request.runtime_path != "audio_transcription" or context.runtime_path != "audio_transcription"
-        or handle.request.operation_id != native.operation_id or handle.request.job_id != native.workflow_job_id
-        or context.job_id != native.workflow_job_id or context.session_id != native.conversation_session_id
-        or context.principal.principal_id != native.owner_principal_id
-        or context.principal.operator_session_id != native.original_root_id
-        or context.data_digest != handle.request.data_digest or context.deadline_at != handle.request.deadline_at
-        or binding.repository is not handle.repository or binding.job_id != handle.job_id
-        or binding.owner != handle.owner or binding.fencing_token != handle.fence
-        or _current_policy_digest.get() != native.policy_digest
-        or tuple(context.requirements.capabilities) != ("text", "audio_input")):
-        raise InferenceAccountingError("audio_native_contact_required")
-    assert_current_inference_policy()
 
 
 class DurableInferenceBrokerMixin:
@@ -483,8 +457,10 @@ class DurableInferenceBrokerMixin:
                 setup = configured.near_text if near else configured.openrouter_setup
                 bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
             from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION, route_slot_for_task_class
-            if request.runtime_path == "audio_transcription" and (tee_slot is not None or setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION):
-                raise InferenceAccountingError("audio_setup_v3_required")
+            if request.runtime_path == "audio_transcription":
+                # #1179 retired voice input: no audio transcription is ever
+                # reserved or contacted again.
+                raise InferenceAccountingError("audio_route_retired")
             if tee_slot is not None:
                 pass
             elif near:
@@ -522,25 +498,6 @@ class DurableInferenceBrokerMixin:
                 raise InferenceAccountingError("repository_iteration_receipt_binding_invalid")
             if not ephemeral and binding.repository_iteration_witness is not None and repository_witness is None:
                 raise InferenceAccountingError("repository_iteration_receipt_binding_invalid")
-            if request.runtime_path == "audio_transcription":
-                if setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
-                    raise InferenceAccountingError("audio_setup_v3_required")
-                if ephemeral:
-                    raise InferenceAccountingError("audio_native_binding_required")
-                native_audio = await binding.repository.validate_audio_inference_binding(request, binding)
-                from src.workflows.audio_native import AudioNativeAdmissionBindingV1
-                if type(native_audio) is not AudioNativeAdmissionBindingV1:
-                    raise InferenceAccountingError("audio_native_binding_required")
-                if type(native_audio.audio_budget_microusd) is not int or bound > native_audio.audio_budget_microusd:
-                    raise InferenceAccountingError("audio_budget_insufficient")
-                from src.llm_runtime import provider_profiles
-                from .audio_contracts import audio_route_witness
-                profile = provider_profiles().get("openrouter.audio")
-                if profile is None or profile.contract_hash != native_audio.profile_hash:
-                    raise InferenceAccountingError("audio_profile_binding_invalid")
-                evidence, _ = await audio_route_witness(profile, native_audio.endpoint_witness_ref)
-                if evidence.pricing.reserve_microusd > bound:
-                    raise InferenceAccountingError("audio_pricing_unbounded")
             if ephemeral and task_binding is not None and task_binding.get("role") == "communication_preparation":
                 raise InferenceAccountingError("communication_preparation_native_binding_required")
             if near and ephemeral:
@@ -614,8 +571,7 @@ class DurableInferenceBrokerMixin:
                 general_task_binding=task_binding,
             )
             return _AccountingHandle(request, repository, job_id, owner, fence, policy_digest,
-                reservation["sequence"], ephemeral, audio_native=native_audio if request.runtime_path == "audio_transcription" else None,
-                profile_id=bound_profile)
+                reservation["sequence"], ephemeral, profile_id=bound_profile)
         except Exception as exc:
             from .remote_inference_admission import RemoteInferenceBindingError
             if created_job is not None:
@@ -680,29 +636,12 @@ class DurableInferenceBrokerMixin:
                     # must still authenticate as the same owner to adopt.
                     root_id = handle.request.operator_session_id
                 if handle.request.runtime_path == "audio_transcription":
-                    from src.workflows.audio_native import AudioNativeAdmissionBindingV1
-                    from .remote_inference_admission import RemoteInferenceReceiptBinding
-                    if type(handle.audio_native) is not AudioNativeAdmissionBindingV1:
-                        raise InferenceAccountingError("audio_native_binding_required")
-                    receipt_binding = RemoteInferenceReceiptBinding(repository=handle.repository,
-                        owner=handle.owner, fencing_token=handle.fence, job_id=handle.job_id)
-                    current = await handle.repository.validate_audio_inference_binding(handle.request, receipt_binding)
-                    if current != handle.audio_native:
-                        raise InferenceAccountingError("audio_native_binding_changed")
-                    root_id = current.original_root_id
+                    # #1179: a retired audio route can never adopt a result.
+                    raise InferenceAccountingError("audio_route_retired")
                 operator = await authenticate_session(root_id, touch=False)
                 adoption_allowed = adoption_allowed and operator.principal.principal_id == handle.request.owner_id
         except Exception:
             adoption_allowed = False
-        if handle.request.runtime_path == "audio_transcription":
-            snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
-            adoption_allowed = (adoption_allowed and row["state"] == "settled"
-                and type(row.get("actual_cost_microusd")) is int
-                and isinstance(row.get("provider_operation_id"), str)
-                and row.get("provider_operation_id") == (payload or {}).get("id")
-                and snapshot.get("accounting_continuity_verified") is True
-                and snapshot.get("status") == "ready"
-                and snapshot.get("overrun_max_cost_microusd", 0) == 0)
         if near:
             snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
             adoption_allowed = (adoption_allowed and billing is not None and row["state"] == "settled"

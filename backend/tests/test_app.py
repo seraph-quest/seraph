@@ -408,7 +408,6 @@ def _isolate_unrelated_app_startup(app_module, monkeypatch, tmp_path):
     monkeypatch.setattr("src.model_fabric.configuration.hydrate_openrouter_credential", AsyncMock())
     monkeypatch.setattr("src.workflows.job_runtime.durable_job_repository.recover_stale_jobs", AsyncMock(return_value=[]))
     monkeypatch.setattr("src.workflows.routines.routine_service.recover_pending_installs", AsyncMock(return_value=[]))
-    monkeypatch.setattr("src.guardian.audio_worker.cleanup_audio_ingress_jobs", AsyncMock(return_value=[]))
     profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
     monkeypatch.setattr("src.observer.manager.context_manager.refresh", AsyncMock())
@@ -566,8 +565,7 @@ async def test_actual_cordis_app_lifespan_authenticated_status_and_positive_clea
                    "src.guardian.goal_programmes.goal_programme_service.stop"):
         monkeypatch.setattr(target, AsyncMock())
     for target in ("src.workflows.job_runtime.durable_job_repository.recover_stale_jobs",
-                   "src.workflows.routines.routine_service.recover_pending_installs",
-                   "src.guardian.audio_worker.cleanup_audio_ingress_jobs"):
+                   "src.workflows.routines.routine_service.recover_pending_installs"):
         monkeypatch.setattr(target, AsyncMock(return_value=[]))
     profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))
@@ -779,8 +777,7 @@ async def test_early_lifespan_failure_releases_exact_source_owner(app, async_db,
                    "src.observer.manager.context_manager.refresh"):
         monkeypatch.setattr(target, AsyncMock())
     for target in ("src.workflows.job_runtime.durable_job_repository.recover_stale_jobs",
-                   "src.workflows.routines.routine_service.recover_pending_installs",
-                   "src.guardian.audio_worker.cleanup_audio_ingress_jobs"):
+                   "src.workflows.routines.routine_service.recover_pending_installs"):
         monkeypatch.setattr(target, AsyncMock(return_value=[]))
     profile = SimpleNamespace(interruption_mode=None, capture_mode=None, tool_policy_mode=None, mcp_policy_mode=None, approval_mode=None)
     monkeypatch.setattr("src.api.profile.get_or_create_profile", AsyncMock(return_value=profile))

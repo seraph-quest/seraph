@@ -79,6 +79,11 @@ async def test_every_system_job_is_classified_and_deletion_jobs_are_exempt(servi
     with pytest.raises(LifecycleBlocked) as unknown:
         job_domain("new_unclassified_job")
     assert unknown.value.reason_code == "lifecycle_job_unclassified"
+    # #1179: the retired voice-input cleanup job is not registered and is no
+    # longer classified, so a stale id fails closed like any unknown job.
+    assert "audio_ingress_cleanup" not in ids
+    with pytest.raises(LifecycleBlocked):
+        job_domain("audio_ingress_cleanup")
 
 
 def test_tasks_is_the_data_domain_and_dispatch_the_lifecycle_domain():
@@ -152,9 +157,9 @@ async def test_retention_jobs_run_while_the_scheduler_domain_is_blocked(service_
         ran.append(name)
 
     await lifecycle.run_gated("screen_cleanup", lambda: job("screen_cleanup"))
-    await lifecycle.run_gated("audio_ingress_cleanup", lambda: job("audio"))
+    await lifecycle.run_gated("cordis_mail_retention", lambda: job("cordis_mail_retention"))
     await lifecycle.run_gated("goal_check", lambda: job("goal_check"))
-    assert ran == ["screen_cleanup", "audio"]
+    assert ran == ["screen_cleanup", "cordis_mail_retention"]
     assert _status_entry("goal_check")["status"] == "blocked"
     assert _status_entry("goal_check")["reason"] == "scheduler_owner_blocked"
     assert _status_entry("screen_cleanup") == {}

@@ -1,19 +1,26 @@
 """Real Auth/SQLite/native broker/artifact journey with intercepted HTTP."""
 import json
 import hashlib
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
-from tests.test_inference_accounting import accounting_db, setup_configuration
+from tests.near_tee_support import prepare_near_tee_vertical
+from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth, ResponseBytes
 from src.auth.middleware import OperatorAuthMiddleware
 from src.workflows.job_runtime import DurableJobRepository, _digest
 from tests.cordis_research import needs_cordis, research_host
 import pytest_asyncio
+
+
+# ADR-035: the NEAR TEE slot reserves its catalog-priced bound per request
+# (>= 1711 micro-USD for this slot), so the programme budget funds that
+# reserve; generation_ceiling keeps room for exactly one request.
+_REQUEST_BOUND = 2_000
+_PROGRAMME_BUDGET = 20_000
 
 
 @pytest_asyncio.fixture
@@ -107,24 +114,16 @@ def public_http_fixture():
     "manifest_receipt_foreign", "physical_query_tamper", "physical_snapshots_tamper"])
 @needs_cordis
 @pytest.mark.asyncio
-# ADR-035: the discovery model step runs over the intercepted historical OpenRouter route (canary + transport)
-@pytest.mark.openrouter_legacy
 async def test_authenticated_public_programme_logout_native_discovery(accounting_db, real_auth, public_http_fixture, research_cordis, monkeypatch, scenario):
     from config.settings import settings
     from src.api import auth, goals, model_fabric_settings
     from src.guardian.goal_programmes import goal_programme_service
     from src.guardian.goal_discovery import GoalDiscoveryService
     from src.guardian.discovery_search import DiscoverySearch
-    from src.model_fabric.configuration import write_model_fabric_configuration
     from src.workflows.research_sources import physical_discovery_inputs
     root, engine, factory = accounting_db
-    configured = setup_configuration()
-    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
-        replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
-        egress_revision=configured.egress_revision + 1))
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
     calls, contacts = [], []
     from src.memory.task_lessons import ResearchStrategy
     strategy_data = ResearchStrategy(query_templates=["official dated public release evidence"],
@@ -132,76 +131,90 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
         draft_sections=["Evidence summary", "Limitations and next local checks"],
         stop_conditions=["Stop when no selected source has verifiable attribution"]).model_dump(mode="json")
     expected_strategy_version = "1"
-    class ModelBoundary(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request):
-            assert request.url.host == "openrouter.ai" and request.method == "POST"
+    from tests.test_near_tee_text_slot import NearFixture
+
+    class ModelBoundary(NearFixture):
+        """ADR-035: the discovery model step on the intercepted NEAR TEE gateway."""
+
+        def install(self, monkeypatch):
+            # The owned public fixture below is a local Unix socket behind the
+            # real async transport; every other real transport stays refused.
+            real = httpx.AsyncHTTPTransport.handle_async_request
+            super().install(monkeypatch)
+
+            async def owned_uds_only(transport, request):
+                if getattr(transport._pool, "_uds", None) != socket_path:
+                    raise AssertionError("provider transport contacted outside the NEAR fixture")
+                return await real(transport, request)
+            monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", owned_uds_only)
+            return self
+
+        async def handler(self, request):
+            if not (request.method == "POST" and request.url.raw_path.decode() == "/v1/chat/completions"):
+                return super().handler(request)
+            assert request.url.host == "cloud-api.near.ai"
             body = json.loads(request.content)
-            if len(body["messages"]) == 1:
-                answer = "CANARY_OK"
+            assert len(request.content) <= 8192
+            calls.append(body)
+            if scenario in {"model_timeout", "same_goal_unknown_generation"}:
+                raise httpx.ReadTimeout("owned scripted contact response lost", request=request)
+            supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
+            method = supplied.get("research_strategy")
+            projected_data = strategy_data if expected_strategy_version == "1" else {**strategy_data,
+                "query_templates": ["Changed accepted public query"]}
+            if method is not None:
+                assert supplied["strategy_ref"] == {"status": "active", "method_id": "accepted-public-method",
+                    "version": expected_strategy_version, "digest": _digest(projected_data)}
             else:
-                assert len(request.content) <= 8192
-                calls.append(body)
-                if scenario in {"model_timeout", "same_goal_unknown_generation"}:
-                    raise httpx.ReadTimeout("owned scripted contact response lost", request=request)
-                supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
-                method = supplied.get("research_strategy")
-                projected_data = strategy_data if expected_strategy_version == "1" else {**strategy_data,
-                    "query_templates": ["Changed accepted public query"]}
+                assert "research_strategy" not in supplied
+                if supplied.get("task") == "plan_queries" or "manifest_ref" in supplied:
+                    assert supplied["strategy_ref"] == {"status": "none", "method_id": None,
+                        "version": None, "digest": None}
+                else:
+                    assert "strategy_ref" not in supplied
+            if supplied.get("task") == "plan_queries":
                 if method is not None:
-                    assert supplied["strategy_ref"] == {"status": "active", "method_id": "accepted-public-method",
-                        "version": expected_strategy_version, "digest": _digest(projected_data)}
-                else:
-                    assert "research_strategy" not in supplied
-                    if supplied.get("task") == "plan_queries" or "manifest_ref" in supplied:
-                        assert supplied["strategy_ref"] == {"status": "none", "method_id": None,
-                            "version": None, "digest": None}
-                    else:
-                        assert "strategy_ref" not in supplied
-                if supplied.get("task") == "plan_queries":
-                    if method is not None:
-                        assert method == {"schema_version": "ResearchStrategy.v1", "query_templates": projected_data["query_templates"]}
-                    answer = json.dumps({"queries": method["query_templates"] if method else ["public product release evidence"]})
-                    if scenario == "narrow_queries":
-                        assert supplied["max_queries"] == 1
-                        answer = json.dumps({"queries": ["first public query", "second public query"]})
-                    if scenario == "strategy_changed_after_query":
-                        strategy_state["changed"] = True
-                    if scenario == "goal_after_query":
-                        from src.goals.repository import GoalRepository
-                        await GoalRepository().update(goal_id, description="Changed current Goal after contact", expected_revision=1)
-                elif "manifest_ref" in supplied:
-                    if method is not None:
-                        assert method == {"schema_version": "ResearchStrategy.v1", "source_preferences": strategy_data["source_preferences"],
-                            "required_evidence_fields": strategy_data["required_evidence_fields"]}
-                    chosen = next((r for r in supplied["results"] if method and "official" in method["source_preferences"]
-                        and {"url", "date", "excerpt", "limitation"}.issubset(method["required_evidence_fields"])
-                        and r["title"] == "Official dated release"), supplied["results"][0])
-                    answer = json.dumps({"selected_result_ids": ["0" * 32 if scenario == "unselected_id" else chosen["result_id"]]})
-                    if scenario == "narrow_sources":
-                        assert supplied["max_sources"] == 1
-                        answer = json.dumps({"selected_result_ids": [r["result_id"] for r in supplied["results"]]})
-                else:
-                    if method is not None:
-                        assert method == {"schema_version": "ResearchStrategy.v1", "draft_sections": strategy_data["draft_sections"],
-                            "required_evidence_fields": strategy_data["required_evidence_fields"], "stop_conditions": strategy_data["stop_conditions"]}
-                    source = supplied["untrusted_quoted_sources"][0]
-                    answer = json.dumps({"schema_version": 1, "perspective": "Prepare a public Goal discovery brief",
-                        "claims": [{"text": ((method["draft_sections"][0] + ": ") if method else "") + "The public fixture describes the selected release.",
-                            "citations": [{key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
-                        "uncertainty": (["Required evidence: " + ", ".join(method["required_evidence_fields"]),
-                            method["stop_conditions"][0]] if method else ["Fixture execution is not a semantic truth claim."]),
-                        "contradictions": [], "no_learning": True})
-            payload = {"id": "fixture-discovery", "choices": [{"message": {"role": "assistant", "content": answer}}],
-                "usage": {"cost": "0.000002", "prompt_tokens": 10, "completion_tokens": 10}}
-            return httpx.Response(200, request=request, headers={"content-type": "application/json"},
-                stream=ResponseBytes(json.dumps(payload).encode()))
-    original_client = httpx.AsyncClient
-    def clients(**kwargs):
-        if "transport" not in kwargs:
-            kwargs["transport"] = ModelBoundary()
-        return original_client(**kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", clients)
+                    assert method == {"schema_version": "ResearchStrategy.v1", "query_templates": projected_data["query_templates"]}
+                answer = json.dumps({"queries": method["query_templates"] if method else ["public product release evidence"]})
+                if scenario == "narrow_queries":
+                    assert supplied["max_queries"] == 1
+                    answer = json.dumps({"queries": ["first public query", "second public query"]})
+                if scenario == "strategy_changed_after_query":
+                    strategy_state["changed"] = True
+                if scenario == "goal_after_query":
+                    from src.goals.repository import GoalRepository
+                    await GoalRepository().update(goal_id, description="Changed current Goal after contact", expected_revision=1)
+            elif "manifest_ref" in supplied:
+                if method is not None:
+                    assert method == {"schema_version": "ResearchStrategy.v1", "source_preferences": strategy_data["source_preferences"],
+                        "required_evidence_fields": strategy_data["required_evidence_fields"]}
+                chosen = next((r for r in supplied["results"] if method and "official" in method["source_preferences"]
+                    and {"url", "date", "excerpt", "limitation"}.issubset(method["required_evidence_fields"])
+                    and r["title"] == "Official dated release"), supplied["results"][0])
+                answer = json.dumps({"selected_result_ids": ["0" * 32 if scenario == "unselected_id" else chosen["result_id"]]})
+                if scenario == "narrow_sources":
+                    assert supplied["max_sources"] == 1
+                    answer = json.dumps({"selected_result_ids": [r["result_id"] for r in supplied["results"]]})
+            else:
+                if method is not None:
+                    assert method == {"schema_version": "ResearchStrategy.v1", "draft_sections": strategy_data["draft_sections"],
+                        "required_evidence_fields": strategy_data["required_evidence_fields"], "stop_conditions": strategy_data["stop_conditions"]}
+                source = supplied["untrusted_quoted_sources"][0]
+                answer = json.dumps({"schema_version": 1, "perspective": "Prepare a public Goal discovery brief",
+                    "claims": [{"text": ((method["draft_sections"][0] + ": ") if method else "") + "The public fixture describes the selected release.",
+                        "citations": [{key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
+                    "uncertainty": (["Required evidence: " + ", ".join(method["required_evidence_fields"]),
+                        method["stop_conditions"][0]] if method else ["Fixture execution is not a semantic truth claim."]),
+                    "contradictions": [], "no_learning": True})
+            self.answer = {"role": "assistant", "content": answer}
+            self.body_id = f"chatcmpl-discovery-{len(calls)}"
+            return super().handler(request)
     socket_path, physical_contacts, physical_controls = public_http_fixture
+    gateway = ModelBoundary()
+    gateway.cost_nano = 2_000  # NEAR bills 2 micro-USD per request
+    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",),
+                                    request_cost_bound_microusd=_REQUEST_BOUND)
+    original_client = httpx.AsyncClient
     physical_controls["scenario"] = scenario
     class PublicFixtureBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -339,16 +352,12 @@ async def test_authenticated_public_programme_logout_native_discovery(accounting
             assert login.status_code == 200, login.text
             enrolled = await client.post("/api/auth/ownership/enroll")
             assert enrolled.status_code == 200, enrolled.text
-            for capability in ("text", "latency_ms", "health"):
-                canary = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "openrouter",
-                    "capability": capability, "timeout_seconds": 30})
-                assert canary.status_code == 200 and canary.json()["outcome"] == "passed", canary.text
             created = await client.post("/api/goals", json={"title": "PRIVATE_GOAL_TITLE_CANARY", "description": "PRIVATE_GOAL_DESCRIPTION_CANARY"})
             assert created.status_code == 200, created.text
             goal_id = created.json()["id"]
             request = {"expected_goal_revision": 1, "expected_grant_revision": 0,
                 "public_brief": "é" * 1500 if scenario == "unsupported_brief" else "Track public product release evidence",
-                "budget": {"max_inference_microusd": 105 if scenario == "generation_ceiling" else 500}}
+                "budget": {"max_inference_microusd": _REQUEST_BOUND + 5 if scenario == "generation_ceiling" else _PROGRAMME_BUDGET}}
             base = f"/api/goals/{goal_id}/programmes"
             preview = await client.post(base + "/preview", json=request)
             assert preview.status_code == 200, preview.text

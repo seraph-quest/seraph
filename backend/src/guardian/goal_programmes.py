@@ -64,15 +64,13 @@ def programme_policy_facts(configured) -> tuple[int, str, str | None]:
     OpenRouter projection applies only in the explicit legacy test mode.
     Returns ``(epoch, digest, blocked_reason)``; never reads credentials.
     """
-    from src.model_fabric.configuration import near_tee_slot_block_reason
-    from src.model_fabric.effective_policy import _policy_digest, inference_policy_from_configuration
+    from src.model_fabric.effective_policy import inference_policy_from_configuration, near_tee_policy_from_configuration
     from src.model_fabric.near_tee_vertical import near_tee_vertical_route
     from src.model_fabric.retirement import openrouter_retired
     try:
         if near_tee_vertical_route("readonly_research_child", configured) is not None:
-            if reason := near_tee_slot_block_reason(configured, "text"):
-                raise PermissionError(reason)
-            return configured.egress_revision, _policy_digest(configured), None
+            _configured, digest = near_tee_policy_from_configuration(configured, "text")
+            return configured.egress_revision, digest, None
         if openrouter_retired():
             raise PermissionError("no_active_provider")
         _configured, digest = inference_policy_from_configuration(configured)

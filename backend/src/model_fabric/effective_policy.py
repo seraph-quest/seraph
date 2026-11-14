@@ -95,8 +95,17 @@ def _policy_digest(configured) -> str:
 
 def current_near_tee_policy(slot: str = "text") -> tuple[object, str]:
     """Exact NEAR TEE slot authority projection (ADR-035); fails closed."""
+    return near_tee_policy_from_configuration(read_model_fabric_configuration(), slot)
+
+
+def near_tee_policy_from_configuration(configured, slot: str = "text") -> tuple[object, str]:
+    """Pure NEAR TEE slot authority projection for one configuration (ADR-035).
+
+    Raises ``PermissionError`` with the slot's local block reason; never reads
+    credentials. The one projection both the live check and programme
+    bindings use, so the two cannot drift apart.
+    """
     from .configuration import near_tee_slot_block_reason
-    configured = read_model_fabric_configuration()
     if reason := near_tee_slot_block_reason(configured, slot):
         raise PermissionError(reason)
     return configured, _policy_digest(configured)

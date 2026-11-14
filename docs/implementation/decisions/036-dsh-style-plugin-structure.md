@@ -81,7 +81,7 @@ Adding or moving a capability means designing all three. A provider swap must no
 **What each new part covers:**
 - **Execution guard:** the pre-execution check of authority, approval and consent that every capability consumer passes. Today `CapabilityExecutionHost` calls into it, together with the authority checks.
 - **Operator authentication:** operator sessions, and the #1161 local no-login mode with its startup validation.
-- **Credential vault:** vault keys and stored secrets. It is a trust service hosted by the Python provider worker. Giving it a domain row is a separate slice.
+- **Credential vault:** vault keys and stored secrets. Today the Python provider worker only checks that the vault key resolves; the vault is not one of its providers. In the target, the worker hosts the vault as a trust service. Making it a provider, and giving it a domain row, is a separate slice.
 
 **What "pinned" means:**
 

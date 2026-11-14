@@ -2,9 +2,9 @@
 
 The orchestrator and its real specialists (the agent factories' wrapped tools)
 run one scripted conversation on the legacy loop and on the Cordis loop, where
-each specialist is a durable child turn. The model is the real governed
-``FallbackLiteLLMModel`` for the orchestrator and every specialist; only its
-OpenRouter HTTP client is scripted, so nothing leaves the process.
+each specialist is a durable child turn. The model is the production model for
+the orchestrator and every specialist on its ADR-035 NEAR TEE route; only the
+NEAR gateway is scripted, so nothing leaves the process.
 """
 from __future__ import annotations
 
@@ -21,14 +21,9 @@ pytestmark = [needs_cordis]
 
 
 def _delegating(env, monkeypatch, loop):
-    """use_delegation on; specialists use the same governed model; Cordis owns presets and delegation."""
+    """use_delegation on; specialists use their production model on the same NEAR TEE route; Cordis owns presets and delegation."""
     from src.runtime_plugins.cutover import transition_domain
-
-    def specialist_model(temperature, runtime_path):
-        from src.agent import factory
-        return factory.get_model(runtime_path=runtime_path, temperature=temperature)
     monkeypatch.setattr(settings, "use_delegation", True)
-    monkeypatch.setattr("src.agent.specialists._create_model", specialist_model)
     if loop == "cordis":
         for domain in ("seraph.agent-presets.v1", "seraph.delegation.v1"):
             env.run(transition_domain(domain, "cordis", host=env.host, actor="operator:test"))

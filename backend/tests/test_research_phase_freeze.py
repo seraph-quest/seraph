@@ -13,6 +13,7 @@ from src.workflows.research_waits import pause_parent
 from src.work_board.research_contracts import WAIT_SOURCES
 
 
+
 async def closed_phase(accounting_db):
     jobs, task, attempt, spec, parent, creation = await create_kernel(accounting_db)
     binding = await pause_parent(jobs, parent_id=spec.identity.job_id, owner="research-kernel",

@@ -618,11 +618,19 @@ def run_shard_files(
     pytest_args: list[str] | None = None,
     file_timeout_seconds: int | None = None,
     exclude_cancelled_eval_harness: bool = False,
+    keep_going: bool = False,
 ) -> int:
+    """Run each file in its own pytest process.
+
+    By default the first failing invocation ends the shard. ``keep_going``
+    runs every assigned invocation and returns the first non-zero code, so a
+    single red file cannot hide the rest of the shard's failures (#1180).
+    """
     if not files:
         print("No backend tests assigned to this shard.")
         return 0
 
+    failures: list[tuple[str, int]] = []
     extra_args = list(pytest_args or [])
     if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
         extra_args.append("--no-cov")
@@ -658,14 +666,24 @@ def run_shard_files(
                     f"[backend-shard] {label} -> 124 ({duration_s:.2f}s) timed out after "
                     f"{timeout_seconds}s"
                 )
-                return 124
+                if not keep_going:
+                    return 124
+                failures.append((label, 124))
+                continue
             duration_s = time.perf_counter() - started_at
             print(
                 f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)"
                 f"{f' timeout={timeout_seconds}s' if timeout_seconds is not None else ''}"
             )
             if completed.returncode != 0:
-                return completed.returncode
+                if not keep_going:
+                    return completed.returncode
+                failures.append((label, completed.returncode))
+    if failures:
+        print(f"[backend-shard] {len(failures)} failing invocation(s):")
+        for label, code in failures:
+            print(f"[backend-shard] FAILED {label} -> {code}")
+        return failures[0][1]
     return 0
 
 
@@ -678,8 +696,15 @@ def main() -> int:
         "--exclude-cancelled-eval-harness", action="store_true",
         help="CI policy: retire only tests/test_eval_harness.py from execution and report it as not run",
     )
+    parser.add_argument(
+        "--keep-going", action="store_true",
+        help="run every assigned file even after a failure; exit with the first failure's code",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    # Progress lines must reach the job log as each file ends, not at exit:
+    # a shard killed by the step timeout otherwise shows no timing at all.
+    sys.stdout.reconfigure(line_buffering=True)
 
     root = Path(__file__).resolve().parents[1]
     files = shard_for_index(root, shard_count=args.shard_count, shard_index=args.shard_index)
@@ -692,6 +717,7 @@ def main() -> int:
         pytest_args=extra_args,
         file_timeout_seconds=args.file_timeout_seconds,
         exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
+        keep_going=args.keep_going,
     )
 
 

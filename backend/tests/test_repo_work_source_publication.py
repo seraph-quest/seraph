@@ -23,6 +23,9 @@ from tests.repo_publication_support import GitDataTransport
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 async def selected_publisher(flow, monkeypatch):
     owner, source = flow["owner"], flow["service"].repository_source_service

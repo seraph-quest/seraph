@@ -19,6 +19,9 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_repo_source_recovered_finalizer import _signed_ownerless_fixture, _scope, _rows, DENIED
 
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def _retain_original_node_runtime(monkeypatch, language):
     if language == "test_node":

@@ -37,6 +37,15 @@ def require(value, reason):
         raise RuntimeError(reason)
 
 
+class UnsupportedLiveInput(RuntimeError):
+    """Preflight refusal raised before any stage exists or APT is touched.
+
+    Hosted runners of one image version do not all carry byte-identical
+    /etc/apt mirror files (#1180). Only this pre-mutation class may be reported
+    as a skip by the CLI; every later failure still aborts the setup step.
+    """
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -144,15 +153,21 @@ def validate_sources(data):
 
 def publish(apt):
     """Fixture API may use synthetic owned directories; CLI always fixes APT."""
-    tree = HeldDirectories(apt)
+    try:
+        tree = HeldDirectories(apt)
+    except (RuntimeError, OSError) as error:
+        raise UnsupportedLiveInput(f'{type(error).__name__}: {error}') from error
     stage = None
     stage_info = None
     try:
-        original_info, original = read_file(tree, apt / MIRROR, 144)
-        require(len(original) == 144 and original == ORIGINAL and digest(original) == ORIGINAL_SHA256,
-                'unsupported source-derived mirror input')
-        sources_info, sources = read_file(tree, apt / DEB822, 65536)
-        validate_sources(sources)
+        try:
+            original_info, original = read_file(tree, apt / MIRROR, 144)
+            require(len(original) == 144 and original == ORIGINAL and digest(original) == ORIGINAL_SHA256,
+                    'unsupported source-derived mirror input')
+            sources_info, sources = read_file(tree, apt / DEB822, 65536)
+            validate_sources(sources)
+        except (RuntimeError, OSError) as error:
+            raise UnsupportedLiveInput(f'{type(error).__name__}: {error}') from error
         before_receipt = {'path': str(apt / MIRROR), 'sha256': digest(original), 'bytes': len(original),
                           'mode': oct(stat.S_IMODE(original_info.st_mode)),
                           'uid': original_info.st_uid, 'gid': original_info.st_gid}
@@ -233,7 +248,26 @@ def main():
             and os.environ.get('ImageOS') == 'ubuntu24', 'GitHub hosted Ubuntu24 image required')
     release = platform.freedesktop_os_release()
     require(release.get('ID') == 'ubuntu' and release.get('VERSION_ID') == '24.04', 'Ubuntu24.04 required')
-    publish(APT)
+    try:
+        publish(APT)
+    except UnsupportedLiveInput as error:
+        # Nothing was staged or replaced: APT keeps the image's own mirror
+        # order. Mirror priority is a download-reliability preference, not a
+        # test precondition, so an unrecognised runner variant is reported
+        # and the job continues on the untouched image configuration.
+        print(json.dumps({'phase': 'mirror_priority_skipped', 'reason': str(error),
+                          'observed': observe(APT / MIRROR), 'apt_mutated': False}), flush=True)
+        print(f'::warning::APT mirror priority left unchanged: {error}', flush=True)
+
+
+def observe(path):
+    """Diagnostic-only metadata of the live mirror file; never authority."""
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        return {'error': type(error).__name__}
+    return {'mode': oct(info.st_mode), 'uid': info.st_uid, 'gid': info.st_gid,
+            'nlink': info.st_nlink, 'bytes': info.st_size}
 
 
 if __name__ == '__main__':

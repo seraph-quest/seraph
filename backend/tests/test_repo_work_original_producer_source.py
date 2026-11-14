@@ -9,6 +9,9 @@ from tests.test_repo_work_task_publication import _actual_source_callback_journe
 from src.workflows.repo_repair_source import read_repository_inventory
 from src.workflows.repo_repair_source_recovery import read_registered_repository_producer
 
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 async def test_knownpost_dtos_deny_before_current_source_or_sql_reads(monkeypatch):

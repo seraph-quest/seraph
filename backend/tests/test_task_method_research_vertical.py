@@ -14,6 +14,7 @@ from starlette.responses import FileResponse, HTMLResponse
 from sqlalchemy import select
 
 from config.settings import settings
+from tests.near_tee_support import RESEARCH_REQUEST_BOUND_MICROUSD, prepare_near_tee_vertical, scripted_near_gateway
 from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth, ResponseBytes
 from tests.cordis_research import needs_cordis
@@ -94,45 +95,37 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
     monkeypatch.setattr("src.browser.pinned_transport._blocking_default_resolver", public_dns)
     calls = []
     discovery_inputs = []
-    class FinalProviderBoundary(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request):
-            if request.url.host != "openrouter.ai":
-                return await public_transport.handle_async_request(request)
-            assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
-            body = json.loads(request.content)
-            calls.append(body)
-            supplied = json.loads(body["messages"][1]["content"])
-            if "untrusted_public_data" in supplied:
-                supplied = supplied["untrusted_public_data"]
-                discovery_inputs.append(supplied)
-                method = supplied.get("research_strategy")
-                if supplied.get("task") == "plan_queries":
-                    answer = {"queries": method["query_templates"] if method else ["public release evidence"]}
-                elif "manifest_ref" in supplied:
-                    chosen = next((item for item in supplied["results"] if method and item["title"] == "Official dated release"),
-                        supplied["results"][0])
-                    answer = {"selected_result_ids": [chosen["result_id"]]}
-                else:
-                    source = supplied["untrusted_quoted_sources"][0]
-                    answer = {"schema_version": 1, "perspective": "Prepare a public Goal discovery brief",
-                        "claims": [{"text": (method["draft_sections"][0] + ": " if method else "") + "The supplied public release evidence is attributed.",
-                            "citations": [{key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
-                        "uncertainty": method["stop_conditions"] if method else ["Fixture mechanics only."],
-                        "contradictions": [], "no_learning": True}
+    def answer_for(body):
+        # ADR-035: research (programme discovery and dossier children) on the
+        # intercepted NEAR TEE gateway.
+        calls.append(body)
+        supplied = json.loads(body["messages"][1]["content"])
+        if "untrusted_public_data" in supplied:
+            supplied = supplied["untrusted_public_data"]
+            discovery_inputs.append(supplied)
+            method = supplied.get("research_strategy")
+            if supplied.get("task") == "plan_queries":
+                answer = {"queries": method["query_templates"] if method else ["public release evidence"]}
+            elif "manifest_ref" in supplied:
+                chosen = next((item for item in supplied["results"] if method and item["title"] == "Official dated release"),
+                    supplied["results"][0])
+                answer = {"selected_result_ids": [chosen["result_id"]]}
             else:
                 source = supplied["untrusted_quoted_sources"][0]
-                answer = {"schema_version": 1, "perspective": supplied["perspective_instruction"],
-                    "claims": [{"text": "The supplied release source is attributed.",
+                answer = {"schema_version": 1, "perspective": "Prepare a public Goal discovery brief",
+                    "claims": [{"text": (method["draft_sections"][0] + ": " if method else "") + "The supplied public release evidence is attributed.",
                         "citations": [{key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
-                    "uncertainty": ["Fixture mechanics only."], "contradictions": [], "no_learning": True}
-            payload = {"id": "functional-research-" + str(len(calls)), "usage": {"cost": "0"},
-                "choices": [{"message": {"role": "assistant", "content": json.dumps(answer)}}]}
-            return httpx.Response(200, request=request, stream=ResponseBytes(json.dumps(payload).encode()))
-    def owned_clients(*args, **kwargs):
-        if "transport" not in kwargs:
-            kwargs["transport"] = FinalProviderBoundary()
-        return original_client(*args, **kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", owned_clients)
+                    "uncertainty": method["stop_conditions"] if method else ["Fixture mechanics only."],
+                    "contradictions": [], "no_learning": True}
+        else:
+            source = supplied["untrusted_quoted_sources"][0]
+            answer = {"schema_version": 1, "perspective": supplied["perspective_instruction"],
+                "claims": [{"text": "The supplied release source is attributed.",
+                    "citations": [{key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
+                "uncertainty": ["Fixture mechanics only."], "contradictions": [], "no_learning": True}
+        return json.dumps(answer)
+    # NEAR bills these fixture requests at zero, as the old fixture did.
+    gateway = scripted_near_gateway(answer_for, passthrough=public_transport.handle_async_request, cost_nano=0)
     app = FastAPI()
     app.add_middleware(OperatorAuthMiddleware)
     app.include_router(auth.router, prefix="/api/auth")
@@ -158,6 +151,15 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
             owner = WorkBoardOwner(principal_id=owner_data["principal_id"], session_id=owner_data["session_id"])
             # Literal disposable capability metadata only; no canary execution.
             await prepare((root, _engine, sessions), monkeypatch, existing_owner=owner)
+            # ADR-035: the research route is the NEAR TEE text slot (a new
+            # egress revision after the planner fixture's configuration).
+            await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=gateway, capabilities=("text",),
+                request_cost_bound_microusd=RESEARCH_REQUEST_BOUND_MICROUSD, egress_revision=3)
+            # Apply the NEAR TEE lane's limits to the shared broker, as profile
+            # resolution does after a settings change (the planner fixture's
+            # OpenRouter lane had a 1000 micro-USD owner ceiling).
+            from src.model_fabric.configuration import effective_provider_profiles
+            effective_provider_profiles({})
             goal = await client.post("/api/goals", json={"title": "Private owned research Goal",
                 "admission_budget": {"reviewed_grant": True, "grant_id": "owned-research-grant",
                     "max_outstanding_jobs": 1, "max_attempts": 1, "max_runtime_seconds": 300}})
@@ -165,7 +167,7 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
             goal_id = goal.json()["id"]
             if termination == "default_baseline":
                 request = {"expected_goal_revision": 1, "expected_grant_revision": 0,
-                    "public_brief": "Track public release evidence", "budget": {"max_inference_microusd": 500}}
+                    "public_brief": "Track public release evidence", "budget": {"max_inference_microusd": 10 * RESEARCH_REQUEST_BOUND_MICROUSD}}
                 base = "/api/goals/" + goal_id + "/programmes"
                 preview = await client.post(base + "/preview", json=request)
                 assert preview.status_code == 200, preview.text
@@ -266,7 +268,7 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
                 assert json.loads(pointer.binding_json)["digest"] == binding.digest
                 assert current._key is not None
             request = {"expected_goal_revision": 1, "expected_grant_revision": 0,
-                "public_brief": "Track public product release evidence", "budget": {"max_inference_microusd": 500}}
+                "public_brief": "Track public product release evidence", "budget": {"max_inference_microusd": 10 * RESEARCH_REQUEST_BOUND_MICROUSD}}
             base = "/api/goals/" + goal_id + "/programmes"
             programme_preview = await client.post(base + "/preview", json=request)
             assert programme_preview.status_code == 200, programme_preview.text

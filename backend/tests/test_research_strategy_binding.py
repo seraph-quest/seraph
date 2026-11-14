@@ -33,7 +33,7 @@ async def test_original_strategy_denies_before_actual_governed_preflight(account
     from src.api import model_fabric_settings
     from src.model_fabric.effective_policy import current_inference_policy
     from src.model_fabric.configuration import write_model_fabric_configuration
-    jobs, task, attempt, spec, _, _ = await create_kernel(accounting_db)
+    jobs, task, attempt, spec, _, _ = await create_kernel(accounting_db, provider="openrouter")
     configured, _ = current_inference_policy()
     write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
         replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
@@ -412,7 +412,8 @@ async def test_existing_active_replay_and_readiness_never_consult_current_resolv
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.repository import BoardDispatchClaim
     from src.workflows.research_native import checkpoint
-    jobs, task, attempt, spec, _, creation = await create_kernel(accounting_db, strategy=active(), reviewed_route=True)
+    jobs, task, attempt, spec, _, creation = await create_kernel(accounting_db, strategy=active(), reviewed_route=True,
+                                                                       provider="openrouter")
     calls, probes = [], []
     async def resolve(*args):
         calls.append(True)

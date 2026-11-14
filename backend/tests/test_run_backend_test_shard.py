@@ -82,7 +82,15 @@ def test_ci_retirement_cli_forwards_fixed_policy_and_preserves_arguments():
     assert shard.call_args.kwargs == {"shard_count": 10, "shard_index": 2}
     assert run.call_args.args[1] == ["tests/test_alpha.py"]
     assert run.call_args.kwargs == {"pytest_args": ["-x"], "file_timeout_seconds": 900,
-                                    "exclude_cancelled_eval_harness": True}
+                                    "exclude_cancelled_eval_harness": True, "keep_going": False}
+
+
+def test_cli_forwards_keep_going():
+    with patch.object(sys, "argv", ["runner", "--shard-count", "10", "--shard-index", "2", "--keep-going"]), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ), patch("scripts.run_backend_test_shard.run_shard_files", return_value=0) as run:
+        assert main() == 0
+    assert run.call_args.kwargs["keep_going"] is True
 
 
 def test_run_shard_files_executes_each_file_in_isolation(tmp_path: Path):
@@ -133,6 +141,28 @@ def test_run_shard_files_stops_after_first_failure(tmp_path: Path):
 
     assert result == 1
     assert mock_run.call_count == 1
+
+
+def test_keep_going_runs_every_file_and_reports_all_failures(tmp_path: Path, capsys):
+    files = ["tests/test_alpha.py", "tests/test_beta.py", "tests/test_gamma.py", "tests/test_delta.py"]
+
+    with patch("scripts.run_backend_test_shard.subprocess.run") as mock_run:
+        mock_run.side_effect = [
+            CompletedProcess(args=["pytest"], returncode=0),
+            CompletedProcess(args=["pytest"], returncode=1),
+            TimeoutExpired(cmd=["pytest"], timeout=600),
+            CompletedProcess(args=["pytest"], returncode=0),
+        ]
+
+        result = run_shard_files(tmp_path, files, file_timeout_seconds=600, keep_going=True)
+
+    assert result == 1
+    assert mock_run.call_count == 4
+    out = capsys.readouterr().out
+    assert "2 failing invocation(s)" in out
+    assert "FAILED tests/test_beta.py -> 1" in out
+    assert "FAILED tests/test_gamma.py -> 124" in out
+    assert "FAILED tests/test_delta.py" not in out
 
 
 def test_run_shard_files_accepts_empty_shards(tmp_path: Path):

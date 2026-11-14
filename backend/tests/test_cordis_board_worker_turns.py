@@ -3,13 +3,13 @@
 The real dispatcher runs the Mail reply draft through its durable Work Board
 path on both owners of ``seraph.board-workers.v1``: the legacy owner (today's
 path) and the Cordis owner (one worker turn under the reviewed worker preset,
-sequenced by the real reviewed child). Only the Gmail adapter and the governed
-OpenRouter transport are scripted; nothing is contacted and nothing is spent.
+sequenced by the real reviewed child). Only the Gmail adapter and the NEAR TEE
+gateway (ADR-035: the draft's route is the NEAR TEE text slot) are intercepted;
+nothing else is contacted and nothing is spent.
 """
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -30,11 +30,16 @@ OUTPUT = {"subject": "Re: Architecture review", "body": "Thanks, I will follow u
           "caveats": ["Review before sending."]}
 
 
-class Scripted:
-    """The Gmail adapter and the governed provider transport; everything above them is real."""
+_NEAR = {}  # the intercepted NEAR gateway of the current test (set by _setup)
 
-    def __init__(self, monkeypatch, *, during_call=None):
-        self.reads, self.model_bodies, self.during_call = 0, [], during_call
+
+class Scripted:
+    """The Gmail adapter and the NEAR TEE gateway; everything above them is real."""
+
+    def __init__(self, monkeypatch):
+        self.reads, self.near = 0, _NEAR["fixture"]
+        self.near.answer = {"role": "assistant", "content": json.dumps(OUTPUT, separators=(",", ":"))}
+        self._before = len(self.near.requests)
         scripted = self
 
         class Adapter:
@@ -46,17 +51,13 @@ class Scripted:
                 if self.contact_observer:
                     self.contact_observer()
                 return mail._body(scripted.reads)
-
-        def transport(**kwargs):
-            scripted.model_bodies.append(dict(kwargs["body"]))
-            if scripted.during_call is not None:
-                scripted.during_call()
-            content = json.dumps(OUTPUT, separators=(",", ":"))
-            message = SimpleNamespace(role="assistant", content=content)
-            return (SimpleNamespace(choices=[SimpleNamespace(message=message)]),
-                    {"choices": [{"message": {"role": "assistant", "content": content}}], "usage": {"cost": "0.000002"}})
         monkeypatch.setattr("src.integrations.gmail_read.GoogleGmailReadonlyAdapter", Adapter)
-        monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", transport)
+
+    @property
+    def model_bodies(self) -> list[dict]:
+        """Bodies of the NEAR completions made since this script was installed."""
+        return [json.loads(request.content) for request in self.near.requests[self._before:]
+                if request.url.path == "/v1/chat/completions"]
 
 
 async def _draft(async_db, key: str):
@@ -81,7 +82,15 @@ async def _setup(accounting_db, monkeypatch):  # noqa: F811
     tmp_path, _engine, factory = accounting_db
     async_db = factory.accounting_sessions
     await mail._seed(async_db, monkeypatch)
-    await mail._configure_model_route(async_db, monkeypatch, tmp_path)
+    from config.settings import settings
+    from tests.near_tee_support import prepare_near_tee_vertical
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(mail.vault_crypto, "_fernet", None)
+    _NEAR["fixture"] = await prepare_near_tee_vertical(monkeypatch, jobs=durable_job_repository)
+    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
+    broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
     return async_db
 
 
@@ -119,7 +128,9 @@ async def test_mail_reply_draft_is_todays_draft_on_either_owner(accounting_db, m
     assert (io.reads, len(io.model_bodies)) == (2, 1)
     [body] = io.model_bodies
     assert body["messages"] == _expected_messages()
-    assert (body["response_format"], body["max_tokens"]) == ({"type": "json_object"}, 2048)
+    # The draft's 2048-token request is bounded by the NEAR TEE slot's output limit.
+    assert (body["response_format"], body["max_tokens"]) == ({"type": "json_object"}, 1024)
+    assert body["model"] == "Qwen/Qwen3.8-27B"
     assert task.status is WorkBoardStatus.done and root.status == "succeeded"
     turns = await _turns(async_db)
     if owner == "legacy":
@@ -284,15 +295,20 @@ async def test_a_refused_settlement_after_contact_adopts_nothing_and_is_retry_sa
 
 async def test_meeting_prep_runs_todays_journey_through_one_worker_turn(accounting_db, monkeypatch):  # noqa: F811
     """The whole real Calendar preparation journey (two reads, one model call, artifact, readback) on the Cordis owner."""
-    from tests.test_calendar_manual_vertical import test_calendar_dispatcher_real_durable_two_reads_model_and_readback
+    from tests.test_near_tee_vertical_journeys import _calendar_world, assert_calendar_on_near
+    sessions, jobs, near, task_id, claim, typed_input, dispatcher, calendar_reads = await _calendar_world(
+        accounting_db, monkeypatch, key="calendar-cordis-worker")
     async with research_host(durable_job_repository) as host:
         monkeypatch.setattr("src.runtime_plugins.bridge.cordis_host", host)
         await cutover(host, PRESETS_DOMAIN)
         await cutover(host, BOARD_WORKERS_DOMAIN)
-        await test_calendar_dispatcher_real_durable_two_reads_model_and_readback(accounting_db, monkeypatch, False, False)
+        result = await dispatcher._admit_execute_direct(claim, typed_input, runtime_seconds=120)
+    assert result["completed"] is True, result
+    assert_calendar_on_near(near, calendar_reads, await jobs.inference_accounting_snapshot())
     async_db = accounting_db[2].accounting_sessions
     [turn] = await _turns(async_db)
     async with async_db() as db:
         root = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.job_kind == "calendar_meeting_prep"))
+    assert root.status == "succeeded"
     assert turn.status == "succeeded" and turn.parent_job_id == root.run_identity
     assert json.loads(turn.declared_authority_json)["preset_id"] == "worker.meeting_prep"

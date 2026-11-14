@@ -1093,7 +1093,8 @@ def test_background_inference_toggles_survive_backup_and_restore(tmp_path, monke
     assert error is None and all(defaults.values())
 
 
-@pytest.mark.parametrize("writer", ["extension-lock", "evolution-state"])
+@pytest.mark.parametrize("writer", ["extension-lock", "evolution-state", "near-catalog-receipts",
+                                    "near-catalog-observations", "near-credential-binding"])
 def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monkeypatch, writer):
     from config.settings import settings
     from src.workspace.state_registry import production_workspace_inventory
@@ -1105,6 +1106,20 @@ def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monke
         with _extension_effect_guard():
             pass
         assert (root / ".seraph-extension-lifecycle.lock").exists()
+    elif writer.startswith("near-"):
+        # The real NEAR TEE writers (#1178/#1180), through their own staging.
+        from src.model_fabric import near_tee_catalog
+        from src.model_fabric.configuration import record_near_tee_credential_binding
+        if writer == "near-catalog-receipts":
+            near_tee_catalog.write_catalog_receipts({})
+            assert (root / "near-tee-catalog-receipts.json").exists()
+        elif writer == "near-catalog-observations":
+            near_tee_catalog.write_catalog_observations({})
+            assert (root / "near-tee-catalog-observations.json").exists()
+        else:
+            record_near_tee_credential_binding("0123456789ab", now=1.0)
+            assert (root / "near-tee-credential-binding.json").exists()
+        assert not list(root.glob(".near-tee-*.tmp"))  # staging never survives a write
     else:
         from src.evolution.runtime import EvolutionRuntime
         runtime = EvolutionRuntime(EvolutionRuntime.default_path(root))

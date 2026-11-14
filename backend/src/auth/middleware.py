@@ -217,9 +217,13 @@ def _auth_failure_response(path: str, code: str, *, status_code: int) -> JSONRes
     return JSONResponse({"detail": {"code": str(code)[:128]}}, status_code=status_code)
 
 
+# ``ownership_proof_invalid`` is a rejected presented credential (continuity
+# cookie or recovery code); ``/api/auth/login`` establishes it as 401.
+# ``ownership_proof_required`` is an authenticated root without an enrolled
+# identity; ``/api/auth/ownership/*`` establishes it as 403.
 _AUTH_FAILURE_UNAUTHENTICATED = {
-    "authentication_required", "invalid_token", "session_expired",
-    "session_revoked", "session_unavailable",
+    "authentication_required", "invalid_token", "ownership_proof_invalid",
+    "session_expired", "session_revoked", "session_unavailable",
 }
 _AUTH_FAILURE_FORBIDDEN = {
     "legacy_ownership_unproved", "mutation_origin_required", "ownership_proof_required",

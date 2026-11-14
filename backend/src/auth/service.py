@@ -939,6 +939,19 @@ def _is_local_root(record: OperatorSession) -> bool:
     return token_hash == LOCAL_ROOT_TOKEN_MARKER or token_hash.startswith(LOCAL_ROOT_TOKEN_MARKER + ":")
 
 
+def local_root_marker_valid(token_hash: str | None) -> bool:
+    """Shared current-root fence rule for the local no-login root (#1175).
+
+    A root row (or operator proof) whose ``token_hash`` is the local-root
+    marker is a current-root proof only while local no-login mode is active.
+    Every other value, including real bearer hashes, is left to the caller's
+    own comparison.  Every current-root/owner fence applies this rule, so a
+    stale local operator context is refused once the mode is switched off,
+    even before startup reconciliation retires the row.
+    """
+    return token_hash != LOCAL_ROOT_TOKEN_MARKER or local_no_login_active()
+
+
 def _local_root_usable(record: OperatorSession, now: datetime) -> bool:
     return (
         record.is_bearer_tombstone is False

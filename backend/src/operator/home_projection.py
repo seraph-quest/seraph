@@ -10,7 +10,7 @@ import hashlib
 from sqlalchemy import text
 
 from config.settings import settings
-from src.auth.service import AuthFailure
+from src.auth.service import AuthFailure, local_root_marker_valid
 from src.db.engine import get_session
 from pydantic import TypeAdapter
 from src.operator.home_contracts import HomeContinuation, Item
@@ -377,7 +377,8 @@ class HomeProjection:
         AND NOT EXISTS (SELECT 1 FROM operator_sessions p WHERE p.replaced_by_id=r.id AND p.is_bearer_tombstone=1 AND p.revoked_at IS NULL)
         """), {"root": operator.session_id, "principal": operator.principal.principal_id,
             "token": operator._token_hash, "now": now.replace(tzinfo=None)})).mappings().one_or_none()
-        if row is None or row["identity_id"] != operator.operator_identity_id:
+        if (row is None or row["identity_id"] != operator.operator_identity_id
+                or not local_root_marker_valid(operator._token_hash)):
             raise AuthFailure("ownership_proof_required")
         return row["identity_id"]
 

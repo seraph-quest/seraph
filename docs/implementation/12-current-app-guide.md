@@ -2212,6 +2212,8 @@ existing revocation watches poll it like any other root. Owner-scoped reads
 and durable owner fences recheck that the request's root is still current; a
 password request proves this with its bearer hash, and the local root proves it
 with its row marker, which no cookie can hash to and which retirement rewrites.
+Every current-root and owner fence accepts that marker only while the mode is
+on, so a stale local context is refused as soon as the mode is switched off.
 Goals, Work board tasks, routines, memory records and ownership recovery
 therefore resolve under the local root exactly as under a password session
 (#1175). Login, refresh,
@@ -2243,7 +2245,8 @@ unchanged and still require their credential or explicit test bypass.
 
 In every mode, an `AuthFailure` that a route or service raises after the
 middleware is answered by an app-wide handler with its reason code and a typed
-status, never a 500 (#1175): session verdicts `401`, boundary and
+status, never a 500 (#1175): session verdicts and a rejected
+`ownership_proof_invalid` `401` (as at login), boundary and
 ownership-proof refusals `403`, `recovery_record_unavailable` `404`,
 `auth_not_configured` `503`, and other ownership/recovery state conflicts
 `409`. Routes that already map their own failures are unchanged.

@@ -24,6 +24,7 @@ from src.auth.service import AuthFailure
         ("session_expired", 401),
         ("authentication_required", 401),
         ("ownership_proof_required", 403),
+        ("ownership_proof_invalid", 401),
         ("legacy_ownership_unproved", 403),
         ("local_peer_forbidden", 403),
         ("origin_forbidden", 403),

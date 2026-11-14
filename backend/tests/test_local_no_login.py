@@ -586,6 +586,74 @@ async def test_local_root_proof_matches_only_the_current_local_root(local_mode, 
 
 
 @pytest.mark.asyncio
+async def test_every_current_root_fence_refuses_a_stale_local_operator(local_mode, monkeypatch, async_db):
+    """Mode switched off at runtime: each fence refuses the old context (#1175)."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from src.auth.ownership import _current_root
+    from src.memory.evidence_execution import _current_operator
+    from src.memory.procedure_recommendations import assert_current_root
+    from src.operator.home_projection import HomeProjection
+    from src.work_board.contracts import WorkBoardOwner
+    from src.work_board.documents import current_source_root
+    from src.work_board.repository import BoardError
+    from src.workflows.specialist_partial import authenticate_partial_owner
+
+    operator = await authenticate_local_operator()
+    owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
+    task = SimpleNamespace(owner_session_id=operator.session_id, owner_principal_id=operator.principal.principal_id)
+
+    async def check_all(expect_ok: bool):
+        fences = [
+            ("ownership._current_root", lambda db: _current_root(db, operator), AuthFailure),
+            ("assert_current_root", lambda db: assert_current_root(db, operator), BoardError),
+            ("evidence _current_operator", lambda db: _current_operator(db, owner, operator), BoardError),
+            ("current_source_root", lambda db: current_source_root(db, owner, None), BoardError),
+            ("specialist partial owner", lambda db: authenticate_partial_owner(db, task, operator=operator), BoardError),
+            ("home projection", lambda db: HomeProjection.current(None, db, operator, datetime.now(timezone.utc)), AuthFailure),
+        ]
+        for name, call, error in fences:
+            async with async_db() as db:
+                if expect_ok:
+                    await call(db)
+                else:
+                    with pytest.raises(error):
+                        await call(db)
+                    print("refused:", name)
+
+    await check_all(expect_ok=True)
+    monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
+    assert local_no_login_active() is False
+    await check_all(expect_ok=False)
+
+
+def test_signed_native_fences_apply_the_local_root_rule():
+    """Fences whose witnesses need a full native run carry the shared rule."""
+    import inspect
+
+    from src.work_board import near_text_native, opportunity_preference_native
+
+    for function in (
+        near_text_native.seal_input_authority,
+        near_text_native.recheck_provider_contact,
+        opportunity_preference_native._recheck_original_commitment,
+    ):
+        assert "local_root_marker_valid(root.token_hash)" in inspect.getsource(function), function.__name__
+
+
+@pytest.mark.asyncio
+async def test_local_route_auth_failure_from_a_dependency_is_typed(local_mode, app, async_db, monkeypatch):
+    # A stale local-root proof deep inside the real goals-tree read must answer
+    # 401 session_revoked, never a 500 traceback.
+    monkeypatch.setattr("src.auth.ownership.local_root_marker_valid", lambda token_hash: False)
+    async with _client(app) as client:
+        response = await client.get("/api/goals/tree", headers={"origin": ORIGIN})
+    assert response.status_code == 401, response.text
+    assert response.json() == {"detail": {"code": "session_revoked"}}
+
+
+@pytest.mark.asyncio
 async def test_chat_turn_is_owned_by_local_root(local_mode, app, async_db, monkeypatch):
     monkeypatch.setattr("src.api.chat.should_use_direct_local_chat", lambda *args, **kwargs: True)
     monkeypatch.setattr("src.api.chat.direct_local_chat_route_error", AsyncMock(return_value=None))

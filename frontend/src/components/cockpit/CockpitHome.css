@@ -3,3 +3,15 @@
 .cockpit-home-continuation-item p { margin: 0; }
 .cockpit-home nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .cockpit-home-continuation-item button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.cockpit-home-row { display: grid; gap: 3px; width: 100%; padding: 8px 10px; border: 1px solid var(--cockpit-border); background: var(--cockpit-soft-button-bg); color: var(--cockpit-text); font: inherit; cursor: pointer; }
+.cockpit-home-row:hover { border-color: var(--cockpit-state-selected-border); background: var(--cockpit-state-selected-fill); }
+.cockpit-home-row-title { font-size: 14px; font-weight: 600; }
+.cockpit-home-row-state { color: var(--cockpit-muted); font-size: 12.5px; }
+.cockpit-home-row-action { color: var(--cockpit-accent); font-size: 12.5px; }
+.cockpit-home-row-details { color: var(--cockpit-muted); font-size: 12px; }
+.cockpit-home-row-details > summary, .cockpit-home-about > summary { width: fit-content; cursor: pointer; color: var(--cockpit-muted); font-size: 12px; }
+.cockpit-home-row-details[open] { display: grid; gap: 4px; }
+.cockpit-home-continuation-item { border-top: 0; padding: 6px 0; }
+.cockpit-home time { text-decoration: underline dotted; text-underline-offset: 2px; }
+.cockpit-home nav button, .cockpit-home .cockpit-section-header > button, .cockpit-home > button { padding: 4px 10px; border: 1px solid var(--cockpit-border); background: var(--cockpit-action-bg); color: var(--cockpit-text); font: inherit; font-size: 12.5px; cursor: pointer; }
+.cockpit-home nav button:hover, .cockpit-home > button:hover { border-color: var(--cockpit-state-selected-border); }

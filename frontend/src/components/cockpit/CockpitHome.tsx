@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type React from "react";
 import { FirstResultSetup } from "./FirstResultSetup";
 import { moveAttentionFocus } from "./AttentionList";
 import "./CockpitHome.css";
@@ -35,6 +36,47 @@ function description(item: HomeItem) {
     case "blocked_programme": return `Programme ${item.programme_id} · ${item.reason_code.replace(/_/g, " ")}`;
   }
 }
+// Human-first row presentation (#1172): a headline and one state line lead;
+// identities, ISO timestamps and provenance move into a details disclosure.
+const sentence = (value: string) => { const text = value.replace(/_/g, " "); return text.charAt(0).toUpperCase() + text.slice(1); };
+export function relativeTime(value: string | null | undefined, now = Date.now()): string {
+  if (!value) return "time unavailable";
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return "time unavailable";
+  const delta = at - now;
+  const minutes = Math.round(Math.abs(delta) / 60_000);
+  const span = minutes < 1 ? null : minutes < 60 ? `${minutes}m` : minutes < 48 * 60 ? `${Math.round(minutes / 60)}h` : `${Math.round(minutes / 1440)}d`;
+  if (!span) return "just now";
+  return delta < 0 ? `${span} ago` : `in ${span}`;
+}
+function TimeAgo({ value }: { value: string | null | undefined }) {
+  return value ? <time dateTime={value} title={value}>{relativeTime(value)}</time> : <>time unavailable</>;
+}
+function headline(item: HomeItem): string {
+  switch (item.kind) {
+    case "active_goal": return item.title ?? "Goal title unavailable";
+    case "inbox_decision": return item.title;
+    case "programme": return "Goal programme";
+    case "task_next_action": return item.action === "inspect_task" ? "Check task progress" : sentence(item.action);
+    case "prepared_output": return item.output_state === "prepared" ? "Result ready to review" : item.output_state === "blocked" ? "Result blocked" : "Result status unknown";
+    case "approval": return "Approval waiting";
+    case "blocked_task": return sentence(item.reason_code);
+    case "blocked_approval": return "Approval expired";
+    case "blocked_programme": return sentence(item.reason_code);
+  }
+}
+function stateLine(item: HomeItem) {
+  const parts: React.ReactNode[] = [];
+  if (item.kind === "active_goal") parts.push(item.status, item.due_at ? <>due <TimeAgo value={item.due_at} /></> : null);
+  else if (item.kind === "inbox_decision") parts.push(item.state, <>expires <TimeAgo value={item.expires_at} /></>);
+  else if (item.kind === "programme") parts.push(item.state.replace(/_/g, " "), item.next_digest_at ? <>next digest <TimeAgo value={item.next_digest_at} /></> : null);
+  else if (item.kind === "task_next_action") parts.push(item.status, `priority ${item.priority}`, item.scheduled_at ? <>scheduled <TimeAgo value={item.scheduled_at} /></> : null);
+  else if (item.kind === "approval") parts.push(item.expires_at ? <>expires <TimeAgo value={item.expires_at} /></> : "no expiry reported");
+  parts.push(<>updated <TimeAgo value={item.source_at} /></>);
+  if (item.ownership_access === "recovered_read_only") parts.push("read only");
+  return parts.filter(Boolean).map((part, index) => <span key={index}>{index ? " · " : ""}{part}</span>);
+}
+
 export function CockpitHome(props: CockpitHomeProps) {
   return <OwnedHome key={`${props.owner?.principalId ?? ""}:${props.owner?.sessionId ?? ""}`} {...props} />;
 }
@@ -72,7 +114,10 @@ function OwnedHome({ onOpenSection, onOpenApprovals, onOpenTask, onOpenAttention
     if (active && !authenticated) { setLoading(false); setError("Current operator ownership is unavailable. Sign in or restore the existing session."); return; }
     if (active && !initialized.current) { initialized.current = true; void load(); }
   }, [active, authenticated, load]);
-  useEffect(() => () => controller.current?.abort(), []);
+  // Re-arm the first load after an unmount: React StrictMode (used by the dev
+  // server) unmounts and remounts once, and the aborted first request used to
+  // leave Home on "Refreshing..." forever (#1172).
+  useEffect(() => () => { controller.current?.abort(); initialized.current = false; }, []);
   useEffect(() => {
     if (!active || !focusAttentionId || !snapshot) return;
     const button = [...surface.current?.querySelectorAll<HTMLButtonElement>("[data-attention-id]") ?? []].find(entry => entry.dataset.attentionId === focusAttentionId);
@@ -100,16 +145,22 @@ function OwnedHome({ onOpenSection, onOpenApprovals, onOpenTask, onOpenAttention
   return <section ref={surface} tabIndex={-1} onKeyDown={moveAttentionFocus} className="cockpit-section-surface cockpit-home" data-testid="cockpit-home" aria-busy={loading}>
     <div className="cockpit-section-header"><div><div className="cockpit-eyebrow">HOME</div><h2>Continue your work</h2><p>Goals, next steps, prepared results and recovery in one local snapshot.</p></div>
       <button type="button" disabled={loading || !authenticated} onClick={() => void load()}>{loading ? "Refreshing…" : restartRequired ? "Restart Home snapshot" : "Refresh Home"}</button></div>
-    <p>Snapshot · {snapshot?.as_of ?? "unavailable"}{stale ? " · last confirmed, refresh failed" : ""}. Inspectors recheck current ownership and permissions.</p>
+    <p className="cockpit-home-snapshot">Snapshot · {snapshot ? <TimeAgo value={snapshot.as_of} /> : "unavailable"}{stale ? " · last confirmed, refresh failed" : ""}. Inspectors recheck current ownership and permissions.</p>
     {error ? <p role="status">{snapshot ? "Showing last confirmed metadata" : "Home metadata unavailable"} · {error}{restartRequired ? " · Restart to obtain a new snapshot. The original continuation was not renewed." : ""}</p> : null}
     <nav aria-label="Available cockpit controls"><button onClick={() => onOpenSection("inbox")}>Open Inbox</button><button onClick={() => onOpenSection("work")}>Open Work</button><button onClick={() => onOpenSection("goals")}>Open Goals</button><button onClick={() => onOpenSection("library")}>Open Library</button><button onClick={() => onOpenSection("connections")}>Open Connections</button><button onClick={() => onOpenSection("reports")}>Open Reports</button></nav>
     {summaryMatches ? <article aria-label="Selected Goal context"><h3>{displaySummary(goalSummary.title)}</h3><p>Status · {displaySummary(goalSummary.status)}</p><p>Criterion · {displaySummary(goalSummary.criterion)}</p><p>Current Goal context; inspect the Goal before execution.</p></article> : goalSummary ? <p>Selected Goal context unavailable for this page or current revision.</p> : null}
     <div className="cockpit-home-grid">{(["task_next_actions", "approvals", "blocked_items", "active_goals", "programme_status", "prepared_outputs"] as const).map(key => {
       const section = snapshot?.[key];
       return <article key={key} className="cockpit-home-card" aria-label={labels[key]}><h3>{key==="task_next_actions"?"Needs attention and next steps":labels[key]}</h3>
-        <p className="cockpit-home-muted">{section?.state === "ready" ? "Metadata confirmed" : section?.state === "empty" ? "Empty on this page" : section ? `Metadata ${section.state}` : "Metadata unavailable"}{stale ? " · last confirmed" : ""} · source {section?.source_as_of ?? "unavailable"}</p>
+        <p className="cockpit-home-muted">{section?.state === "ready" ? <>Up to date · <TimeAgo value={section.source_as_of} /></> : section?.state === "empty" ? "Nothing on this page" : section ? `Metadata ${section.state}` : "Metadata unavailable"}{stale ? " · last confirmed" : ""}</p>
         {section?.items.map(item => <div className="cockpit-home-continuation-item" key={continuationItemId(item)}>
-          <button type="button" data-attention-id={continuationItemId(item)} onClick={() => open(item.target, item)}><strong>{description(item)}</strong><span> · Inspect {item.target.kind}</span></button>
+          <button type="button" className="cockpit-home-row" data-attention-id={continuationItemId(item)} aria-label={`${headline(item)} — ${description(item)} · Inspect ${item.target.kind}`} onClick={() => open(item.target, item)}>
+            <strong className="cockpit-home-row-title">{headline(item)}</strong>
+            <span className="cockpit-home-row-state">{stateLine(item)}</span>
+            <span className="cockpit-home-row-action">Inspect {item.target.kind} →</span>
+          </button>
+          <details className="cockpit-home-row-details"><summary>Details</summary>
+          <p>{description(item)}</p>
           <p>Source · {item.source_at} · {item.ownership_access === "recovered_read_only" ? "Recovered history · read only" : "Current operator metadata"}</p>
           {item.kind === "prepared_output" ? <p>Attempt {item.attempt_id}. Physical output availability is checked by the owning inspector.</p> : null}
           {item.kind === "programme" ? <p>Next passive digest · {item.next_digest_at ?? "unavailable"}. This timing does not promise execution.</p> : null}
@@ -118,12 +169,13 @@ function OwnedHome({ onOpenSection, onOpenApprovals, onOpenTask, onOpenAttention
           {item.kind === "task_next_action" ? <p>Priority {item.priority} · scheduled {item.scheduled_at ?? "unscheduled"}</p> : null}
           {"method" in item ? <div aria-label="Historical method metadata"><p>{item.method?.status === "admitted" ? `Originally admitted method ${item.method.method_id} · version ${item.method.version} · ${item.method.lifecycle.replace(/_/g, " ")} · admitted ${item.method.admitted_at}` : item.method?.status === "baseline" ? "Originally admitted configured baseline" : "Historical method Unknown"}. This metadata does not establish execution readiness or measured improvement.</p>
             {item.method?.target ? <button type="button" onClick={() => open(item.method!.target!, item)}>Inspect original method and rollback controls</button> : null}</div> : null}
+          </details>
         </div>)}
         {!section ? <p>Metadata unavailable. Existing cockpit controls remain available.</p> : section.items.length === 0 ? <p>{section.state === "empty" ? "No items on this page." : "Source metadata unavailable; absence of rows does not confirm empty work."}</p> : null}
       </article>;
     })}</div>
     {cursor ? <button type="button" disabled={loading || restartRequired || Boolean(error)} onClick={() => void load(cursor)}>Next Home page</button> : null}
-    <p>At most 20 metadata items per page. Continuation keeps its original creation cutoff and five-minute or operator-session expiry. Each page rechecks current metadata; existing decisions may change. Refresh to include newly created work.</p>
+    <details className="cockpit-home-about"><summary>About this snapshot</summary><p>At most 20 metadata items per page. Continuation keeps its original creation cutoff and five-minute or operator-session expiry. Each page rechecks current metadata; existing decisions may change. Refresh to include newly created work.</p></details>
     <button type="button" onClick={() => setSetupOpen(value => !value)}>{setupOpen ? "Hide first-result setup" : "Open first-result setup"}</button>
     {setupOpen ? <FirstResultSetup onOpenSection={onOpenSection} onOpenTask={onOpenTask} /> : null}
   </section>;

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import type { CockpitSection } from "../../stores/cockpitLayoutStore";
 
@@ -15,9 +15,11 @@ export const COCKPIT_SECTIONS: Array<{ id: CockpitSection; label: string }> = [
 export interface CockpitSectionNavProps {
   activeSection: CockpitSection;
   onSelect: (section: CockpitSection) => void;
+  /** "Needs you" summary rendered above the sections (#1172). */
+  attention?: ReactNode;
 }
 
-export function CockpitSectionNav({ activeSection, onSelect }: CockpitSectionNavProps) {
+export function CockpitSectionNav({ activeSection, onSelect, attention }: CockpitSectionNavProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const primary = COCKPIT_SECTIONS.slice(0, 4);
   const secondary = COCKPIT_SECTIONS.slice(4);
@@ -29,6 +31,7 @@ export function CockpitSectionNav({ activeSection, onSelect }: CockpitSectionNav
 
   return (
     <nav className="cockpit-section-nav" aria-label="Workspace sections" data-testid="cockpit-section-nav">
+      {attention ? <div className="cockpit-section-nav-attention">{attention}</div> : null}
       <div className="cockpit-section-nav-desktop">
         {COCKPIT_SECTIONS.map((section) => (
           <button

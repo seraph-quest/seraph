@@ -7,13 +7,11 @@ import { githubCapacityClosure, githubCapacityClosePending, githubCapacityCloseS
 import { publicationKey } from "../../lib/repoPublication";
 import { EffectiveGrantsPanel } from "../settings/EffectiveGrantsPanel";
 import { DocumentReader } from "./DocumentReader";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { appEventBus } from "../../lib/appEventBus";
 import {
-  isSuccessfulModelFabricOutcome,
   normalizeModelFabricRuntime,
-  textRouteProofLabel,
   type ModelFabricRuntimeStatus,
 } from "../../lib/modelFabric";
 import { API_URL } from "../../config/constants";
@@ -80,7 +78,7 @@ import {
   type GitHubFollowthroughSummary,
 } from "./OutcomeCockpitPanel";
 import { GuardianInboxPanel, type GuardianInboxPanelHandle } from "./GuardianInboxPanel";
-import { CockpitSectionNav } from "./CockpitSectionNav";
+import { COCKPIT_SECTIONS, CockpitSectionNav } from "./CockpitSectionNav";
 import { CockpitHome } from "./CockpitHome";
 import { ReportsPanel } from "./ReportsPanel";
 import { GuardianCandidateInspector } from "./GuardianCandidateInspector";
@@ -97,7 +95,26 @@ import {
   type ApprovalLoadState,
 } from "./cockpitAuthority";
 import { SeraphPresencePane } from "./SeraphPresencePane";
-import { deriveSeraphPresenceMetadataState } from "./seraphPresence";
+import { deriveSeraphPresenceMetadataState, deriveSeraphPresenceState } from "./seraphPresence";
+import { CockpitStatusMenu } from "./CockpitStatusMenu";
+import { CockpitMoreMenu, type CockpitMenuItem } from "./CockpitMoreMenu";
+import { CockpitConversationDock } from "./CockpitConversationDock";
+import { useGoalsInlineHost } from "../quest/QuestPanel";
+import { openSettingsSection } from "../../lib/settingsNavigation";
+import {
+  chatFabricRouteDegraded,
+  deriveChatRuntimeIdentity,
+  deriveConnectionItem,
+  deriveContextItem,
+  deriveDesktopItem,
+  deriveInterruptionItem,
+  derivePolicyItem,
+  deriveVersionItem,
+  summarizeShellStatus,
+  type ShellStatusAction,
+  type ShellStatusItem,
+} from "../../lib/cockpitShellStatus";
+import "./CockpitShell.css";
 import { PttAudioControl, type PttTaskRecovery } from "../chat/PttAudioControl";
 import { TelegramCaptureControl } from "./TelegramCaptureControl";
 import { ChannelOutputReview } from "./ChannelOutputReview";
@@ -1546,6 +1563,10 @@ interface DaemonPresenceState {
   connected: boolean;
   pending_notification_count: number;
   last_native_notification_outcome?: string | null;
+  daemon_state?: string | null;
+  last_error_kind?: string | null;
+  status_reason?: string | null;
+  recovery_hint?: string | null;
 }
 
 interface GuardianContinuityIntervention {
@@ -7443,12 +7464,9 @@ function supportsArtifactRoundtrip(workflow: WorkflowInfo): boolean {
   return workflowArtifactInputs(workflow).length > 0;
 }
 
-const COCKPIT_GLOBAL_HINTS = [
-  "Shift+1/2/3 switch layouts",
-  "Shift+K or Ctrl+K opens the capability palette",
-  "Drag headers to move panes",
-  "Reset view repacks the current workspace",
-];
+const COCKPIT_SECTION_LABELS = Object.fromEntries(
+  COCKPIT_SECTIONS.map((section) => [section.id, section.label]),
+) as Record<CockpitSection, string>;
 
 const COCKPIT_WINDOW_HINTS = {
   sessions: "Thread control, saved conversations, and continuity markers for the active thread.",
@@ -7479,6 +7497,13 @@ const ACTIVITY_LEDGER_FILTERS: ActivityLedgerFilter[] = [
   "system",
 ];
 
+/**
+ * Section mode (#1172) lays existing panes out in the canvas flow. Docked
+ * windows render without the floating geometry and drag/resize handles so
+ * section scrolling can never rewrite the saved Workspace windows layout.
+ */
+const WorkspaceDockedContext = createContext(false);
+
 function CockpitWorkspaceWindow({
   panelId,
   title,
@@ -7506,16 +7531,17 @@ function CockpitWorkspaceWindow({
     minWidth: resolvedMinWidth,
     minHeight: resolvedMinHeight,
   });
+  const docked = useContext(WorkspaceDockedContext);
 
   return (
     <section
-      ref={panelRef}
-      className={`cockpit-window ${isFront ? "cockpit-window--active" : ""}`}
-      style={style}
-      onPointerDown={bringToFront}
+      ref={docked ? undefined : panelRef}
+      className={`cockpit-window ${isFront && !docked ? "cockpit-window--active" : ""}`}
+      style={docked ? undefined : style}
+      onPointerDown={docked ? undefined : bringToFront}
     >
-      <ResizeHandles resizeHandleProps={resizeHandleProps} />
-      <div className="cockpit-window-header" {...dragHandleProps}>
+      {docked ? null : <ResizeHandles resizeHandleProps={resizeHandleProps} />}
+      <div className="cockpit-window-header" {...(docked ? {} : dragHandleProps)}>
         <div className="cockpit-window-header-main">
           <div className="cockpit-window-title">{title}</div>
           <div className="cockpit-window-meta">{meta}</div>
@@ -8033,6 +8059,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const [operatorStatus, setOperatorStatus] = useState<string | null>(null);
   const [workBoardEvidenceStatus, setWorkBoardEvidenceStatus] = useState<string | null>(null);
   const [onboardingActionStatus, setOnboardingActionStatus] = useState<string | null>(null);
+  // The onboarding notice is a slim, dismissible dock banner (#1172); Skip
+  // onboarding stays reachable from the More menu while onboarding is active.
+  const [onboardingNoticeDismissed, setOnboardingNoticeDismissed] = useState(false);
   const [deepPaneLoadState, setDeepPaneLoadState] = useState<Record<DeepPaneKey, DeepPaneLoadState>>({
     presence: "idle",
     activity: "idle",
@@ -8097,6 +8126,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const bringToFront = usePanelLayoutStore((s) => s.bringToFront);
   const syncCockpitPaneStack = usePanelLayoutStore((s) => s.syncCockpitPaneStack);
   const setActiveSection = useCockpitLayoutStore((s) => s.setActiveSection);
+  const chatDockOpen = useCockpitLayoutStore((s) => s.chatDockOpen);
+  const setChatDockOpen = useCockpitLayoutStore((s) => s.setChatDockOpen);
+  const setGoalsInlineHost = useGoalsInlineHost((s) => s.setHost);
 
   const legacyWorkspaceVisible = advancedWorkspaceOpen
     || activeSection === "work"
@@ -8110,7 +8142,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const connectionStatus = useChatStore((s) => s.connectionStatus);
   const isAgentBusy = useChatStore((s) => s.isAgentBusy);
   const ambientState = useChatStore((s) => s.ambientState);
-  const ambientTooltip = useChatStore((s) => s.ambientTooltip);
   const cockpitHintsEnabled = useChatStore((s) => s.cockpitHintsEnabled);
   const agentVisual = useChatStore((s) => s.agentVisual);
   const onboardingCompleted = useChatStore((s) => s.onboardingCompleted);
@@ -8192,7 +8223,9 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     setLibraryCapabilitiesOpen(false);
     setActiveSection(section);
     if (section === "work") focusPane("work_board_pane");
-    if (section === "goals") setQuestPanelOpen(true);
+    // Goals renders inline in the canvas (#1172). The overlay flag is not
+    // persisted, so relying on it left a reloaded Goals section empty.
+    if (section === "goals") setQuestPanelOpen(false);
     if (section === "connections") {
       setPaneVisible("presence_pane", true);
       focusPane("desktop_shell_pane");
@@ -8804,6 +8837,73 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     markDeepPaneLoaded("m8", false);
   }, [fetchCockpitJson, markDeepPaneLoaded, sessionId, updateDeepPaneState]);
 
+  // Shell status (#1172): the header, status popover and attention summary are
+  // visible in every section, so their sources refresh in every section. The
+  // full cockpit batch below still owns Work/Connections/Windows; this bounded
+  // batch only reads the runtime, observer, approval and policy endpoints the
+  // shell displays, and never runs while the full batch is active.
+  const refreshShellStatus = useCallback(async (isCancelled: () => boolean = () => false) => {
+    const [runtimeStatusResult, observerResult, approvalsResult, toolModeResult, mcpModeResult, approvalModeResult] = await fetchCockpitBatch([
+      () => fetchCockpitJson(`${API_URL}/api/runtime/status`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/observer/state`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/approvals/pending?limit=8`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/settings/tool-policy-mode`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/settings/mcp-policy-mode`, 5000, isCancelled),
+      () => fetchCockpitJson(`${API_URL}/api/settings/approval-mode`, 5000, isCancelled),
+    ], isCancelled, 3);
+    if (isCancelled()) return;
+    const runtimeStatusPayload = runtimeStatusResult.ok ? normalizeRuntimeStatus(runtimeStatusResult.payload) : null;
+    if (runtimeStatusResult.ok && runtimeStatusResult.payload && typeof runtimeStatusResult.payload === "object") {
+      const raw = runtimeStatusResult.payload as { guardian_runtime?: unknown; runtime_domains?: unknown };
+      setRuntimeOwners({ guardian: normalizeGuardianRuntime(raw.guardian_runtime ?? null),
+        domains: normalizeRuntimeDomains(raw.runtime_domains ?? null) });
+    }
+    if (runtimeStatusPayload) {
+      storeRuntimeReceipt(runtimeStatusPayload);
+      setRuntimeReceipt({ status: runtimeStatusPayload, source: "runtime_status" });
+    } else {
+      setRuntimeReceipt((current) => (current ? { ...current, source: "retained" } : null));
+    }
+    if (observerResult.ok) setObserverState((observerResult.payload as ObserverState | null) ?? {});
+    if (approvalsResult.ok && Array.isArray(approvalsResult.payload)) {
+      setPendingApprovals(normalizePendingApprovals(approvalsResult.payload));
+      setApprovalLoadState("ready");
+    } else {
+      setPendingApprovals([]);
+      setApprovalLoadState("stale");
+    }
+    const modeOf = (result: CockpitFetchResult) => (result.ok && result.payload && typeof result.payload === "object"
+      ? (result.payload as { mode?: string }).mode ?? "unknown" : null);
+    const toolMode = modeOf(toolModeResult);
+    if (toolMode) setToolPolicyMode(toolMode as ToolPolicyMode | "unknown");
+    const mcpMode = modeOf(mcpModeResult);
+    if (mcpMode) setMcpPolicyMode(mcpMode as McpPolicyMode | "unknown");
+    const approvalModeValue = modeOf(approvalModeResult);
+    if (approvalModeValue) setApprovalMode(approvalModeValue as ApprovalMode | "unknown");
+  }, [fetchCockpitBatch, fetchCockpitJson]);
+
+  const fullCockpitRefreshActive = advancedWorkspaceOpen || activeSection === "work" || activeSection === "connections";
+  useEffect(() => {
+    if (fullCockpitRefreshActive) return;
+    let disposed = false;
+    const isCancelled = () => disposed || !cockpitMountedRef.current;
+    void refreshShellStatus(isCancelled);
+    const interval = window.setInterval(() => void refreshShellStatus(isCancelled), 30_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [fullCockpitRefreshActive, refreshShellStatus]);
+
+  // Desktop presence is part of the shell status; confirm it once per mount
+  // (Connections and the status popover refresh it on demand).
+  const presenceShellCheckRef = useRef(false);
+  useEffect(() => {
+    if (presenceShellCheckRef.current) return;
+    presenceShellCheckRef.current = true;
+    void loadPresenceContinuity(() => cockpitMountedRef.current);
+  }, [loadPresenceContinuity]);
+
   useEffect(() => {
     if (!advancedWorkspaceOpen && activeSection !== "work" && activeSection !== "connections") return;
     let disposed = false;
@@ -8890,7 +8990,15 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [activeSection, fetchCockpitJson]);
 
   useEffect(() => {
-    const focusComposer = () => inputRef.current?.focus();
+    // Shift+C reveals the conversation dock when collapsed, then focuses it.
+    const focusComposer = () => {
+      if (!useCockpitLayoutStore.getState().chatDockOpen) {
+        useCockpitLayoutStore.getState().setChatDockOpen(true);
+        window.setTimeout(() => inputRef.current?.focus(), 0);
+        return;
+      }
+      inputRef.current?.focus();
+    };
     window.addEventListener("seraph-cockpit-focus-composer", focusComposer as EventListener);
     return () => {
       window.removeEventListener("seraph-cockpit-focus-composer", focusComposer as EventListener);
@@ -9128,7 +9236,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   }, [refreshCockpit, sessionId]);
 
   const activeSession = sessions.find((item) => item.id === sessionId) ?? null;
-  const activeLayout = getCockpitLayout(activeLayoutId);
   const selectedBrowserProvider = browserProviders.find((provider) => provider.selected) ?? browserProviders[0] ?? null;
   const degradedBrowserProviderCount = browserProviders.filter(
     (provider) => provider.runtime_state.includes("fallback") || provider.runtime_state.includes("degraded"),
@@ -9175,23 +9282,25 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         guardianState: false,
         timeline: false,
         workflows: false,
-        workBoard: activeSection === "work" && paneVisibility.work_board_pane,
+        // Section surfaces do not depend on Windows-layout pane visibility
+        // (#1172): a layout that hides a pane must not blank a section.
+        workBoard: activeSection === "work",
         interventions: false,
         audit: false,
         trace: false,
         inspector:
-          (activeSection === "work" || activeSection === "connections" || (activeSection === "library" && libraryInspectorOpen))
-          && paneVisibility.inspector_pane,
+          activeSection === "work" || activeSection === "connections" || (activeSection === "library" && libraryInspectorOpen),
         // Connections exposes its existing desktop shell; chat/presence and
         // diagnostics remain available from Windows when explicitly requested.
           conversation:
-            (activeSection === "connections" && (paneVisibility.desktop_shell_pane || paneVisibility.presence_pane))
-            || (activeSection === "library" && libraryCapabilitiesOpen && paneVisibility.operator_surface_pane),
+            activeSection === "connections"
+            || (activeSection === "library" && libraryCapabilitiesOpen),
       };
     },
     [activeSection, advancedWorkspaceOpen, libraryCapabilitiesOpen, libraryInspectorOpen, paneVisibility],
   );
   const recentConversation = messages.slice(-18);
+  const conversationMessages = useMemo(() => messages.slice(-100), [messages]);
   const latestResponse = useMemo(
     () =>
       [...messages]
@@ -10338,40 +10447,23 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     : connectionStatus === "connecting" || connectionStatus === "error"
       ? "disconnected"
       : connectionStatus;
-  const connectionLabel = effectiveConnectionStatus === "connected"
-    ? "live"
-    : effectiveConnectionStatus;
   const runtimeRouteLabel = runtimeStatus?.effective_runtime?.route_label
     || runtimeStatus?.effective_runtime?.provider_label
     || runtimeStatus?.provider
     || "unknown";
-  const runtimeProviderBaseLabel = runtimeRouteLabel.replace(/[_.-]+/g, " ").toUpperCase();
   const interactiveFabricRoute = runtimeStatus?.model_fabric?.runtime_paths.chat_agent
     ?? runtimeStatus?.model_fabric?.workloads.interactive;
   const actualFabricRoute = interactiveFabricRoute?.succeeded;
   const attemptedFabricRoute = interactiveFabricRoute?.attempted;
   const selectedFabricRoute = interactiveFabricRoute?.selected;
-  const runtimeProviderLabelBase = actualFabricRoute
-    ? `TEXT ${actualFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()}`
-    : attemptedFabricRoute
-      ? `ATTEMPTED ${attemptedFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()} ${attemptedFabricRoute.outcome.replace(/[_.-]+/g, " ").toUpperCase()}`
-      : selectedFabricRoute
-        ? `SELECTED ${selectedFabricRoute.profile_id.replace(/[_.-]+/g, " ").toUpperCase()}`
-        : runtimeProviderBaseLabel;
+  // A route with no attempts reports persistence "unknown"; that is not a
+  // degraded route (#1172). chatFabricRouteDegraded needs attempt evidence.
   const runtimeDegraded = runtimeStatus?.model_fabric?.status === "degraded"
-    || (interactiveFabricRoute?.last_outcome != null && !isSuccessfulModelFabricOutcome(interactiveFabricRoute.last_outcome))
-    || (interactiveFabricRoute?.persistence != null && interactiveFabricRoute.persistence !== "persisted");
+    || chatFabricRouteDegraded(interactiveFabricRoute);
   const runtimeReadinessStatus = runtimeStatus?.effective_runtime?.inference_readiness?.status;
   const runtimeBlocked = runtimeStatus?.effective_runtime?.inference_ready === false
     || runtimeReadinessStatus === "configuration_required";
   const runtimeReadinessDegraded = runtimeReadinessStatus === "degraded";
-  const runtimeProviderLabel = [
-    runtimeProviderLabelBase,
-    interactiveFabricRoute?.fallback_used ? "FALLBACK" : "",
-    runtimeBlocked ? "BLOCKED" : "",
-    runtimeDegraded || runtimeReadinessDegraded ? "DEGRADED" : "",
-    runtimeReceipt?.source === "retained" ? "STALE" : "",
-  ].filter(Boolean).join(" ");
   const runtimeModelLabel = (
     actualFabricRoute?.model
     ?? attemptedFabricRoute?.model
@@ -10386,7 +10478,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     .replace(/^anthropic\//, "")
     .replace(/[_/-]+/g, " ")
     .toUpperCase();
-  const runtimeBuildLabel = runtimeStatus?.build_id ?? SERAPH_BUILD_ID;
   const controlPlaneHandoffEntries = useMemo(
     () => (
       operatorControlPlane
@@ -10455,32 +10546,12 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       `${operatorContinuityGraph.summary.edge_count} edges`,
     ].join(" · ")
     : null;
-  const runtimeProofLabel = textRouteProofLabel(runtimeStatus?.model_fabric);
-  const workspaceTelemetryLeft = [runtimeProviderLabel, runtimeModelLabel, runtimeProofLabel].filter(Boolean).join(" · ");
-  const workspaceTelemetryCenter = `${activeLayout.label.toUpperCase()} WORKSPACE · 16PX GRID SNAP · ${runtimeBuildLabel}`;
-  const workspaceTelemetryRight = effectiveConnectionStatus === "connected"
-    ? `${connectionLabel.toUpperCase()} LINK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`
-    : `DIRECT FALLBACK · ${toolPolicyMode.toUpperCase()} TOOLS · ${approvalMode.toUpperCase()} APPROVAL`;
   const presenceMetadataState = deriveSeraphPresenceMetadataState(
     deepPaneLoadState.presence,
     continuityHasConfirmedPayload,
   );
   const presenceMetadataUnavailable = presenceMetadataState === "unavailable";
   const presenceMetadataStale = presenceMetadataState === "stale";
-  const desktopPresenceLabel = presenceMetadataUnavailable
-    ? "desktop unknown"
-    : presenceMetadataStale
-      ? "desktop last confirmed"
-      : daemonPresence?.connected
-        ? "desktop live"
-        : runtimeAvailable
-          ? "desktop optional"
-          : "desktop offline";
-  const bundleQueueLabel = presenceMetadataUnavailable
-    ? "bundle unknown"
-    : presenceMetadataStale
-      ? `bundle ${queuedBundleCount} queued · last confirmed`
-      : `bundle ${queuedBundleCount} queued`;
   const desktopShellMeta = presenceMetadataUnavailable
     ? "presence unknown · alerts unknown"
     : presenceMetadataStale
@@ -10566,6 +10637,64 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       recentTrace,
     ],
   );
+  // Shell status (#1172): one honest summary for the header and its popover.
+  const chatRuntimeIdentity = useMemo(
+    () => deriveChatRuntimeIdentity(runtimeStatus, runtimeReceipt?.source ?? null),
+    [runtimeReceipt?.source, runtimeStatus],
+  );
+  const shellStatusItems = useMemo<ShellStatusItem[]>(() => {
+    const chatItem: ShellStatusItem = {
+      id: "chat_model",
+      label: "Chat model",
+      value: chatRuntimeIdentity.label,
+      tone: chatRuntimeIdentity.tone,
+      reason: chatRuntimeIdentity.reason
+        ?? (chatRuntimeIdentity.lastReceipt ? `Last chat receipt: ${chatRuntimeIdentity.lastReceipt}.` : null),
+      source: "/api/runtime/status · effective_runtime",
+      action: chatRuntimeIdentity.tone === "ok"
+        ? { kind: "settings", label: "Open Settings → Models", section: "artifacts" }
+        : chatRuntimeIdentity.tone === "unknown"
+          ? { kind: "refresh", label: "Check again" }
+          : { kind: "settings", label: "Open Settings → Models", section: "artifacts" },
+    };
+    return [
+      deriveConnectionItem(connectionStatus),
+      chatItem,
+      derivePolicyItem(toolPolicyMode, mcpPolicyMode, approvalMode),
+      deriveContextItem(observerState?.data_quality ?? null, observerState !== null),
+      deriveDesktopItem(daemonPresence, presenceMetadataState, deepPaneLoadState.presence === "stale"),
+      deriveInterruptionItem(
+        observerState?.attention_budget_remaining ?? null,
+        observerState !== null,
+        presenceMetadataState === "unavailable" ? null : queuedBundleCount,
+      ),
+      deriveVersionItem(SERAPH_BUILD_ID, runtimeStatus, runtimeReceipt?.source ?? null),
+    ];
+  }, [
+    approvalMode,
+    chatRuntimeIdentity,
+    connectionStatus,
+    daemonPresence,
+    deepPaneLoadState.presence,
+    mcpPolicyMode,
+    observerState,
+    presenceMetadataState,
+    queuedBundleCount,
+    runtimeReceipt?.source,
+    runtimeStatus,
+    toolPolicyMode,
+  ]);
+  const shellStatusSummary = useMemo(() => summarizeShellStatus(shellStatusItems), [shellStatusItems]);
+  const seraphActivity = useMemo(() => deriveSeraphPresenceState(seraphPresenceSnapshot), [seraphPresenceSnapshot]);
+
+  const handleShellStatusAction = useCallback((action: ShellStatusAction) => {
+    if (action.kind === "settings") openSettingsSection(action.section);
+    else if (action.kind === "load-presence") void loadPresenceContinuity(() => cockpitMountedRef.current);
+    else if (fullCockpitRefreshActive) void refreshCockpit();
+    else void refreshShellStatus(() => !cockpitMountedRef.current);
+  }, [fullCockpitRefreshActive, loadPresenceContinuity, refreshCockpit, refreshShellStatus]);
+
+
   const operatorMacros = useMemo(
     () => savedRunbooks,
     [savedRunbooks],
@@ -12182,6 +12311,89 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
     ],
     [extensionPackages, extensionPackagesById, matchPackageFile, mcpServers, skills, workflows],
   );
+
+  // Rarely used shell controls live in one overflow menu (#1172). Shortcuts are
+  // shown here and in tooltips instead of permanent hint chips.
+  const moreMenuItems = useMemo<CockpitMenuItem[]>(() => {
+    const items: CockpitMenuItem[] = [
+      {
+        id: "toggle-chat",
+        group: "Conversation",
+        label: chatDockOpen ? "Hide conversation" : "Show conversation",
+        shortcut: "⇧C",
+        onSelect: () => setChatDockOpen(!chatDockOpen),
+      },
+      {
+        id: "start-fresh",
+        group: "Conversation",
+        label: "Start fresh",
+        description: "Open a blank thread; earlier threads stay listed.",
+        onSelect: () => newSession(),
+      },
+    ];
+    if (onboardingCompleted === false && onSkipOnboarding) {
+      items.push({
+        id: "skip-onboarding",
+        group: "Conversation",
+        label: "Skip onboarding",
+        description: "Open the full workspace without the setup questions.",
+        onSelect: () => void handleSkipOnboarding(),
+      });
+    }
+    if (activeSection !== "goals") {
+      items.push({
+        id: "priorities",
+        group: "Tools",
+        label: "Priorities overlay",
+        description: "Glance at goals without leaving this section.",
+        shortcut: "⇧Q",
+        onSelect: () => setQuestPanelOpen(true),
+      });
+    }
+    items.push(
+      {
+        id: "palette",
+        group: "Tools",
+        label: "Capability palette",
+        description: "Run capabilities, workflows and repair actions.",
+        shortcut: "⌘K",
+        onSelect: () => setPaletteOpen(true),
+      },
+      {
+        id: "studio",
+        group: "Tools",
+        label: "Extension studio",
+        description: "Validate and author extensions, workflows, skills and MCP config.",
+        onSelect: () => {
+          setStudioSelectedId(studioEntries[0]?.id ?? null);
+          setStudioOpen(true);
+        },
+      },
+      {
+        id: "windows",
+        group: "Workspace",
+        label: "Workspace windows",
+        description: `Advanced draggable panes and layouts (${visiblePaneCount}/${COCKPIT_PANES.length} shown).`,
+        shortcut: "⇧1–3",
+        onSelect: () => {
+          setAdvancedWorkspaceOpen(true);
+          setWindowsMenuOpen(true);
+        },
+      },
+    );
+    return items;
+  }, [
+    activeSection,
+    chatDockOpen,
+    handleSkipOnboarding,
+    newSession,
+    onSkipOnboarding,
+    onboardingCompleted,
+    setChatDockOpen,
+    setQuestPanelOpen,
+    studioEntries,
+    visiblePaneCount,
+  ]);
   const selectedStudioEntry = useMemo(
     () => studioEntries.find((entry) => entry.id === studioSelectedId) ?? studioEntries[0] ?? null,
     [studioEntries, studioSelectedId],
@@ -16414,108 +16626,88 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           }
           channelOutputInspectionRef.current = null;
         }} />
-      <header className="cockpit-topbar">
+      <header className="cockpit-topbar cockpit-shell-header">
         <div className="cockpit-brand">
-          <div className="cockpit-eyebrow cockpit-brandmark">SERAPH</div>
-          <div className="cockpit-toolbar-hint">{SERAPH_BUILD_ID}</div>
+          <span className="cockpit-brandmark">SERAPH</span>
+          <span className="cockpit-brand-divider" aria-hidden="true">/</span>
+          <span className="cockpit-brand-section">{COCKPIT_SECTION_LABELS[activeSection]}</span>
         </div>
 
-        <div className="cockpit-topbar-right">
-          <div className="cockpit-pill-row">
-            <span className={`cockpit-pill cockpit-pill--${effectiveConnectionStatus}`}>{connectionLabel}</span>
-            <span className="cockpit-pill">{ambientState.replace("_", " ")}</span>
-            <span className="cockpit-pill">{desktopPresenceLabel}</span>
-            {daemonPresence && (
-              <button
-                type="button"
-                className="cockpit-pill"
-                onClick={() => setSettingsPanelOpen(true)}
-                title="Open settings to inspect or dismiss pending desktop notifications"
-              >
-                native {daemonPresence.pending_notification_count} queued{presenceMetadataStale ? " · last confirmed" : ""}
-              </button>
-            )}
+        <div className="cockpit-shell-header-actions">
+          {approvalLoadState === "ready" && pendingApprovals.length > 0 ? (
             <button
               type="button"
-              className="cockpit-pill"
-              aria-label={deepPaneLoadState.presence === "loading" ? "loading presence continuity" : deepPaneLoadState.presence === "loaded" ? "refresh presence continuity" : "load presence continuity"}
-              disabled={deepPaneLoadState.presence === "loading"}
-              onClick={() => void loadPresenceContinuity()}
-              title={deepPaneLoadState.presence === "loaded" ? "Refresh deferred bundle items and recent guardian continuity" : "Load deferred bundle items and recent guardian continuity"}
+              className="cockpit-attention-pill"
+              onClick={() => openApprovalsPane()}
+              title="Review approvals that are blocking Seraph"
             >
-              {bundleQueueLabel}
+              {pendingApprovals.length} approval{pendingApprovals.length === 1 ? "" : "s"} waiting
             </button>
-            <span className="cockpit-pill">
-              budget {observerState?.attention_budget_remaining ?? "?"}
-            </span>
-            <span className="cockpit-pill">
-              {(observerState?.data_quality ?? ambientTooltip) || "state pending"}
-            </span>
-          </div>
-
-          <div className="cockpit-action-row">
-            {onboardingCompleted === false && onSkipOnboarding && (
-              <button className="cockpit-action cockpit-action--ghost" onClick={() => void handleSkipOnboarding()}>
-                Skip onboarding
-              </button>
-            )}
-            <button
-              className="cockpit-action cockpit-action--ghost"
-              onClick={() => newSession()}
-              title="Start a blank conversation thread. Earlier sessions stay in the Sessions pane."
-            >
-              Start fresh
-            </button>
-            <button
-              className="cockpit-action cockpit-action--ghost"
-              onClick={() => setQuestPanelOpen(true)}
-            >
-              Priorities overlay
-            </button>
-            <button
-              className="cockpit-action cockpit-action--ghost"
-              onClick={() => setPaletteOpen(true)}
-              title="Open the capability command palette"
-            >
-              Capability palette
-            </button>
-            <button
-              className="cockpit-action cockpit-action--ghost"
-              onClick={() => {
-                setStudioSelectedId(studioEntries[0]?.id ?? null);
-                setStudioOpen(true);
-              }}
-              title="Open the extension studio for workflows, skills, and MCP configuration"
-            >
-              Extension studio
-            </button>
-            <button
-              className="cockpit-action cockpit-action--ghost"
-              onClick={() => setSettingsPanelOpen(true)}
-            >
-              Settings
-            </button>
-          </div>
+          ) : null}
+          <CockpitStatusMenu
+            items={shellStatusItems}
+            summary={shellStatusSummary}
+            headline={chatRuntimeIdentity.model ?? chatRuntimeIdentity.label}
+            onAction={handleShellStatusAction}
+          />
+          <button
+            type="button"
+            className="cockpit-shell-button"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Command palette"
+            title="Command palette: capabilities, workflows and repair actions (Ctrl+K or ⌘K)"
+          >
+            <span className="cockpit-shell-button-label">Commands</span>
+            <kbd className="cockpit-kbd" aria-hidden="true">⌘K</kbd>
+          </button>
+          <button
+            type="button"
+            className="cockpit-shell-button"
+            onClick={() => setSettingsPanelOpen(true)}
+            title="Settings (Shift+S)"
+          >
+            Settings
+          </button>
+          <CockpitMoreMenu items={moreMenuItems} />
         </div>
 
-        <div className="cockpit-topbar-bottom">
-          <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
-            <button
-              className={`cockpit-action cockpit-action--ghost ${windowsMenuOpen ? "cockpit-action--active" : ""}`}
-              onClick={() => {
-                setAdvancedWorkspaceOpen(true);
-                setWindowsMenuOpen((current) => !current);
-              }}
-              title="Show or hide workspace windows"
-              aria-label="Windows"
-            >
-              Windows {visiblePaneCount}/{COCKPIT_PANES.length}
-            </button>
+        <div className="cockpit-menu-anchor" ref={windowsMenuRef}>
             {windowsMenuOpen && (
-              <div className="cockpit-windows-menu cockpit-windows-menu--brand cockpit-window-launcher-drawer retro-scrollbar">
+              <div role="dialog" aria-label="Workspace windows" className="cockpit-windows-menu cockpit-windows-menu--brand cockpit-window-launcher-drawer retro-scrollbar">
                 <div className="cockpit-window-launcher-header">
-                  <div className="cockpit-window-launcher-title">Windows</div>
+                  <div className="cockpit-window-launcher-title">Workspace windows</div>
                   <div className="cockpit-window-launcher-meta">{visiblePaneCount}/{COCKPIT_PANES.length} visible</div>
+                  <button
+                    type="button"
+                    className="cockpit-windows-menu-action"
+                    aria-label="Close windows menu"
+                    onClick={() => setWindowsMenuOpen(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="cockpit-windows-menu-group" role="group" aria-label="Layout">
+                  <div className="cockpit-windows-menu-group-title">Layout</div>
+            <div className="cockpit-layout-row">
+              {Object.values(COCKPIT_LAYOUTS).map((layout) => (
+                <button
+                  key={layout.id}
+                  className={`cockpit-action cockpit-action--ghost ${
+                    activeLayoutId === layout.id ? "cockpit-action--active" : ""
+                  }`}
+                  onClick={() => handleSelectLayout(layout.id)}
+                  title={layout.description}
+                >
+                  {layout.label}
+                </button>
+              ))}
+              <button className="cockpit-action cockpit-action--ghost" onClick={handleResetWorkspace}>
+                Reset view
+              </button>
+              <button className="cockpit-action cockpit-action--ghost" onClick={handleSaveWorkspace}>
+                Save view
+              </button>
+            </div>
                 </div>
                 <div className="cockpit-windows-menu-toolbar">
                   <button
@@ -16562,46 +16754,54 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 ))}
               </div>
             )}
-          </div>
-
-          <div className="cockpit-layout-row">
-            {Object.values(COCKPIT_LAYOUTS).map((layout) => (
-              <button
-                key={layout.id}
-                className={`cockpit-action cockpit-action--ghost ${
-                  activeLayoutId === layout.id ? "cockpit-action--active" : ""
-                }`}
-                onClick={() => handleSelectLayout(layout.id)}
-                title={layout.description}
-              >
-                {layout.label}
-              </button>
-            ))}
-            <button className="cockpit-action cockpit-action--ghost" onClick={handleResetWorkspace}>
-              Reset view
-            </button>
-            <button className="cockpit-action cockpit-action--ghost" onClick={handleSaveWorkspace}>
-              Save view
-            </button>
-          </div>
         </div>
       </header>
 
-      {cockpitHintsEnabled && (
-        <section className="cockpit-hint-strip" aria-label="Workspace hints">
-          {COCKPIT_GLOBAL_HINTS.map((hint) => (
-            <span key={hint} className="cockpit-hint-chip">
-              {hint}
-            </span>
-          ))}
-        </section>
-      )}
-
       <RuntimeOwnerBanner guardian={runtimeOwners.guardian} domains={runtimeOwners.domains} />
 
-      <div className="cockpit-main-stage">
-        <CockpitSectionNav activeSection={activeSection} onSelect={selectCockpitSection} />
-        <main className="cockpit-section-content">
+      <div className={`cockpit-main-stage ${chatDockOpen ? "cockpit-main-stage--dock-open" : "cockpit-main-stage--dock-closed"}`}>
+        <CockpitSectionNav
+          activeSection={activeSection}
+          onSelect={selectCockpitSection}
+          attention={(
+            <section className="cockpit-attention" aria-label="Needs you" data-testid="cockpit-attention">
+              <h2 className="cockpit-attention-title">Needs you</h2>
+              {approvalLoadState === "ready" ? (
+                pendingApprovals.length > 0 ? (
+                  <button type="button" className="cockpit-attention-row cockpit-attention-row--warning" onClick={() => openApprovalsPane()}>
+                    <span className="cockpit-attention-count">{pendingApprovals.length}</span>
+                    <span>approval{pendingApprovals.length === 1 ? "" : "s"} waiting</span>
+                  </button>
+                ) : (
+                  <p className="cockpit-attention-row cockpit-attention-row--clear">No approvals waiting</p>
+                )
+              ) : (
+                <button type="button" className="cockpit-attention-row" onClick={() => handleShellStatusAction({ kind: "refresh", label: "Check again" })}>
+                  <span>{approvalLoadState === "loading" ? "Checking approvals…" : "Approvals not confirmed · check again"}</span>
+                </button>
+              )}
+              {daemonPresence && daemonPresence.pending_notification_count > 0 ? (
+                <button type="button" className="cockpit-attention-row" onClick={() => openSettingsSection("native")}>
+                  <span className="cockpit-attention-count">{daemonPresence.pending_notification_count}</span>
+                  <span>desktop notification{daemonPresence.pending_notification_count === 1 ? "" : "s"} queued</span>
+                </button>
+              ) : null}
+              <button type="button" className="cockpit-attention-link" onClick={() => selectCockpitSection("home")}>
+                Next steps, Inbox decisions and blocked work are on Home
+              </button>
+            </section>
+          )}
+        />
+        <main className="cockpit-section-content" id="cockpit-main" tabIndex={-1}>
+      {advancedWorkspaceOpen ? (
+        <div className="cockpit-advanced-banner" role="status">
+          <span>Workspace windows are open: drag pane headers to arrange them.</span>
+          <button type="button" className="cockpit-shell-button cockpit-shell-button--compact" onClick={() => { setAdvancedWorkspaceOpen(false); setWindowsMenuOpen(false); }}>
+            Close windows
+          </button>
+        </div>
+      ) : null}
+      {activeSection === "goals" ? <div className="cockpit-goals-host" ref={setGoalsInlineHost} /> : null}
 
       {currentHomeInspection && activeSection !== "home" ? <button type="button" onClick={() => selectCockpitSection("home")}>Return to Home snapshot</button> : null}
       <div hidden={activeSection !== "home"}>
@@ -16776,7 +16976,8 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
       ) : null}
 
       {legacyWorkspaceVisible ? (
-      <div className="cockpit-workspace">
+      <WorkspaceDockedContext.Provider value={!advancedWorkspaceOpen}>
+      <div className={`cockpit-workspace ${advancedWorkspaceOpen ? "cockpit-workspace--floating" : "cockpit-workspace--docked"}`}>
         {visibleSections.rail && (
           <>
             {advancedWorkspaceOpen && paneVisibility.sessions_pane && (
@@ -18169,7 +18370,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
 
         {visibleSections.conversation && (
           <>
-            {(advancedWorkspaceOpen || activeSection === "connections") && paneVisibility.presence_pane && (
+            {(advancedWorkspaceOpen ? paneVisibility.presence_pane : activeSection === "connections") && (
               <CockpitWorkspaceWindow
                 panelId="presence_pane"
                 title="Seraph presence"
@@ -18196,18 +18397,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                 onClose={() => closeWindowPane("conversation_pane")}
               >
               <section className="cockpit-panel cockpit-panel--embedded cockpit-chat-panel">
-                {onboardingCompleted === false && onSkipOnboarding && (
-                  <div className="cockpit-onboarding-actions" role="group" aria-label="Onboarding actions">
-                    <div className="cockpit-onboarding-copy">
-                      <span className="cockpit-key">onboarding active</span>
-                      <span>Answer the setup questions below, or skip them to open the full workspace.</span>
-                    </div>
-                    <button type="button" className="cockpit-action cockpit-action--ghost" onClick={() => void handleSkipOnboarding()}>
-                      Skip onboarding
-                    </button>
-                    {onboardingActionStatus && <span className="cockpit-onboarding-status" role="status">{onboardingActionStatus}</span>}
-                  </div>
-                )}
                 <div className="cockpit-feed">
                   {recentConversation.map((message) => (
                     <div key={message.id} className={`cockpit-message cockpit-message--${message.role}`}>
@@ -18240,20 +18429,11 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
                     </div>
                   )}
                 </div>
-                <PttAudioControl
-                  taskRecovery={pttTaskRecoveryRef}
-                  sessionId={sessionId}
-                  disabled={isAgentBusy}
-                  ownerPrincipalId={operatorAuth.principalId}
-                  ownerSessionId={operatorAuth.sessionId}
-                  goals={activeGoalsForCockpit}
-                  onTaskCreated={(taskId) => { setFocusTaskId(taskId); selectCockpitSection("work"); }}
-                />
               </section>
               </CockpitWorkspaceWindow>
             )}
 
-            {(advancedWorkspaceOpen || activeSection === "connections") && paneVisibility.desktop_shell_pane && (
+            {(advancedWorkspaceOpen ? paneVisibility.desktop_shell_pane : activeSection === "connections") && (
               <CockpitWorkspaceWindow
                 panelId="desktop_shell_pane"
                 title="Desktop shell"
@@ -18593,7 +18773,7 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
               </CockpitWorkspaceWindow>
             )}
 
-            {(advancedWorkspaceOpen || (activeSection === "library" && libraryCapabilitiesOpen)) && paneVisibility.operator_surface_pane && (
+            {(advancedWorkspaceOpen ? paneVisibility.operator_surface_pane : activeSection === "library" && libraryCapabilitiesOpen) && (
               <CockpitWorkspaceWindow
                 panelId="operator_surface_pane"
                 title="Operator terminal"
@@ -22115,8 +22295,67 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
           </>
         )}
       </div>
+      </WorkspaceDockedContext.Provider>
       ) : null}
         </main>
+        <CockpitConversationDock
+          open={chatDockOpen}
+          onToggle={() => setChatDockOpen(!chatDockOpen)}
+          sessionTitle={activeSession?.title ?? "New thread · saved after first reply"}
+          sessions={sessions}
+          currentSessionId={sessionId}
+          onSwitchSession={(id) => {
+            clearSessionContinuity(id);
+            switchSession(id, "live");
+          }}
+          onNewSession={() => newSession()}
+          messages={conversationMessages}
+          isAgentBusy={isAgentBusy}
+          activity={seraphActivity}
+          roleLabel={labelForRole}
+          ageLabel={formatAge}
+          onboarding={onboardingCompleted === false && onSkipOnboarding && !onboardingNoticeDismissed ? (
+            <div className="cockpit-dock-banner" role="group" aria-label="Onboarding actions">
+              <span className="cockpit-dock-banner-text">Setup questions are running in this chat.</span>
+              <button type="button" className="cockpit-dock-banner-action" onClick={() => void handleSkipOnboarding()}>
+                Skip onboarding
+              </button>
+              <button
+                type="button"
+                className="cockpit-dock-banner-dismiss"
+                aria-label="Dismiss onboarding notice"
+                title="Hide this notice. Skip onboarding stays in the More menu."
+                onClick={() => setOnboardingNoticeDismissed(true)}
+              >
+                ×
+              </button>
+              {onboardingActionStatus && <span className="cockpit-onboarding-status" role="status">{onboardingActionStatus}</span>}
+            </div>
+          ) : onboardingActionStatus ? (
+            <div className="cockpit-dock-banner" role="status">{onboardingActionStatus}</div>
+          ) : null}
+          voice={(
+            <PttAudioControl
+              taskRecovery={pttTaskRecoveryRef}
+              sessionId={sessionId}
+              disabled={isAgentBusy}
+              ownerPrincipalId={operatorAuth.principalId}
+              ownerSessionId={operatorAuth.sessionId}
+              goals={activeGoalsForCockpit}
+              onTaskCreated={(taskId) => { setFocusTaskId(taskId); selectCockpitSection("work"); }}
+                    />
+          )}
+          composerValue={composer}
+          onComposerChange={setComposer}
+          onSubmit={handleSubmit}
+          inputRef={inputRef}
+          placeholder={
+            effectiveConnectionStatus === "connected"
+              ? "Message Seraph…"
+              : "Live link offline: messages use the direct chat fallback."
+          }
+          submitDisabled={submitDisabled}
+        />
       </div>
 
       {studioOpen && (
@@ -22731,44 +22970,6 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
         </div>
       )}
 
-      <form className="cockpit-composer" onSubmit={handleSubmit}>
-        <div className="cockpit-composer-meta">
-          <span>{workspaceTelemetryLeft}</span>
-          <span className="cockpit-composer-meta-center">
-            {workspaceTelemetryCenter}
-          </span>
-          <span>{isAgentBusy ? "SERAPH RESPONDING" : workspaceTelemetryRight}</span>
-        </div>
-        <div className="cockpit-composer-row">
-          <input
-            ref={inputRef}
-            type="text"
-            value={composer}
-            onChange={(event) => setComposer(event.target.value)}
-            placeholder={
-              effectiveConnectionStatus === "connected"
-                ? "Ask Seraph, redirect a workflow, or steer the guardian."
-                : "WebSocket offline. Message will fall back to direct chat."
-            }
-            className="cockpit-input"
-            disabled={isAgentBusy}
-          />
-          <button type="submit" className="cockpit-send" disabled={submitDisabled}>
-            {isAgentBusy ? (
-              <>
-                <span className="cockpit-send-spinner" aria-hidden="true">
-                  <span className="thinking-dot">.</span>
-                  <span className="thinking-dot">.</span>
-                  <span className="thinking-dot">.</span>
-                </span>
-                <span>Working</span>
-              </>
-            ) : (
-              "Send"
-            )}
-          </button>
-        </div>
-      </form>
     </div>
   );
 }

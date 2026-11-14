@@ -188,11 +188,33 @@ async function renderLegacyCockpit(ui: Parameters<typeof render>[0]) {
   // Navigate only after the initial mocked GETs and auth updates settle.
   // Each operator action commits before the next control is queried.
   await act(async () => { fireEvent.click(screen.getByTestId("cockpit-section-work")); });
-  const windowsButton = screen.getByRole("button", { name: "Windows" });
-  await act(async () => { fireEvent.click(windowsButton); });
+  // #1172: the Windows manager moved into More → Workspace windows.
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "More actions" })); });
+  await act(async () => { fireEvent.click(screen.getByRole("menuitem", { name: "Workspace windows" })); });
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Show all" })); });
-  await act(async () => { fireEvent.click(windowsButton); });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Close windows menu" })); });
   return result;
+}
+
+/**
+ * The footer telemetry line was replaced by the shell status popover (#1172).
+ * Returns one status item, opening the popover when needed.
+ */
+function shellStatusItem(id: string) {
+  if (!screen.queryByTestId("cockpit-status-panel")) fireEvent.click(screen.getByTestId("cockpit-status-trigger"));
+  return screen.getByTestId(`cockpit-status-item-${id}`);
+}
+
+/** Rarely used shell controls live in the More menu since #1172. */
+function openMoreMenuItem(name: string) {
+  fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name }));
+}
+
+function toggleWindowsMenu() {
+  const close = screen.queryByRole("button", { name: "Close windows menu" });
+  if (close) fireEvent.click(close);
+  else openMoreMenuItem("Workspace windows");
 }
 
 function browserPreviewFixture(options: {
@@ -650,7 +672,9 @@ describe("CockpitView", () => {
     expect(screen.getByTestId("cockpit-section-home")).toHaveAttribute("aria-current", "page");
     expect(screen.queryByLabelText("Work board")).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Continue your work" })).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(false);
+    // #1172: the shell status (header, popover, Needs you) refreshes its own
+    // bounded endpoints in every section; heavy cockpit panes stay deferred.
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
     const homeUrls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(homeUrls.some((url) => ["/api/audit/events", "/api/capabilities/overview", "/api/extensions", "/api/workflows/runs"].some((endpoint) => url.includes(endpoint)) || url.includes("/api/operator/") && !url.includes("/api/operator/continuation?") )).toBe(false);
     fireEvent.click(screen.getByTestId("cockpit-section-inbox"));
@@ -927,7 +951,11 @@ describe("CockpitView", () => {
     expect(within(pane).queryByText("READY")).not.toBeInTheDocument();
     expect(within(pane).queryByText("Guardian continuity and proactive guidance are active.")).not.toBeInTheDocument();
     expect(within(pane).getByText("reach unknown · load presence continuity to confirm")).toBeInTheDocument();
-    expect(screen.getByText("bundle unknown")).toBeInTheDocument();
+    // #1172: the header "bundle unknown" chip became a status item with a reason.
+    expect(shellStatusItem("desktop")).toHaveTextContent(/Unavailable|Not checked yet/);
+    expect(shellStatusItem("desktop")).toHaveTextContent(/continuity/i);
+    expect(shellStatusItem("interruptions")).not.toHaveTextContent("deferred nudge");
+    fireEvent.click(screen.getByTestId("cockpit-status-trigger"));
     expect(screen.getByText("presence unknown · bundle unknown · recent unknown")).toBeInTheDocument();
     expect(screen.getByText("Desktop continuity items unknown. Load presence continuity to confirm.")).toBeInTheDocument();
   });
@@ -1021,8 +1049,10 @@ describe("CockpitView", () => {
     expect(within(pane).getByText("last confirmed · clear")).toBeInTheDocument();
     expect(within(pane).getByText("last confirmed · follow-through 0 · alerts 0 · bundled 0")).toBeInTheDocument();
     expect(within(pane).getByText("last confirmed · reach ready")).toBeInTheDocument();
-    expect(screen.getByText("bundle 0 queued · last confirmed")).toBeInTheDocument();
-    expect(screen.getByText("desktop last confirmed")).toBeInTheDocument();
+    // #1172: header chips became status items that keep the stale marker.
+    expect(shellStatusItem("desktop")).toHaveTextContent("(last confirmed)");
+    expect(shellStatusItem("interruptions")).toHaveTextContent("0 deferred nudges queued");
+    fireEvent.click(screen.getByTestId("cockpit-status-trigger"));
     expect(screen.getByRole("button", { name: /presence continuity/i })).toBeEnabled();
   });
 
@@ -1032,7 +1062,9 @@ describe("CockpitView", () => {
     render(<CockpitView onSend={() => {}} />);
 
     expect(await screen.findByRole("heading", { name: "Continue your work" })).toBeInTheDocument();
-    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(false);
+    // #1172: shell status reads runtime status in every section; the capability
+    // inventory stays deferred until Library opens its terminal.
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/runtime/status"))).toBe(true));
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/capabilities/overview"))).toHaveLength(0);
 
     fireEvent.click(screen.getByTestId("cockpit-section-library"));
@@ -2678,9 +2710,11 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByText("DIRECT FALLBACK · BALANCED TOOLS · HIGH_RISK APPROVAL")).toBeInTheDocument());
-    expect(screen.getAllByText("disconnected").length).toBeGreaterThan(0);
-    expect(screen.queryByText("LIVE LINK · BALANCED TOOLS · HIGH_RISK APPROVAL")).not.toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("policy")).toHaveTextContent("Tools balanced · MCP approval · Approvals high risk"));
+    const link = shellStatusItem("connection");
+    expect(link).toHaveTextContent("Offline");
+    expect(link).toHaveTextContent(/fall back to direct chat/);
+    expect(link).not.toHaveTextContent("Connected");
     expect(screen.queryByText("runtime linked")).not.toBeInTheDocument();
   });
 
@@ -2701,6 +2735,7 @@ describe("CockpitView", () => {
             provider: "local-gemma",
             model: "openai/local-gemma",
             model_label: "local-gemma",
+            effective_runtime: { route_label: "local-gemma", model_label: "local-gemma" },
           }));
         }
         return Promise.resolve(mockResponse({ detail: "temporary runtime refresh failure" }, false, 503));
@@ -2739,7 +2774,8 @@ describe("CockpitView", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByText("LOCAL GEMMA · LOCAL GEMMA")).toBeInTheDocument();
+    expect(shellStatusItem("chat_model")).toHaveTextContent("local-gemma · local-gemma");
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Ready");
 
     failRuntimeStatus = true;
     await act(async () => {
@@ -2747,8 +2783,11 @@ describe("CockpitView", () => {
     });
 
     expect(runtimeStatusCalls).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("LOCAL GEMMA STALE · LOCAL GEMMA")).toBeInTheDocument();
-    expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
+    const retained = shellStatusItem("chat_model");
+    expect(retained).toHaveTextContent("local-gemma · local-gemma");
+    expect(retained).toHaveTextContent("Not confirmed");
+    expect(retained).toHaveTextContent(/Last confirmed value/);
+    expect(retained).not.toHaveTextContent("Route not reported");
   });
 
   it("surfaces backend OpenRouter configuration readiness as blocked", async () => {
@@ -2779,8 +2818,9 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
-    expect(screen.queryByText("OPENROUTER · GROK 4.1 FAST")).not.toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("openrouter · grok-4.1-fast"));
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Blocked");
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Chat inference is blocked (readiness: configuration required): openrouter api key missing.");
   });
 
   it("retains blocked readiness when control-plane posture omits readiness fields", async () => {
@@ -2815,14 +2855,15 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    expect(await screen.findByText("OPENROUTER BLOCKED · GROK 4.1 FAST")).toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("openrouter · grok-4.1-fast"));
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Blocked");
     fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
 
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/operator/control-plane"))).toBe(true);
-      expect(screen.getByText("OPENROUTER BLOCKED · GROK 4.2")).toBeInTheDocument();
+      expect(shellStatusItem("chat_model")).toHaveTextContent("openrouter · grok-4.2");
     });
-    expect(screen.queryByText("OPENROUTER · GROK 4.2")).not.toBeInTheDocument();
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Blocked");
     expect(screen.queryByText("openrouter_api_key_missing")).not.toBeInTheDocument();
   });
 
@@ -2864,14 +2905,18 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.1 FAST")).toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("openrouter · grok-4.1-fast"));
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Not confirmed");
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Chat inference is blocked (readiness: degraded)");
     fireEvent.click(screen.getAllByRole("button", { name: "load control plane" })[0]);
 
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/operator/control-plane"))).toBe(true);
-      expect(screen.getByText("OPENROUTER BLOCKED DEGRADED STALE · GROK 4.2")).toBeInTheDocument();
+      expect(shellStatusItem("chat_model")).toHaveTextContent("openrouter · grok-4.2");
     });
-    expect(screen.queryByText("OPENROUTER BLOCKED DEGRADED · GROK 4.2")).not.toBeInTheDocument();
+    // Posture that follows a retained receipt stays unconfirmed and blocked.
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Not confirmed");
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Chat inference is blocked (readiness: degraded)");
   });
 
   it("keeps BLOCKED and DEGRADED telemetry tokens independent", async () => {
@@ -2900,10 +2945,12 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    expect(await screen.findByText("OPENROUTER BLOCKED DEGRADED · GROK 4.1 FAST")).toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("Blocked"));
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Chat inference is blocked");
+    expect(shellStatusItem("chat_model")).toHaveTextContent("The model fabric reports a degraded state.");
   });
 
-  it("preserves legacy runtime labels when readiness fields are absent", async () => {
+  it("does not present a configured default as the chat route when effective_runtime is absent", async () => {
     mockCockpitBaselineFetch(fetchMock, {
       runtimeStatus: {
         version: "test",
@@ -2916,8 +2963,10 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    expect(await screen.findByText("LEGACY PROVIDER · LEGACY MODEL")).toBeInTheDocument();
-    expect(screen.queryByText(/LEGACY PROVIDER (BLOCKED|DEGRADED)/)).not.toBeInTheDocument();
+    // #1172: top-level provider/model are configured defaults, not the chat path.
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("Route not reported"));
+    expect(shellStatusItem("chat_model")).toHaveTextContent(/configured default is not shown/);
+    expect(shellStatusItem("chat_model")).not.toHaveTextContent(/legacy-provider|legacy-model/);
   });
 
   it("renders GPU VLM route labels from effective runtime status", async () => {
@@ -2951,10 +3000,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => {
-      expect(screen.getByText("GPU VLM · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
-    });
-    expect(screen.queryByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).not.toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("GPU VLM · gemma-4-26B-A4B-it-qat-GGUF"));
+    expect(shellStatusItem("chat_model")).not.toHaveTextContent("local-gemma ·");
   });
 
   it("renders the last actual text route and marks a degraded fallback attempt", async () => {
@@ -2992,10 +3039,12 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => {
-      expect(screen.getByText("TEXT LAST ACTUAL FALLBACK DEGRADED · ACTUAL MODEL")).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/CONFIGURED PRIMARY/)).not.toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("last-actual · actual-model"));
+    const route = shellStatusItem("chat_model");
+    expect(route).toHaveTextContent("Needs attention");
+    expect(route).toHaveTextContent("A fallback route was used.");
+    expect(route).toHaveTextContent("receipt persistence failed");
+    expect(route).not.toHaveTextContent(/configured-primary|configured-model/);
   });
 
   it("does not mark a persisted succeeded text route degraded", async () => {
@@ -3035,10 +3084,9 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => {
-      expect(screen.getByText("TEXT LOCAL TEXT · GEMMA TEXT")).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/TEXT LOCAL TEXT DEGRADED/)).not.toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("local-text · gemma-text"));
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Ready");
+    expect(shellStatusItem("chat_model")).not.toHaveTextContent(/did not complete cleanly|Degradation/);
   });
 
   it("labels a failed-only route as attempted instead of actual text", async () => {
@@ -3077,10 +3125,9 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => {
-      expect(screen.getByText("ATTEMPTED LOCAL TEXT FAILED DEGRADED · GEMMA TEXT")).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/TEXT LOCAL TEXT/)).not.toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("local-text · gemma-text"));
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Needs attention");
+    expect(shellStatusItem("chat_model")).toHaveTextContent("Last attempt failed; no successful receipt yet.");
   });
 
   it("uses operator runtime posture when runtime status is temporarily unavailable", async () => {
@@ -3096,6 +3143,7 @@ describe("CockpitView", () => {
           provider: "local-gemma",
           model: "openai/gemma-4-26b",
           model_label: "gemma-4-26B-A4B-it-qat-GGUF",
+          effective_runtime: { route_label: "local-gemma", model_label: "gemma-4-26B-A4B-it-qat-GGUF" },
         })));
       }
       if (url.includes("/api/sessions")) return Promise.resolve(mockResponse([]));
@@ -3131,9 +3179,8 @@ describe("CockpitView", () => {
 
     await loadAllDeepPanes();
 
-    expect(await screen.findByText("LOCAL GEMMA · GEMMA 4 26B A4B IT QAT GGUF")).toBeInTheDocument();
-    expect(screen.queryByText("UNKNOWN · UNKNOWN")).not.toBeInTheDocument();
-    expect(screen.queryByText("MODEL UNAVAILABLE")).not.toBeInTheDocument();
+    await waitFor(() => expect(shellStatusItem("chat_model")).toHaveTextContent("local-gemma · gemma-4-26B-A4B-it-qat-GGUF"));
+    expect(shellStatusItem("chat_model")).not.toHaveTextContent("Not reported yet");
   });
 
   it("keeps recovery controls disabled when the workflow session is not the operator session", async () => {
@@ -3957,11 +4004,12 @@ describe("CockpitView", () => {
     expect(screen.getByText("approval 0 · blocked 1")).toBeInTheDocument();
     expect(screen.getByText("blocked web-brief-to-file")).toBeInTheDocument();
     expect(screen.getByText("tools write_file")).toBeInTheDocument();
-    expect(screen.getByText("bundle 1 queued")).toBeInTheDocument();
+    expect(shellStatusItem("interruptions")).toHaveTextContent("1 deferred nudge queued");
+    fireEvent.click(screen.getByTestId("cockpit-status-trigger"));
 
     // All panes are already visible after renderLegacyCockpit. Close the
     // launcher drawer without toggling the existing Desktop shell pane.
-    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    toggleWindowsMenu();
 
     expect(screen.getByText("Guardian nudge")).toBeInTheDocument();
     expect(screen.getByText(/Bundle delivery: unavailable/i)).toBeInTheDocument();
@@ -8875,7 +8923,7 @@ describe("CockpitView", () => {
 
     // All panes are already visible after renderLegacyCockpit. Close the
     // launcher drawer without toggling the existing Desktop shell pane.
-    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    toggleWindowsMenu();
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -9096,7 +9144,7 @@ describe("CockpitView", () => {
       expect(screen.getByText("Activity ledger", { selector: ".cockpit-window-title" })).toBeInTheDocument(),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    toggleWindowsMenu();
     const menu = screen.getByText("Show all").closest(".cockpit-window-launcher-drawer") as HTMLElement;
     const activityToggle = within(menu).getByText("Activity Ledger").closest("button") as HTMLButtonElement;
     fireEvent.click(activityToggle);
@@ -9154,7 +9202,7 @@ describe("CockpitView", () => {
 
     await waitFor(() => expect(guardianTitle.closest(".cockpit-window")).toHaveStyle({ left: "222px", top: "144px" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Windows" }));
+    toggleWindowsMenu();
     const menu = screen.getByText("Show all").closest(".cockpit-window-launcher-drawer") as HTMLElement;
     fireEvent.click(within(menu).getByText("Priorities").closest("button") as HTMLButtonElement);
 
@@ -10178,6 +10226,8 @@ describe("CockpitView", () => {
       expect(screen.queryByText("Activity ledger", { selector: ".cockpit-window-title" })).not.toBeInTheDocument(),
     );
 
+    // #1172: layout controls live in the Workspace windows drawer.
+    toggleWindowsMenu();
     fireEvent.click(screen.getByRole("button", { name: "Reset view" }));
 
     await waitFor(() =>
@@ -10290,8 +10340,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={() => {}} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.click(within(studio).getByRole("button", { name: "Refresh validation" }));
@@ -12664,8 +12714,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     const draftInput = await within(studio).findByLabelText("authoring draft");
@@ -12817,8 +12867,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     expect(within(studio).getByText("Test Installable")).toBeInTheDocument();
@@ -12994,8 +13044,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     const draftInput = await within(studio).findByLabelText("authoring draft");
@@ -13099,8 +13149,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     expect(await within(studio).findByText("Reload extension package metadata before editing local-workflow")).toBeInTheDocument();
@@ -13244,15 +13294,15 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     let studio = await screen.findByLabelText("Extension studio");
     expect(within(studio).getByText("Test Installable")).toBeInTheDocument();
     fireEvent.click(within(studio).getByRole("button", { name: "Close extension studio" }));
 
     extensionsHealthy = false;
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    openMoreMenuItem("Extension studio");
 
     studio = await screen.findByLabelText("Extension studio");
     await waitFor(() => expect(within(studio).getByText("Test Installable")).toBeInTheDocument());
@@ -13357,8 +13407,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     expect(await within(studio).findByLabelText("manifest draft")).toBeInTheDocument();
@@ -13492,8 +13542,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.change(within(studio).getByLabelText("Extension package path"), {
@@ -13589,8 +13639,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.change(within(studio).getByLabelText("New extension package name"), {
@@ -13691,8 +13741,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.change(within(studio).getByLabelText("New extension package name"), {
@@ -13818,8 +13868,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.change(within(studio).getByLabelText("Extension package path"), {
@@ -13991,8 +14041,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.change(within(studio).getByLabelText("Extension package path"), {
@@ -14487,8 +14537,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.change(within(studio).getByLabelText("Extension package path"), {
@@ -14586,8 +14636,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.change(within(studio).getByLabelText("Extension package path"), {
@@ -14758,8 +14808,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
@@ -14980,8 +15030,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
@@ -15134,8 +15184,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
@@ -15270,8 +15320,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.click(within(studio).getAllByText("manifest.yaml")[0].closest("button") as HTMLButtonElement);
@@ -15553,8 +15603,8 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn()} />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Extension studio" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Extension studio" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument());
+    openMoreMenuItem("Extension studio");
 
     const studio = await screen.findByLabelText("Extension studio");
     fireEvent.click(within(studio).getByText("daily-standup").closest("button") as HTMLButtonElement);
@@ -15661,7 +15711,7 @@ describe("CockpitView", () => {
 
     await renderLegacyCockpit(<CockpitView onSend={vi.fn(async () => false)} />);
 
-    const composer = await screen.findByPlaceholderText(/Ask Seraph/i);
+    const composer = await screen.findByLabelText("Message Seraph");
     fireEvent.change(composer, { target: { value: "keep me" } });
     fireEvent.submit(composer.closest("form")!);
 

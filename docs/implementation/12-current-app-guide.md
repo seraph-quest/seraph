@@ -1965,7 +1965,8 @@ remain available before a conversation exists, but recording stays disabled
 until a session can own the durable audio request. Audio processing may still
 show a governed degraded state when no audio transport is configured.
 
-Onboarding presents an explicit **Skip onboarding** action in the cockpit. It
+Onboarding presents an explicit **Skip onboarding** action in the cockpit, in
+the conversation dock and the **More** menu while onboarding is active. It
 uses the live WebSocket when available and the authenticated REST profile
 endpoint while the socket reconnects; the UI only reports success after one of
 those paths accepts the update. If no compliant OpenRouter route is persisted,
@@ -4133,6 +4134,102 @@ the selected browser journey; macOS execution and native desktop capture remain
 unverified.
 
 ## Memory
+
+### Cockpit shell layout (#1172)
+
+The cockpit shell has one fixed hierarchy. Talking to Seraph, what needs the
+operator and honest status stay visible in every section. Rarely used controls
+sit one click away. This layout is **Partial**: the defect fixes are covered by
+focused component tests. The layout was checked visually only in an offline
+preview with redacted fixtures, not in a live managed cockpit.
+
+```text
+┌ No login (local only) ── gate strip, shown whenever local no-login mode is on ┐
+├ SERAPH / <section> · [N approvals waiting] · [● <chat model> · <summary>] ·    │
+│                       [Commands ⌘K] · [Settings] · [⋯ More]                    │
+├──────────────┬──────────────────────────────────────┬────────────────────────┤
+│ Needs you    │ Section canvas                        │ Conversation dock      │
+│  approvals   │  Home · Inbox · Work · Goals ·        │  thread picker         │
+│  desktop     │  Library · Connections · Reports      │  "Seraph · <doing now>"│
+│  queue       │  (Work/Connections panes flow inline; │  messages              │
+│ Sections     │   Goals renders inline)               │  voice (collapsed)     │
+│              │                                       │  composer              │
+└──────────────┴──────────────────────────────────────┴────────────────────────┘
+```
+
+- **Conversation.** The dock on the right is the only conversation surface,
+  and every section keeps it. It holds the thread picker, **New thread**, the
+  current Seraph activity, the messages, onboarding prompts, push-to-talk and
+  the composer. **Shift+C** opens and focuses it. It can be collapsed to a slim
+  **Chat** tab, and the open/closed choice persists. Before this change,
+  messages showed only in the optional **Conversation** window. The default
+  section view had no visible chat, only a thin composer at the bottom.
+- **Needs you.** At the top of the navigation rail: pending approvals, from
+  `/api/approvals/pending`, open the approvals pane. Queued native desktop
+  notifications open Settings → Native. A link leads to Home for next steps,
+  Inbox decisions and blocked work. If approvals have not loaded, the rail says
+  so ("Approvals not confirmed · check again") instead of showing zero.
+- **Status.** One trigger shows the chat model and an overall summary.
+  Its popover lists the live link, chat model, tools and approvals, context
+  signals, desktop presence, interruption budget and version. Each item names
+  its source endpoint. Every state that is not ready says why and links to the
+  fix, usually a Settings section such as Models, Native, Policies or General.
+  Expected configuration is labelled **No action needed** and never raises the
+  summary. One example is the desktop daemon turned off by `DAEMON_ENABLED=false`.
+  Another is observer `data_quality=degraded`, which means some observer
+  sources (time, calendar, git, goals) have not refreshed for this operator
+  scope. Neither is a fault. The Seraph presence pane shows the second case as
+  **Partial context** rather than a red **Degraded**.
+- **Chat model truth.** The label comes from
+  `/api/runtime/status.effective_runtime`, the `chat_agent` path. Top-level
+  `provider`/`model` are configured defaults and are never shown as the chat
+  model. A receipt retained from an earlier browser session is labelled
+  **not confirmed**. A fabric route with no attempts is not reported as
+  degraded just because its persistence is `unknown`.
+- **Version.** The bundle build is compared with the backend `build_id` from
+  live runtime status. A mismatch is a warning with a reload or restart hint. A
+  retained earlier receipt is never shown as the backend version.
+- **Home rows.** Each Home row leads with a human headline, such as the Goal
+  or Inbox title, "Review plan" or "Approval waiting". One state line follows,
+  with relative times like "2h ago"; the exact instant is on hover. Task,
+  attempt and approval identities, ISO source times, ownership and
+  historical-method metadata move into a per-row **Details** disclosure. The
+  Home snapshot carries no Task titles, so Task rows name the next action
+  instead.
+- **Onboarding.** While onboarding is active, a one-line banner at the top of
+  the dock offers **Skip onboarding** and can be dismissed. Skip onboarding
+  stays in the More menu.
+- **More menu.** Holds Start fresh, Skip onboarding (while onboarding is
+  active), Priorities overlay, Capability palette, Extension studio, Show or
+  hide conversation, and **Workspace windows**. Workspace windows is the
+  existing floating pane manager. Its drawer now also holds the
+  Default/Focus/Review layouts, Reset view and Save view. Shortcuts appear in
+  the menu and in tooltips (Ctrl/⌘+K, Shift+1–3, Shift+C, Shift+Q, Shift+S).
+  The four permanent hint chips were removed. The Settings toggle for cockpit
+  hints still controls per-window hints.
+
+Root causes of the defects reported in #1172 on `develop` @ 0850178d:
+
+- **Empty canvas on Goals.** `activeSection` persists in local storage. The
+  Goals section had no canvas content of its own: it only set the priorities
+  overlay's open flag, which is not persisted. After a reload the canvas was
+  blank. Goals now renders the same single `QuestPanel` instance inline,
+  through a portal. Section surfaces no longer depend on Windows-layout pane
+  visibility, so the Focus or Review layouts can no longer blank Work or
+  Connections.
+- **Stale model and version labels.** The shell fetched runtime status only in
+  Work, Connections or the Windows workspace. Other sections kept showing a
+  receipt retained in local storage from an earlier configuration, for example
+  "LOCAL GEMMA STALE" and build `v2026.4.11`. A bounded shell refresh now runs
+  in every section: runtime status, observer state, pending approvals and the
+  policy modes every 30 s, plus one continuity check per mount.
+- **Unknown chips.** "Desktop unknown", "bundle unknown", "budget ?",
+  "state pending" and the "unknown tools/approval" chips came from data the
+  shell had not loaded, shown without a reason. They became status items with
+  reasons and actions.
+- **Home stuck on "Refreshing…" in the dev server.** Under React StrictMode,
+  the Home loader's first request was aborted by the simulated unmount and was
+  never re-armed. It now reloads on remount.
 
 ### Cockpit navigation and canonical inspector
 

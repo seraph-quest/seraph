@@ -18,7 +18,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
-from src.auth.service import AuthenticatedOperator
+from src.auth.service import AuthenticatedOperator, _is_local_root, local_no_login_active
 from src.db.models import (
     Goal, GuardianRoutine, GuardianRoutineVersion, OperatorSession,
     WorkBoardAttempt, WorkBoardEvent, WorkBoardInputArtifact, WorkBoardTask,
@@ -124,7 +124,8 @@ async def assert_current_root(db, operator: AuthenticatedOperator, *, now: datet
         or row.principal_id != operator.principal.principal_id
         or row.token_hash != operator._token_hash or row.revoked_at is not None
         or row.replaced_by_id is not None or row.is_bearer_tombstone
-        or _utc(row.idle_expires_at) <= now or _utc(row.absolute_expires_at) <= now):
+        or _utc(row.idle_expires_at) <= now or _utc(row.absolute_expires_at) <= now
+        or (_is_local_root(row) and not local_no_login_active())):
         raise BoardError("procedure_root_stale", "The original authenticated Root is no longer current")
     return row
 

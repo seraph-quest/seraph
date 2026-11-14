@@ -972,6 +972,20 @@ async def _read_local_root(db) -> OperatorSession | None:
     ).scalar_one_or_none()
 
 
+async def _local_operator_from_record(db, record: OperatorSession) -> AuthenticatedOperator:
+    """Operator context for the local root with its current-root proof.
+
+    A password request carries the hash of the presented bearer, and every
+    owner recheck (``ownership._current_root``, ``assert_current_root`` and
+    the durable owner fences) compares it with the root row's ``token_hash``.
+    The local root has no bearer; its row's ``token_hash`` is the marker,
+    which retirement rewrites.  Carrying the marker as the proof gives the
+    local root the same "this exact root is still current" recheck as a
+    password session (#1175) without inventing a bearer credential.
+    """
+    return await _operator_from_record(db, record, token_hash=LOCAL_ROOT_TOKEN_MARKER)
+
+
 async def authenticate_local_operator() -> AuthenticatedOperator:
     """Resolve the persisted local single-operator root (#1161).
 
@@ -988,7 +1002,7 @@ async def authenticate_local_operator() -> AuthenticatedOperator:
     async with get_session() as db:
         record = await _read_local_root(db)
         if record is not None and _local_root_usable(record, now):
-            return await _operator_from_record(db, record)
+            return await _local_operator_from_record(db, record)
     operator, _created = await _ensure_local_root()
     return operator
 
@@ -1004,7 +1018,7 @@ async def _ensure_local_root() -> tuple[AuthenticatedOperator, bool]:
         async with get_session() as db:
             record = await _read_local_root(db)
             if record is not None and _local_root_usable(record, now):
-                return await _operator_from_record(db, record), False
+                return await _local_operator_from_record(db, record), False
         raise
 
 
@@ -1016,7 +1030,7 @@ async def _create_local_root() -> tuple[AuthenticatedOperator, bool]:
         async with get_session() as db:
             record = await _read_local_root(db)
             if record is not None and _local_root_usable(record, now):
-                return await _operator_from_record(db, record), False
+                return await _local_operator_from_record(db, record), False
             identity_id: str | None = None
             predecessor = record
             if predecessor is None:
@@ -1056,7 +1070,7 @@ async def _create_local_root() -> tuple[AuthenticatedOperator, bool]:
             )
             db.add(record)
             await db.flush()
-            operator = await _operator_from_record(db, record)
+            operator = await _local_operator_from_record(db, record)
     logger.warning(
         "Local no-login operator root created (principal %s); any loopback "
         "process or page passing the Host/Origin checks has operator authority",

@@ -381,7 +381,9 @@ async def test_local_root_is_a_real_operator_principal(local_mode, async_db):
     }
     assert operator.ownership_continuity == "stable"
     assert operator.operator_identity_id
-    assert operator._token_hash is None
+    # No bearer credential: the root's current-root proof is the row marker
+    # itself, which no presented cookie can hash to (#1175).
+    assert operator._token_hash == LOCAL_ROOT_TOKEN_MARKER
     # Durable owner checks and device-principal rechecks see the same root.
     assert (await authenticate_session(operator.session_id)).principal == principal
     assert (await authenticate_principal(principal.principal_id)).session_id == operator.session_id
@@ -511,6 +513,76 @@ async def test_cockpit_session_and_credential_routes(local_mode, app, async_db):
         assert response.json()["detail"]["code"] == "local_no_login_active"
     # The root survives the refused revoke.
     assert (await authenticate_local_operator()).session_id == payload["session_id"]
+
+
+# Owner-scoped cockpit reads recheck "this exact root is still current"
+# through ``ownership._current_root``; before #1175 the local root carried no
+# root proof and these answered 500 ``session_revoked``.
+_OWNER_SCOPED_READS = [
+    "/api/goals",
+    "/api/goals/tree",
+    "/api/goals/dashboard",
+    "/api/work-board/tasks",
+    "/api/capabilities/routines",
+    "/api/memory/records",
+    "/api/auth/ownership/recovery",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _OWNER_SCOPED_READS)
+async def test_owner_scoped_reads_resolve_the_local_root(local_mode, app, async_db, path):
+    async with _client(app) as client:
+        response = await client.get(path, headers={"origin": ORIGIN})
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.asyncio
+async def test_local_goal_is_owned_and_listed_under_the_local_root(local_mode, app, async_db):
+    async with _client(app) as client:
+        created = await client.post("/api/goals", json={"title": "Local goal"}, headers={"origin": ORIGIN})
+        tree = await client.get("/api/goals/tree", headers={"origin": ORIGIN})
+    assert created.status_code in {200, 201}, created.text
+    assert tree.status_code == 200, tree.text
+    assert created.json()["id"] in tree.text
+    operator = await authenticate_local_operator()
+    from src.db.models import Goal
+
+    async with async_db() as db:
+        goal = await db.get(Goal, created.json()["id"])
+        assert goal.owner_principal_id == operator.principal.principal_id
+        assert goal.owner_session_id == operator.session_id
+
+
+@pytest.mark.asyncio
+async def test_local_root_proof_matches_only_the_current_local_root(local_mode, monkeypatch, async_db):
+    from src.auth.ownership import _current_root
+    from src.memory.procedure_recommendations import assert_current_root
+    from src.work_board.repository import BoardError
+
+    operator = await authenticate_local_operator()
+    async with async_db() as db:
+        root = await _current_root(db, operator)
+        assert root.id == operator.session_id
+        assert (await assert_current_root(db, operator)).id == operator.session_id
+
+    # Mode off: the same context is no longer a current root, even before
+    # startup reconciliation retires the row.
+    monkeypatch.setattr(settings, "operator_auth_secret", "correct horse battery staple")
+    async with async_db() as db:
+        with pytest.raises(AuthFailure, match="session_revoked"):
+            await _current_root(db, operator)
+        with pytest.raises(BoardError):
+            await assert_current_root(db, operator)
+
+    # Retired and re-enabled: the old context never matches the new root.
+    await reconcile_local_operator_root()
+    monkeypatch.setattr(settings, "operator_auth_secret", "")
+    replacement = await authenticate_local_operator()
+    async with async_db() as db:
+        with pytest.raises(AuthFailure, match="session_revoked"):
+            await _current_root(db, operator)
+        assert (await _current_root(db, replacement)).id == replacement.session_id
 
 
 @pytest.mark.asyncio

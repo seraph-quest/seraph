@@ -27,7 +27,8 @@ from src.auth.middleware import OperatorAuthMiddleware
 from src.runtime_plugins.dispatch import NativeServiceBlocked
 from src.workflows.job_runtime import DurableJobRepository
 
-pytestmark = [needs_cordis, pytest.mark.asyncio]
+# ADR-035: governed inference lanes are pinned over the intercepted historical OpenRouter route (canary + SSE)
+pytestmark = [needs_cordis, pytest.mark.asyncio, pytest.mark.openrouter_legacy]
 SECRET = "VAULT_SECRET_CANARY_1018_value"
 
 
@@ -628,7 +629,11 @@ async def test_identity_check_covers_case_insensitive_spellings_and_redaction_co
     monkeypatch.setattr(settings, "capability_journal_secret_hash", "")
     async with governed(accounting_db, monkeypatch) as env:
         workspace = Path(settings.workspace_dir)
-        (workspace / ".vault-key").write_text("MASTER_KEY_CANARY_1018")
+        # The Vault stores values below, so the master key must be a real
+        # Fernet key: the per-test cipher reset (#1132) reads this file, and
+        # an arbitrary canary string is not key material (#1180).
+        from cryptography.fernet import Fernet
+        (workspace / ".vault-key").write_bytes(Fernet.generate_key())
         (workspace / "Notes.txt").write_text("ordinary")
         # Simulate a case-insensitive filesystem: this spelling opens the Vault master key.
         real_stat = os.stat

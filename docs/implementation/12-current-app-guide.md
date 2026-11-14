@@ -1056,11 +1056,14 @@ provider whose predicate now fails becomes `failed` with its typed reason, and
 a degraded or failed provider whose predicate passes again recovers. Rechecks
 and shutdown marks are serialized by one lock. Every Cordis child (re)start
 runs the audit write probe (bounded retries on a held SQLite writer lock; still
-contended means `unknown`, never `failed`) and sends fresh provider reports
+contended means `unknown`, never `failed`; an audit provider failed by a write
+probe stays `failed` through status reads and recovers only on a passing write
+probe) and sends fresh provider reports
 **before** the host admits anything: if the reports cannot be produced (for
 example `composition_inventory_invalid` or a closed state gate) or are not
-acknowledged, that boot is `blocked` (`provider_reports_unavailable` or
-`provider_report_not_acknowledged`) and its child is stopped.
+acknowledged, that boot is `blocked` (`provider_reports_unavailable`,
+`provider_report_invalid` or `provider_report_not_acknowledged`) and its child
+is stopped.
 Importing the worker or `src.app` starts no consumer, connection, task, thread
 (other than the rate limiter's library timer), scheduler job or DB file.
 

@@ -383,6 +383,11 @@ async def test_readiness_fails_a_mandatory_provider_typed_and_recovers_it(monkey
     assert snapshot["mandatory_ready"] is False
     assert {item["provider"]: (item["state"], item["reason_code"]) for item in snapshot["providers"]}["audit"] == (
         "failed", "audit_write_unavailable")
+    # A plain status read after the write failure never revives audit.
+    plain = await worker.readiness()
+    assert plain["mandatory_ready"] is False
+    assert {item["provider"]: (item["state"], item["reason_code"]) for item in plain["providers"]}["audit"] == (
+        "failed", "audit_write_unavailable")
     # Every method depending on audit now blocks typed.
     from src.runtime_plugins.ownership import method_dependencies
     assert domain_provider_unavailable("seraph.memory.v1", *method_dependencies("memory.forget")) == \
@@ -580,3 +585,56 @@ async def test_concurrent_rechecks_and_shutdown_serialize_status(contended_db, m
     worker.close_gate()
     await recheck
     assert all(worker.status[name].state == "deactivated" for name in worker.status)
+
+
+@pytest.mark.asyncio
+async def test_a_plain_status_read_never_revives_a_write_failed_audit_provider(contended_db, monkeypatch):
+    """Only a passing write probe recovers audit; read-only rechecks leave it failed and blocking."""
+    from src.runtime_plugins.ownership import method_dependencies
+    worker = _active_worker()
+    original = worker_module._audit_write_probe
+
+    async def broken():
+        raise ProviderActivationError("audit", "audit_write_unavailable")
+    monkeypatch.setattr(worker_module, "_audit_write_probe", broken)
+    await worker.readiness(probe_writes=True)
+    monkeypatch.setattr(worker_module, "_audit_write_probe", original)
+    for _ in range(3):
+        status = await worker.readiness()
+        assert worker.status["audit"].state == "failed" and status["mandatory_ready"] is False
+        for method in ("memory.forget", "audit.append", "capabilities.invoke"):
+            assert domain_provider_unavailable(*method_dependencies(method)) == "native_provider_audit_unavailable"
+    # A passing write probe (child restart) is the recovery path.
+    status = await worker.readiness(probe_writes=True)
+    assert worker.status["audit"].state == "active" and status["audit_write_probe"]["outcome"] == "passed"
+    assert domain_provider_unavailable(*method_dependencies("audit.append")) is None
+
+
+def test_lock_contention_is_classified_precisely():
+    import sqlite3
+    from sqlalchemy.exc import OperationalError
+    def wrapped(original):
+        return OperationalError("INSERT", {}, original)
+    locked = sqlite3.OperationalError("database is locked")
+    assert worker_module._is_lock_contention(wrapped(locked)) is True
+    assert worker_module._is_lock_contention(wrapped(sqlite3.OperationalError("database table is locked"))) is True
+    for other in (sqlite3.OperationalError("disk I/O error"), sqlite3.OperationalError("device busy elsewhere"),
+                  RuntimeError("database is locked"), sqlite3.IntegrityError("database is locked")):
+        assert worker_module._is_lock_contention(wrapped(other)) is False
+    # A real SQLITE_BUSY from a held writer carries its error code.
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as root:
+        path = Path(root) / "busy.db"
+        holder = sqlite3.connect(path, isolation_level=None)
+        holder.execute("CREATE TABLE t (x)")
+        holder.execute("BEGIN IMMEDIATE")
+        other = sqlite3.connect(path, timeout=0.01, isolation_level=None)
+        try:
+            with pytest.raises(sqlite3.OperationalError) as busy:
+                other.execute("BEGIN IMMEDIATE")
+            assert worker_module._is_lock_contention(wrapped(busy.value)) is True
+        finally:
+            other.close()
+            holder.execute("ROLLBACK")
+            holder.close()

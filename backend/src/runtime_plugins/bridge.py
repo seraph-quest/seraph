@@ -62,7 +62,8 @@ class HostBlocked(RuntimeError):
 
 
 # A boot whose provider reports cannot be produced or acknowledged never admits (#1024).
-_PROVIDER_REPORT_BLOCKS = frozenset({"provider_reports_unavailable", "provider_report_not_acknowledged"})
+_PROVIDER_REPORT_BLOCKS = frozenset({"provider_reports_unavailable", "provider_report_invalid",
+                                     "provider_report_not_acknowledged"})
 
 
 @dataclass
@@ -235,6 +236,11 @@ class CordisHost:
                         raise
                     except Exception as exc:  # noqa: BLE001 - typed block, child stopped below
                         raise HostBlocked("provider_reports_unavailable") from exc
+                    from .protocol import validate_provider_report
+                    try:
+                        reports = [validate_provider_report(dict(report), "provider.readiness") for report in reports]
+                    except (ProtocolError, TypeError, ValueError) as exc:
+                        raise HostBlocked("provider_report_invalid") from exc
                     await self._send_provider_reports(reports)
                 self.state, self.reason = "ready", None
                 return True

@@ -163,9 +163,20 @@ class ProbeContended(RuntimeError):
 _AUDIT_PROBE_BACKOFF = (0.05, 0.2, 0.5)
 
 
+_SQLITE_BUSY, _SQLITE_LOCKED = 5, 6
+_SQLITE_LOCK_MESSAGES = ("database is locked", "database table is locked")
+
+
 def _is_lock_contention(exc: BaseException) -> bool:
-    text = str(getattr(exc, "orig", None) or exc).lower()
-    return "database is locked" in text or "database table is locked" in text or "busy" in text
+    """Exactly SQLite writer contention: SQLITE_BUSY/SQLITE_LOCKED or their messages."""
+    import sqlite3
+    original = getattr(exc, "orig", None) or exc
+    if not isinstance(original, sqlite3.OperationalError):
+        return False
+    code = getattr(original, "sqlite_errorcode", None)
+    if code is not None:
+        return code & 0xFF in {_SQLITE_BUSY, _SQLITE_LOCKED}
+    return str(original).strip().lower() in _SQLITE_LOCK_MESSAGES
 
 
 async def _audit_write_probe() -> None:
@@ -261,6 +272,8 @@ class ProviderWorker:
         self._status_lock = asyncio.Lock()
         # Last audit write probe: {"checked_at", "outcome", "reason_code"}.
         self.audit_probe: dict | None = None
+        # Providers failed by a write probe: only a passing write probe recovers them.
+        self._write_failed: set[str] = set()
 
     # ---------------------------------------------------------------- lock
 
@@ -350,12 +363,16 @@ class ProviderWorker:
                     break  # shutdown began mid-recheck: its marks win
                 if self.status[name].state not in {"active", "degraded", "failed"}:
                     continue
+                if name in self._write_failed and not probe_writes:
+                    # A read-only recheck can never revive a provider whose writes failed.
+                    continue
                 try:
                     await checks[name]()
                     if self._closed:
                         break
                     self.status[name].state, self.status[name].reason_code = "active", None
                     if name == "audit" and probe_writes:
+                        self._write_failed.discard(name)
                         self._record_audit_probe("passed", None)
                 except ProbeContended as exc:
                     self._record_audit_probe("unknown", str(exc))
@@ -366,6 +383,7 @@ class ProviderWorker:
                     self.status[name].state = "failed" if name in MANDATORY else "degraded"
                     self.status[name].reason_code = exc.reason_code
                     if name == "audit" and probe_writes:
+                        self._write_failed.add(name)
                         self._record_audit_probe("failed", exc.reason_code)
             return self.snapshot()
 

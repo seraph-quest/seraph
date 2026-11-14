@@ -210,7 +210,7 @@ async def test_reports_reach_the_child_before_it_admits_anything(service_db):
 
 @needs_host
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["inventory", "state_gate", "unexpected", "not_acknowledged"])
+@pytest.mark.parametrize("failure", ["inventory", "state_gate", "unexpected", "not_acknowledged", "invalid"])
 async def test_a_boot_without_provider_reports_never_admits_and_stops_its_child(service_db, failure):
     from pathlib import Path
     from src.db.engine import StateProviderUnavailable
@@ -224,6 +224,9 @@ async def test_a_boot_without_provider_reports_never_admits_and_stops_its_child(
     async def source():
         if failure in errors:
             raise errors[failure]
+        if failure == "invalid":
+            return [{"domain": "seraph.state.v1", "state": "active", "epoch": 1, "composition_digest": "a" * 64,
+                     "reason_code": None, "vault_key": "secret"}]
         return [{"domain": "seraph.state.v1", "state": "active", "epoch": 1, "composition_digest": "a" * 64,
                  "reason_code": None}]
     if failure == "not_acknowledged":
@@ -239,8 +242,8 @@ async def test_a_boot_without_provider_reports_never_admits_and_stops_its_child(
         assert await host.start() is False
         snapshot = host.snapshot()
         assert host.admitting is False and host.state == "blocked"
-        assert host.reason == ("provider_report_not_acknowledged" if failure == "not_acknowledged"
-                               else "provider_reports_unavailable")
+        assert host.reason == {"not_acknowledged": "provider_report_not_acknowledged",
+                               "invalid": "provider_report_invalid"}.get(failure, "provider_reports_unavailable")
         assert snapshot["cleanup"]["process_reaped"] is True
         with pytest.raises(HostBlocked):
             await host.request()

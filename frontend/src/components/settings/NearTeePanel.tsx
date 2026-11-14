@@ -225,20 +225,21 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     finally { if (mounted.current) setBusy(null); }
   }
   /** One structured_output check (#1167): the text slot's JSON callers, or the vision json_schema mode. */
-  async function structuredCheck() {
+  async function structuredCheck(mode?: "json_schema" | "prompt_json") {
     setBusy("structured:" + spec.name); setError(null); setMessage(null);
     try {
       if (!slot) throw new Error(`Save the ${spec.name} slot first.`);
       const response = await apiFetch(API_URL + "/api/settings/model-fabric/canary", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile_id: slot.profile_id, capability: "structured_output", timeout_seconds: slot.capability_check_timeout_seconds,
-          proof_ttl_seconds: 86400, ...(vision ? { structured_mode: "json_schema" } : {}) }),
+          proof_ttl_seconds: 86400, ...(vision && mode ? { structured_mode: mode } : {}) }),
       });
       if (!response.ok) throw new Error("Capability check refused (structured_output): " + await detail(response));
       const body = await response.json();
       if (body?.outcome !== "passed") throw new Error("Capability check failed (structured_output): " + readable(body?.error_code ?? "unknown")
-        + (vision ? ". Run the vision capability check again to return to prompt-JSON requests." : "."));
-      if (mounted.current) setMessage(vision ? "JSON-schema structured output check passed (one billed NEAR request). Refresh to see the request mode."
+        + (mode === "json_schema" ? ". JSON schema requests are withdrawn; the vision slot stays blocked until a prompt-JSON check passes (Run vision capability check)." : "."));
+      if (mounted.current) setMessage(mode === "json_schema" ? "JSON-schema structured output check passed (one billed NEAR request). Refresh to see the request mode."
+        : mode === "prompt_json" ? "Prompt-JSON structured output check passed (one billed NEAR request). Refresh to see the request mode."
         : "Structured output check passed (one billed NEAR request). Refresh to see readiness.");
     } catch (reason) { if (mounted.current) setError(safeError(reason, "Capability check failed.")); }
     finally { if (mounted.current) setBusy(null); }
@@ -247,6 +248,15 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
   const passedReceipt = receipt?.outcome === "passed";
   const structuredBasis = slot?.structured_output_basis ?? (receipt?.structured_outputs ? "catalog" : null);
   const reasoningModel = Boolean(passedReceipt && receipt?.features?.includes("reasoning"));
+  // Reserve (microUSD) a reasoning-sized maximum output needs at the receipt's catalog prices (#1167).
+  const reasoningReserveMicrousd = (() => {
+    const input = Number(receipt?.input_price_usd_per_million), output = Number(receipt?.output_price_usd_per_million);
+    const image = vision ? Number(receipt?.image_price_usd ?? 0) : 0;
+    const maxInput = Number(draft.maxInput);
+    if (!receipt?.input_price_usd_per_million || !receipt?.output_price_usd_per_million
+      || ![input, output, image, maxInput].every(Number.isFinite)) return null;
+    return Math.ceil(maxInput * input + reasoningMaxOutput * output + image * 1_000_000);
+  })();
   const label = (text: string) => spec.prefix + " " + text;
   return <div className="mt-3 border-t border-retro-text/10 pt-2" aria-label={"NEAR TEE " + spec.title}>
     <div className="flex justify-between gap-2 text-[10px]"><span>NEAR TEE · {spec.title}</span><span>{stale ? "stale retained" : readable(slot?.status ?? "disabled")}</span></div>
@@ -260,7 +270,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     {!vision && passedReceipt && slot?.structured_output_capability && <p className="mt-1 text-[9px]">{slot.structured_output_capability === "ready"
       ? "Structured output (JSON callers): ready, established by a current capability check."
       : `Structured output (JSON callers): unavailable until a structured output check passes (${readable(slot.structured_output_capability)}).`}</p>}
-    {reasoningModel && Number(draft.maxOutput) < reasoningMaxOutput && <p className="mt-1 text-[9px]">Reasoning model: reasoning tokens count against the maximum output. Use at least {reasoningMaxOutput} so answers are not cut off (near tee output truncated).</p>}
+    {reasoningModel && Number(draft.maxOutput) < reasoningMaxOutput && <p className="mt-1 text-[9px]">Reasoning model: reasoning tokens count against the maximum output. Use at least {reasoningMaxOutput} so answers are not cut off (near tee output truncated).{reasoningReserveMicrousd !== null ? ` At NEAR's catalog prices that needs a per-request reserve of at least $${usd(reasoningReserveMicrousd)} with the current maximum input (reserve now $${draft.reserveUsd}).` : ""}</p>}
     <fieldset disabled={busy !== null} className="mt-2 grid gap-2 text-[10px] sm:grid-cols-2">
       <label className="flex gap-2"><input type="checkbox" aria-label={`Enable NEAR TEE ${spec.name} slot`} checked={draft.enabled} onChange={e => update("enabled", e.target.checked)} />Enable {spec.name} slot</label>
       <label className="sm:col-span-2">{vision ? "Vision model" : "Text model"}<select className={inputClass + " mt-1 w-full"} aria-label={`NEAR TEE ${spec.name} model`} value={draft.model} onChange={e => update("model", e.target.value)}>
@@ -281,7 +291,10 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
       <button type="button" disabled={busy !== null} onClick={() => void save()}>{busy === "save:" + spec.name ? "Saving…" : saveLabel}</button>
       {vision && slot?.enabled && slot.consent_current && <button type="button" disabled={busy !== null} onClick={() => void save(true)}>Withdraw screenshot consent</button>}
       <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void capabilityCheck()}>{busy === "capability:" + spec.name ? "Running capability check…" : (vision ? "Run vision capability check" : "Run capability check")}</button>
-      {(!vision || (passedReceipt && !receipt?.structured_outputs)) && <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void structuredCheck()}>{busy === "structured:" + spec.name ? "Running structured output check…" : (vision ? "Run JSON-schema structured output check" : "Run structured output check")}</button>}
+      {!vision && <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void structuredCheck()}>{busy === "structured:" + spec.name ? "Running structured output check…" : "Run structured output check"}</button>}
+      {vision && passedReceipt && !receipt?.structured_outputs && (structuredBasis === "capability_proof"
+        ? <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void structuredCheck("prompt_json")}>{busy === "structured:" + spec.name ? "Running structured output check…" : "Run prompt-JSON check"}</button>
+        : <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void structuredCheck("json_schema")}>{busy === "structured:" + spec.name ? "Running structured output check…" : "Run JSON-schema structured output check"}</button>)}
     </div>
   </div>;
 }

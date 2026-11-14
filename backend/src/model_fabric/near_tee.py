@@ -783,14 +783,16 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
             capture=capture_near_billing_evidence)
     if evidence is None:
         raise NearTeeError("near_tee_cost_liability")
-    if failure is not None:
-        return CapabilityProbeObservation(False, error_code=failure)
     vision_mode = None
     if capability == "structured_output" and profile.id == "near_tee.vision":
         from .near_tee_vision import structured_check_mode
         vision_mode = structured_check_mode(body)
         if vision_mode is None:
             return CapabilityProbeObservation(False, error_code="near_tee_vision_check_mode_invalid")
+    if failure is not None:
+        # A failed vision structured_output check records the mode it
+        # exercised, so a failed json_schema check cancels json_schema (#1167).
+        return CapabilityProbeObservation(False, proven_value=vision_mode, error_code=failure)
     if capability == "structured_output":
         try:
             candidate_text = text
@@ -799,9 +801,9 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
                 from src.observer.screenshot_analysis_contract import _strip_json_fence
                 candidate_text = _strip_json_fence(text)
             if not isinstance(json.loads(candidate_text), dict):
-                return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
+                return CapabilityProbeObservation(False, proven_value=vision_mode, error_code="canary_shape_invalid")
         except (TypeError, ValueError):
-            return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
+            return CapabilityProbeObservation(False, proven_value=vision_mode, error_code="canary_shape_invalid")
     # A vision structured_output proof is bound to the request mode it exercised.
     value = vision_mode or {"latency_ms": elapsed_ms, "health": "healthy"}.get(capability, "verified")
     return CapabilityProbeObservation(True, proven_value=value)

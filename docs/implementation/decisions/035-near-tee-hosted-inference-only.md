@@ -127,7 +127,8 @@ probe the same day showed chat, strict json_schema output, tool calling and a
 `/v1/attestation/report` with gateway and model attestations. Therefore:
 
 - Readiness: `isReady: true` passes; an explicit `isReady: false` fails; an
-  **absent** `isReady` passes only when the record is otherwise eligible
+  **absent** `isReady` (an explicit JSON `null` counts as absent) passes only
+  when the record is otherwise eligible
   (`providerType=vllm`, `attestationSupported` true, `verifiable` true). The
   receipt records `is_ready` as read and `readiness_basis`
   (`catalog_ready` or `absent_flag_attested`), and Settings says readiness was
@@ -137,9 +138,10 @@ probe the same day showed chat, strict json_schema output, tool calling and a
   not a capability. Callers needing structured output keep needing a fresh
   `structured_output` proof at dispatch. The vision slot sends json_schema when
   the catalog lists the feature or, when it omits it, a current passing
-  json_schema `structured_output` proof on the exact profile exists; otherwise
-  it uses strictly validated prompt-JSON. No proof and no feature means the
-  capability is unavailable.
+  json_schema `structured_output` proof on the exact profile exists and no
+  newer failed json_schema check contradicts it; otherwise it uses strictly
+  validated prompt-JSON. No proof and no feature means the capability is
+  unavailable.
 - Reasoning tokens count against `max_output_tokens`: capability checks of a
   model whose receipt lists `reasoning` send up to 1024 output tokens (bounded
   by the slot), Settings recommends a maximum output of at least 4096 for such

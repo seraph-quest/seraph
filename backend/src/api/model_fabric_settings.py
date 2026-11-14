@@ -1534,7 +1534,7 @@ async def _near_tee_setup_status(configured, accounting):
         REASONING_RECOMMENDED_MAX_OUTPUT_TOKENS, TEE_LABEL_TEMPLATE, catalog_receipt_block_reason,
         read_catalog_receipts, receipt_structured_outputs,
     )
-    from src.model_fabric.near_tee_vision import structured_mode, vision_structured_basis
+    from src.model_fabric.near_tee_vision import current_vision_structured_basis, structured_mode
     setup = configured.near_tee
     allowlists = {slot: sorted(models) for slot, models in NEAR_TEE_SLOT_ALLOWLISTS.items()}
     disclosure = ("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in "
@@ -1597,8 +1597,8 @@ async def _near_tee_setup_status(configured, accounting):
                         proof_reason = f"{'proof_expired' if expired else 'proof_missing'}:{capability}"
                         break
                     if name == "vision" and capability == "structured_output":
-                        basis = vision_structured_basis(
-                            catalog_lists=receipt_structured_outputs("vision", receipts=receipts), proof=proof)
+                        basis = await current_vision_structured_basis(profile,
+                            catalog_lists=receipt_structured_outputs("vision", receipts=receipts))
                         if proof.proven_value != structured_mode(basis is not None):
                             proof_reason = "proof_mode_mismatch:structured_output"
                             break
@@ -1627,8 +1627,11 @@ async def _near_tee_setup_status(configured, accounting):
             except Exception:
                 structured_proof, structured_capability = None, "proof_metadata_unavailable"
             if name == "vision":
-                structured_basis = vision_structured_basis(
-                    catalog_lists=receipt_structured_outputs("vision", receipts=receipts), proof=structured_proof)
+                try:
+                    structured_basis = await current_vision_structured_basis(profile,
+                        catalog_lists=receipt_structured_outputs("vision", receipts=receipts))
+                except Exception:
+                    structured_basis = None
             elif structured_proof is not None and proof_is_fresh(structured_proof):
                 structured_basis, structured_capability = "capability_proof", "ready"
             elif structured_capability is None:
@@ -1755,15 +1758,15 @@ async def run_model_fabric_canary(body: CapabilityCanaryRequest, request: Reques
             # on request so a live proof can establish it when NEAR's catalog
             # omits structured_outputs.
             from src.model_fabric.near_tee_catalog import receipt_structured_outputs
-            from src.model_fabric.near_tee_vision import latest_structured_output_proof, vision_structured_basis
+            from src.model_fabric.near_tee_vision import current_vision_structured_basis
             catalog_lists = receipt_structured_outputs("vision")
             if body.structured_mode == "prompt_json" and catalog_lists:
                 raise HTTPException(status_code=409, detail="near_tee_vision_structured_mode_conflict")
             if body.structured_mode is not None:
                 vision_structured = body.structured_mode == "json_schema"
             else:
-                vision_structured = vision_structured_basis(catalog_lists=catalog_lists,
-                    proof=await latest_structured_output_proof(profile)) is not None
+                vision_structured = await current_vision_structured_basis(profile,
+                    catalog_lists=catalog_lists) is not None
         try:
             near_tee_key = await capture_near_tee_credential(expected_revision=configured.egress_revision,
                 expected_fingerprint=configured.near_tee.credential_fingerprint)

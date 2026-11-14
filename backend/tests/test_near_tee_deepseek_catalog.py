@@ -52,23 +52,30 @@ from tests.test_openrouter_setup_api import keyless_openrouter, model_fabric_wor
 DEEPSEEK = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
 
 
+# NEAR's live ``GET /v1/model/deepseek-ai%2FDeepSeek-V4.1-Flash-1017`` record,
+# verbatim as saved by the #1167 critic on 2026-11-14: no ``isReady``,
+# ``supportedFeatures`` tools+reasoning (no ``structured_outputs``), no
+# ``maxOutputLength`` and no sampling list.
+DEEPSEEK_LIVE_RECORD = (
+    '{"modelId":"deepseek-ai/DeepSeek-V4.1-Flash-1017","inputCostPerToken":{"amount":300,"scale":9,"curre'
+    'ncy":"USD"},"outputCostPerToken":{"amount":1200,"scale":9,"currency":"USD"},"costPerImage":{"amount"'
+    ':0,"scale":9,"currency":"USD"},"cacheReadCostPerToken":{"amount":6,"scale":9,"currency":"USD"},"meta'
+    'data":{"verifiable":true,"contextLength":1048576,"modelDisplayName":"DeepSeek V4.1 Flash 1017","mode'
+    'lDescription":"October 17, 2026 snapshot of DeepSeek V4.1 Flash, a reasoning and coding model. Serve'
+    'd privately from NEAR AI\'s attested TEE infrastructure.","modelIcon":"https://avatars.githubusercont'
+    'ent.com/u/148330874?v=4","ownedBy":"nearai","aliases":["deepseek-ai/DeepSeek-V4-Flash"],"providerTyp'
+    'e":"vllm","providerConfig":{},"attestationSupported":true,"architecture":{"inputModalities":["text",'
+    '"image"],"outputModalities":["text"]},"supportedFeatures":["tools","reasoning"]}}'
+)
+
+
 def deepseek_catalog_record(**metadata_changes):
-    """The fields of NEAR's ``/v1/model/deepseek-ai%2FDeepSeek-V4.1-Flash-1017``
-    record as reported in #1167 (read 2026-11-14): vllm, attested, verifiable,
-    **no** ``isReady``, ``supportedFeatures`` tools+reasoning (no
-    ``structured_outputs``), an empty sampling list, no ``maxOutputLength``,
-    text+image input, $0.30/M input and $1.20/M output, context 1,048,576.
-    ``_ABSENT`` removes a field; other keyword arguments replace it."""
-    metadata = {"verifiable": True, "contextLength": 1_048_576, "modelDisplayName": "DeepSeek V4.1 Flash",
-        "modelDescription": "Served privately from NEAR AI's attested TEE infrastructure",
-        "ownedBy": "deepseek-ai", "aliases": ["deepseek-ai/DeepSeek-V4-Flash"], "providerType": "vllm",
-        "providerConfig": {}, "attestationSupported": True,
-        "architecture": {"inputModalities": ["text", "image"], "outputModalities": ["text"]},
-        "supportedFeatures": ["tools", "reasoning"], "supportedSamplingParameters": []}
-    metadata.update(metadata_changes)
-    metadata = {key: value for key, value in metadata.items() if value is not _ABSENT}
-    return {"modelId": DEEPSEEK, "inputCostPerToken": {"amount": 300, "scale": 9, "currency": "USD"},
-        "outputCostPerToken": {"amount": 1200, "scale": 9, "currency": "USD"}, "metadata": metadata}
+    """The live record; ``_ABSENT`` removes a metadata field, other keyword
+    arguments replace it."""
+    record = json.loads(DEEPSEEK_LIVE_RECORD)
+    metadata = {**record["metadata"], **metadata_changes}
+    record["metadata"] = {key: value for key, value in metadata.items() if value is not _ABSENT}
+    return record
 
 
 def _facts(**changes):
@@ -88,11 +95,17 @@ def _slot(**changes):
 def test_deepseek_record_passes_with_readiness_inferred_from_attestation():
     facts = _facts()
     assert facts.is_ready is None and facts.max_output_tokens is None
+    assert facts.image_price == (0, 9) and not facts.image_price_invalid
+    # An explicit JSON null isReady is treated exactly as an absent flag.
+    explicit_null = _facts(isReady=None)
+    assert explicit_null.is_ready is None and readiness_basis(explicit_null) == READINESS_ABSENT_FLAG_ATTESTED
+    assert evaluate_catalog(explicit_null, slot_name="text", slot=_slot()) == (None, 7373)
+    assert readiness_basis(_facts(isReady=None, verifiable=None)) is None
     assert facts.features == ("reasoning", "tools") and "structured_outputs" not in facts.features
     assert readiness_basis(facts) == READINESS_ABSENT_FLAG_ATTESTED
     # 8192 x 0.30/M + 4096 x 1.20/M = 2457.6 + 4915.2 microUSD -> 7373 (ceil)
     assert evaluate_catalog(facts, slot_name="text", slot=_slot()) == (None, 7373)
-    # 16384 x 0.30/M + 4096 x 1.20/M = 4915.2 + 4915.2 -> 9831 (no listed image price)
+    # 16384 x 0.30/M + 4096 x 1.20/M + 1 image x $0 = 4915.2 + 4915.2 -> 9831
     assert evaluate_catalog(facts, slot_name="vision", slot=_slot(max_input_tokens=16384)) == (None, 9831)
     # Every other gate is unchanged: unknown output limit, reserve, context, modality.
     assert evaluate_catalog(facts, slot_name="text", slot=_slot(max_output_tokens=8193,
@@ -291,7 +304,8 @@ async def test_deepseek_vision_json_schema_is_established_only_by_a_current_proo
     assert checked.status_code == 200, checked.text
     receipt = checked.json()["catalog_check"]["vision"]
     assert receipt["outcome"] == "passed" and receipt["readiness_basis"] == READINESS_ABSENT_FLAG_ATTESTED
-    assert receipt["structured_outputs"] is False
+    assert receipt["structured_outputs"] is False and receipt["image_price_usd"] == "0.000000000"
+    assert receipt["required_cost_microusd"] == 9831
 
     # structured_mode belongs to the vision structured_output check only.
     assert (await _check(client, "near_tee.vision", "vision", structured_mode="json_schema")).status_code == 422
@@ -344,6 +358,80 @@ async def test_deepseek_vision_json_schema_is_established_only_by_a_current_proo
     assert vision_structured_basis(catalog_lists=False, proof=None) is None
     assert vision_structured_basis(catalog_lists=True, proof=None) == "catalog"
     assert vision_structured_basis(catalog_lists=False, proof=replace(proof, outcome="failed")) is None
+    # A newer failed json_schema (or unknown-mode) check withdraws the basis;
+    # an older one, or a newer failed prompt-JSON check, does not.
+    newer = replace(proof, outcome="failed", checked_at=proof.checked_at + 1)
+    older = replace(proof, outcome="failed", checked_at=proof.checked_at - 1)
+    assert vision_structured_basis(catalog_lists=False, proof=proof, failed_proof=newer) is None
+    assert vision_structured_basis(catalog_lists=False, proof=proof,
+        failed_proof=replace(newer, proven_value=None)) is None
+    assert vision_structured_basis(catalog_lists=False, proof=proof, failed_proof=older) == "capability_proof"
+    assert vision_structured_basis(catalog_lists=False, proof=proof,
+        failed_proof=replace(newer, proven_value="vision_prompt_json")) == "capability_proof"
+    assert vision_structured_basis(catalog_lists=True, proof=proof, failed_proof=newer) == "catalog"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_newer_failed_json_schema_check_returns_vision_to_prompt_json(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch, tmp_path):
+    from src.auth.service import authenticate_session
+    from src.model_fabric.configuration import near_tee_profile_for_slot, read_model_fabric_configuration
+    from src.model_fabric.near_tee_vision import latest_structured_output_proof
+
+    near = VisionFixture().install(monkeypatch)
+    near.catalogs[DEEPSEEK] = deepseek_catalog_record()
+    owner = await _login(client, monkeypatch)
+    await _lane(client)
+    saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 3,
+        "near_tee": {"api_key": PROVIDER_KEY, "slots": {"vision": vision_payload(model_id=DEEPSEEK,
+            max_output_tokens=4096)}}})
+    assert saved.status_code == 200, saved.text
+    assert (await client.post("/api/settings/model-fabric/near-tee/catalog-check",
+        json={"expected_policy_revision": 5})).status_code == 200
+    for capability in ("vision", "health", "latency_ms"):
+        assert (await _check(client, "near_tee.vision", capability)).json()["outcome"] == "passed"
+    near.body_id = "chatcmpl-schema-ok"
+    assert (await _check(client, "near_tee.vision", "structured_output",
+        structured_mode="json_schema")).json()["outcome"] == "passed"
+    status = (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]
+    assert status["status"] == "ready" and status["structured_output_basis"] == "capability_proof"
+    profile = near_tee_profile_for_slot("vision", read_model_fabric_configuration().near_tee.slots["vision"])
+    passing = await latest_structured_output_proof(profile)
+
+    # A later json_schema check fails (invalid JSON): the failed proof records
+    # its mode and withdraws json_schema even though the older pass is current.
+    near.answer = {"role": "assistant", "content": "not json"}
+    near.body_id = "chatcmpl-schema-failed"
+    failed = await _check(client, "near_tee.vision", "structured_output", structured_mode="json_schema")
+    assert failed.status_code == 200 and failed.json()["outcome"] == "failed"
+    failed_proof = await latest_structured_output_proof(profile, failed=True)
+    assert failed_proof.proven_value == "vision_json_schema" and failed_proof.checked_at > passing.checked_at
+    assert (await latest_structured_output_proof(profile)).proof_hash == passing.proof_hash
+    status = (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]
+    assert status["structured_output_basis"] is None
+    assert status["reason_code"] == "proof_mode_mismatch:structured_output"
+    operator = await authenticate_session(owner["session_id"], touch=False)
+    assert (await client.put("/api/settings/screen-analysis", json={"provider": "near_tee"})).status_code == 200
+    before = len(near.requests)
+    blocked = await _upload(tmp_path / "shots", monkeypatch, capture_id="cap-deepseek-0101", color=(90, 90, 200))
+    await _analyze(operator)
+    assert (await _details(blocked))[2]["reason"] == \
+        "remote_inference_blocked:near_tee_vision_structured_proof_mode_mismatch"
+    assert len(near.requests) == before  # no contact
+
+    # The default check now runs prompt-JSON and restores dispatch in that mode.
+    from tests.test_near_tee_vision_slot import analysis_json
+    near.answer = {"role": "assistant", "content": analysis_json("Back to prompt JSON.")}
+    near.body_id = "chatcmpl-prompt-json-again"
+    assert (await _check(client, "near_tee.vision", "structured_output")).json()["outcome"] == "passed"
+    assert "response_format" not in _chat_bodies(near)[-1]
+    status = (await client.get("/api/settings/model-fabric")).json()["near_tee"]["slots"]["vision"]
+    assert status["status"] == "ready" and status["structured_output_basis"] is None
+    near.body_id = "chatcmpl-prompt-json-analysis"
+    await _upload(tmp_path / "shots", monkeypatch, capture_id="cap-deepseek-0102", color=(200, 90, 90))
+    assert (await _analyze(operator)).analyzed == 1
+    assert "response_format" not in _chat_bodies(near)[-1]
 
 
 @pytest.mark.asyncio

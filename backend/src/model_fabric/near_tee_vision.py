@@ -64,32 +64,49 @@ def structured_mode(structured: bool) -> str:
     return STRUCTURED_MODE_JSON_SCHEMA if structured else STRUCTURED_MODE_PROMPT_JSON
 
 
-def vision_structured_basis(*, catalog_lists: bool, proof, now: float | None = None) -> str | None:
+def vision_structured_basis(*, catalog_lists: bool, proof, failed_proof=None,
+                            now: float | None = None) -> str | None:
     """Why the vision slot may send json_schema, or None for prompt-JSON (#1167).
 
     The catalog's ``structured_outputs`` feature, or, when NEAR's record omits
     it, a current passing ``structured_output`` capability proof that
-    exercised the json_schema mode on this exact profile. Without either the
+    exercised the json_schema mode on this exact profile and that no newer
+    failed json_schema (or unknown-mode) check contradicts. Without either the
     json_schema capability stays unavailable (fail closed to prompt-JSON,
     which is strictly validated). The proof is still required at dispatch.
     """
     from .proofs import proof_is_fresh
     if catalog_lists:
         return STRUCTURED_BASIS_CATALOG
-    if proof is not None and proof.proven_value == STRUCTURED_MODE_JSON_SCHEMA and proof_is_fresh(proof, now=now):
-        return STRUCTURED_BASIS_CAPABILITY_PROOF
-    return None
+    if proof is None or proof.proven_value != STRUCTURED_MODE_JSON_SCHEMA or not proof_is_fresh(proof, now=now):
+        return None
+    if (failed_proof is not None and failed_proof.checked_at > proof.checked_at
+            and failed_proof.proven_value in (None, STRUCTURED_MODE_JSON_SCHEMA)):
+        # A newer failed json_schema check withdraws the proof-based basis.
+        return None
+    return STRUCTURED_BASIS_CAPABILITY_PROOF
 
 
-async def latest_structured_output_proof(profile):
-    """The newest ``structured_output`` proof bound to this exact profile, or None."""
+async def latest_structured_output_proof(profile, *, failed: bool = False):
+    """The newest passing (or, with ``failed``, failed) ``structured_output``
+    proof bound to this exact profile, or None."""
     from .repository import model_fabric_repository
     from .selector import candidate_from_profile
     candidate = candidate_from_profile(profile)
-    return await model_fabric_repository.latest_capability_proof(
+    lookup = (model_fabric_repository.latest_failed_capability_proof if failed
+        else model_fabric_repository.latest_capability_proof)
+    return await lookup(
         profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
         profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
         endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability="structured_output")
+
+
+async def current_vision_structured_basis(profile, *, catalog_lists: bool, now: float | None = None) -> str | None:
+    """``vision_structured_basis`` with this profile's stored proofs."""
+    if catalog_lists:
+        return STRUCTURED_BASIS_CATALOG
+    return vision_structured_basis(catalog_lists=False, proof=await latest_structured_output_proof(profile),
+        failed_proof=await latest_structured_output_proof(profile, failed=True), now=now)
 
 
 def structured_check_body(*, model: str, structured: bool, max_tokens: int) -> dict[str, object]:
@@ -178,8 +195,8 @@ async def prepare_near_tee_vision_call(
     if reason := catalog_receipt_block_reason("vision", profile, now=now, receipts=receipts,
             revision=configured.egress_revision):
         raise NearTeeDenied(reason)
-    structured = vision_structured_basis(catalog_lists=receipt_structured_outputs("vision", receipts=receipts),
-        proof=await latest_structured_output_proof(profile), now=now) is not None
+    structured = await current_vision_structured_basis(profile,
+        catalog_lists=receipt_structured_outputs("vision", receipts=receipts), now=now) is not None
     estimate = estimate_vision_input_tokens(prompt, width=width, height=height)
     if estimate > slot.max_input_tokens:
         # Rejected before contact (ADR-035): the image counts conservatively.

@@ -290,6 +290,10 @@ export interface NearTeeCatalogReceipt {
   readiness_basis?: string | null;
   /** NEAR's catalog `supportedFeatures` (e.g. "reasoning"). */
   features?: string[];
+  /** Catalog prices as decimal strings: USD per million tokens, USD per image. */
+  input_price_usd_per_million?: string | null;
+  output_price_usd_per_million?: string | null;
+  image_price_usd?: string | null;
 }
 
 export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_provider_egress_acknowledged" | "screenshot_plaintext_egress_acknowledged"> {
@@ -573,6 +577,10 @@ export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | nu
   };
 }
 
+function decimalText(value: unknown): string | null {
+  return typeof value === "string" && /^\d{1,20}(?:\.\d{1,40})?$/.test(value) ? value : null;
+}
+
 function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"): NearTeeSlotStatus | null {
   const row = recordOf(value);
   const integer = (field: string, min: number, max: number) => typeof row?.[field] === "number"
@@ -600,7 +608,10 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
       is_ready: typeof receipt.is_ready === "boolean" ? receipt.is_ready : null,
       readiness_basis: receipt.readiness_basis === "catalog_ready" || receipt.readiness_basis === "absent_flag_attested"
         ? receipt.readiness_basis : null,
-      features: stringArray(receipt.features) } : null,
+      features: stringArray(receipt.features),
+      input_price_usd_per_million: decimalText(receipt.input_price_usd_per_million),
+      output_price_usd_per_million: decimalText(receipt.output_price_usd_per_million),
+      image_price_usd: decimalText(receipt.image_price_usd) } : null,
     catalog_receipt_current: row.catalog_receipt_current === true,
     tee_hosted_per_catalog: row.tee_hosted_per_catalog === true,
     tee_hosting_label: text(row.tee_hosting_label),

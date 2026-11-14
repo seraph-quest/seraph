@@ -1456,8 +1456,11 @@ Status: **Partial** until live operator use; disabled by default. In
 4. Optional when the catalog omits structured outputs (DeepSeek): press **Run
    JSON-schema structured output check**. If it passes, screenshots use JSON
    schema requests while that proof is current ("a current capability check
-   established JSON schema requests"); if it fails, run the vision capability
-   check again to return to prompt-JSON.
+   established JSON schema requests"). If a later JSON-schema check fails,
+   JSON schema requests stop and the slot is blocked until a prompt-JSON check
+   passes: press **Run vision capability check** (it now runs prompt-JSON) or
+   **Run prompt-JSON check**. The reasoning hint shows the reserve a
+   4096-token maximum output needs at the receipt's catalog prices.
 
 Then choose **NEAR TEE vision slot** as the screen-analysis provider (choosing
 "off" keeps background analysis off while the slot stays configured). The vision

@@ -731,7 +731,8 @@ settings save requires a new check. It parses NEAR's catalog record shape
 (`metadata.architecture` modalities, `maxOutputLength`; an absent output limit
 allows at most 8192 output tokens). Readiness (#1167, ADR-035 amendment
 2026-11-14): `isReady: true` passes, an explicit `isReady: false` fails
-`near_tee_catalog_not_ready`, and an **absent** `isReady` passes only on an
+`near_tee_catalog_not_ready`, and an **absent** (or JSON `null`) `isReady`
+passes only on an
 otherwise eligible record (`vllm`, attestation supported, verifiable); the
 receipt records `is_ready: null` and `readiness_basis: absent_flag_attested`
 and Settings says readiness was inferred (this is how
@@ -829,7 +830,9 @@ mode (strict json_schema or prompt-JSON) and its proof records that mode;
 dispatch with a current proof of another mode is blocked
 (`near_tee_vision_structured_proof_mode_mismatch`). The effective mode is
 json_schema when the receipt lists `structured_outputs` or, when NEAR's catalog
-omits it (#1167), when a current passing json_schema proof exists: the check
+omits it (#1167), when a current passing json_schema proof exists that no
+newer failed json_schema check contradicts (a failed check records its mode;
+the slot then needs a prompt-JSON check): the check
 endpoint accepts `structured_mode: "json_schema"` for that (Settings: **Run
 JSON-schema structured output check**; `prompt_json` is refused with
 `near_tee_vision_structured_mode_conflict` while the catalog lists the

@@ -1,0 +1,12 @@
+{
+ "authenticated": true,
+ "principal_id": "redacted-principal_id",
+ "session_id": "redacted-session_id",
+ "idle_expires_at": "2999-01-01T00:00:00+00:00",
+ "absolute_expires_at": "2999-01-01T00:00:00+00:00",
+ "ownership_continuity": "stable",
+ "ownership_recovery_action": null,
+ "operator_identity_id": "redacted-operator_identity_id",
+ "auth_mode": "local_no_login",
+ "local_no_login": true
+}

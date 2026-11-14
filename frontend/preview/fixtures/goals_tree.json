@@ -1,0 +1,54 @@
+[
+ {
+  "id": "preview-goal-1",
+  "parent_id": null,
+  "path": "preview-goal-1",
+  "level": "monthly",
+  "title": "Ship the cockpit redesign (preview data)",
+  "description": "Synthetic preview goal (#1172 offline preview).",
+  "status": "active",
+  "domain": "productivity",
+  "start_date": null,
+  "due_date": null,
+  "sort_order": 0,
+  "children": [],
+  "progress": 60,
+  "revision": 1,
+  "owner_session_id": "redacted-session_id"
+ },
+ {
+  "id": "preview-goal-2",
+  "parent_id": null,
+  "path": "preview-goal-2",
+  "level": "quarterly",
+  "title": "Keep a weekly review habit (preview data)",
+  "description": "Synthetic preview goal (#1172 offline preview).",
+  "status": "active",
+  "domain": "growth",
+  "start_date": null,
+  "due_date": null,
+  "sort_order": 0,
+  "children": [
+   {
+    "id": "preview-goal-2b",
+    "parent_id": "preview-goal-2",
+    "path": "preview-goal-2b",
+    "level": "weekly",
+    "title": "Draft weekly review checklist",
+    "description": "Synthetic preview goal (#1172 offline preview).",
+    "status": "active",
+    "domain": "productivity",
+    "start_date": null,
+    "due_date": null,
+    "sort_order": 0,
+    "children": [],
+    "progress": 40,
+    "revision": 1,
+    "owner_session_id": "redacted-session_id"
+   }
+  ],
+  "progress": 25,
+  "revision": 1,
+  "owner_session_id": "redacted-session_id"
+ }
+]

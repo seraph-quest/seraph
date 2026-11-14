@@ -1,0 +1,11 @@
+[
+ {
+  "id": "preview-session-1",
+  "title": "New Conversation",
+  "continuity_task_id": null,
+  "created_at": "2026-11-14 15:30:44.268858",
+  "updated_at": "2026-11-14 15:30:47.425849",
+  "last_message": "[redacted text]",
+  "last_message_role": "assistant"
+ }
+]

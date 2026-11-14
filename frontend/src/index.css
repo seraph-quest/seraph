@@ -867,7 +867,8 @@ body {
 }
 
 .cockpit-action--primary {
-  color: #041119;
+  /* #041119 in dark, white in light (darker AA accent gradient, #1172). */
+  color: var(--cockpit-send-text);
   background: linear-gradient(135deg, var(--cockpit-accent), var(--cockpit-accent-strong));
   font-weight: 700;
 }

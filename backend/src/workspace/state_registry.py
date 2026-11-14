@@ -1592,6 +1592,12 @@ _RUNTIME_PATH_SPECS = (
     # run of each job records its status again after a restore.
     ("background-inference-status.json", WorkspaceStateClass.CACHE),
     ("background-inference-status.tmp", WorkspaceStateClass.CACHE),
+    # NEAR TEE catalog-check receipts (ADR-035). Re-acquirable by running the
+    # catalog check again, so cache state: never archived, read-only to agents
+    # (a forged receipt would open a route), absent until the first check.
+    # A restored workspace holds no receipt and the slot fails closed until
+    # the operator re-checks the catalog.
+    ("near-tee-catalog-receipts.json", WorkspaceStateClass.CACHE),
     ("local-runtime-profile-receipts", WorkspaceStateClass.DERIVED),
     ("lance", WorkspaceStateClass.DERIVED),
     # Audio documentation source objects (ADR-033). Re-acquirable evidence, so
@@ -1624,6 +1630,8 @@ _OPTIONAL_RUNTIME_TRANSIENT_PATHS = frozenset({
     # Written on the first scheduler tick; the .tmp exists only mid-write.
     "background-inference-status.json",
     "background-inference-status.tmp",
+    # Written by the first NEAR TEE catalog check.
+    "near-tee-catalog-receipts.json",
 })
 # Canonical runtime state agent file tools may neither read nor write: MCP
 # server and stdio proxy settings (inline credentials are possible, and an

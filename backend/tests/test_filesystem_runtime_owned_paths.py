@@ -42,6 +42,7 @@ _READ_ONLY_PATHS = (
     "daemon-status.json",
     "background-inference-status.json",
     "background-inference-status.tmp",
+    "near-tee-catalog-receipts.json",
     "local-runtime-profile-receipts/receipt.json",
     ".seraph-extension-snapshots/pack.json",
     "cache/entry.txt",

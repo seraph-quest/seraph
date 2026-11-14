@@ -683,6 +683,34 @@ def test_managed_restore_succeeds_with_the_background_inference_status_file(tmp_
     assert restore.returncode == 0, restore.stdout + restore.stderr
     assert json.loads(restore.stdout)["stage_receipt"]["restore_reconciliation"]["status"] == "ready"
 
+def test_managed_backup_and_restore_accept_the_near_tee_catalog_receipts(tmp_path):
+    """#1180: the NEAR TEE catalog receipt store is declared cache state.
+
+    Undeclared, any workspace that had run a catalog check failed every backup
+    with unknown_workspace_path. As cache it is never archived, so a restored
+    workspace holds no receipt and the slot fails closed until re-checked.
+    """
+    root = _workspace(tmp_path)
+    (root / "near-tee-catalog-receipts.json").write_text('{"schema_version": "x", "receipts": {}}')
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "near-catalog.zip"],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert backup.returncode == 0, backup.stdout + backup.stderr
+    archive = json.loads(backup.stdout)["archive_path"]
+    import zipfile
+    with zipfile.ZipFile(archive) as bundle:
+        assert not any(name.endswith("near-tee-catalog-receipts.json") for name in bundle.namelist())
+    restore = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert restore.returncode == 0, restore.stdout + restore.stderr
+
+
 def test_manage_prod_commands_use_host_bind_and_never_start_compose(tmp_path):
     root = _workspace(tmp_path)
     env_file = ROOT / ".env.prod"

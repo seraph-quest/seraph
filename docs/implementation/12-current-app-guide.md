@@ -1895,7 +1895,9 @@ with the exact LAN hostname/IP and browser origin (for example,
 `seraph.lan,192.168.1.50` and `https://seraph.lan`). The same boundary is
 enforced for unsafe HTTP requests and WebSocket upgrades. An authenticated
 operator may use model-fabric setup and canaries from that configured LAN
-boundary; loopback is only the unauthenticated local-development shortcut.
+boundary. Loopback is not an authentication shortcut: without a configured
+credential every API route stays locked unless the explicit local no-login
+mode below is enabled.
 
 The login/session/refresh/logout endpoints are the canonical provisioning
 surface for the current single-operator deployment. Host headers with ports
@@ -1910,6 +1912,61 @@ core locked until the managed backend is restarted. Browser API requests use
 credentialed cookies across the local frontend/backend ports; raw passwords and
 session tokens never enter frontend state. Multi-operator identity ownership
 remains outside the current single-operator boundary.
+
+### Local single-operator mode without login (#1161, branch-local)
+
+On the #1161 branch, one operator running Seraph on their own machine may opt
+out of the password with `OPERATOR_AUTH_LOCAL_NO_LOGIN=true` in `.env.dev`
+(default `false`; never enable it in a committed environment file). Startup
+refuses the mode with a named error unless all of these hold:
+`DEPLOYMENT_ENVIRONMENT=development`; neither `OPERATOR_AUTH_SECRET` nor
+`OPERATOR_AUTH_SECRET_HASH` is set; the test bypass is off;
+`BACKEND_BIND_HOST` names a loopback address (the managed
+`./manage.sh -e dev local` launcher exports `127.0.0.1` beside its
+`--host 127.0.0.1`), and any uvicorn `--host` argument is loopback with no
+inherited `--fd`/`--uds` listener; and the Host and Origin allow-lists each
+contain a loopback entry. The backend cannot introspect its listening socket,
+so the bind check relies on the launcher's declaration plus its own process
+arguments; the per-request peer check below is the enforcing boundary.
+Docker development is not supported because container peers are not loopback.
+
+Every request is still checked. The socket peer must be loopback (forwarding
+headers are ignored, `403 local_peer_forbidden`); `Host` must be in
+`OPERATOR_AUTH_ALLOWED_HOSTS` and itself a loopback name, so configured LAN or
+`test` names are refused; state-changing requests and the WebSocket handshake
+need an `Origin` from `OPERATOR_AUTH_ALLOWED_ORIGINS` with a loopback host, and
+any `Origin` a browser sends on a safe request must pass the same check. This
+blocks cross-site pages and DNS rebinding (the Vite dev server additionally
+rejects unknown Host headers).
+
+Requests resolve to one persisted local operator root: an ordinary
+`OperatorSession` row with an `operator:root:*` principal, the normal operator
+grants (not the test-bypass identity) and a bound `OperatorIdentity`. It has
+no bearer token and no expiry, is created once and is reused across restarts,
+so conversation, Work, browser and WebSocket ownership stay stable and the
+existing revocation watches poll it like any other root. Login, refresh,
+logout and ownership credential changes (enroll, recovery-code rotation,
+forget-device, identity revoke) answer `409 local_no_login_active`. When the
+mode is later switched off, the root has no authority (session, principal and
+WebSocket checks refuse it) and the next startup revokes it; re-enabling binds
+a new root to the same live identity, so earlier work is reachable through the
+read-only ownership recovery contract rather than revived authority.
+Capability-journal and attachment-receipt MAC roots in this mode derive from
+the workspace vault key, never a password hash.
+
+Startup records an `operator_auth_mode` audit event with `local_no_login=true`,
+the principal and the declared bind, and `/api/runtime/status` exposes
+`operator_auth: {mode, local_no_login, login_required}`. `/api/auth/session`
+adds `auth_mode: "local_no_login"` and `local_no_login: true` only in this
+mode, so the password contract is unchanged. The cockpit gate goes straight
+into the cockpit with a visible **No login (local only)** badge (also shown in
+Settings in place of Refresh/Sign out) and offers no login or setup screen.
+
+**Risk:** any local process, browser extension or page that passes the
+loopback, Host and Origin checks has full operator authority, including model
+inference, capability execution and artifact transfer. Use it only on a
+single-user machine you control; production and test configuration are
+unchanged and still require their credential or explicit test bypass.
 
 On the #895 corrective branch, a refresh rotates only the bearer hash while
 retaining the active `OperatorSession.id` and absolute expiry. The retired hash

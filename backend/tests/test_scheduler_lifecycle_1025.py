@@ -291,9 +291,21 @@ async def test_api_launched_workers_refuse_while_dispatch_is_not_active(service_
 
 # ------------------------------------------------------------------ drain and restart
 
-async def test_drain_waits_for_in_flight_work_then_cancels_past_the_original_bound(service_db):  # noqa: F811
+async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_never_a_bare_cancel(service_db):  # noqa: F811
     registry: dict = {}
+    calls: list[tuple] = []
     lifecycle = _lifecycle(registry=lambda: registry)
+
+    async def cleanup(task_id, attempt_id, *, reason):
+        # Stands in for WorkBoardDispatcher.drain_attempt_past_bound (hook + cancel_job_tree).
+        calls.append((task_id, attempt_id, reason))
+        worker = registry[(task_id, attempt_id)]
+        worker.cancel()
+        await asyncio.wait([worker], timeout=1)
+        return {"task_id": task_id, "attempt_id": attempt_id, "job_id": "job-" + task_id, "status": "cancelled",
+                "cleanup_proven": True, "worker_alive": False}
+
+    lifecycle.attempt_cleanup = cleanup
     await lifecycle.activate(DISPATCH_DOMAIN)
     finished: list[str] = []
 
@@ -302,19 +314,16 @@ async def test_drain_waits_for_in_flight_work_then_cancels_past_the_original_bou
         finished.append("quick")
 
     async def stuck():
-        try:
-            await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            finished.append("cancelled")
-            raise
+        await asyncio.sleep(3600)
 
     registry[("t1", "a1")] = asyncio.create_task(quick())
     registry[("t2", "a2")] = asyncio.create_task(stuck())
     status = await lifecycle.deactivate(DISPATCH_DOMAIN, "dispatch_owner_draining", drain_seconds=0.3)
-    assert sorted(finished) == ["cancelled", "quick"]
+    assert finished == ["quick"]
+    assert calls == [("t2", "a2", "dispatch_drain_timeout")]  # only the attempt past its bound
     assert status["state"] == "blocked" and lifecycle.current(DISPATCH_DOMAIN) is None
     quiesced = [event for event in await _events(QUIESCED_EVENT) if event["domain"] == DISPATCH_DOMAIN]
-    assert len(quiesced) == 1 and quiesced[0]["cancelled"] == 1 and quiesced[0]["epoch"] == 1
+    assert len(quiesced) == 1 and quiesced[0]["cancelled"] == 1 and quiesced[0]["unknown"] == []
 
     # Admission is closed during and after the drain: a gated tick does not run.
     ran: list[str] = []
@@ -325,6 +334,110 @@ async def test_drain_waits_for_in_flight_work_then_cancels_past_the_original_bou
     lifecycle._last_attempt[DISPATCH_DOMAIN] = 10**12  # no re-evaluation in this assertion
     await lifecycle.run_gated("work_board_dispatch", tick)
     assert ran == []
+
+
+async def test_unproven_cleanup_records_unknown_never_audits_quiescence_and_refuses_the_flip(service_db):  # noqa: F811
+    from src.runtime_plugins.lifecycle import DRAIN_UNKNOWN_EVENT
+    registry: dict = {}
+    lifecycle = _lifecycle(registry=lambda: registry)
+    release = asyncio.Event()
+
+    async def shielded_child():
+        # Like _await_communication_model_call: outlives cancellation until its callback closes.
+        while not release.is_set():
+            try:
+                await asyncio.shield(release.wait())
+            except asyncio.CancelledError:
+                continue
+
+    async def cleanup(task_id, attempt_id, *, reason):
+        registry[(task_id, attempt_id)].cancel()
+        return {"task_id": task_id, "attempt_id": attempt_id, "job_id": "job-1", "status": "unknown",
+                "cleanup_proven": False, "worker_alive": True}
+
+    lifecycle.attempt_cleanup = cleanup
+    await lifecycle.activate(DISPATCH_DOMAIN)
+    registry[("t1", "a1")] = worker = asyncio.create_task(shielded_child())
+    await asyncio.sleep(0)
+    with pytest.raises(LifecycleBlocked) as refused:
+        await lifecycle.deactivate(DISPATCH_DOMAIN, "dispatch_owner_draining", drain_seconds=0.05)
+    assert refused.value.reason_code == "dispatch_drain_cleanup_unknown"
+    assert [event for event in await _events(QUIESCED_EVENT) if event["domain"] == DISPATCH_DOMAIN] == []
+    unknown = [event for event in await _events(DRAIN_UNKNOWN_EVENT) if event["domain"] == DISPATCH_DOMAIN]
+    assert unknown[0]["unknown"][0]["status"] == "unknown" and unknown[0]["alive"] == 1
+    # The domain never activates beside the still-live cancelled worker.
+    lifecycle._last_attempt.clear()
+    assert (await lifecycle.activate(DISPATCH_DOMAIN))["reason"] == "dispatch_drain_cleanup_unknown"
+    release.set()
+    await worker
+    lifecycle._last_attempt.clear()
+    assert (await lifecycle.activate(DISPATCH_DOMAIN))["state"] == "active"
+
+
+async def test_a_live_transition_with_unknown_drain_never_flips_the_owner(service_db):  # noqa: F811
+    from src.runtime_plugins.ownership import inventory
+    lifecycle = _lifecycle()
+    await lifecycle.activate(SCHEDULER_DOMAIN)
+
+    async def unknown_drain(domain, bound, *, stop_leftovers):
+        return {"cancelled": [], "unknown": [{"task_id": "t", "attempt_id": "a", "status": "unknown"}], "alive": []}
+
+    lifecycle._drain = unknown_drain
+    with pytest.raises(LifecycleBlocked):
+        await lifecycle.transition(SCHEDULER_DOMAIN, "legacy", actor="operator:test", expected_epoch=1,
+                                   reason="test")
+    async with db_engine.get_session() as db:
+        row = (await inventory(db))[SCHEDULER_DOMAIN]
+    assert (row.epoch, row.state) == (1, "ready")
+
+
+async def test_dispatcher_drain_cleanup_uses_the_capability_hook_and_cancel_job_tree(monkeypatch):
+    """``drain_attempt_past_bound`` never only cancels: hook, then the tree cancel, then proof."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from src.work_board import dispatcher as module
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    order: list[str] = []
+    task_row = SimpleNamespace(task_id="t1", capability_id="work.document-compare.v1", typed_input_json="{}")
+    attempt_row = SimpleNamespace(attempt_id="a1", workflow_run_id="job-1")
+
+    class Db:
+        async def get(self, model, key):
+            return task_row if key == "t1" else attempt_row
+
+    @asynccontextmanager
+    async def sessions():
+        yield Db()
+
+    class Jobs:
+        async def get_job(self, job_id):
+            return {"job_id": job_id, "status": "running"}
+
+        async def cancel_job_tree(self, job_id, *, reason):
+            order.append(f"tree:{job_id}:{reason}")
+            return [{"job_id": job_id, "status": "unknown_external_effect"}]
+
+    dispatcher = WorkBoardDispatcher.__new__(WorkBoardDispatcher)
+    dispatcher.session_provider = sessions
+    dispatcher.jobs = Jobs()
+    dispatcher._active_worker_tasks = {}
+    monkeypatch.setattr(module, "_parse_typed_input", lambda task: {})
+
+    async def hook(task, attempt, inputs, projection, *, reason):
+        order.append(f"hook:{task.capability_id}")
+        return [{"job_id": "job-1", "status": "unknown"}], False
+
+    dispatcher._cleanup_adapter = hook
+    outcome = await dispatcher.drain_attempt_past_bound("t1", "a1")
+    assert order == ["hook:work.document-compare.v1", "tree:job-1:dispatch_drain_timeout"]
+    assert outcome["status"] == "unknown" and outcome["cleanup_proven"] is False
+
+    async def proving_hook(task, attempt, inputs, projection, *, reason):
+        order.append("proven")
+        return [], True
+
+    dispatcher._cleanup_adapter = proving_hook
+    assert (await dispatcher.drain_attempt_past_bound("t1", "a1"))["status"] == "cancelled"
 
 
 async def test_a_scheduler_tick_in_flight_at_deactivation_finishes_within_its_bound(service_db):  # noqa: F811
@@ -476,3 +589,113 @@ async def test_operator_api_moves_a_lifecycle_domain_as_one_background_drain_ste
         assert (domains[SCHEDULER_DOMAIN]["owner_kind"], domains[SCHEDULER_DOMAIN]["epoch"]) == ("cordis", 2)
         status = lifecycle.status(SCHEDULER_DOMAIN)
         assert (status["state"], status["epoch"], status["last_transition"]["epoch"]) == ("active", 2, 2)
+
+
+# ------------------------------------------------------------------ shutdown (critic SHOULD 1 and 2)
+
+async def test_shutdown_closes_admission_first_so_no_tick_reactivates_after_the_drain(service_db):  # noqa: F811
+    lifecycle = _lifecycle()
+    await lifecycle.activate(SCHEDULER_DOMAIN)
+    await lifecycle.activate(DISPATCH_DOMAIN)
+    release = asyncio.Event()
+    ran: list[str] = []
+
+    async def slow():
+        await release.wait()
+
+    async def late():
+        ran.append("late")
+
+    in_flight = asyncio.create_task(lifecycle.run_gated("goal_check", slow))
+    await asyncio.sleep(0.01)
+    stopping = asyncio.create_task(lifecycle.stop())
+    await asyncio.sleep(0.01)
+    assert lifecycle.closing and lifecycle.current(SCHEDULER_DOMAIN) is None
+    lifecycle._last_attempt.clear()  # a tick in the window would otherwise re-evaluate
+    await lifecycle.run_gated("calendar_scan", late)
+    await lifecycle.run_gated("work_board_dispatch", late)
+    assert (await lifecycle.activate(DISPATCH_DOMAIN))["state"] != "active"
+    release.set()
+    await asyncio.gather(in_flight, stopping)
+    assert ran == [] and lifecycle.current(DISPATCH_DOMAIN) is None and not lifecycle.managed
+    # Post-stop ticks persist nothing and API launches are refused (not let through).
+    assert _status_entry("calendar_scan") == {}
+    with pytest.raises(LifecycleBlocked) as refused:
+        lifecycle.require_dispatch_active()
+    assert refused.value.reason_code == "dispatch_owner_not_active"
+    activations = [event for event in await _events(ACTIVATED_EVENT)]
+    assert len(activations) == 2  # nothing reactivated during or after the shutdown drain
+
+
+async def test_shutdown_during_a_live_transition_is_bounded_and_restart_is_consistent(service_db, monkeypatch):  # noqa: F811
+    from src.runtime_plugins import lifecycle as module
+    from src.runtime_plugins.ownership import inventory
+    monkeypatch.setattr(module, "SHUTDOWN_TRANSITION_SECONDS", 2.0)
+    lifecycle = _lifecycle()
+    await lifecycle.activate(SCHEDULER_DOMAIN)
+    never = asyncio.Event()
+
+    async def stuck_tick():
+        await never.wait()
+
+    tick = asyncio.create_task(lifecycle.run_gated("goal_check", stuck_tick))
+    await asyncio.sleep(0.01)
+    moving = asyncio.create_task(lifecycle.transition(SCHEDULER_DOMAIN, "legacy", actor="operator:test",
+                                                      expected_epoch=1, reason="test"))
+    await asyncio.sleep(0.05)
+    assert lifecycle.status(SCHEDULER_DOMAIN)["transition"] == "draining"
+    started = asyncio.get_running_loop().time()
+    await asyncio.wait_for(lifecycle.stop(), timeout=15)  # not the 120 s scheduler drain bound
+    assert asyncio.get_running_loop().time() - started < 10
+    assert moving.done() and moving.cancelled()
+    tick.cancel()
+    await asyncio.gather(tick, return_exceptions=True)
+    # The flip never ran: the row is still the ready owner at E, and a restart activates there.
+    async with db_engine.get_session() as db:
+        row = (await inventory(db))[SCHEDULER_DOMAIN]
+    assert (row.owner_kind, row.epoch, row.state) == ("legacy", 1, "ready")
+    restarted = _lifecycle()
+    assert (await restarted.activate(SCHEDULER_DOMAIN))["epoch"] == 1
+
+
+async def test_a_crash_after_the_flip_restarts_at_the_new_epoch_only(service_db):  # noqa: F811
+    from src.runtime_plugins.cutover import transition_domain
+    lifecycle = _lifecycle()
+    await lifecycle.activate(SCHEDULER_DOMAIN)
+    await lifecycle.deactivate(SCHEDULER_DOMAIN, "scheduler_owner_draining", mark_jobs=False)
+    # No host: the Cordis target is recorded blocked at E+1 (pending digest), then rolled back at E+2.
+    pending = await transition_domain(SCHEDULER_DOMAIN, "cordis", host=None, actor="test", reason="test")
+    assert (pending["epoch"], pending["state"]) == (2, "blocked")
+    blocked = _lifecycle()
+    assert (await blocked.activate(SCHEDULER_DOMAIN))["reason"] == "scheduler_owner_blocked"
+    receipt = await transition_domain(SCHEDULER_DOMAIN, "legacy", host=None, actor="test", reason="rollback")
+    assert (receipt["epoch"], receipt["state"]) == (3, "ready")
+    # The process dies here, before reactivation; the next boot activates at the new epoch, never E.
+    restarted = _lifecycle()
+    assert (await restarted.activate(SCHEDULER_DOMAIN))["epoch"] == 3
+
+
+def test_the_dispatch_introduction_refuses_a_corrupt_row_and_inserts_nothing(tmp_path):
+    from sqlalchemy import create_engine, text
+    from sqlmodel import SQLModel
+    from src.runtime_plugins.ownership import (PRE_DISPATCH_DOMAINS, introduce_dispatch_domain_sync,
+                                               legacy_composition_digest)
+    engine = create_engine(f"sqlite:///{tmp_path / 'corrupt.db'}")
+    SQLModel.metadata.create_all(engine)
+    with engine.begin() as connection:
+        for domain in PRE_DISPATCH_DOMAINS:
+            connection.execute(text(
+                "INSERT INTO runtime_composition_states (runtime_domain, owner_kind, epoch, composition_digest, "
+                "state, recovery_receipt_ref) VALUES (:d, 'legacy', 1, :g, 'ready', NULL)"),
+                {"d": domain, "g": legacy_composition_digest(domain)})
+        connection.execute(text("UPDATE runtime_composition_states SET state = 'bogus' "
+                                "WHERE runtime_domain = 'seraph.scheduler.v1'"))
+    with pytest.raises(CompositionBindingError) as refused:
+        with engine.begin() as connection:
+            introduce_dispatch_domain_sync(connection)
+    assert refused.value.reason_code == "composition_inventory_invalid"
+    with engine.connect() as connection:
+        domains = {row[0] for row in connection.execute(text("SELECT runtime_domain FROM runtime_composition_states"))}
+        events = connection.execute(text("SELECT COUNT(*) FROM audit_events")).scalar_one()
+    assert DISPATCH_DOMAIN not in domains and events == 0
+    engine.dispose()

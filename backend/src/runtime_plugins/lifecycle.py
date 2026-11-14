@@ -59,6 +59,9 @@ LIFECYCLE_DOMAINS = (SCHEDULER_DOMAIN, DISPATCH_DOMAIN)
 _SHORT = {SCHEDULER_DOMAIN: "scheduler", DISPATCH_DOMAIN: "dispatch"}
 ACTIVATED_EVENT = "runtime_lifecycle_activated"
 QUIESCED_EVENT = "runtime_lifecycle_quiesced"
+DRAIN_UNKNOWN_EVENT = "runtime_lifecycle_drain_unknown"
+# Bounded shutdown: an in-flight live transition is aborted and awaited at most this long.
+SHUTDOWN_TRANSITION_SECONDS = 10.0
 
 # Closed classification of every system job registered by ``init_scheduler``.
 # Retention/cleanup (deletion) jobs are exempt from the Cordis gate.
@@ -96,7 +99,15 @@ class LifecycleFenced(LifecycleBlocked):
 def lifecycle_recovery(reason: str) -> str:
     if reason.startswith("cordis_") or reason == "composition_boot_proof_missing":
         return ("Start the Cordis runtime (npm ci --prefix runtime/cordis --ignore-scripts, then "
-                "./manage.sh local up); scheduled work resumes on the next tick once it reports ready.")
+                "./manage.sh local up); scheduled work resumes on the next tick once it reports ready. "
+                "Or roll the domain back to the legacy owner in Settings or with POST "
+                "/api/runtime/composition/domains/<domain>/owner {\"target\": \"legacy\"} (dispatch before "
+                "scheduler); the legacy owner runs the same Python scheduler and dispatcher.")
+    if reason.endswith("_drain_cleanup_unknown"):
+        return ("Work cancelled past its drain bound has unproven cleanup; reconcile the unknown attempts on the "
+                "Work Board (their durable jobs keep their recovery text), then retry the transition.")
+    if reason == "lifecycle_shutdown":
+        return "Seraph is shutting down; scheduled work resumes after the restart."
     if reason.endswith("_owner_draining"):
         return "An owner transition is draining in-flight work; scheduled work resumes when it finishes."
     if reason.endswith("_owner_blocked"):
@@ -144,6 +155,10 @@ class Activation:
 
 
 # The activation a running tick was admitted under; durable effects fence on it.
+# Context inheritance is deliberate: a task the tick spawns (``create_task``
+# copies the context) keeps the tick's activation, so its later effects are
+# fenced to epoch E as well and refuse once the row moves. Work started
+# outside a tick (API, manual, startup recovery) carries none and is not gated.
 _TICK: ContextVar[Activation | None] = ContextVar("seraph_lifecycle_tick", default=None)
 
 
@@ -189,6 +204,13 @@ class RuntimeLifecycle:
         self._last_attempt: dict[str, float] = {}
         self._notified: dict[str, str] = {}
         self.worker_registry: Callable[[], dict] | None = None
+        # (task_id, attempt_id, *, reason) -> outcome; the dispatcher's cleanup hook + cancel_job_tree.
+        self.attempt_cleanup: Callable[..., Awaitable[dict]] | None = None
+        # Set first at shutdown: nothing activates again and post-stop ticks persist nothing.
+        self.closing = False
+        # Tasks cancelled past their bound that are still alive: their domain never activates beside them.
+        self._held: dict[str, list[asyncio.Task]] = {}
+        self._transition_tasks: dict[str, asyncio.Task] = {}
         for domain in LIFECYCLE_DOMAINS:
             self._set_status(domain, "inactive", "lifecycle_not_started")
 
@@ -270,15 +292,22 @@ class RuntimeLifecycle:
         """Activate one domain's provider at its current ready epoch; a second call is a no-op."""
         if domain not in LIFECYCLE_DOMAINS:
             raise CompositionBindingError("composition_domain_unknown")
-        if not self.managed:
+        if not self.managed or self.closing:
+            # Shutdown began (or never started): nothing reactivates after admission closed.
             return self.status(domain)
         if domain == SCHEDULER_DOMAIN and not self.scheduler_enabled:
             self._set_status(domain, "disabled", "scheduler_disabled")
             return self.status(domain)
         async with self._lock(domain):
-            if domain in self._transitioning or self.current(domain) is not None:
+            if self.closing or domain in self._transitioning or self.current(domain) is not None:
                 return self.status(domain)
             self._last_attempt[domain] = time.monotonic()
+            held = [task for task in self._held.get(domain, ()) if not task.done()]
+            if held:
+                # Work cancelled past its bound is still alive: never admit beside it.
+                await self._enter_blocked(domain, f"{_SHORT[domain]}_drain_cleanup_unknown")
+                return self.status(domain)
+            self._held.pop(domain, None)
             candidate, reason = await self._evaluate(domain)
             if candidate is None:
                 await self._enter_blocked(domain, reason)
@@ -298,6 +327,8 @@ class RuntimeLifecycle:
                                   summary=f"Runtime lifecycle {domain} activated",
                                   details_json=json.dumps({**candidate.payload(), "boot_nonce_present":
                                                            candidate.boot_nonce is not None}, sort_keys=True)))
+            if self.closing:
+                return self.status(domain)
             self._active[domain] = candidate
             was_blocked = self._notified.pop(domain, None) is not None
             self._set_status(domain, "active", None, candidate)
@@ -309,7 +340,7 @@ class RuntimeLifecycle:
     async def ensure(self, domain: str) -> Activation | None:
         """The live activation, re-evaluating a non-active domain at most every few seconds."""
         activation = self.current(domain)
-        if activation is not None or not self.managed or domain in self._transitioning:
+        if activation is not None or not self.managed or self.closing or domain in self._transitioning:
             return activation
         if time.monotonic() - self._last_attempt.get(domain, 0.0) < REACTIVATE_INTERVAL_SECONDS:
             return None
@@ -319,8 +350,15 @@ class RuntimeLifecycle:
     # ------------------------------------------------------------ deactivation
 
     async def deactivate(self, domain: str, reason: str, *, drain_seconds: float | None = None,
-                         mark_jobs: bool = True) -> dict[str, Any]:
-        """Close admission, drain within the original bounds, cancel what is left, audit quiescence."""
+                         mark_jobs: bool = True, stop_leftovers: bool = True) -> dict[str, Any]:
+        """Close admission, drain within the original bounds, stop leftovers through their cleanup, audit.
+
+        ``runtime_lifecycle_quiesced`` is written only when nothing is left
+        alive and every leftover attempt's cleanup was proven; otherwise a
+        ``runtime_lifecycle_drain_unknown`` event names what is unknown, the
+        domain stays blocked while a cancelled task lives, and
+        ``LifecycleBlocked`` is raised so no owner flip follows.
+        """
         if domain not in LIFECYCLE_DOMAINS:
             raise CompositionBindingError("composition_domain_unknown")
         async with self._lock(domain):
@@ -329,44 +367,88 @@ class RuntimeLifecycle:
             bound = drain_seconds
             if bound is None:
                 bound = SCHEDULER_DRAIN_SECONDS if domain == SCHEDULER_DOMAIN else _dispatch_drain_seconds()
-            cancelled = await self._drain(domain, bound)
+            result = await self._drain(domain, bound, stop_leftovers=stop_leftovers)
+            settled = not result["alive"] and not result["unknown"]
             if activation is not None:
-                await self._audit_quiesced(activation, reason, cancelled)
+                await self._audit_drain(activation, reason, result, quiesced=settled)
+            if result["alive"]:
+                self._held[domain] = list(result["alive"])
+            if not settled:
+                blocked = f"{_SHORT[domain]}_drain_cleanup_unknown"
+                await self._enter_blocked(domain, blocked, activation=activation, mark_jobs=mark_jobs)
+                if stop_leftovers:
+                    raise LifecycleBlocked(blocked)
+                return self.status(domain)
             await self._enter_blocked(domain, reason, activation=activation, mark_jobs=mark_jobs)
             return self.status(domain)
 
-    async def _drain(self, domain: str, bound: float) -> int:
+    async def _drain(self, domain: str, bound: float, *, stop_leftovers: bool) -> dict[str, Any]:
+        current = asyncio.current_task()
+
+        def registry() -> dict:
+            if domain != DISPATCH_DOMAIN or self.worker_registry is None:
+                return {}
+            return {key: task for key, task in list(self.worker_registry().items())
+                    if task is not None and not task.done() and task is not current}
+
         def pending() -> list[asyncio.Task]:
-            tasks = [task for task in self._inflight[domain] if not task.done()]
-            if domain == DISPATCH_DOMAIN and self.worker_registry is not None:
-                tasks.extend(task for task in self.worker_registry().values()
-                             if task is not None and not task.done() and task not in tasks)
-            current = asyncio.current_task()
-            return [task for task in tasks if task is not current]
+            tasks = {task for task in self._inflight[domain] if not task.done() and task is not current}
+            tasks.update(registry().values())
+            return list(tasks)
+
         deadline = time.monotonic() + max(bound, 0.0)
         while pending() and time.monotonic() < deadline:
             await asyncio.wait(pending(), timeout=min(0.5, max(deadline - time.monotonic(), 0.01)))
-        remaining = pending()
-        for task in remaining:
-            # Past the original bound: cancellation runs the work's own recovery
-            # path (stale-lease recovery leaves an unresolved effect unknown).
+        result: dict[str, Any] = {"cancelled": [], "unknown": [], "alive": []}
+        if not pending():
+            return result
+        if not stop_leftovers:
+            # Shutdown keeps today's behaviour: nothing is cancelled here, restart
+            # recovery owns the leases. Nothing is claimed quiesced while work lives.
+            result["alive"] = pending()
+            result["unknown"] = [{"reason": "shutdown_with_live_work", "count": len(result["alive"])}]
+            return result
+        # Past the original bound. Each live attempt goes through its own
+        # capability cleanup hook and cancel_job_tree (never a bare cancel).
+        for (task_id, attempt_id), _task in registry().items():
+            if self.attempt_cleanup is None:
+                outcome = {"task_id": task_id, "attempt_id": attempt_id, "status": "unknown",
+                           "cleanup_proven": False, "worker_alive": True}
+            else:
+                outcome = await self.attempt_cleanup(task_id, attempt_id,
+                                                     reason=f"{_SHORT[domain]}_drain_timeout")
+            (result["cancelled"] if outcome.get("cleanup_proven") else result["unknown"]).append(outcome)
+        # Remaining wrappers own no attempt (a scheduler job; its durable work keeps
+        # its lease and stale-lease recovery). Cancel them and wait, bounded.
+        leftovers = [task for task in pending() if task in self._inflight[domain]]
+        for task in leftovers:
             task.cancel()
-        if remaining:
-            await asyncio.wait(remaining, timeout=5.0)
-            logger.warning("Lifecycle %s drain cancelled %d task(s) past their bound", domain, len(remaining))
-        return len(remaining)
+        if leftovers:
+            await asyncio.wait(leftovers, timeout=5.0)
+            result["cancelled"].extend({"wrapper": task.get_name()} for task in leftovers if task.done())
+        result["alive"] = pending()
+        if result["alive"]:
+            logger.warning("Lifecycle %s drain left %d task(s) alive past cleanup", domain, len(result["alive"]))
+        return result
 
-    async def _audit_quiesced(self, activation: Activation, reason: str, cancelled: int) -> None:
+    async def _audit_drain(self, activation: Activation, reason: str, result: dict[str, Any], *,
+                           quiesced: bool) -> None:
         from src.db.engine import get_session
         from src.db.models import AuditEvent
+        details = {**activation.payload(), "reason": reason, "cancelled": len(result["cancelled"]),
+                   "unknown": [{key: item.get(key) for key in ("task_id", "attempt_id", "job_id", "status", "reason",
+                                                               "count") if key in item}
+                               for item in result["unknown"]],
+                   "alive": len(result["alive"])}
         try:
             async with get_session() as db:
-                db.add(AuditEvent(session_id=None, actor="runtime", event_type=QUIESCED_EVENT,
-                                  summary=f"Runtime lifecycle {activation.domain} quiesced",
-                                  details_json=json.dumps({**activation.payload(), "reason": reason,
-                                                           "cancelled": cancelled}, sort_keys=True)))
+                db.add(AuditEvent(session_id=None, actor="runtime",
+                                  event_type=QUIESCED_EVENT if quiesced else DRAIN_UNKNOWN_EVENT,
+                                  summary=f"Runtime lifecycle {activation.domain} "
+                                          + ("quiesced" if quiesced else "drain left unknown work"),
+                                  details_json=json.dumps(details, sort_keys=True, default=str)))
         except Exception:  # noqa: BLE001 - shutdown with a closed state gate
-            logger.warning("Lifecycle %s quiescence audit unavailable", activation.domain, exc_info=True)
+            logger.warning("Lifecycle %s drain audit unavailable", activation.domain, exc_info=True)
 
     async def _enter_blocked(self, domain: str, reason: str, *, activation: Activation | None = None,
                              mark_jobs: bool = True) -> None:
@@ -426,6 +508,8 @@ class RuntimeLifecycle:
         domain = job_domain(job_id)
         if domain is None:
             return await run()
+        if self.closing:
+            return None  # shutdown: no tick runs and no block is persisted for a closing process
         if not self.managed:
             record_job_blocked(job_id, "lifecycle_not_started")
             return None
@@ -454,8 +538,10 @@ class RuntimeLifecycle:
 
     def require_dispatch_active(self) -> None:
         """API-launched workers enter the live-worker registry only while dispatch is active."""
+        if self.closing:
+            raise LifecycleBlocked("dispatch_owner_not_active", lifecycle_recovery("lifecycle_shutdown"))
         if not self.managed:
-            return
+            return  # a process that never ran the lifespan (tests, host CLIs) has no lifecycle
         if self.current(DISPATCH_DOMAIN) is None:
             raise LifecycleBlocked("dispatch_owner_not_active",
                                    (self._status.get(DISPATCH_DOMAIN) or {}).get("recovery")
@@ -478,19 +564,46 @@ class RuntimeLifecycle:
     async def start(self, host, *, scheduler_enabled: bool) -> list[dict[str, Any]]:
         """Called once by the lifespan after the host started and the boot cutover ran."""
         self.host = host
+        self.closing = False
         self.managed = True
         self.scheduler_enabled = scheduler_enabled
         if self.worker_registry is None:
             from src.work_board.dispatcher import _ACTIVE_WORKER_TASKS
             self.worker_registry = lambda: _ACTIVE_WORKER_TASKS
+        if self.attempt_cleanup is None:
+            from src.work_board.dispatcher import _dispatcher
+            self.attempt_cleanup = _dispatcher.drain_attempt_past_bound
         return [await self.activate(domain) for domain in LIFECYCLE_DOMAINS]
 
     async def stop(self) -> None:
-        """Shutdown: close admission and keep today's bounded shutdown (no new wait)."""
+        """Shutdown, bounded: close admission first, abort a live transition, keep today's teardown.
+
+        ``closing`` is set before any await, so no tick can reactivate a domain
+        after its drain. A live transition is cancelled (its flip is one
+        writer transaction: it either committed or rolled back) and awaited at
+        most ``SHUTDOWN_TRANSITION_SECONDS``. No attempt is cancelled here:
+        restart recovery owns the leases, as before #1025.
+        """
+        self.closing = True
+        for domain in LIFECYCLE_DOMAINS:
+            self._active.pop(domain, None)
         try:
+            moving = [task for task in self._transition_tasks.values() if not task.done()]
+            for task in moving:
+                task.cancel()
+            if moving:
+                await asyncio.wait(moving, timeout=SHUTDOWN_TRANSITION_SECONDS)
             for domain in reversed(LIFECYCLE_DOMAINS):
-                await self.deactivate(domain, "lifecycle_shutdown", drain_seconds=0.0
-                                      if domain == DISPATCH_DOMAIN else 5.0, mark_jobs=False)
+                lock = self._lock(domain)
+                try:
+                    await asyncio.wait_for(lock.acquire(), timeout=SHUTDOWN_TRANSITION_SECONDS)
+                except asyncio.TimeoutError:
+                    self._set_status(domain, "blocked", "lifecycle_shutdown")
+                    continue
+                lock.release()
+                await self.deactivate(domain, "lifecycle_shutdown",
+                                      drain_seconds=0.0 if domain == DISPATCH_DOMAIN else 5.0,
+                                      mark_jobs=False, stop_leftovers=False)
         finally:
             self.managed = False
             self.host = None
@@ -499,6 +612,8 @@ class RuntimeLifecycle:
         """Synchronously reserve the one live transition of a domain (no await in between)."""
         if domain not in LIFECYCLE_DOMAINS:
             raise CompositionBindingError("composition_domain_unknown")
+        if self.closing:
+            raise CompositionBindingError("composition_transition_in_progress")
         if domain in self._transitioning:
             raise CompositionBindingError("composition_transition_in_progress")
         self._transitioning[domain] = "queued"
@@ -510,11 +625,17 @@ class RuntimeLifecycle:
         Drain-before-flip (review item 1): admission closes and in-flight work
         settles while the row is still ready at E; only then does the fenced
         writer move it, so no heartbeat or settle interleaves with ``draining``.
+        A drain that leaves unknown or live work raises before the flip. The
+        flip itself is one writer transaction, so an interruption (shutdown
+        cancel or crash) leaves the row at E ready or at E+1, never between.
         """
         from .bridge import cordis_host
         from .cutover import transition_domain
         if not claimed:
             self.claim_transition(domain)
+        task = asyncio.current_task()
+        if task is not None:
+            self._transition_tasks[domain] = task
         self._transitioning[domain] = "draining"
         try:
             await self.deactivate(domain, f"{_SHORT[domain]}_owner_draining", mark_jobs=False)
@@ -523,11 +644,14 @@ class RuntimeLifecycle:
                                               expected_epoch=expected_epoch, reason=reason)
         except BaseException:
             self._transitioning.pop(domain, None)
-            # Whatever happened, the row decides: reactivate if it is still ready.
+            self._transition_tasks.pop(domain, None)
+            # Whatever happened, the row decides: reactivate if it is still ready (never while closing).
             self._last_attempt.pop(domain, None)
-            await self.activate(domain)
+            if not self.closing:
+                await self.activate(domain)
             raise
         self._transitioning.pop(domain, None)
+        self._transition_tasks.pop(domain, None)
         self._last_attempt.pop(domain, None)
         await self.activate(domain)
         self._set_status(domain, self._status[domain]["state"], self._status[domain]["reason"],
@@ -579,6 +703,6 @@ async def lifecycle_runtime_status(domain: str) -> dict[str, Any]:
     return result
 
 
-__all__ = ["ACTIVATED_EVENT", "Activation", "DISPATCH_JOBS", "LIFECYCLE_DOMAINS", "LifecycleBlocked",
+__all__ = ["ACTIVATED_EVENT", "Activation", "DRAIN_UNKNOWN_EVENT", "DISPATCH_JOBS", "LIFECYCLE_DOMAINS", "LifecycleBlocked",
            "LifecycleFenced", "QUIESCED_EVENT", "RETENTION_JOBS", "SCHEDULER_GATED_JOBS", "assert_tick_fence",
            "current_tick", "job_domain", "lifecycle_recovery", "lifecycle_runtime_status", "runtime_lifecycle"]

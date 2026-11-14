@@ -3874,6 +3874,60 @@ class WorkBoardDispatcher:
             }
         return WorkBoardDispatcher._direct_expected_identity(task, attempt, inputs, projection)
 
+    async def drain_attempt_past_bound(self, task_id: str, attempt_id: str, *,
+                                       reason: str = "dispatch_drain_timeout") -> dict[str, Any]:
+        """#1025: stop one attempt still live past the lifecycle drain bound.
+
+        The attempt goes through its capability's own cleanup hook, then the
+        common ``cancel_job_tree`` (descendants before their root; unresolved
+        external effects stay in their authoritative unknown state). The result
+        is ``cleanup_proven`` only when the hook proves cleanup, the tree
+        cancel ran and the process-local worker is no longer alive; otherwise
+        it is ``unknown`` and the caller must not flip the owner.
+        """
+        key = (task_id, attempt_id)
+        worker = self._active_worker_tasks.get(key)
+        receipts: list[dict[str, Any]] = []
+        proven = False
+        job_id = ""
+        try:
+            async with self.session_provider() as db:
+                task = await db.get(WorkBoardTask, task_id)
+                attempt = await db.get(WorkBoardAttempt, attempt_id)
+            job_id = _text(getattr(attempt, "workflow_run_id", None))
+            if task is not None and attempt is not None and job_id:
+                try:
+                    inputs = _parse_typed_input(task)
+                except Exception:
+                    inputs = {}
+                projection = await self.jobs.get_job(job_id)
+                hook_receipts, proven = await self._cleanup_adapter(
+                    task, attempt, inputs, projection if isinstance(projection, Mapping) else {}, reason=reason)
+                receipts.extend(hook_receipts)
+                try:
+                    receipts.extend(await self.jobs.cancel_job_tree(job_id, reason=reason[:128]))
+                except Exception:
+                    proven = False
+        except Exception:
+            logger.warning("drain cleanup for %s/%s unavailable", task_id, attempt_id, exc_info=True)
+            proven = False
+        if worker is not None and not worker.done() and worker is not asyncio.current_task():
+            # An unadmitted attempt (no durable run yet) or a hook that left the
+            # worker running: cancel it and wait, bounded, never release it early.
+            worker.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            if not job_id:
+                proven = worker.done()
+        alive = worker is not None and not worker.done()
+        status = "cancelled" if proven and not alive else "unknown"
+        return {"task_id": task_id, "attempt_id": attempt_id, "job_id": job_id or None, "status": status,
+                "cleanup_proven": bool(proven and not alive), "worker_alive": alive,
+                "receipts": [{"job_id": item.get("job_id"), "status": item.get("status")}
+                             for item in receipts if isinstance(item, Mapping)]}
+
     async def _cleanup_adapter(
         self,
         task: WorkBoardTask,

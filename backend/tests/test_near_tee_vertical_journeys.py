@@ -203,3 +203,134 @@ async def test_general_task_planning_missing_near_billing_is_unknown_and_blocks_
     assert len(rows) == 1 and rows[0]["state"] == "unknown" and snapshot["unknown_microusd"] > 0
     receipt = isolated_broker.receipt_for(rows[0]["operation_id"])
     assert receipt.status == "blocked" and receipt.active_operation_id == rows[0]["operation_id"]
+
+
+# ── Work Board card proposals (triage) ───────────────────────────
+
+
+def specify_answer():
+    """A valid one-card Specify answer whose typed input exists in the workspace."""
+    import hashlib
+    import os
+    from pathlib import Path
+    from src.work_board.dispatcher import GOAL_SNAPSHOT_CAPABILITY, REGISTERED_CAPABILITIES
+    from src.work_board import triage as triage_service
+    raw = json.dumps({"schema_version": 1, "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+        "input": {"file_path": "artifacts/specified.md"}}, sort_keys=True, separators=(",", ":")).encode()
+    input_path = Path(settings.workspace_dir) / "inputs" / "specified.json"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(settings.workspace_dir, 0o700)
+    input_path.write_bytes(raw)
+    answer = {"title": "Specified operator task", "body": "A complete bounded execution specification.",
+        "capability_id": GOAL_SNAPSHOT_CAPABILITY,
+        "capability_version": REGISTERED_CAPABILITIES[GOAL_SNAPSHOT_CAPABILITY].version,
+        "typed_input_ref": "workspace-json:inputs/specified.json",
+        "typed_input_digest": hashlib.sha256(raw).hexdigest(),
+        "executor_id": triage_service.registered_executor_id(GOAL_SNAPSHOT_CAPABILITY)}
+    return answer
+
+
+async def _card_proposal_world(accounting_db, monkeypatch, *, key="card-near", **near_options):
+    from src.db.models import WorkBoardStatus
+    from src.work_board.contracts import WorkBoardTaskCreate
+    from src.work_board.repository import WorkBoardRepository
+    from src.workflows.job_runtime import DurableJobRepository
+    from tests.test_work_board_m6_provider_free_journey import _goal
+
+    sessions = accounting_db[2].accounting_sessions
+    monkeypatch.setattr("src.work_board.triage.get_session", sessions)
+    operator, owner = await operator_owner(monkeypatch)
+    jobs = DurableJobRepository()
+    near = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, **near_options)
+    assert retirement.inactive_route_reason("strategist_agent") is None
+    goal = _goal("goal-card-near", "Specify a card on NEAR TEE")
+    goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
+    async with sessions() as db:
+        db.add(goal)
+    async with sessions() as db:
+        created = await WorkBoardRepository().create_task(db, owner, WorkBoardTaskCreate(
+            title="Card awaiting a specification", goal_id=goal.id, goal_revision=1,
+            status=WorkBoardStatus.triage, idempotency_key=key))
+        task = created.task
+    answer = specify_answer()
+    near.answer = {"role": "assistant", "content": json.dumps(answer)}
+    return sessions, jobs, operator, owner, task, near
+
+
+@pytest.mark.asyncio
+async def test_work_board_card_proposal_reaches_near_and_settles_from_near_billing(accounting_db, monkeypatch):
+    from src.db.models import WorkBoardProposal, WorkBoardStatus, WorkBoardTask, WorkflowRunState
+    from src.work_board.contracts import WorkBoardProposalRequest
+    from src.work_board import triage as triage_service
+    sessions, jobs, operator, owner, task, near = await _card_proposal_world(accounting_db, monkeypatch)
+    request = WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="near-specify")
+    result = await triage_service.create_proposal(owner, task.task_id, kind="specify", request=request,
+        operator=operator)
+    assert result["status"] == "proposed", result
+    assert result["provider_contact_state"] == "succeeded"
+    assert result["proposed_tasks"][0]["title"] == "Specified operator task"
+    body = assert_near_contract(near_inference_requests(near))
+    assert body["max_tokens"] == 1024 and body["messages"][0]["role"] == "system"
+    assert "Seraph work-board proposal" in body["messages"][0]["content"]
+    assert json.loads(body["messages"][1]["content"])["kind"] == "specify"
+    snapshot = await jobs.inference_accounting_snapshot()
+    rows = near_settled_rows(snapshot, "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled" and rows[0]["profile_id"] == "near_tee.text"
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD and snapshot["unknown_microusd"] == 0
+    async with sessions() as db:
+        proposal = (await db.execute(select(WorkBoardProposal))).scalar_one()
+        cards = list((await db.execute(select(WorkBoardTask))).scalars())
+        runs = list((await db.execute(select(WorkflowRunState))).scalars())
+    # The durable proposal job is bound to the NEAR slot contract and succeeded.
+    assert proposal.capability_version == retirement_near_contract()
+    assert proposal.provider_contact_started is True and proposal.status == "proposed"
+    assert [(run.job_kind, run.status) for run in runs] == [("work_board_proposal", "succeeded")]
+    assert rows[0]["job_id"] == proposal.admission_job_id
+    # Advisory only: the parent card is unchanged until explicit acceptance.
+    assert [(card.task_id, card.status) for card in cards] == [(task.task_id, WorkBoardStatus.triage)]
+    # The idempotent replay returns the same proposal without a second contact.
+    replay = await triage_service.create_proposal(owner, task.task_id, kind="specify", request=request,
+        operator=operator)
+    assert replay["proposal_id"] == result["proposal_id"] and replay["status"] == "proposed"
+    assert len(near_inference_requests(near)) == 2
+
+
+def retirement_near_contract():
+    from src.model_fabric.near_tee_vertical import near_tee_vertical_route
+    return near_tee_vertical_route("strategist_agent").profile_contract_hash
+
+
+@pytest.mark.asyncio
+async def test_work_board_card_proposal_near_echo_mismatch_blocks_with_settled_cost(accounting_db, monkeypatch):
+    from src.work_board.contracts import WorkBoardProposalRequest
+    from src.work_board import triage as triage_service
+    sessions, jobs, operator, owner, task, near = await _card_proposal_world(accounting_db, monkeypatch)
+    near.echo_model = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    result = await triage_service.create_proposal(owner, task.task_id, kind="specify",
+        request=WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="near-echo"),
+        operator=operator)
+    assert result["status"] == "blocked" and result["blocked_reason"] == "near_tee_model_mismatch", result
+    assert result["proposed_tasks"] == []
+    rows = near_settled_rows(await jobs.inference_accounting_snapshot(), "strategist_agent")
+    assert len(rows) == 1 and rows[0]["state"] == "settled"
+    assert rows[0]["actual_cost_microusd"] == NEAR_COST_MICROUSD
+
+
+@pytest.mark.asyncio
+async def test_work_board_card_proposal_missing_near_proof_is_sealed_precontact(accounting_db, monkeypatch):
+    from src.db.models import WorkflowRunState
+    from src.work_board.contracts import WorkBoardProposalRequest
+    from src.work_board import triage as triage_service
+    # The strategist route requires structured output; without its proof the
+    # sealed precontact gate refuses before any job, reservation or contact.
+    sessions, jobs, operator, owner, task, near = await _card_proposal_world(accounting_db, monkeypatch,
+        capabilities=("text",))
+    result = await triage_service.create_proposal(owner, task.task_id, kind="specify",
+        request=WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="near-proof"),
+        operator=operator)
+    assert result["status"] == "blocked" and result["blocked_reason"] == "proof_missing:structured_output", result
+    assert result["provider_contact_state"] == "not_started"
+    assert near_inference_requests(near) == []
+    assert (await jobs.inference_accounting_snapshot())["operations"] == []
+    async with sessions() as db:
+        assert list((await db.execute(select(WorkflowRunState))).scalars()) == []

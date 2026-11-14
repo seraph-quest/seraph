@@ -39,7 +39,10 @@ from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
 # Retired worlds: retained OpenRouter config, fresh install, a NEAR TEE text
 # slot with its credential missing (the NEAR reason wins, as in Settings), and
-# a NEAR TEE slot that serves the route while the vertical has no NEAR adapter.
+# a NEAR TEE slot that serves the route. #1159: a vertical with a NEAR TEE
+# adapter makes progress in that last world (its full contract is pinned in
+# test_near_tee_vertical_journeys.py); ``near_tee_route_unsupported`` remains
+# only for a vertical still without one.
 WORLDS = ["retained_openrouter", "fresh_install", "near_credential_missing", "near_serves_route"]
 EXPECTED = {"retained_openrouter": OPENROUTER_RETIRED_REASON, "fresh_install": NO_ACTIVE_PROVIDER_REASON,
     "near_credential_missing": "near_tee_credential_required",
@@ -112,6 +115,16 @@ def write_world(world):
         write_near_tee_text_configuration()
 
 
+async def write_world_async(world, monkeypatch):
+    """``write_world``, except a NEAR-served world for a vertical with a NEAR
+    TEE adapter gets a fully ready, intercepted slot; returns its fixture."""
+    if world != "near_serves_route":
+        write_world(world)
+        return None
+    from tests.near_tee_support import prepare_near_tee_vertical
+    return await prepare_near_tee_vertical(monkeypatch)
+
+
 def _assert_world(world):
     from src.model_fabric.configuration import effective_workload_policy, read_model_fabric_configuration
     configured = read_model_fabric_configuration()
@@ -157,7 +170,7 @@ async def test_work_board_card_proposal_blocks_with_retired_reason(accounting_db
     else:
         operator = await _operator_session(monkeypatch)
         owner = WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
-    write_world(world)
+    near = await write_world_async(world, monkeypatch)
     _assert_world(world)
     goal = _goal("goal-card-no-provider", "Specify a card without a provider")
     goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
@@ -168,6 +181,19 @@ async def test_work_board_card_proposal_blocks_with_retired_reason(accounting_db
             title="Card awaiting a specification", goal_id=goal.id, goal_revision=1,
             status=WorkBoardStatus.triage, idempotency_key="card-no-provider"))
         task = created.task
+    if near is not None:
+        # #1159: NEAR TEE serves proposals; the model step reaches NEAR and
+        # the advisory proposal is staged (contract pinned in the NEAR journeys).
+        from tests.test_near_tee_vertical_journeys import specify_answer
+        near.answer = {"role": "assistant", "content": json.dumps(specify_answer())}
+        result = await triage_service.create_proposal(owner, task.task_id, kind="specify",
+            request=WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="near"),
+            operator=operator)
+        from tests.near_tee_support import near_inference_requests
+        assert [request.url.path for request in near_inference_requests(near)] == [
+            "/v1/chat/completions", "/v1/billing/costs"]
+        assert result["status"] == "proposed" and result["blocked_reason"] is None, result
+        return
     with no_provider_contact():
         result = await triage_service.create_proposal(owner, task.task_id, kind="specify",
             request=WorkBoardProposalRequest(expected_revision=task.task_revision, idempotency_key="no-provider"),
@@ -244,7 +270,7 @@ async def test_general_task_planning_blocks_with_retired_reason(accounting_db, m
     else:
         operator = await _operator_session(monkeypatch)
         jobs, owner = None, WorkBoardOwner(principal_id=operator.principal.principal_id, session_id=operator.session_id)
-    write_world(world)
+    near = await write_world_async(world, monkeypatch)
     _assert_world(world)
     goal = _goal("goal-general-no-provider", "Read local notes through one governed plan")
     goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
@@ -257,6 +283,24 @@ async def test_general_task_planning_blocks_with_retired_reason(accounting_db, m
             "input": {"goal_ref": goal.id, "intent": "Read notes.txt and return its content",
                 "requested_output": descriptor.output_schema, "inference_egress_acknowledged": True,
                 "limits": {"max_cost_microusd": 1000}}}
+        if near is not None:
+            # #1159: NEAR TEE serves planning; the plan step reaches NEAR and
+            # settles from NEAR billing (contract pinned in the NEAR journeys).
+            from tests.near_tee_support import near_inference_requests, near_settled_rows
+            plan = {"schema_version": 1, "revision": 1, "steps": [{"step_id": "read",
+                "tool_id": "read_file", "input": {"file_path": "notes.txt"}, "depends_on": [],
+                "output_contract": descriptor.output_schema}]}
+            near.answer = {"role": "assistant", "content": json.dumps(plan)}
+            body["input"]["limits"] = {"max_cost_microusd": 50_000}
+            created = await client.post("/api/work-board/general-tasks", json=body)
+            assert created.status_code == 200, created.text
+            assert [request.url.path for request in near_inference_requests(near)] == [
+                "/v1/chat/completions", "/v1/billing/costs"]
+            from src.workflows.job_runtime import DurableJobRepository
+            rows = near_settled_rows(await DurableJobRepository().inference_accounting_snapshot(),
+                "general_task_planner")
+            assert [row["state"] for row in rows] == ["settled"]
+            return
         with no_provider_contact():
             for _ in range(2):  # a retry gets the same block, never a different path
                 created = await client.post("/api/work-board/general-tasks", json=body)

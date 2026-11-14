@@ -19,7 +19,6 @@ from src.auth.service import AuthenticatedOperator, authenticate_principal
 from src.db import engine as database
 from src.db.models import AuditEvent, Goal, OperatorIdentity, OperatorSession
 from src.goals.contracts import GoalProgramme, GoalProgrammeAccept, GoalProgrammeRequest, GoalProgrammeAuthorityBinding
-from src.model_fabric.near_tee_vertical import vertical_inference_policy
 
 CAPABILITY_IDS = ("guardian.goal-discovery.v1", "guardian.query-plan.v1", "guardian.public-search.v1",
                   "source.public-extract.v1", "guardian.prepare-brief.v1")
@@ -53,23 +52,40 @@ def _aware(value: datetime) -> datetime:
     return value.replace(tzinfo=value.tzinfo or timezone.utc).astimezone(timezone.utc)
 
 
-def _policy_binding() -> tuple[int, str, str | None]:
-    """The programme's route binding: the research route's current policy.
+def programme_policy_facts(configured) -> tuple[int, str, str | None]:
+    """Pure: a programme's route binding for one model-fabric configuration.
 
     ADR-035 (#1180): a programme's inference runs on the research route
     (``readonly_research_child``), served by the NEAR TEE text slot. Binding
-    to the OpenRouter-only projection made every programme preview/accept on
-    a NEAR-only configuration fail with ``provider_policy_unavailable``.
+    to the OpenRouter-only projection made every programme preview/accept on a
+    NEAR TEE-only configuration fail with ``provider_policy_unavailable`` (and
+    Home showed every programme blocked). The digest equals
+    ``vertical_inference_policy``'s for the same configuration; the retained
+    OpenRouter projection applies only in the explicit legacy test mode.
+    Returns ``(epoch, digest, blocked_reason)``; never reads credentials.
     """
+    from src.model_fabric.configuration import near_tee_slot_block_reason
+    from src.model_fabric.effective_policy import _policy_digest, inference_policy_from_configuration
+    from src.model_fabric.near_tee_vertical import near_tee_vertical_route
+    from src.model_fabric.retirement import openrouter_retired
     try:
-        configuration, digest, _setup = vertical_inference_policy("readonly_research_child")
-        return configuration.egress_revision, digest, None
+        if near_tee_vertical_route("readonly_research_child", configured) is not None:
+            if reason := near_tee_slot_block_reason(configured, "text"):
+                raise PermissionError(reason)
+            return configured.egress_revision, _policy_digest(configured), None
+        if openrouter_retired():
+            raise PermissionError("no_active_provider")
+        _configured, digest = inference_policy_from_configuration(configured)
+        return configured.egress_revision, digest, None
     except PermissionError:
         # No credentials or private settings enter the public preview.
-        from src.model_fabric.configuration import read_model_fabric_configuration
-        configuration = read_model_fabric_configuration()
-        return configuration.egress_revision, _digest({"blocked": configuration.status,
-            "revoked": configuration.egress_revoked, "epoch": configuration.egress_revision}), "provider_policy_unavailable"
+        return configured.egress_revision, _digest({"blocked": configured.status,
+            "revoked": configured.egress_revoked, "epoch": configured.egress_revision}), "provider_policy_unavailable"
+
+
+def _policy_binding() -> tuple[int, str, str | None]:
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    return programme_policy_facts(read_model_fabric_configuration())
 
 
 def _load(goal: Goal) -> dict:

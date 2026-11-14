@@ -709,7 +709,9 @@ function start_local_backend() {
     echo "Starting local backend on http://127.0.0.1:$LOCAL_BACKEND_PORT ..."
     nohup /bin/bash -c '
         cd "$1" || exit 1
-        export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend
+        # BACKEND_BIND_HOST states the listener below; local no-login mode
+        # (OPERATOR_AUTH_LOCAL_NO_LOGIN) refuses to start unless it is loopback.
+        export WORKSPACE_DIR="$2" LLM_LOG_DIR="$3" UV_CACHE_DIR="$4" DEFAULT_MODEL="$5" SERAPH_LOCAL_SERVICE=backend BACKEND_BIND_HOST=127.0.0.1
         exec uv run python -B -m uvicorn src.app:create_app --factory --host 127.0.0.1 --port "$6"
     ' seraph-local-backend "$SCRIPT_DIR/backend" "$LOCAL_WORKSPACE_DIR" "$LOCAL_LLM_LOG_DIR" "$LOCAL_UV_CACHE_DIR" "$LOCAL_DEFAULT_MODEL" "$LOCAL_BACKEND_PORT" </dev/null >> "$LOCAL_BACKEND_LOG_FILE" 2>&1 &
     local pid=$!
@@ -752,10 +754,21 @@ function start_local_frontend() {
     return 1
 }
 
+function cordis_cli_python() {
+    # The keyless Cordis CLI runs under env -i, so a version-manager shim
+    # (asdf/pyenv: needs $HOME) or an old system python3 must not be used.
+    # The backend's own uv environment is the supported interpreter (#1168).
+    if [ -x "$SCRIPT_DIR/backend/.venv/bin/python" ]; then
+        printf '%s\n' "$SCRIPT_DIR/backend/.venv/bin/python"
+    else
+        command -v python3
+    fi
+}
+
 function cordis_cli() {
     # Same keyless path as `./manage.sh cordis`: no operator env, credentials or workspace.
     env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
-        python3 -m src.runtime_plugins.cli "$@"
+        "$(cordis_cli_python)" -m src.runtime_plugins.cli "$@"
 }
 
 # Goal discovery plans and extracts only through the reviewed Cordis host (#1008).
@@ -887,6 +900,20 @@ function local_run() {
     local_logs all
 }
 
+# Physical path of the system temp base.  On macOS /tmp is a symlink to
+# /private/tmp and the backend rejects symlinked runtime roots, so built-in
+# defaults are derived from the resolved directory.  Explicitly configured
+# values are never rewritten.
+function default_tmp_root() {
+    local base="${1:-/tmp}"
+    local resolved
+    if resolved="$(cd -P -- "$base" 2>/dev/null && pwd -P)" && [ -n "$resolved" ]; then
+        printf '%s\n' "$resolved"
+    else
+        printf '%s\n' "$base"
+    fi
+}
+
 if [ "${SERAPH_MANAGE_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -934,7 +961,7 @@ if [ "$COMMAND" = "cordis" ]; then
     # This finite keyless path never reads operator env, credentials or workspace.
     # Build uses already installed pins; probe launches/reaps the production host.
     exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
-        python3 -B -m src.runtime_plugins.cli "$@"
+        "$(cordis_cli_python)" -B -m src.runtime_plugins.cli "$@"
 fi
 COMPOSE_FILES=(
     -f "$SCRIPT_DIR/docker-compose.$ENV.yaml"
@@ -967,16 +994,17 @@ fi
 
 LOCAL_BACKEND_PORT="${LOCAL_BACKEND_PORT:-8004}"
 LOCAL_FRONTEND_PORT="${LOCAL_FRONTEND_PORT:-3001}"
+SERAPH_DEFAULT_TMP_ROOT="$(default_tmp_root /tmp)"
 if [ "$COMMAND" = "local" ]; then
-    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-/tmp/seraph-dev-data}"
+    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}"
 else
-    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-${BACKEND_DATA_PATH_DEV:-/tmp/seraph-dev-data}}"
+    LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-${BACKEND_DATA_PATH_DEV:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}}"
 fi
 if [[ "$LOCAL_WORKSPACE_DIR" != /* ]]; then
     LOCAL_WORKSPACE_DIR="$SCRIPT_DIR/$LOCAL_WORKSPACE_DIR"
 fi
-LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-/tmp/seraph-dev-logs}"
-LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-/tmp/uv-cache}"
+LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-logs}"
+LOCAL_UV_CACHE_DIR="${LOCAL_UV_CACHE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/uv-cache}"
 LOCAL_DEFAULT_MODEL="${LOCAL_DEFAULT_MODEL:-${DEFAULT_MODEL:-openrouter/anthropic/claude-sonnet-4}}"
 SCREEN_CAPTURE_ARCHIVE_DIR="${SCREEN_CAPTURE_ARCHIVE_DIR:-$LOCAL_WORKSPACE_DIR/artifacts/screen-captures}"
 SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR="${SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR:-$SCREEN_CAPTURE_ARCHIVE_DIR}"

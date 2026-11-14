@@ -125,6 +125,14 @@ def assert_no_aliasing(headers: dict[str, str]) -> None:
         raise NearTeeError("near_tee_no_aliasing_required")
 
 
+def near_tee_finish_reason(payload: object) -> object:
+    """The single choice's ``finish_reason`` (None when the shape is unusual)."""
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if isinstance(choices, list) and len(choices) == 1 and isinstance(choices[0], dict):
+        return choices[0].get("finish_reason")
+    return None
+
+
 def near_tee_answer(payload: object, model: str) -> tuple[str | None, str | None]:
     """Return (answer, failure). Reasoning fields are never read as answer text."""
     if not isinstance(payload, dict) or payload.get("model") != model:
@@ -144,6 +152,10 @@ def near_tee_answer(payload: object, model: str) -> tuple[str | None, str | None
         return None, "near_tee_answer_invalid"
     content = message.get("content")
     if content is None or isinstance(content, str) and not content.strip():
+        if choice.get("finish_reason") == "length":
+            # The output bound ended the answer before any content, e.g. a
+            # reasoning model spent max_tokens on reasoning (#1167).
+            return None, "near_tee_output_truncated"
         # Reasoning with empty answer content is an empty output.
         return None, "near_tee_empty_output"
     if not isinstance(content, str):
@@ -154,13 +166,6 @@ def near_tee_answer(payload: object, model: str) -> tuple[str | None, str | None
     except UnicodeEncodeError:
         return None, "near_tee_answer_invalid"
     return content, None
-
-
-def _finish_reason(payload: object) -> object:
-    choices = payload.get("choices") if isinstance(payload, dict) else None
-    if isinstance(choices, list) and len(choices) == 1 and isinstance(choices[0], dict):
-        return choices[0].get("finish_reason")
-    return None
 
 
 def _text_content(content: object) -> str | list[dict[str, str]] | None:
@@ -507,9 +512,11 @@ async def near_tee_transport(call: NearTeeCall) -> NearTeeOutcome:
             text = message.get("content") if message is not None else None
         else:
             text, failure = near_tee_answer(payload, model)
-        if failure is None and "response_format" in call.body and _finish_reason(payload) == "length":
-            # #1159: a structured (JSON) answer cut at the output bound is
-            # never a valid object; name it instead of a later parse error.
+        if failure is None and near_tee_finish_reason(payload) == "length" \
+                and ("response_format" in call.body or call.slot_name == "vision"):
+            # A JSON answer (response_format, or the vision slot's strict
+            # JSON either mode) cut at the output bound is never a valid
+            # object; name it instead of a later parse error (#1159, #1167).
             failure = "near_tee_output_truncated"
         del raw, payload
         evidence = await read_near_billing(client, key=call.key, identity=identity, operation_id=operation_id,
@@ -675,7 +682,9 @@ async def near_tee_stream_transport(call: NearTeeCall, state: NearTeeStreamState
     if evidence is None:
         raise NearTeeError("near_tee_cost_liability")
     if failure is None and not state.delivered:
-        failure = "near_tee_empty_output"
+        # Nothing delivered because the output bound ended the stream (e.g.
+        # reasoning used max_tokens) is a truncation, not an empty answer.
+        failure = "near_tee_output_truncated" if reader.finish_reason == "length" else "near_tee_empty_output"
     if failure is None and reader.finish_reason not in ("stop", "length"):
         failure = "near_tee_stream_incomplete"
     if failure is None and evidence.cost_microusd > call.request_cost_bound_microusd:
@@ -764,6 +773,9 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
                 text = None
             else:
                 text, failure = near_tee_answer(payload, profile.model)
+                if failure is None and capability == "structured_output" \
+                        and near_tee_finish_reason(payload) == "length":
+                    failure = "near_tee_output_truncated"
             del raw, payload
         elapsed_ms = max(int((time.monotonic() - started) * 1000), 0)
         evidence = await read_near_billing(client, key=key, identity=identity, operation_id=operation_id,
@@ -771,14 +783,16 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
             capture=capture_near_billing_evidence)
     if evidence is None:
         raise NearTeeError("near_tee_cost_liability")
-    if failure is not None:
-        return CapabilityProbeObservation(False, error_code=failure)
     vision_mode = None
     if capability == "structured_output" and profile.id == "near_tee.vision":
         from .near_tee_vision import structured_check_mode
         vision_mode = structured_check_mode(body)
         if vision_mode is None:
             return CapabilityProbeObservation(False, error_code="near_tee_vision_check_mode_invalid")
+    if failure is not None:
+        # A failed vision structured_output check records the mode it
+        # exercised, so a failed json_schema check cancels json_schema (#1167).
+        return CapabilityProbeObservation(False, proven_value=vision_mode, error_code=failure)
     if capability == "structured_output":
         try:
             candidate_text = text
@@ -787,9 +801,9 @@ async def near_tee_capability_check_transport(*, profile, capability: str, body:
                 from src.observer.screenshot_analysis_contract import _strip_json_fence
                 candidate_text = _strip_json_fence(text)
             if not isinstance(json.loads(candidate_text), dict):
-                return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
+                return CapabilityProbeObservation(False, proven_value=vision_mode, error_code="canary_shape_invalid")
         except (TypeError, ValueError):
-            return CapabilityProbeObservation(False, error_code="canary_shape_invalid")
+            return CapabilityProbeObservation(False, proven_value=vision_mode, error_code="canary_shape_invalid")
     # A vision structured_output proof is bound to the request mode it exercised.
     value = vision_mode or {"latency_ms": elapsed_ms, "health": "healthy"}.get(capability, "verified")
     return CapabilityProbeObservation(True, proven_value=value)

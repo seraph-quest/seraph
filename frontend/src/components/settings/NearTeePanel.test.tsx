@@ -164,3 +164,76 @@ it("caps the vision timeout at the job budget and withdraws screenshot consent e
   expect(await screen.findByRole("alert")).toHaveTextContent("between 1 and 94");
   expect(onSave).toHaveBeenCalledTimes(2);
 });
+
+it("shows inferred readiness, reasoning guidance and runs the text structured output check (#1167)", async () => {
+  const deepseek = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+  const raw = { schema_version: "seraph.model-fabric.settings.v1", status: "blocked", egress_revision: 5, egress_revoked: false,
+    near_tee: { ...setup(), reasoning_recommended_max_output_tokens: 4096, slots: { text: { ...slot, model_id: deepseek,
+      status: "ready", reason_code: null, catalog_receipt_current: true, tee_hosted_per_catalog: true,
+      structured_output_basis: null, structured_output_capability: "proof_missing:structured_output",
+      catalog_receipt: { model_id: deepseek, checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null, outcome: "passed",
+        reason_code: null, required_cost_microusd: 7373, structured_outputs: false, is_ready: null,
+        readiness_basis: "absent_flag_attested", features: ["reasoning", "tools"],
+        input_price_usd_per_million: "0.300000000", output_price_usd_per_million: "1.200000000", image_price_usd: null } } } } };
+  const next = normalizeModelFabricSettings(raw);
+  const text = next?.near_tee?.slots.text;
+  expect(text?.catalog_receipt?.readiness_basis).toBe("absent_flag_attested");
+  expect(text?.catalog_receipt?.is_ready).toBeNull();
+  expect(text?.structured_output_capability).toBe("proof_missing:structured_output");
+  expect(next?.near_tee?.reasoning_recommended_max_output_tokens).toBe(4096);
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ outcome: "passed" }), { status: 200 }));
+  vi.stubGlobal("fetch", fetch);
+  render(<NearTeePanel setup={next?.near_tee} stale={false} policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  expect(screen.getByText(/Readiness inferred: NEAR's catalog omits isReady/)).toBeInTheDocument();
+  expect(screen.getByText(/unavailable until a structured output check passes/)).toBeInTheDocument();
+  expect(screen.getByText(/Use at least 4096/)).toBeInTheDocument();
+  // 8192 x $0.30/M + 4096 x $1.20/M = $0.007373 (ceil), shown against the current reserve.
+  expect(screen.getByText(/needs a per-request reserve of at least \$0\.007373 .*reserve now \$0\.02\)/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Run structured output check" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+  const [, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+  expect(JSON.parse(String(init.body))).toMatchObject({ profile_id: "near_tee.text", capability: "structured_output" });
+  expect(JSON.parse(String(init.body))).not.toHaveProperty("structured_mode");
+  expect(await screen.findByRole("status")).toHaveTextContent("Structured output check passed");
+});
+
+it("establishes the vision JSON-schema mode only through an explicit check (#1167)", async () => {
+  const deepseek = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+  const receipt = { model_id: deepseek, checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null, outcome: "passed",
+    reason_code: null, required_cost_microusd: 9831, structured_outputs: false, readiness_basis: "absent_flag_attested",
+    features: ["reasoning", "tools"] };
+  const visionSlot: NearTeeSlotStatus = { ...slot, model_id: deepseek, profile_id: "near_tee.vision", max_output_tokens: 4096,
+    catalog_receipt_current: true, status: "ready", reason_code: null, structured_output_basis: null, catalog_receipt: receipt };
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ outcome: "passed" }), { status: 200 }));
+  vi.stubGlobal("fetch", fetch);
+  const { rerender } = render(<NearTeePanel setup={{ ...setup(), slots: { text: slot, vision: visionSlot } }} stale={false}
+    policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  expect(screen.getByText(/no current JSON-schema check: prompt-JSON requests/)).toBeInTheDocument();
+  expect(screen.queryByText(/Use at least/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Run JSON-schema structured output check" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+  const [, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+  expect(JSON.parse(String(init.body))).toMatchObject({ profile_id: "near_tee.vision", capability: "structured_output",
+    structured_mode: "json_schema" });
+  rerender(<NearTeePanel setup={{ ...setup(), slots: { text: slot, vision: { ...visionSlot, structured_output_basis: "capability_proof" } } }}
+    stale={false} policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  expect(screen.getByText(/a current capability check established JSON schema requests/)).toBeInTheDocument();
+  // With JSON schema established by a proof, the explicit way back is a prompt-JSON check.
+  expect(screen.queryByRole("button", { name: "Run JSON-schema structured output check" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Run prompt-JSON check" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  const [, again] = fetch.mock.calls[1] as unknown as [string, RequestInit];
+  expect(JSON.parse(String(again.body))).toMatchObject({ capability: "structured_output", structured_mode: "prompt_json" });
+});
+
+it("explains that a failed JSON-schema check withdraws JSON schema requests (#1167)", async () => {
+  const deepseek = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
+  const visionSlot: NearTeeSlotStatus = { ...slot, model_id: deepseek, profile_id: "near_tee.vision", status: "ready", reason_code: null,
+    catalog_receipt_current: true, structured_output_basis: null, catalog_receipt: { model_id: deepseek, checked_at_iso: null,
+      expires_at: null, outcome: "passed", reason_code: null, required_cost_microusd: 9831, structured_outputs: false } };
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ outcome: "failed", error_code: "canary_shape_invalid" }), { status: 200 })));
+  render(<NearTeePanel setup={{ ...setup(), slots: { text: slot, vision: visionSlot } }} stale={false}
+    policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Run JSON-schema structured output check" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/JSON schema requests are withdrawn; the vision slot stays blocked until a prompt-JSON check passes/);
+});

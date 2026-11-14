@@ -493,6 +493,8 @@ def _near_tee_credential_cutoff(profile_ids) -> float | None:
         from .configuration import near_tee_credential_bound_since
         return near_tee_credential_bound_since()
     except Exception:
+        # Fail open: a wrong key is caught per request by NEAR's own auth
+        # refusal; the binding only tracks deliberate key changes.
         return None
 
 

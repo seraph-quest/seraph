@@ -19,6 +19,7 @@ import pytest
 from config.settings import settings
 from tests.near_tee_support import near_inference_requests, near_settled_rows
 from tests.test_near_tee_text_slot import NearFixture, catalog_record
+from tests.test_openrouter_setup_api import keyless_openrouter, model_fabric_workspace  # noqa: F401
 from tests.test_near_tee_vertical_journeys import (  # noqa: F401
     PLAN,
     _planner_world,
@@ -242,3 +243,97 @@ async def test_background_refresher_runs_without_blocking_and_stops(accounting_d
     assert refresher._task is None
     reads = near.requests[before:]
     assert reads and all(r.method == "GET" and "authorization" not in r.headers for r in reads)
+
+
+# ── Credential binding through the settings PUT (#1178) ───────────────
+
+
+async def _text_proof(capability: str = "text"):
+    from src.model_fabric import candidate_from_profile
+    from src.model_fabric.repository import model_fabric_repository
+    profile = _text_profile()
+    candidate = candidate_from_profile(profile)
+    return await model_fabric_repository.latest_capability_proof(profile_schema_version=profile.schema_version,
+        profile_contract_hash=profile.contract_hash, profile_id=profile.id, model=profile.model,
+        endpoint=candidate.endpoint, endpoint_class=candidate.endpoint_class, adapter=candidate.adapter,
+        capability=capability)
+
+
+async def _proven_text_slot(client, monkeypatch):
+    from tests.test_near_tee_text_slot import _configure, _login, _prove_slot
+    near = NearFixture().install(monkeypatch)
+    await _login(client, monkeypatch)
+    await _configure(client)  # key A, revision 5
+    assert (await client.post("/api/settings/model-fabric/near-tee/catalog-check",
+        json={"expected_policy_revision": 5})).status_code == 200
+    await _prove_slot(client, near)
+    proof = await _text_proof()
+    assert proof is not None
+    return near, proof
+
+
+def _put_slot(revision: int, **near_tee):
+    from tests.test_near_tee_text_slot import slot_payload
+    return {"expected_policy_revision": revision, "near_tee": {"slots": {"text": slot_payload()}, **near_tee}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_put_with_new_key_invalidates_proofs_and_unchanged_key_keeps_them(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch):
+    _near, proof = await _proven_text_slot(client, monkeypatch)
+    # Unchanged key (no api_key, and the same key again): same profile, proofs keep counting.
+    unchanged = await client.put("/api/settings/model-fabric", json=_put_slot(5))
+    assert unchanged.status_code == 200, unchanged.text
+    assert (await _text_proof()) == proof
+    from tests.test_near_tee_text_slot import PROVIDER_KEY
+    same_key = await client.put("/api/settings/model-fabric", json=_put_slot(7, api_key=PROVIDER_KEY))
+    assert same_key.status_code == 200, same_key.text
+    assert (await _text_proof()) == proof
+    # A new key: proofs checked before the change no longer count.
+    new_key = await client.put("/api/settings/model-fabric", json=_put_slot(9, api_key="private-intercepted-key-b"))
+    assert new_key.status_code == 200, new_key.text
+    assert await _text_proof() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_failed_put_with_new_key_keeps_proofs_for_the_unchanged_key(client, model_fabric_workspace,
+        keyless_openrouter, monkeypatch):
+    from src.api import model_fabric_settings as api
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    from src.workspace.accounting_witness import PolicyRevisionConflict
+    from src.workflows.job_runtime import durable_job_repository
+    from tests.test_near_tee_text_slot import PROVIDER_KEY
+    _near, proof = await _proven_text_slot(client, monkeypatch)
+    fingerprint_a = read_model_fabric_configuration().near_tee.credential_fingerprint
+
+    # In-lock revision conflict after the key-B binding was recorded: nothing
+    # is published, the configuration still names key A, A's proofs count.
+    real_write = api.write_model_fabric_configuration
+
+    def conflict(*_args, **_kwargs):
+        raise PolicyRevisionConflict("changed")
+    monkeypatch.setattr(api, "write_model_fabric_configuration", conflict)
+    refused = await client.put("/api/settings/model-fabric", json=_put_slot(5, api_key="private-intercepted-key-b"))
+    assert refused.status_code == 409, refused.text
+    monkeypatch.setattr(api, "write_model_fabric_configuration", real_write)
+    assert read_model_fabric_configuration().near_tee.credential_fingerprint == fingerprint_a
+    assert (await _text_proof()) == proof
+    assert (await _text_proof()) == proof  # the restored binding stays
+
+    # Accounting failure mid-save (key B left on the revoked intermediate):
+    # re-saving key A restores A's binding and its proofs.
+    real_configure = durable_job_repository.configure_inference_accounting
+
+    async def unavailable(*_args, **_kwargs):
+        raise RuntimeError("accounting_settings_revision_unavailable")
+    monkeypatch.setattr(durable_job_repository, "configure_inference_accounting", unavailable)
+    failed = await client.put("/api/settings/model-fabric", json=_put_slot(5, api_key="private-intercepted-key-b"))
+    assert failed.status_code == 503, failed.text
+    monkeypatch.setattr(durable_job_repository, "configure_inference_accounting", real_configure)
+    revision = read_model_fabric_configuration().egress_revision
+    resaved = await client.put("/api/settings/model-fabric", json=_put_slot(revision, api_key=PROVIDER_KEY))
+    assert resaved.status_code == 200, resaved.text
+    assert read_model_fabric_configuration().near_tee.credential_fingerprint == fingerprint_a
+    assert (await _text_proof()) == proof

@@ -168,7 +168,10 @@ failing. Therefore:
   complete profile hash (model and slot settings) and the configuration
   revision (every settings save); a capability proof is bound to the
   complete profile hash and the NEAR credential (a new key requires the checks
-  again). Neither expires by age. Stored receipts that carry an `expires_at`
+  again; a save that fails, or a return to the key just replaced, restores
+  that key's binding). The credential binding fails open when its record is
+  missing or unreadable: a wrong key is caught per request by NEAR's own auth
+  refusal; the binding only tracks deliberate key changes. Neither expires by age. Stored receipts that carry an `expires_at`
   and stored proofs with an `expires_at` stay valid while their binding
   matches; the capability-check `proof_ttl_seconds` field is still accepted
   and stored but is advisory for NEAR TEE slot profiles. Other profiles keep

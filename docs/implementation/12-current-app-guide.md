@@ -1632,7 +1632,9 @@ In **Settings → NEAR TEE · text slot**:
 
 These checks are a one-time setup (ADR-035 amendment 2026-11-14, #1178): once
 passed they stay valid until the model, a slot setting or the NEAR key
-changes; age never blocks the slot. Settings shows each slot's catalog basis
+changes; age never blocks the slot. A save that fails does not count as a key
+change; a wrong key is caught per request by NEAR's own auth refusal, and the
+key binding only tracks deliberate key changes. Settings shows each slot's catalog basis
 ("setup check at &lt;time&gt;") and when NEAR's catalog last confirmed it.
 Seraph re-reads the public catalog record in the background shortly after
 startup and then every few hours (at most 6, sooner with a lower refresh

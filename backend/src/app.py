@@ -842,7 +842,7 @@ def create_app() -> FastAPI:
     validate_auth_configuration()
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.10.7",
+        version="2026.11.14",
         debug=settings.debug,
         lifespan=lifespan,
     )

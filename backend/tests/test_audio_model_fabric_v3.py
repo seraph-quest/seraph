@@ -183,7 +183,9 @@ async def test_audio_accounting_rejects_missing_native_receipt_before_ephemeral_
     setup = configured_audio()
     configured = ModelFabricConfiguration(status="ready", openrouter_setup=setup, egress_revision=1)
     monkeypatch.setattr("src.model_fabric.configuration.read_model_fabric_configuration", lambda: configured)
-    monkeypatch.setattr(accounting, "_policy_for_runtime", lambda _: (configured, "d"*64))
+    # _policy_for_runtime takes (runtime_path, bound_profile); the base
+    # one-argument stub raised TypeError before reaching any audio check.
+    monkeypatch.setattr(accounting, "_policy_for_runtime", lambda *_: (configured, "d"*64))
     monkeypatch.setattr("src.model_fabric.remote_inference_admission.current_remote_inference_receipt_binding", lambda: None)
     request = GpuAdmissionRequest(operation_id="audio-original", owner_id="operator:original", session_id="conversation",
         job_id="audio-transcription:original", runtime_path="audio_transcription", data_digest="e"*64,

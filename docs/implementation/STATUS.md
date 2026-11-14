@@ -659,9 +659,11 @@ drafts, Calendar meeting prep and communication preparation. Repository work
 stays blocked on NEAR TEE: its repair iteration model step
 (`repo_repair_source`, whose consented exact request body and code-egress
 consent are bound to the retired OpenRouter target) has no NEAR TEE adapter,
-so `repository_work` is never offered and a repository intent or plan is
+so the `repository_work` tool is never offered. A frozen tool set or explicit
+plan naming it, and an admitted repository child (including on resume), is
 refused with `near_tee_route_unsupported` before any planning, reservation or
-contact (no planning cost). A NEAR TEE answer that is not adopted (for
+contact. A repository-worded intent submitted without that tool is ordinary
+NEAR planning (charged) and cannot produce a repository step. A NEAR TEE answer that is not adopted (for
 example `near_tee_output_truncated` for a JSON draft cut at the slot's output
 bound) settles its NEAR cost and blocks the Mail or Calendar card with that
 code. Every vertical blocks

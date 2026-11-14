@@ -42,6 +42,16 @@ def _is_repository_work_child(child_projection) -> bool:
     return isinstance(arguments, dict) and arguments.get("tool_id") == REPOSITORY_WORK_DESCRIPTOR_ID
 
 
+def _repository_route_blocked() -> dict | None:
+    """The blocked no-contact outcome when repository repair has no route (#1159)."""
+    from src.model_fabric.near_tee_vertical import repository_repair_route_block
+    reason = repository_repair_route_block()
+    if reason is None:
+        return None
+    return {"verified": False, "blocked": True, "reason": reason, "provider_contact_state": "not_started",
+        "no_learning": True, "native_execution": True}
+
+
 async def _binding_is_repository_work(jobs, binding) -> bool:
     """Read the private child input before selecting the fixed route."""
     async with jobs._session() as db:
@@ -733,6 +743,10 @@ async def continue_native_wait(service, jobs, parent_id, *, principal):
         await assert_general_task_child_phase_current(db, child)
         binding = child_binding(child)
         repository_child = _is_repository_work_child(child)
+    if repository_child and (blocked := _repository_route_blocked()) is not None:
+        # #1159: a pending repository child (e.g. after a crash) cannot run
+        # its repair model step on NEAR TEE: no claim, reservation or contact.
+        return blocked, None, None
     if repository_child:
         from src.workflows.repo_repair_source import prepare_repository_native_source
         prepared = await prepare_repository_native_source(service, jobs, binding,
@@ -764,6 +778,10 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
         binding = resume_child["binding"]
         if binding.parent_job_id != job_id:
             raise BoardError("general_task_resume_binding_changed", "Original native parent required", status_code=409)
+        if await _binding_is_repository_work(jobs, binding) and (blocked := _repository_route_blocked()) is not None:
+            # #1159: an approved repository child cannot resume its repair
+            # model step on NEAR TEE; blocked with no contact.
+            return blocked
         output, _artifact, _reference = await _execute_interpreter_child(service, jobs, binding,
             child_owner=resume_child["runtime_owner"], principal=principal, approved_resume=True)
         if _artifact is None:
@@ -821,14 +839,11 @@ async def execute_interpreter(service, jobs, *, job_id, owner, fence, principal,
             inputs = await resolve_current_native_step_inputs(db, parent, task, attempt,
                 manifest, envelope, ready)
         service.check_method_source(envelope, ready, inputs)
-        if _is_repository_work_descriptor(descriptor):
-            from src.model_fabric.near_tee_vertical import repository_repair_route_block
-            if reason := repository_repair_route_block():
-                # #1159: a repository Task published before retirement cannot
-                # run its repair model step on NEAR TEE: blocked before the
-                # child is admitted, with no reservation or contact.
-                return {"verified": False, "blocked": True, "reason": reason,
-                    "provider_contact_state": "not_started", "no_learning": True, "native_execution": True}
+        if _is_repository_work_descriptor(descriptor) and (blocked := _repository_route_blocked()) is not None:
+            # #1159: a repository Task published before retirement cannot run
+            # its repair model step on NEAR TEE: blocked before the child is
+            # admitted, with no reservation or contact.
+            return blocked
         binding, _admitted = await admit_native_step(jobs, job_id, owner=owner, fence=fence,
             step=ready, descriptor=descriptor, inputs=inputs, service=service)
         if _is_repository_work_descriptor(descriptor):

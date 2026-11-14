@@ -1288,8 +1288,11 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > Work Board card proposals, guardian opportunity assessment and plans,
 > research dossiers, Mail reply drafts, Calendar meeting prep and
 > communication preparation run there, settling from NEAR billing with no
-> fallback. Repository work (repair) stays blocked on NEAR TEE with
-> `near_tee_route_unsupported`, refused before planning so nothing is spent.
+> fallback. Repository work (repair) stays blocked on NEAR TEE: its tool is
+> not offered, and an explicit repository plan or admitted repository child
+> is refused with `near_tee_route_unsupported` before any contact. A
+> repository-worded request without that tool is planned (and charged) as
+> ordinary NEAR planning.
 > Without a ready slot each vertical blocks with its stable reason, which the
 > Work Board explains. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.

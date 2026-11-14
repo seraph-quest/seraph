@@ -1441,6 +1441,10 @@ def _stable_reason_code(value: Any, *, fallback: str = "execution_blocked") -> s
     candidate = _text(value).lower()
     if candidate in _STABLE_REASON_CODES:
         return candidate
+    from src.model_fabric.retirement import ROUTE_BLOCK_REASONS
+    if candidate in ROUTE_BLOCK_REASONS:
+        # ADR-035 route blocks are stable operator-visible codes (#1159).
+        return candidate
     if any(token in candidate for token in ("unknown", "effect", "cost", "reconcile")):
         return "unknown_effect"
     if any(token in candidate for token in ("approval", "input", "consent", "review")):
@@ -11078,6 +11082,8 @@ class WorkBoardDispatcher:
                 if outcome.get("native_execution") and not outcome.get("verified") and task.status is WorkBoardStatus.blocked:
                     return task
                 await self._settle_parent(request.workflow_run_id, parent_owner, parent_fence, outcome)
+                if (blocked_task := await self._project_precontact_block(task, attempt, outcome)) is not None:
+                    return blocked_task
                 projection = await self.jobs.get_job(request.workflow_run_id)
                 proof = self._workflow_readback(projection, request.workflow_run_id)
                 if not outcome.get("verified") or projection.get("status") != "succeeded" or proof is None:
@@ -11177,6 +11183,17 @@ class WorkBoardDispatcher:
                 result_refs=outcome.get("result_refs"), artifact_refs=outcome.get("artifact_refs"))
             return projected.task, projected.attempt
 
+    async def _project_precontact_block(self, task, attempt, outcome):
+        """A resumed native step refused before any contact (#1159): the
+        settled root and the card close blocked with its stable reason."""
+        if (outcome.get("verified") or not outcome.get("blocked")
+                or outcome.get("provider_contact_state") != "not_started"):
+            return None
+        reason = _stable_reason_code(_text(outcome.get("reason")))
+        return (await self._project(task, attempt, board_revision=task.task_revision,
+            status=WorkBoardStatus.blocked, outcome=reason, block_kind="capability", block_reason=reason,
+            result_refs=outcome.get("result_refs"))).task
+
     async def _resume_native_general_task(self, owner, task_id, request):
         from src.work_board.channel_capture import staged_captured_source_identity
         with staged_captured_source_identity():
@@ -11223,6 +11240,8 @@ class WorkBoardDispatcher:
                 if outcome.get("native_execution") and not outcome.get("verified") and task.status is WorkBoardStatus.blocked:
                     return task
                 await self._settle_parent(request.workflow_run_id, parent_owner, parent_fence, outcome)
+                if (blocked_task := await self._project_precontact_block(task, attempt, outcome)) is not None:
+                    return blocked_task
                 projection = await self.jobs.get_job(request.workflow_run_id)
                 proof = self._workflow_readback(projection, request.workflow_run_id)
                 if not outcome.get("verified") or projection.get("status") != "succeeded" or proof is None:

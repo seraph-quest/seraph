@@ -62,7 +62,7 @@ NEAR_TEE_TEXT_PROFILE_ID = "near_tee.text"
 
 async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_000_000,
         request_cost_bound_microusd: int = 20_000, capabilities=("text", "structured_output"),
-        timeout_seconds: float = 30.0, jobs=None, near=None):
+        timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2):
     """A ready NEAR TEE text slot with every dispatch gate satisfied; no contact.
 
     - the canonical configuration (consented, enabled, behind the shared lane);
@@ -95,7 +95,7 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
     fingerprint = hashlib.sha256(NEAR_TEE_VERTICAL_KEY.encode()).hexdigest()[:12]
     write_near_tee_text_configuration(ceiling_microusd=ceiling_microusd,
         request_cost_bound_microusd=request_cost_bound_microusd, credential_fingerprint=fingerprint,
-        timeout_seconds=timeout_seconds)
+        timeout_seconds=timeout_seconds, egress_revision=egress_revision)
     await vault_repository.store("near_api_key", NEAR_TEE_VERTICAL_KEY)
     configured = read_model_fabric_configuration()
     receipts = await run_catalog_check(configured)
@@ -148,3 +148,13 @@ def assume_repository_repair_route_available(monkeypatch) -> None:
     """
     from src.model_fabric import near_tee_vertical
     monkeypatch.setattr(near_tee_vertical, "repository_repair_route_block", lambda: None)
+
+
+def restore_repository_repair_route_block(monkeypatch) -> None:
+    """Undo ``assume_repository_repair_route_available`` (the retirement switch)."""
+    from src.model_fabric import near_tee_vertical
+    monkeypatch.setattr(near_tee_vertical, "repository_repair_route_block", _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK)
+
+
+from src.model_fabric import near_tee_vertical as _near_tee_vertical  # noqa: E402
+_REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route_block

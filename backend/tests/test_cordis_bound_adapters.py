@@ -2,7 +2,8 @@
 
 Real Auth, SQLite, Vault, the real mail/calendar owner routes (connections are
 written by those owners, so they are ``active``), the real reviewed Cordis child.
-Only Google/OpenRouter HTTP and DNS are intercepted; provider requests are counted.
+Only Google/NEAR TEE HTTP and DNS are intercepted (ADR-035: the draft runs on the NEAR TEE
+text slot); provider requests are counted.
 """
 from __future__ import annotations
 
@@ -21,8 +22,7 @@ from tests.test_mail_reply_operator_vertical import prepared_flow
 from src.runtime_plugins.dispatch import NativeServiceBlocked
 from src.workflows.job_runtime import DurableJobRepository
 
-# ADR-035: reuses the operator mail-reply vertical whose model step runs over the intercepted historical OpenRouter route
-pytestmark = [needs_cordis, pytest.mark.asyncio, pytest.mark.openrouter_legacy]
+pytestmark = [needs_cordis, pytest.mark.asyncio]
 
 
 @asynccontextmanager
@@ -30,7 +30,7 @@ async def mail_env(accounting_db, real_auth, monkeypatch, *, hook=None, until=No
     from src.auth.service import authenticate_token
     from src.runtime_plugins import bridge
     client, post, google, model_calls, preview, body, owner, source = await prepared_flow(
-        accounting_db, real_auth, monkeypatch, approve=False, until=until)
+        accounting_db, real_auth, monkeypatch, approve=False, until=until, near=True)
     from config.settings import settings
     from src.db.models import Goal
     from src.goals.contracts import GoalAdmissionBudget

@@ -8,11 +8,17 @@
 
 - primary design doc: [06. Presence And Reach](/research/presence-and-reach)
 
-## Branch-local #751 Audio Vertical Slice
+## Branch-local #751 Audio Vertical Slice (retired)
+
+**Retired 2026-11-14 ([#1179](https://github.com/seraph-quest/seraph/issues/1179)):**
+voice input was removed by operator decision. The modules, routes and control
+named below no longer exist; the `audio_ingress_jobs` rows are kept unused. This
+section is history, not current behavior. See the
+[current app guide](./12-current-app-guide.md#local-cockpit-interaction-boundaries).
 
 The `feat/751-ptt-audio-impl` branch adds a **Partial**, provider-free
 push-to-talk (PTT) vertical slice in
-[`backend/src/guardian/audio_ingress.py`](../../backend/src/guardian/audio_ingress.py).
+`backend/src/guardian/audio_ingress.py` (removed).
 This is branch-local work and is not shipped `develop` truth. The authenticated
 `/api/audio/ptt` and `/api/audio/ingress` routes use #750 server-owned session,
 message, attachment, and request identities, persist one SQLite

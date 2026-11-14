@@ -259,11 +259,13 @@ time, not provider-specific gates.
 
 ### Audio (ADR-033)
 
-The OpenRouter setup.v3 audio route is never activated; audio stays the
-explicit "Voice route unavailable" state. A later NEAR TEE audio slot for
-`openai/whisper-large-v3` requires its own ticket amending this ADR with
-source-attested endpoint, codec and pricing evidence. ADR-033's quarantine,
-transcript-correction, consent and separate Task allowance invariants carry over.
+Retired 2026-11-14 ([#1179](https://github.com/seraph-quest/seraph/issues/1179),
+operator decision): Seraph has no voice input, and
+[ADR-033](./033-governed-optional-audio-route.md) is retired. The OpenRouter
+setup.v3 audio route can never be enabled (`audio_route_retired`), and no audio
+transcription is admitted, reserved or contacted. Audio DB rows are kept unused.
+`openai/whisper-large-v3` stays unselectable; adding voice back needs a new
+operator decision and a new ADR, not an amendment of this section.
 
 ### Cordis fit and rollback
 
@@ -303,7 +305,7 @@ Model choice narrows to the allowlist; since the 2026-11-14 amendment DeepSeek
 passes the catalog check with inferred readiness, and its structured output
 rests on capability proofs, not catalog metadata. One Unknown NEAR cost blocks all inference,
 chat included, until the operator settles it. Semantic recall is lexical until re-indexing.
-Voice stays unavailable. OpenRouter code remains until its liabilities clear.
+Voice input is retired (#1179). OpenRouter code remains until its liabilities clear.
 STATUS and the Current App Guide change only as slices merge.
 
 ## Inspected sources

@@ -1168,8 +1168,8 @@ scheduler).
 Every job registered by `init_scheduler` and every `user_cron:*` job is gated by
 a closed classification: `work_board_dispatch` by dispatch, the other system
 jobs and user cron jobs (including `run_source_watch`) by the scheduler.
-Retention and cleanup jobs (`screen_cleanup`, `audio_ingress_cleanup`,
-`cordis_mail_retention`) are exempt and keep running while a domain is blocked
+Retention and cleanup jobs (`screen_cleanup`, `cordis_mail_retention`) are
+exempt and keep running while a domain is blocked
 or Cordis is missing. An unclassified system job is refused at registration.
 Timers keep their phase: a tick whose domain is not active returns at entry
 (before the background-inference toggle, any admission or contact) and records
@@ -1924,20 +1924,25 @@ is **Partial**:
   replacement attempt. Work continues in the cockpit, where the plan is reviewed,
   edited and promoted as for any Task. A small document attachment enters C6
   quarantine only through the explicit document selection.
-- **Voice.** Live voice shows **Voice route unavailable** in push-to-talk: no
-  exact endpoint, codec and pricing proof is issued, so model consent cannot be
-  granted ([ADR-033](./decisions/033-governed-optional-audio-route.md)). Enabling
-  the live route is tracked follow-up work. The correction path is implemented:
-  an operator reviews the transcript, saves one corrected canonical Message, and a
-  separate explicit fresh Goal/Task action captures that corrected text as an
-  unexecuted review-only intent without replaying the original call or
-  transferring audio costs. Tests exercise this with a scripted transcription at
-  the owned transport.
-- Audio documentation source objects under `.model-fabric/` are declared cache
-  workspace state: backups and restores succeed with or without them, and they
-  are never archived. Their canonical attestation rows stay in `seraph.db`; after
-  a restore, a missing object fails closed with
-  `audio_documentation_source_missing` until the documentation is staged again.
+- **Voice input: removed.** Seraph has no voice input
+  ([#1179](https://github.com/seraph-quest/seraph/issues/1179), operator
+  decision 2026-11-14; the operator dictates with their own tool). The
+  push-to-talk control, `/api/audio/*`, the audio ingress worker, the
+  `audio_ingress_cleanup` job and the audio documentation settings endpoints
+  are gone, and [ADR-033](./decisions/033-governed-optional-audio-route.md) is
+  retired. The `audio_ingress_jobs` and `audio_consent_grants` tables are kept
+  unused with their existing rows; nothing creates or advances them, and they are
+  no longer listed as effective grants. Deleting a conversation still deletes its
+  historical audio rows, but Seraph no longer touches the retired worker's
+  short-lived quarantine files. A stored setup.v3 still saves, but its audio slot
+  can never be enabled again (`audio_route_retired`), and no
+  `audio_transcription_v1` run can be admitted or contacted. Telegram voice notes
+  keep their existing metadata-only, always-degraded handoff record.
+- Audio documentation source objects under `.model-fabric/` (historical; the
+  acquisition endpoints were removed by #1179) are declared cache workspace
+  state: backups and restores succeed with or without them, and they are never
+  archived. Their canonical attestation rows stay in `seraph.db`, and startup
+  still reconciles settled private staging.
 - **Channel signing.** Capture origins and cockpit output links are HMAC-signed
   with a key derived (HKDF, `seraph.channel-capture.v1`) from the workspace vault
   key, so a stock production deployment with only `OPERATOR_AUTH_SECRET_HASH`
@@ -1957,13 +1962,8 @@ Live Telegram delivery, provider operation and native macOS/Safari capture remai
 unverified by these provider-free checks.
 
 The managed development cockpit may be opened over local HTTP for text and
-operator controls. Browser microphone capture follows the browser secure
-context rule: `http://localhost` is eligible, while a LAN HTTP origin such as
-`http://192.168.1.26:3001` cannot request microphone permission. Seraph states
-that limitation directly in the push-to-talk control. The two consent grants
-remain available before a conversation exists, but recording stays disabled
-until a session can own the durable audio request. Audio processing may still
-show a governed degraded state when no audio transport is configured.
+operator controls. It never requests microphone access (voice input was removed
+by #1179).
 
 Onboarding presents an explicit **Skip onboarding** action in the cockpit, in
 the conversation dock and the **More** menu while onboarding is active. It
@@ -4168,15 +4168,14 @@ preview with redacted fixtures, not in a live managed cockpit.
 │  approvals   │  Home · Inbox · Work · Goals ·        │  thread picker         │
 │  desktop     │  Library · Connections · Reports      │  "Seraph · <doing now>"│
 │  queue       │  (Work/Connections panes flow inline; │  messages              │
-│ Sections     │   Goals renders inline)               │  voice (collapsed)     │
-│              │                                       │  composer              │
+│ Sections     │   Goals renders inline)               │  composer              │
 └──────────────┴──────────────────────────────────────┴────────────────────────┘
 ```
 
 - **Conversation.** The dock on the right is the only conversation surface,
   and every section keeps it. It holds the thread picker, **New thread**, the
-  current Seraph activity, the messages, onboarding prompts, push-to-talk and
-  the composer. **Shift+C** opens and focuses it. It can be collapsed to a slim
+  current Seraph activity, the messages, onboarding prompts and the composer
+  (the collapsed voice-input section was removed by #1179). **Shift+C** opens and focuses it. It can be collapsed to a slim
   **Chat** tab, and the open/closed choice persists. Before this change,
   messages showed only in the optional **Conversation** window. The default
   section view had no visible chat, only a thin composer at the bottom.

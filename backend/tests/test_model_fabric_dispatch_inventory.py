@@ -461,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2358,
+        2426,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -470,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2371,
+        2439,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -479,7 +479,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2386,
+        2454,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -488,7 +488,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "local_runtime_profile_verifier.py",
-        263,
+        264,
         "_verify_profile",
         "client.post",
         "transitional_provider_call",
@@ -497,7 +497,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "local_runtime_profile_verifier.py",
-        311,
+        312,
         "_probe_backend",
         "client.get",
         "health_or_metadata_probe",

@@ -19,7 +19,7 @@ from src.auth.service import AuthenticatedOperator, authenticate_principal
 from src.db import engine as database
 from src.db.models import AuditEvent, Goal, OperatorIdentity, OperatorSession
 from src.goals.contracts import GoalProgramme, GoalProgrammeAccept, GoalProgrammeRequest, GoalProgrammeAuthorityBinding
-from src.model_fabric.effective_policy import current_inference_policy
+from src.model_fabric.near_tee_vertical import vertical_inference_policy
 
 CAPABILITY_IDS = ("guardian.goal-discovery.v1", "guardian.query-plan.v1", "guardian.public-search.v1",
                   "source.public-extract.v1", "guardian.prepare-brief.v1")
@@ -54,8 +54,15 @@ def _aware(value: datetime) -> datetime:
 
 
 def _policy_binding() -> tuple[int, str, str | None]:
+    """The programme's route binding: the research route's current policy.
+
+    ADR-035 (#1180): a programme's inference runs on the research route
+    (``readonly_research_child``), served by the NEAR TEE text slot. Binding
+    to the OpenRouter-only projection made every programme preview/accept on
+    a NEAR-only configuration fail with ``provider_policy_unavailable``.
+    """
     try:
-        configuration, digest = current_inference_policy()
+        configuration, digest, _setup = vertical_inference_policy("readonly_research_child")
         return configuration.egress_revision, digest, None
     except PermissionError:
         # No credentials or private settings enter the public preview.

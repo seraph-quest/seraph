@@ -68,7 +68,7 @@ it("runs the explicit catalog check at the current revision and shows the receip
   const response = { ...saved(5), near_tee: setup({ ...slot, status: "configuration_required", reason_code: "proof_missing:health",
     catalog_receipt_current: true, tee_hosted_per_catalog: true,
     tee_hosting_label: "TEE-hosted per NEAR catalog as of 2026-11-13T00:00:00+00:00; NEAR gateway receives plaintext; attestation not verified by Seraph; no end-to-end encryption",
-    catalog_receipt: { model_id: "Qwen/Qwen3.8-27B", checked_at_iso: "2026-11-13T00:00:00+00:00", expires_at: null,
+    catalog_receipt: { model_id: "Qwen/Qwen3.8-27B", checked_at_iso: "2026-11-13T00:00:00+00:00",
       outcome: "passed", reason_code: null, required_cost_microusd: 1711 } }) };
   const fetch = vi.fn(async () => new Response(JSON.stringify({ ...response, tee_verified: undefined }), { status: 200 }));
   vi.stubGlobal("fetch", fetch);
@@ -122,7 +122,7 @@ it("saves only the vision slot after both plaintext and separate screenshot cons
 it("runs the vision capability check for vision mechanics and stays usable without metadata", async () => {
   const visionSlot: NearTeeSlotStatus = { ...slot, model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct", profile_id: "near_tee.vision",
     catalog_receipt_current: true, reason_code: "proof_missing:health",
-    catalog_receipt: { model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct", checked_at_iso: "2026-11-13T00:00:00+00:00", expires_at: null,
+    catalog_receipt: { model_id: "Qwen/Qwen3-VL-30B-A3B-Instruct", checked_at_iso: "2026-11-13T00:00:00+00:00",
       outcome: "passed", reason_code: null, required_cost_microusd: 3584, structured_outputs: true } };
   const fetch = vi.fn(async () => new Response(JSON.stringify({ outcome: "passed" }), { status: 200 }));
   vi.stubGlobal("fetch", fetch);
@@ -171,7 +171,7 @@ it("shows inferred readiness, reasoning guidance and runs the text structured ou
     near_tee: { ...setup(), reasoning_recommended_max_output_tokens: 4096, slots: { text: { ...slot, model_id: deepseek,
       status: "ready", reason_code: null, catalog_receipt_current: true, tee_hosted_per_catalog: true,
       structured_output_basis: null, structured_output_capability: "proof_missing:structured_output",
-      catalog_receipt: { model_id: deepseek, checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null, outcome: "passed",
+      catalog_receipt: { model_id: deepseek, checked_at_iso: "2026-11-14T00:00:00+00:00", outcome: "passed",
         reason_code: null, required_cost_microusd: 7373, structured_outputs: false, is_ready: null,
         readiness_basis: "absent_flag_attested", features: ["reasoning", "tools"],
         input_price_usd_per_million: "0.300000000", output_price_usd_per_million: "1.200000000", image_price_usd: null } } } } };
@@ -199,7 +199,7 @@ it("shows inferred readiness, reasoning guidance and runs the text structured ou
 
 it("establishes the vision JSON-schema mode only through an explicit check (#1167)", async () => {
   const deepseek = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
-  const receipt = { model_id: deepseek, checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null, outcome: "passed",
+  const receipt = { model_id: deepseek, checked_at_iso: "2026-11-14T00:00:00+00:00", outcome: "passed",
     reason_code: null, required_cost_microusd: 9831, structured_outputs: false, readiness_basis: "absent_flag_attested",
     features: ["reasoning", "tools"] };
   const visionSlot: NearTeeSlotStatus = { ...slot, model_id: deepseek, profile_id: "near_tee.vision", max_output_tokens: 4096,
@@ -230,10 +230,29 @@ it("explains that a failed JSON-schema check withdraws JSON schema requests (#11
   const deepseek = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
   const visionSlot: NearTeeSlotStatus = { ...slot, model_id: deepseek, profile_id: "near_tee.vision", status: "ready", reason_code: null,
     catalog_receipt_current: true, structured_output_basis: null, catalog_receipt: { model_id: deepseek, checked_at_iso: null,
-      expires_at: null, outcome: "passed", reason_code: null, required_cost_microusd: 9831, structured_outputs: false } };
+      outcome: "passed", reason_code: null, required_cost_microusd: 9831, structured_outputs: false } };
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ outcome: "failed", error_code: "canary_shape_invalid" }), { status: 200 })));
   render(<NearTeePanel setup={{ ...setup(), slots: { text: slot, vision: visionSlot } }} stale={false}
     policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: "Run JSON-schema structured output check" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(/JSON schema requests are withdrawn; the vision slot stays blocked until a prompt-JSON check passes/);
+});
+
+it("shows the receipt basis, last confirmation and a non-blocking catalog warning, never an expiry (#1178)", () => {
+  const raw = { ...saved(5), near_tee: setup({ ...slot, status: "ready", reason_code: null,
+    catalog_receipt_current: true, tee_hosted_per_catalog: true,
+    tee_hosting_label: "TEE-hosted per NEAR catalog as of 2026-11-14T06:00:00+00:00; NEAR gateway receives plaintext; attestation not verified by Seraph; no end-to-end encryption",
+    catalog_receipt: { model_id: "Qwen/Qwen3.8-27B", checked_at_iso: "2026-11-10T00:00:00+00:00", basis: "setup_check",
+      outcome: "passed", reason_code: null, required_cost_microusd: 1711 },
+    catalog_last_confirmed_at: "2026-11-14T06:00:00+00:00", catalog_last_confirmed_basis: "background_read",
+    catalog_warning: { reason_code: "near_tee_catalog_not_ready", since: "2026-11-14T12:00:00+00:00",
+      message: "NEAR catalog reports Qwen/Qwen3.8-27B not ready since 2026-11-14T12:00:00+00:00. Requests are not blocked; the per-request model echo and provider errors still apply." },
+    catalog_background_read: { last_attempt_at: "2026-11-14T12:00:00+00:00", last_attempt_outcome: "read", last_attempt_error: null } }) };
+  const normalized = normalizeModelFabricSettings(raw);
+  render(<NearTeePanel setup={normalized?.near_tee} stale={false} policyRevision={5} laneCeilingMicrousd={1_000_000} onSave={vi.fn()} />);
+  expect(screen.getByText(/Catalog basis: setup check at 2026-11-10T00:00:00\+00:00 · last confirmed 2026-11-14T06:00:00\+00:00 \(background read\)/)).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("NEAR catalog reports Qwen/Qwen3.8-27B not ready since 2026-11-14T12:00:00+00:00");
+  expect(screen.getByLabelText("NEAR TEE catalog refresh hours")).toHaveValue(24);
+  expect(screen.queryByText(/expires|lifetime/i)).toBeNull();
+  expect(screen.queryByText(/^Blocked:/)).toBeNull();
 });

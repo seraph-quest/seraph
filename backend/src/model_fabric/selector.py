@@ -535,8 +535,9 @@ def _proof_reason(
         if context.requirements.max_cost_microusd is None or candidate.profile.cost_microusd is None:
             return "profile_cost_unknown"
         if candidate.profile.provider_kind == NEAR_TEE_PROVIDER_KIND:
-            # Price freshness is the NEAR catalog receipt (TTL 1-24h), which
-            # the NEAR TEE caller re-validates locally before admission.
+            # Prices come from the NEAR catalog setup receipt, which the NEAR
+            # TEE caller re-validates locally (binding, not age) before
+            # admission (ADR-035 amendment #1178).
             if candidate.profile.cost_source != "near_tee_catalog_receipt":
                 return "profile_cost_source_missing_or_stale"
         elif (
@@ -557,7 +558,7 @@ def _proof_reason(
         return None
     exact: dict[str, ModelRouteProof] = {}
     expired: set[str] = set()
-    from .proofs import proof_is_fresh, validate_model_route_proof
+    from .proofs import proof_aged_out, proof_is_fresh, validate_model_route_proof
 
     for proof in proofs:
         try:
@@ -575,7 +576,8 @@ def _proof_reason(
         ):
             if proof_is_fresh(proof, now=now):
                 exact[proof.capability] = proof
-            elif proof.outcome == "passed" and proof.expires_at <= now:
+            elif proof_aged_out(proof, now=now):
+                # Never a NEAR TEE slot proof: those do not age out (#1178).
                 expired.add(proof.capability)
     if "audio_input" in required:
         from .audio_contracts import validate_audio_route_proof

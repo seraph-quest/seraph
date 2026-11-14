@@ -196,6 +196,9 @@ def isolate_operator_auth_defaults(monkeypatch):
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
     monkeypatch.setattr(settings, "operator_auth_secret", "")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    # No background NEAR catalog reads in tests (#1178); tests drive
+    # refresh_catalog_observations directly over intercepted transport.
+    monkeypatch.setattr(settings, "near_tee_catalog_refresh_enabled", False)
     yield
     _reset_login_throttle_for_tests()
 

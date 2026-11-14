@@ -2,8 +2,9 @@
 
 Real Auth, SQLite, durable jobs, CapabilityExecutionHost, model-fabric
 execute_streaming behind the single remote_inference_admission_broker and the
-real reviewed Cordis child. Model inference uses fixed in-memory transport
-responses; Python socket connects and DNS are denied.
+real reviewed Cordis child. Model inference runs on the ADR-035 NEAR TEE text
+slot against the intercepted NEAR gateway (fixed in-memory responses); Python
+socket connects and DNS are denied.
 """
 from __future__ import annotations
 
@@ -17,18 +18,14 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI
 
-from tests.async_wait_support import started_or_raise
 from tests.cordis_research import needs_cordis, package_variant, research_host
-from tests.test_inference_accounting import accounting_db, request as broker_request, setup_configuration  # noqa: F401
+from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import ResponseBytes, real_auth  # noqa: F401
-from src.auth.middleware import OperatorAuthMiddleware
 from src.runtime_plugins.dispatch import NativeServiceBlocked
 from src.workflows.job_runtime import DurableJobRepository
 
-# ADR-035: governed inference lanes are pinned over the intercepted historical OpenRouter route (canary + SSE)
-pytestmark = [needs_cordis, pytest.mark.asyncio, pytest.mark.openrouter_legacy]
+pytestmark = [needs_cordis, pytest.mark.asyncio]
 SECRET = "VAULT_SECRET_CANARY_1018_value"
 
 
@@ -41,77 +38,70 @@ def _deny_sockets(monkeypatch):
 
 
 class Model:
-    """Fixed in-memory provider: canary JSON, then scripted SSE streams."""
+    """The intercepted NEAR TEE gateway (ADR-035): scripted SSE streams and billing.
 
-    def __init__(self):
-        self.calls, self.gates, self.script, self.bodies = [], {}, {}, []
+    Built on tests.test_near_tee_text_slot.NearFixture: any host other than
+    cloud-api.near.ai, the real transports and litellm fail the test. Every
+    stream's billing readback is answered per requested id, so concurrent
+    streams settle independently.
+    """
 
-    def transport(self):
-        model = self
+    def __new__(cls):
+        from tests.test_near_tee_text_slot import NearFixture, _json
 
-        class Boundary(httpx.AsyncBaseTransport):
-            async def handle_async_request(self, request):
+        class Gateway(NearFixture):
+            def __init__(self):
+                super().__init__()
+                self.calls, self.gates, self.script, self.bodies = [], {}, {}, []
+
+            async def handler(self, request):
+                path = request.url.raw_path.decode()
+                if request.method == "POST" and path == "/v1/billing/costs":
+                    self.requests.append(request)
+                    ids = json.loads(request.content)["requestIds"]
+                    return _json({"requests": [{"requestId": item, "costNanoUsd": 2_000} for item in ids]})
+                if not (request.method == "POST" and path == "/v1/chat/completions"):
+                    return super().handler(request)
+                self.requests.append(request)
+                assert request.url.host == "cloud-api.near.ai"
                 body = json.loads(request.content)
-                model.bodies.append(request.content)
-                if not body.get("stream"):
-                    payload = {"id": "canary", "choices": [{"message": {"role": "assistant", "content": "CANARY_OK"}}],
-                               "usage": {"cost": "0.000001", "prompt_tokens": 1, "completion_tokens": 1}}
-                    return httpx.Response(200, request=request, headers={"content-type": "application/json"},
-                                          stream=ResponseBytes(json.dumps(payload).encode()))
+                self.bodies.append(request.content)
+                assert body.get("stream") is True, body
                 tag = body["messages"][-1]["content"]
-                if tag != "Reply with CANARY_OK only.":
-                    model.calls.append(tag)
-                behaviour = model.script.get(tag, {})
-                if tag in model.gates:
-                    await model.gates[tag].wait()
+                self.calls.append(tag)
+                behaviour = self.script.get(tag, {})
+                if tag in self.gates:
+                    await self.gates[tag].wait()
                 if behaviour.get("sleep"):
                     await asyncio.sleep(behaviour["sleep"])
                 if behaviour.get("lost"):
                     raise httpx.ReadError("owned scripted provider response lost", request=request)
                 text = behaviour.get("text", "Answer for " + tag)
-                events = [{"choices": [{"delta": {"content": part}}]} for part in (text[:5], text[5:]) if part]
-                events.append({"choices": [{"delta": {}}], "usage": {"cost": "0.000002", "prompt_tokens": 3, "completion_tokens": 3}})
+                body_id = f"chatcmpl-{len(self.bodies)}"
+                events = [{"id": body_id, "model": body["model"], "choices": [{"index": 0, "delta": {"content": part}}]}
+                          for part in (text[:5], text[5:]) if part]
+                events.append({"id": body_id, "model": body["model"], "choices": [{"index": 0, "delta": {},
+                                                                                     "finish_reason": "stop"}]})
                 raw = "".join("data: " + json.dumps(event) + "\n\n" for event in events) + "data: [DONE]\n\n"
                 return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"},
                                       stream=ResponseBytes(raw.encode()))
-        return Boundary()
+        return Gateway()
 
 
 @asynccontextmanager
 async def governed(accounting_db, monkeypatch, *, package_root=None, hook=None):  # noqa: F811
-    from src.api import auth, model_fabric_settings
-    from src.model_fabric.configuration import write_model_fabric_configuration
+    from tests.near_tee_support import prepare_near_tee_vertical
     root, _, _ = accounting_db
-    configured = setup_configuration()
-    # Streaming inference requires an operator route that declares and proves streaming, as chat does.
-    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
-        replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "streaming")), profiles=(), policies=()),
-        egress_revision=configured.egress_revision + 1))
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
     # Interactive chat and Cordis share one broker instance (the module singleton).
     from src.model_fabric import remote_inference_admission
     monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
                         remote_inference_admission.remote_inference_admission_broker)
-    model = Model()
-    original_client = httpx.AsyncClient
-
-    def clients(**kwargs):
-        kwargs.setdefault("transport", model.transport())
-        return original_client(**kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", clients)
+    # ADR-035: governed inference runs on the NEAR TEE text slot. Streaming
+    # inference requires a slot that has proven streaming, as chat does.
+    model = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=Model(),
+                                            capabilities=("text", "streaming"))
     _deny_sockets(monkeypatch)
-    app = FastAPI()
-    app.add_middleware(OperatorAuthMiddleware)
-    app.include_router(auth.router, prefix="/api/auth")
-    app.include_router(model_fabric_settings.router, prefix="/api")
-    async with original_client(transport=httpx.ASGITransport(app=app), base_url="http://test",
-                               headers={"origin": "http://localhost:3001"}) as client:
-        assert (await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})).status_code == 200
-        for capability in ("text", "streaming", "latency_ms", "health"):
-            canary = await client.post("/api/settings/model-fabric/canary", json={
-                "profile_id": "openrouter", "capability": capability, "timeout_seconds": 30})
-            assert canary.json()["outcome"] == "passed", canary.text
     from src.auth.service import create_session
     _, operator = await create_session()
     frames = []
@@ -123,6 +113,37 @@ async def governed(accounting_db, monkeypatch, *, package_root=None, hook=None):
     async with research_host(jobs, package_root=package_root, observe=observe) as host:
         yield {"jobs": jobs, "host": host, "operator": operator, "model": model, "frames": frames, "root": root,
                "broker": remote_inference_admission.remote_inference_admission_broker}
+
+
+def _chat(env, tag, *, gated=False):
+    """A real interactive NEAR TEE chat stream (chat_agent priority) through the one broker.
+
+    With ``gated`` the gateway holds its response until ``env["model"].gates[tag]``
+    is set, so the chat holds the serial broker slot meanwhile.
+    """
+    from src.approval.runtime import reset_runtime_context, set_runtime_context
+    from src.llm_runtime import stream_completion_with_fallback
+    from src.model_fabric.caller_context import build_canonical_inference_context
+    operator, messages = env["operator"], _messages(tag)
+    if gated:
+        env["model"].gates[tag] = asyncio.Event()
+
+    async def run():
+        tokens = set_runtime_context(operator.session_id, "high_risk", trust_principal=operator.principal)
+        try:
+            context = build_canonical_inference_context("chat_agent", payload=messages, output_tokens=64,
+                timeout_seconds=60, principal=operator.principal, session_id=operator.session_id, streaming=True)
+            return "".join([delta async for delta in stream_completion_with_fallback(
+                messages, 0.3, 64, "chat_agent", context)])
+        finally:
+            reset_runtime_context(tokens)
+    return asyncio.create_task(run())
+
+
+async def _chat_rows(jobs, count):
+    rows = [row for row in (await jobs.inference_accounting_snapshot()).get("operations", [])
+            if row["runtime_path"] == "chat_agent"]
+    return len(rows) >= count
 
 
 async def _until(predicate, attempts=200):
@@ -180,50 +201,35 @@ async def test_one_broker_preserves_priority_cancellation_and_unknown_cost(accou
     from src.runtime_plugins.governed_services import execute_native_inference
     async with governed(accounting_db, monkeypatch) as env:
         broker, jobs, model = env["broker"], env["jobs"], env["model"]
-        started, release, order = asyncio.Event(), asyncio.Event(), []
-
-        async def active():
-            order.append("interactive-active")
-            started.set()
-            await release.wait()
-            return {"usage": {"cost": "0.000001"}}
-
-        async def foreground():
-            order.append("interactive-queued")
-            return {"usage": {"cost": "0.000001"}}
-        holder = asyncio.create_task(broker.execute(broker_request("interactive-active"), active))
-        await started_or_raise(started, holder)
+        # Interactive chats are real NEAR TEE chat streams; the first holds the
+        # serial slot at the gateway until released.
+        holder = _chat(env, "interactive-active", gated=True)
+        assert await _until(lambda: _contacted(model, "interactive-active"))
         background = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="background",
             messages=_messages("cordis-background"), max_tokens=64, idempotency_key="inf-bg", host=env["host"]))
         assert await _until(lambda: _has_row(jobs, "remote:cordis-svc:"))
-        interactive = asyncio.create_task(broker.execute(broker_request("interactive-queued"), foreground))
-        assert await _until(lambda: _has_row(jobs, "interactive-queued"))
-        release.set()
+        interactive = _chat(env, "interactive-queued")
+        assert await _until(lambda: _chat_rows(jobs, 2))
+        model.gates["interactive-active"].set()
         await asyncio.gather(holder, interactive)
         done = await background
         # Interactive work outranks the queued Cordis background request in the same serial broker.
-        assert order == ["interactive-active", "interactive-queued"] and model.calls == ["cordis-background"]
+        assert model.calls == ["interactive-active", "interactive-queued", "cordis-background"]
         assert "".join(done["frames"]) == done["output"] == "Answer for cordis-background"
         assert done["route"] == "cordis_background_inference"
         assert [row["state"] for row in done["usage"]] == ["settled"]
         assert done["job"]["status"] == "succeeded"
 
         # Cancellation: a queued Cordis request is released without contacting the provider.
-        started2, release2 = asyncio.Event(), asyncio.Event()
-
-        async def active2():
-            started2.set()
-            await release2.wait()
-            return {"usage": {"cost": "0.000001"}}
-        holder2 = asyncio.create_task(broker.execute(broker_request("interactive-active-2"), active2))
-        await started2.wait()
+        holder2 = _chat(env, "interactive-active-2", gated=True)
+        assert await _until(lambda: _contacted(model, "interactive-active-2"))
         queued = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="background",
             messages=_messages("cordis-cancelled"), max_tokens=64, idempotency_key="inf-cancel", host=env["host"]))
         assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 2))
         queued.cancel()
         with pytest.raises(asyncio.CancelledError):
             await queued
-        release2.set()
+        model.gates["interactive-active-2"].set()
         await holder2
         await env["host"].stop()  # The owner's cancellation fenced this boot; restart it.
         assert await env["host"].start()
@@ -304,10 +310,12 @@ async def test_unavailable_route_fails_closed_before_contact(accounting_db, real
         with pytest.raises(NativeServiceBlocked) as unavailable:
             await execute_native_inference(operator=env["operator"], purpose="background", messages=_messages("cordis-noroute"),
                                            max_tokens=64, idempotency_key="inf-noroute", host=env["host"])
-        assert unavailable.value.reason_code == "inference_route_unavailable"
+        # ADR-035: with the NEAR TEE slot's egress revoked no route remains;
+        # the service names the stable no-route cause before any contact.
+        assert unavailable.value.reason_code == "openrouter_retired"
         assert env["model"].calls == []
         job = (await _governed_jobs(env["jobs"]))[-1]
-        assert job["status"] == "blocked" and job["failure_reason"] == "inference_route_unavailable"
+        assert job["status"] == "blocked" and job["failure_reason"] == "openrouter_retired"
 
 
 async def _governed_jobs(jobs):
@@ -561,21 +569,15 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
         assert model.bodies and all(SECRET.encode() not in body for body in model.bodies) and SECRET not in json.dumps(done)
 
         # Cordis interactive outranks Cordis background through the service, in one broker.
-        started, release = asyncio.Event(), asyncio.Event()
-
-        async def active():
-            started.set()
-            await release.wait()
-            return {"usage": {"cost": "0.000001"}}
-        holder = asyncio.create_task(broker.execute(broker_request("hold-lanes"), active))
-        await started_or_raise(started, holder)
+        holder = _chat(env, "hold-lanes", gated=True)
+        assert await _until(lambda: _contacted(model, "hold-lanes"))
         background = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="background",
             messages=_messages("lane-background"), max_tokens=64, idempotency_key="lane-bg", host=env["host"]))
         assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 2))
         interactive = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="interactive",
             messages=_messages("lane-interactive"), max_tokens=64, idempotency_key="lane-int", host=env["host"]))
         assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 3))
-        release.set()
+        model.gates["hold-lanes"].set()
         await asyncio.gather(holder, background, interactive)
         assert model.calls[-2:] == ["lane-interactive", "lane-background"]
 
@@ -589,11 +591,13 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
             await execute_native_inference(operator=env["operator"], purpose="background", messages=_messages("lane-burst-2"),
                                            max_tokens=64, idempotency_key="burst-2", host=env["host"])
         assert burst.value.reason_code == "cordis_inference_capacity" and "lane-burst-2" not in model.calls
-        chat = asyncio.create_task(broker.execute(broker_request("chat-during-burst"), _usage))
-        assert await _until(lambda: _has_row(jobs, "chat-during-burst"))  # Admitted, not refused for capacity.
+        chats_before = len([row for row in (await jobs.inference_accounting_snapshot())["operations"]
+                            if row["runtime_path"] == "chat_agent"])
+        chat = _chat(env, "chat-during-burst")
+        assert await _until(lambda: _chat_rows(jobs, chats_before + 1))  # Admitted, not refused for capacity.
         model.gates["lane-burst-1"].set()
         assert (await first)["job"]["status"] == "succeeded"
-        assert (await chat)["usage"]
+        assert (await chat) == "Answer for chat-during-burst"
         monkeypatch.setattr(governed_services, "CORDIS_INFERENCE_PER_OWNER", 4)
 
         # Unknown cost: by broker design an uncertain provider result keeps the serial slot
@@ -614,10 +618,6 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
         await broker.reconcile(held.operation_id, owner_id=held.owner_id, job_id=held.job_id,
                                fencing_token=held.fencing_token, outcome="failed", actual_cost_microusd=2)
         assert (await after)["job"]["status"] == "succeeded" and "lane-after-lost" in model.calls
-
-
-async def _usage():
-    return {"usage": {"cost": "0.000001"}}
 
 
 async def test_identity_check_covers_case_insensitive_spellings_and_redaction_covers_multiline_and_non_ascii(accounting_db, real_auth, monkeypatch):  # noqa: F811

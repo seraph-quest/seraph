@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
+import re
 from pathlib import Path
 
 
@@ -33,11 +35,50 @@ RUNTIME_HINT_WEIGHTS: dict[str, int] = {
 }
 
 
-def hinted_test_weight(relative_path: str, base_weight: int) -> int:
+# Measured hosted-CI wall seconds per test file (#1180). Weights are in
+# milliseconds; file size in bytes is a rough stand-in (median ~1 ms per byte
+# on hosted runners) used only for files without a measurement. Size alone
+# let one shard reach the 40-minute step cap while others ran under 15.
+DURATIONS_FILE = Path(__file__).resolve().with_name("backend_test_durations.json")
+_SHARD_RESULT = re.compile(r"\[backend-shard\] (tests/\S+?\.py)(?:::\S+)? -> (\d+) \(([0-9.]+)s\)")
+
+
+def load_measured_durations(path: Path = DURATIONS_FILE) -> dict[str, float]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    durations = payload.get("seconds") if isinstance(payload, dict) else None
+    if not isinstance(durations, dict):
+        return {}
+    return {name: float(value) for name, value in durations.items()
+            if isinstance(name, str) and isinstance(value, (int, float)) and value > 0}
+
+
+def durations_from_shard_logs(texts: list[str]) -> dict[str, float]:
+    """Sum per-file seconds from passing ``run_backend_test_shard`` lines.
+
+    A file with any failing or timed-out invocation is left out: a red file
+    usually stops early and would understate its passing runtime.
+    """
+    totals: dict[str, float] = {}
+    failed: set[str] = set()
+    for text in texts:
+        for match in _SHARD_RESULT.finditer(text):
+            path, code, seconds = match.group(1), int(match.group(2)), float(match.group(3))
+            if code != 0:
+                failed.add(path)
+            totals[path] = totals.get(path, 0.0) + seconds
+    return {path: round(seconds, 2) for path, seconds in sorted(totals.items()) if path not in failed}
+
+
+def hinted_test_weight(relative_path: str, base_weight: int, measured: dict[str, float] | None = None) -> int:
+    if measured and relative_path in measured:
+        return max(1, round(measured[relative_path] * 1000))
     return max(base_weight, RUNTIME_HINT_WEIGHTS.get(relative_path, 0))
 
 
-def discover_test_files(root: Path) -> list[TestFile]:
+def discover_test_files(root: Path, measured: dict[str, float] | None = None) -> list[TestFile]:
     tests_dir = root / "tests"
     discovered: list[TestFile] = []
     for path in sorted(tests_dir.glob("test_*.py")):
@@ -49,7 +90,7 @@ def discover_test_files(root: Path) -> list[TestFile]:
         discovered.append(
             TestFile(
                 path=relative_path,
-                weight=hinted_test_weight(relative_path, max(weight, 1)),
+                weight=hinted_test_weight(relative_path, max(weight, 1), measured),
             )
         )
     return discovered
@@ -73,17 +114,28 @@ def assign_test_shards(files: list[TestFile], shard_count: int) -> list[list[str
 def shard_for_index(root: Path, *, shard_count: int, shard_index: int) -> list[str]:
     if shard_index <= 0 or shard_index > shard_count:
         raise ValueError("shard_index must be between 1 and shard_count")
-    shards = assign_test_shards(discover_test_files(root), shard_count)
+    shards = assign_test_shards(discover_test_files(root, load_measured_durations()), shard_count)
     return shards[shard_index - 1]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shard-count", type=int, required=True)
-    parser.add_argument("--shard-index", type=int, required=True)
+    parser.add_argument("--shard-count", type=int)
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument("--update-durations-from", nargs="+", metavar="SHARD_LOG",
+                        help="refresh the measured durations from hosted shard job logs and exit")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
+    if args.update_durations_from:
+        texts = [Path(item).read_text(encoding="utf-8", errors="replace") for item in args.update_durations_from]
+        measured = {**load_measured_durations(), **durations_from_shard_logs(texts)}
+        DURATIONS_FILE.write_text(json.dumps({"source": "hosted backend-tests shard logs", "seconds": measured},
+                                             indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"{len(measured)} measured test files")
+        return 0
+    if args.shard_count is None or args.shard_index is None:
+        parser.error("--shard-count and --shard-index are required")
     for path in shard_for_index(root, shard_count=args.shard_count, shard_index=args.shard_index):
         print(path)
     return 0

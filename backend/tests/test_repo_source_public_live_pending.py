@@ -25,6 +25,9 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 from tests.test_repo_source_recovered_finalizer import _rows
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 def _physical(root):
     return {str(path.relative_to(root)): {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

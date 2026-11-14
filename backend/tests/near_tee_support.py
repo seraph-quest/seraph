@@ -8,6 +8,8 @@ fails closed at credential capture before transport.
 """
 from __future__ import annotations
 
+import json
+
 from src.model_fabric.configuration import (
     InferenceLaneConfig,
     ModelFabricConfiguration,
@@ -24,15 +26,20 @@ _FINGERPRINT = "0123456789ab"
 
 def write_near_tee_text_configuration(*, egress_revision: int = 2, ceiling_microusd: int = 1_000_000,
         request_cost_bound_microusd: int = 20_000, credential_fingerprint: str | None = _FINGERPRINT,
-        egress_revoked: bool = False, timeout_seconds: float = 30.0) -> ModelFabricConfiguration:
-    """Persist a ready, consented, enabled NEAR TEE text slot behind the shared lane."""
+        egress_revoked: bool = False, timeout_seconds: float = 30.0,
+        max_input_tokens: int = 8192) -> ModelFabricConfiguration:
+    """Persist a ready, consented, enabled NEAR TEE text slot behind the shared lane.
+
+    ``max_input_tokens`` is the slot's context bound; agent turns that carry
+    the full tool inventory need a larger one than single-prompt verticals.
+    """
     configuration = ModelFabricConfiguration(
         status="ready",
         egress_revision=egress_revision,
         egress_revoked=egress_revoked,
         inference_lane=InferenceLaneConfig(spend_ceiling_microusd=ceiling_microusd),
         near_tee=NearTeeSetup(credential_fingerprint=credential_fingerprint, slots={"text": NearTeeSlot(
-            model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=8192, max_output_tokens=1024,
+            model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=max_input_tokens, max_output_tokens=1024,
             request_cost_bound_microusd=request_cost_bound_microusd, enabled=True,
             timeout_seconds=timeout_seconds, purpose_consent_revision=egress_revision)}),
     )
@@ -63,6 +70,7 @@ NEAR_TEE_TEXT_PROFILE_ID = "near_tee.text"
 async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_000_000,
         request_cost_bound_microusd: int = 20_000, capabilities=("text", "structured_output"),
         timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2,
+        max_input_tokens: int = 8192,
         proof_age_seconds: float = 1.0):
     """A ready NEAR TEE text slot with every dispatch gate satisfied; no contact.
 
@@ -96,7 +104,7 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
 
     near = (near or NearFixture()).install(monkeypatch)
     fingerprint = hashlib.sha256(NEAR_TEE_VERTICAL_KEY.encode()).hexdigest()[:12]
-    write_near_tee_text_configuration(ceiling_microusd=ceiling_microusd,
+    write_near_tee_text_configuration(ceiling_microusd=ceiling_microusd, max_input_tokens=max_input_tokens,
         request_cost_bound_microusd=request_cost_bound_microusd, credential_fingerprint=fingerprint,
         timeout_seconds=timeout_seconds, egress_revision=egress_revision)
     await vault_repository.store("near_api_key", NEAR_TEE_VERTICAL_KEY)
@@ -162,3 +170,60 @@ def restore_repository_repair_route_block(monkeypatch) -> None:
 
 from src.model_fabric import near_tee_vertical as _near_tee_vertical  # noqa: E402
 _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route_block
+
+
+# ── Scripted NEAR TEE gateway for research-style verticals (#1180) ─────
+
+# The NEAR TEE slot reserves its catalog-priced bound per request; for the
+# fixture slot (8192 input / 1024 output tokens) the catalog check requires
+# at least 1711 micro-USD. Research programmes fund that reserve.
+RESEARCH_REQUEST_BOUND_MICROUSD = 2_000
+
+
+def scripted_near_gateway(answer_for, *, uds_socket: str | None = None, cost_nano: int = 2_000,
+                          passthrough=None):
+    """An intercepted NEAR gateway whose completions are ``await answer_for(body)``.
+
+    ``answer_for`` returns the assistant content (or raises, e.g. an
+    ``httpx`` transport error to model a lost response). Catalog and billing
+    requests are the shared fixture's. With ``uds_socket`` the real async
+    transport stays live only for that owned local Unix socket (an owned
+    public-web fixture); every other real transport is refused. With
+    ``passthrough`` (``async (request) -> httpx.Response``) a default client's
+    request to any host other than NEAR goes to that owned fixture instead.
+    """
+    import inspect
+
+    import httpx
+    from tests.test_near_tee_text_slot import NearFixture
+
+    class Gateway(NearFixture):
+        def __init__(self):
+            super().__init__()
+            self.cost_nano = cost_nano
+            self.completions = 0
+
+        def install(self, monkeypatch):
+            real = httpx.AsyncHTTPTransport.handle_async_request
+            super().install(monkeypatch)
+            if uds_socket is not None:
+                async def owned_uds_only(transport, request):
+                    if getattr(transport._pool, "_uds", None) != uds_socket:
+                        raise AssertionError("provider transport contacted outside the NEAR fixture")
+                    return await real(transport, request)
+                monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", owned_uds_only)
+            return self
+
+        async def handler(self, request):
+            if passthrough is not None and request.url.host != "cloud-api.near.ai":
+                return await passthrough(request)
+            if request.method == "POST" and request.url.raw_path.decode() == "/v1/chat/completions":
+                assert request.url.host == "cloud-api.near.ai"
+                self.completions += 1
+                answer = answer_for(json.loads(request.content))
+                if inspect.isawaitable(answer):
+                    answer = await answer
+                self.answer = {"role": "assistant", "content": answer}
+                self.body_id = f"chatcmpl-scripted-{self.completions}"
+            return super().handler(request)
+    return Gateway()

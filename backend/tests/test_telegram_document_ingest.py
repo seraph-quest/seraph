@@ -517,7 +517,13 @@ async def test_retirement_unknown_physical_or_generic_owner_retains_charge(clien
             os.link(sources.source_path(row, value, "source"), directory/value["channel_ingest"]["publication"]["source"]["temporary"])
         elif damage == "replaced_witness":
             path = directory/value["channel_ingest"]["readers"][0]["witness"]["file"]
-            raw = path.read_bytes(); path.unlink(); path.write_bytes(raw); path.chmod(0o600)
+            # Same bytes under a new inode. Write the replacement while the
+            # original still exists: an unlink-then-create can recycle the
+            # inode number on ext4 (#1180), which is not a replacement at all.
+            raw = path.read_bytes(); replacement = path.with_name(path.name+".replacement")
+            replacement.write_bytes(raw); replacement.chmod(0o600)
+            assert replacement.stat().st_ino != path.stat().st_ino
+            os.replace(replacement, path)
         elif damage == "partial_unlink":
             sources.source_path(row, value, "source").write_bytes(b"wrong original source ciphertext")
         denied = await client.delete(f"/api/documents/sources/{identifier}", params={"expected_revision": revision})

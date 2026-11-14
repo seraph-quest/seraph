@@ -94,13 +94,22 @@ def model_response(request, calls):
     if len(body["messages"]) == 1:
         content = '{"ok":true}' if body.get("response_format") else "CANARY_OK"
     else:
-        content = json.dumps({"subject": "Re: Architecture review", "body": "Thanks — <script>alert(1)</script> is literal text.\nI will follow up.", "caveats": ["Review before sending."]})
+        content = json.dumps(DRAFT_OUTPUT)
     return httpx.Response(200, json={"id": "intercepted-"+str(len(calls)),
         "choices": [{"message": {"role": "assistant", "content": content}}],
         "usage": {"cost": "0.000002", "prompt_tokens": 20, "completion_tokens": 20}})
 
 
-async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, until=None):
+DRAFT_OUTPUT = {"subject": "Re: Architecture review", "body": "Thanks — <script>alert(1)</script> is literal text.\nI will follow up.", "caveats": ["Review before sending."]}
+
+
+async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, until=None, near=False):
+    """The operator mail-reply flow up to the verified draft (and beyond unless ``until``).
+
+    ``near=True`` runs the draft's model step on the ADR-035 NEAR TEE text slot
+    (intercepted gateway via prepare_near_tee_vertical; any other host fails).
+    Without it the flow pins the historical OpenRouter route (module marker).
+    """
     from src.api import auth, work_board, model_fabric_settings, goals, mail
     from src.model_fabric.configuration import write_model_fabric_configuration
     from src.integrations import gmail_read, mail_reply_runtime
@@ -114,11 +123,16 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
         traceback.print_exception(exc)
         return original_error(exc)
     monkeypatch.setattr(mail, "_error", traced_error)
-    configured = setup_configuration()
-    setup = replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "structured_output"))
-    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(setup, profiles=(), policies=()), egress_revision=configured.egress_revision+1))
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
+    if near:
+        from tests.near_tee_support import prepare_near_tee_vertical
+        near_fixture = await prepare_near_tee_vertical(monkeypatch, jobs=jobs)
+        near_fixture.answer = {"role": "assistant", "content": json.dumps(DRAFT_OUTPUT)}
+    else:
+        configured = setup_configuration()
+        setup = replace(configured.openrouter_setup, timeout_seconds=30, capabilities=("text", "structured_output"))
+        write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(setup, profiles=(), policies=()), egress_revision=configured.egress_revision+1))
+        await jobs.configure_inference_accounting(1000)
     google = GoogleBoundary()
     transport = httpx.MockTransport(google.handle)
     real_google = gmail_read.GoogleGmailReadonlyAdapter
@@ -128,18 +142,19 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
     real_reply = mail_reply_runtime.GmailReplyAdapter
     monkeypatch.setattr(mail_reply_runtime, "GmailReplyAdapter", lambda *args, **kwargs: real_reply(*args,
         transport=transport, resolver=lambda host, port: ["93.184.216.34"], **kwargs))
-    model_calls = []
+    model_calls = near_fixture.requests if near else []
     async_client, sync_client = httpx.AsyncClient, httpx.Client
-    def async_clients(**kwargs):
-        if "transport" not in kwargs:
-            kwargs["transport"] = httpx.MockTransport(lambda req: model_response(req, model_calls))
-        return async_client(**kwargs)
-    def sync_clients(**kwargs):
-        if "transport" not in kwargs:
-            kwargs["transport"] = httpx.MockTransport(lambda req: model_response(req, model_calls))
-        return sync_client(**kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", async_clients)
-    monkeypatch.setattr(httpx, "Client", sync_clients)
+    if not near:
+        def async_clients(**kwargs):
+            if "transport" not in kwargs:
+                kwargs["transport"] = httpx.MockTransport(lambda req: model_response(req, model_calls))
+            return async_client(**kwargs)
+        def sync_clients(**kwargs):
+            if "transport" not in kwargs:
+                kwargs["transport"] = httpx.MockTransport(lambda req: model_response(req, model_calls))
+            return sync_client(**kwargs)
+        monkeypatch.setattr(httpx, "AsyncClient", async_clients)
+        monkeypatch.setattr(httpx, "Client", sync_clients)
     app = FastAPI()
     app.add_middleware(OperatorAuthMiddleware)
     for router, prefix in ((auth.router,"/api/auth"), (work_board.router,"/api"),
@@ -149,7 +164,7 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
     login = await client.post("/api/auth/login", json={"password":"research-vertical-private-secret"})
     assert login.status_code == 200, login.text
     owner = login.json()
-    for capability in ("text", "structured_output", "latency_ms", "health"):
+    for capability in (() if near else ("text", "structured_output", "latency_ms", "health")):
         response = await client.post("/api/settings/model-fabric/canary", json={"profile_id":"openrouter", "capability":capability, "timeout_seconds":30})
         assert response.status_code == 200 and response.json()["outcome"] == "passed", response.text
     async with factory.accounting_sessions() as db:
@@ -180,7 +195,13 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
     result = await dispatcher.run_pass()
     draft = await client.get("/api/capabilities/mail/reply-tasks/"+task_id+"/draft")
     assert draft.status_code == 200 and draft.json()["status"] == "verified", (result,draft.text)
-    assert len(model_calls) == 5  # four actual canaries + one governed draft call
+    if near:
+        # One governed NEAR draft call and its billing readback (the catalog
+        # GET was setup); no other host was contacted.
+        assert [(r.method, r.url.raw_path.decode()) for r in model_calls] == [("GET", "/v1/model/Qwen%2FQwen3.8-27B"),
+            ("POST", "/v1/chat/completions"), ("POST", "/v1/billing/costs")]
+    else:
+        assert len(model_calls) == 5  # four actual canaries + one governed draft call
     if until == "draft":
         # The flow's goal admits one outstanding job; a later paused send would take it.
         return client, post, google, model_calls, None, None, owner, {"consent": consent, "source": source,

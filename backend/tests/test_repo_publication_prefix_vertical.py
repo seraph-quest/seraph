@@ -10,6 +10,9 @@ from src.workflows.job_runtime import durable_job_repository as jobs
 from tests.repo_publication_support import GitDataTransport
 from tests.test_repo_publication_vertical import ORIGIN, actual_repair, request_for, selected_connection
 
+# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)

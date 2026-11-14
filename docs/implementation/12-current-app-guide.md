@@ -1058,7 +1058,8 @@ and shutdown marks are serialized by one lock. Every Cordis child (re)start
 runs the audit write probe (bounded retries on a held SQLite writer lock; still
 contended means `unknown`, never `failed`; an audit provider failed by a write
 probe stays `failed` through status reads and recovers only on a passing write
-probe) and sends fresh provider reports
+probe; the only in-process child start is at backend startup, so in practice it
+recovers when the backend restarts) and sends fresh provider reports
 **before** the host admits anything: if the reports cannot be produced (for
 example `composition_inventory_invalid` or a closed state gate) or are not
 acknowledged, that boot is `blocked` (`provider_reports_unavailable`,

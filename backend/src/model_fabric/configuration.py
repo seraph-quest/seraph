@@ -383,7 +383,8 @@ def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProf
         transport_adapter="openai_compatible_embeddings" if embedding else "openai_compatible_chat",
         context_window_tokens=slot.max_input_tokens, max_output_tokens=slot.max_output_tokens,
         cost_microusd=slot.request_cost_bound_microusd, cost_source="near_tee_catalog_receipt",
-        # Price freshness is the catalog receipt's TTL (1-24h), checked at dispatch.
+        # Prices come from the catalog setup receipt, re-validated at dispatch by
+        # binding (model, profile hash, revision), never by age (#1178).
         cost_source_updated_at=0.0, max_latency_ms=int(slot.timeout_seconds * 1000),
         safety_notes=("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives "
             "requests in plaintext; no end-to-end encryption."))
@@ -453,6 +454,70 @@ async def capture_near_tee_credential(*, expected_revision: int, expected_finger
             or _near_credential_fingerprint(value) != expected_fingerprint):
         raise PermissionError("near_tee_credential_revision_changed")
     return value
+
+
+NEAR_TEE_CREDENTIAL_BINDING_SCHEMA = "seraph.near.tee.credential.binding.v1"
+
+
+def _near_tee_credential_binding_path() -> Path:
+    return Path(settings.workspace_dir).expanduser().resolve() / "near-tee-credential-binding.json"
+
+
+def record_near_tee_credential_binding(fingerprint: str, *, now: float | None = None) -> float:
+    """Record that NEAR TEE capability proofs are bound to ``fingerprint`` from now on.
+
+    ADR-035 amendment 2026-11-14 (#1178): capability checks never expire by
+    age, so a credential change is one of the binding changes that requires
+    the one-time setup checks again. Proofs checked before ``bound_since``
+    belong to an earlier credential and no longer count.
+    """
+    import time as _time
+    if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{12}", fingerprint) is None:
+        raise ValueError("invalid NEAR TEE credential fingerprint")
+    since = _time.time() if now is None else float(now)
+    path = _near_tee_credential_binding_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump({"schema_version": NEAR_TEE_CREDENTIAL_BINDING_SCHEMA, "fingerprint": fingerprint,
+                "bound_since": since}, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return since
+
+
+def near_tee_credential_bound_since(fingerprint: str | None = None) -> float | None:
+    """Earliest ``checked_at`` a NEAR TEE proof needs for the current credential.
+
+    ``None`` means no credential change has been recorded (proofs from before
+    #1178 keep counting while their profile binding matches). When the
+    configured fingerprint differs from the recorded one (a change recorded
+    nowhere else), the binding is re-recorded now: earlier proofs stop
+    counting, which fails towards a re-check, never towards a stale proof.
+    """
+    if fingerprint is None:
+        configured = read_model_fabric_configuration()
+        fingerprint = configured.near_tee.credential_fingerprint if configured.near_tee is not None else None
+    if not fingerprint:
+        return None
+    try:
+        payload = json.loads(_near_tee_credential_binding_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(payload, dict) or payload.get("schema_version") != NEAR_TEE_CREDENTIAL_BINDING_SCHEMA
+            or type(payload.get("bound_since")) not in (int, float) or not math.isfinite(payload["bound_since"])):
+        return None
+    if payload.get("fingerprint") == fingerprint:
+        return float(payload["bound_since"])
+    try:
+        return record_near_tee_credential_binding(fingerprint)
+    except (OSError, ValueError):
+        return float("inf")
 
 
 def _near_tee_slot_from_payload(raw: object) -> NearTeeSlot:

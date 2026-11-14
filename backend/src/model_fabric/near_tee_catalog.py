@@ -5,10 +5,21 @@ enabled slot's canonical model. It makes no inference, sends no operator
 content and no credential (no source evidence shows the endpoint requires
 one). Settings GET/PUT never call it; dispatch never refreshes it.
 
-A passing receipt is an additional hosting gate, not a capability proof and
-not a confidentiality claim: "TEE-hosted per NEAR catalog as of <time>; NEAR
-gateway receives plaintext; attestation not verified by Seraph; no end-to-end
-encryption".
+A passing receipt from the explicit catalog check is part of the slot's
+one-time setup gate, not a capability proof and not a confidentiality claim:
+"TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives plaintext;
+attestation not verified by Seraph; no end-to-end encryption".
+
+ADR-035 amendment 2026-11-14 (#1178, operator decision): the setup receipt
+does not expire by age. It stays in force while its binding holds (canonical
+model, complete profile hash, configuration revision) and is replaced only by
+the next explicit catalog check. Seraph also re-reads the public catalog in
+the background (``NearTeeCatalogRefresher``; no key, no content, no consent).
+Those reads are informational only: they are stored apart from the setup
+receipts, update "last confirmed", and surface a Settings warning when NEAR
+reports a disqualifying change. They never block dispatch; the per-request
+model echo and HTTP errors remain the enforcement. ``catalog_ttl_hours`` is
+the background refresh cadence hint.
 
 Parsed catalog shape: the real record the lead read unauthenticated on
 2026-11-13 (e.g. ``/v1/model/z-ai%2Fglm-5.3-flash``). Anything else fails
@@ -67,6 +78,16 @@ CATALOG_RECEIPT_SCHEMA = "seraph.near.tee.catalog.receipt.v1"
 CATALOG_STORE_SCHEMA = "seraph.near.tee.catalog.receipts.v1"
 CATALOG_RESPONSE_CAP = 65536
 CATALOG_TIMEOUT_SECONDS = 10.0
+OBSERVATION_STORE_SCHEMA = "seraph.near.tee.catalog.observations.v1"
+# Receipt basis: the explicit setup check, or a background read (#1178).
+BASIS_SETUP_CHECK = "setup_check"
+BASIS_BACKGROUND_READ = "background_read"
+# Background refresh: shortly after startup, then every
+# min(slot catalog_ttl_hours, REFRESH_MAX_INTERVAL_HOURS) hours.
+REFRESH_STARTUP_DELAY_SECONDS = 30.0
+REFRESH_MAX_INTERVAL_HOURS = 6
+# Binding changed (model, profile hash or configuration revision): the
+# explicit catalog check must run again. Never raised because of age.
 RECEIPT_STALE = "near_tee_catalog_receipt_stale"
 RECEIPT_MISSING = "near_tee_catalog_receipt_missing"
 TEE_LABEL_TEMPLATE = ("TEE-hosted per NEAR catalog as of {as_of}; NEAR gateway receives plaintext; "
@@ -353,14 +374,16 @@ def check_output_tokens(slot_name: str, slot_max_output_tokens: int, *,
 
 
 def build_receipt(*, slot_name: str, slot, profile, facts: CatalogFacts | None, raw: bytes | None,
-                  reason: str | None, required: int | None, revision: int, now: float) -> dict[str, object]:
-    ttl = int(slot.catalog_ttl_hours) * 3600
+                  reason: str | None, required: int | None, revision: int, now: float,
+                  basis: str = BASIS_SETUP_CHECK) -> dict[str, object]:
+    # No ``expires_at`` (#1178): a receipt is never invalidated by age. Older
+    # stored receipts that carry one stay valid while their binding matches.
     return {
         "schema_version": CATALOG_RECEIPT_SCHEMA, "slot": slot_name, "profile_id": profile.id,
         "model_id": slot.model_id, "profile_hash": profile.contract_hash,
         "configuration_revision": revision, "checked_at": now,
         "checked_at_iso": datetime.fromtimestamp(now, timezone.utc).isoformat(),
-        "expires_at": now + ttl, "ttl_hours": int(slot.catalog_ttl_hours),
+        "basis": basis, "refresh_hours": int(slot.catalog_ttl_hours),
         "outcome": "passed" if reason is None else "failed", "reason_code": reason,
         "provider_type": facts.provider_type if facts else None,
         "attestation_supported": facts.attestation_supported if facts else None,
@@ -421,12 +444,13 @@ def write_catalog_receipts(receipts: dict[str, dict[str, object]]) -> None:
 def catalog_receipt_block_reason(slot_name: str, profile, *, now: float | None = None,
                                  receipts: dict[str, dict[str, object]] | None = None,
                                  revision: int | None = None) -> str | None:
-    """Local precontact re-validation; never refreshes the catalog.
+    """Local precontact re-validation of the setup receipt; never refreshes the catalog.
 
-    A receipt is current only for the same canonical model, complete profile
-    hash and configuration (egress) revision, and before its expiry.
+    A receipt is current for the same canonical model, complete profile hash
+    and configuration (egress) revision, whatever its age (ADR-035 amendment
+    #1178). Background catalog reads never reach this gate.
     """
-    checked = time.time() if now is None else now
+    del now  # Age is not a condition (#1178); kept for caller compatibility.
     if revision is None:
         from .configuration import read_model_fabric_configuration
         revision = read_model_fabric_configuration().egress_revision
@@ -436,10 +460,8 @@ def catalog_receipt_block_reason(slot_name: str, profile, *, now: float | None =
     if receipt.get("model_id") != profile.model or receipt.get("profile_hash") != profile.contract_hash \
             or receipt.get("profile_id") != profile.id or receipt.get("configuration_revision") != revision:
         return RECEIPT_STALE
-    expires = receipt.get("expires_at")
     checked_at = receipt.get("checked_at")
-    if (type(expires) not in (int, float) or type(checked_at) not in (int, float)
-            or not checked_at <= checked < expires or expires - checked_at > 24 * 3600):
+    if type(checked_at) not in (int, float) or not math.isfinite(checked_at):
         return RECEIPT_STALE
     if receipt.get("outcome") != "passed":
         return str(receipt.get("reason_code") or "near_tee_catalog_check_failed")
@@ -463,11 +485,234 @@ def catalog_receipt_feature_block_reason(slot_name: str, feature: str, *,
 
 def tee_hosting_label(slot_name: str, profile, *, revision: int | None = None,
                       now: float | None = None) -> str | None:
-    """The only TEE statement: present only while the receipt is current."""
+    """The only TEE statement: present only while the setup receipt is current.
+
+    ``as of`` is the last time NEAR's catalog confirmed the record: the setup
+    check or a later passing background read of the same binding (#1178).
+    """
     receipts = read_catalog_receipts()
     if catalog_receipt_block_reason(slot_name, profile, now=now, receipts=receipts, revision=revision) is not None:
         return None
-    return TEE_LABEL_TEMPLATE.format(as_of=receipts[slot_name].get("checked_at_iso"))
+    confirmed = last_confirmed(slot_name, profile, receipts=receipts)
+    return TEE_LABEL_TEMPLATE.format(as_of=confirmed[1] if confirmed else receipts[slot_name].get("checked_at_iso"))
+
+
+# ── Background catalog reads (#1178): informational only ──────────────
+
+
+def _observation_path() -> Path:
+    return Path(settings.workspace_dir).expanduser().resolve() / "near-tee-catalog-observations.json"
+
+
+def read_catalog_observations() -> dict[str, dict[str, object]]:
+    """Background read state per slot; never consulted by dispatch."""
+    try:
+        payload = json.loads(_observation_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema_version") != OBSERVATION_STORE_SCHEMA:
+        return {}
+    observations = payload.get("observations")
+    return {slot: item for slot, item in observations.items() if isinstance(item, dict)} \
+        if isinstance(observations, dict) else {}
+
+
+def write_catalog_observations(observations: dict[str, dict[str, object]]) -> None:
+    path = _observation_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump({"schema_version": OBSERVATION_STORE_SCHEMA, "observations": observations}, handle,
+                sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _observation_matches(observation: object, profile) -> bool:
+    return (isinstance(observation, dict) and observation.get("model_id") == profile.model
+        and observation.get("profile_hash") == profile.contract_hash and observation.get("profile_id") == profile.id)
+
+
+def last_confirmed(slot_name: str, profile, *, receipts: dict[str, dict[str, object]] | None = None,
+                   observations: dict[str, dict[str, object]] | None = None) -> tuple[float, str, str] | None:
+    """(time, ISO time, basis) of the newest passing catalog read for this binding.
+
+    The setup receipt counts only while it passes for the same model and
+    profile hash; a background read counts only when it passed too.
+    """
+    candidates: list[tuple[float, str, str]] = []
+    receipt = (read_catalog_receipts() if receipts is None else receipts).get(slot_name)
+    if (_observation_matches(receipt, profile) and receipt.get("outcome") == "passed"
+            and type(receipt.get("checked_at")) in (int, float)):
+        candidates.append((float(receipt["checked_at"]), str(receipt.get("checked_at_iso")), BASIS_SETUP_CHECK))
+    observation = (read_catalog_observations() if observations is None else observations).get(slot_name)
+    last_read = observation.get("last_read") if _observation_matches(observation, profile) else None
+    if (isinstance(last_read, dict) and last_read.get("outcome") == "passed"
+            and type(last_read.get("checked_at")) in (int, float)):
+        candidates.append((float(last_read["checked_at"]), str(last_read.get("checked_at_iso")), BASIS_BACKGROUND_READ))
+    return max(candidates, default=None)
+
+
+def catalog_warning(slot_name: str, profile, *, receipts: dict[str, dict[str, object]] | None = None,
+                    observations: dict[str, dict[str, object]] | None = None) -> dict[str, object] | None:
+    """A visible Settings warning when the latest background read reported a
+    disqualifying change for this binding. Informational: never blocks. A
+    newer passing explicit catalog check supersedes it."""
+    observation = (read_catalog_observations() if observations is None else observations).get(slot_name)
+    if not _observation_matches(observation, profile):
+        return None
+    reason = observation.get("failing_reason")
+    since = observation.get("failing_since")
+    if not isinstance(reason, str) or type(since) not in (int, float):
+        return None
+    confirmed = last_confirmed(slot_name, profile, receipts=receipts, observations=observations)
+    if confirmed is not None and confirmed[0] > since:
+        return None
+    since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat()
+    readable = reason.removeprefix("near_tee_catalog_").replace("_", " ")
+    return {"reason_code": reason, "since": since_iso, "blocks_dispatch": False,
+        "message": f"NEAR catalog reports {profile.model} {readable} since {since_iso}. "
+            "Requests are not blocked; the per-request model echo and provider errors still apply."}
+
+
+def catalog_read_status(slot_name: str, profile, *,
+                        observations: dict[str, dict[str, object]] | None = None) -> dict[str, object] | None:
+    """The latest background read attempt for this binding (for Settings)."""
+    observation = (read_catalog_observations() if observations is None else observations).get(slot_name)
+    if not _observation_matches(observation, profile):
+        return None
+    attempted = observation.get("last_attempt_at")
+    return {"last_attempt_at": datetime.fromtimestamp(attempted, timezone.utc).isoformat()
+            if type(attempted) in (int, float) else None,
+        "last_attempt_outcome": observation.get("last_attempt_outcome"),
+        "last_attempt_error": observation.get("last_attempt_error")}
+
+
+async def refresh_catalog_observations(configuration=None, *, now: float | None = None) -> dict[str, dict[str, object]]:
+    """One background pass: re-read NEAR's public record for each enabled slot.
+
+    Only slots whose setup receipt is current for their binding are read. A
+    failed read (transport, HTTP status or unparseable record; NEAR's HTTP
+    status is not exposed, so a removed model shows as a failed read) keeps
+    the last read; a successful read updates "last confirmed" or records a
+    disqualifying change as a warning. Nothing here changes setup receipts or
+    dispatch.
+    """
+    from .configuration import NEAR_TEE_IMPLEMENTED_SLOTS, near_tee_profile_for_slot, read_model_fabric_configuration
+    configured = read_model_fabric_configuration() if configuration is None else configuration
+    setup = configured.near_tee
+    if configured.status != "ready" or setup is None:
+        return read_catalog_observations()
+    receipts = read_catalog_receipts()
+    observations = read_catalog_observations()
+    updated = dict(observations)
+    for slot_name in NEAR_TEE_IMPLEMENTED_SLOTS:
+        slot = (setup.slots or {}).get(slot_name)
+        if slot is None or not slot.enabled:
+            continue
+        profile = near_tee_profile_for_slot(slot_name, slot)
+        if catalog_receipt_block_reason(slot_name, profile, receipts=receipts,
+                revision=configured.egress_revision) is not None:
+            continue
+        checked = time.time() if now is None else now
+        prior = observations.get(slot_name)
+        entry = dict(prior) if _observation_matches(prior, profile) else {
+            "model_id": profile.model, "profile_hash": profile.contract_hash, "profile_id": profile.id,
+            "last_read": None, "failing_reason": None, "failing_since": None}
+        entry["last_attempt_at"] = checked
+        raw = facts = required = None
+        try:
+            raw = await fetch_catalog_record(slot.model_id)
+            facts = parse_catalog_record(raw, model_id=slot.model_id)
+            reason, required = evaluate_catalog(facts, slot_name=slot_name, slot=slot)
+        except NearTeeCatalogError as exc:
+            entry.update(last_attempt_outcome="read_failed", last_attempt_error=exc.code)
+            updated[slot_name] = entry
+            continue
+        except Exception:
+            entry.update(last_attempt_outcome="read_failed", last_attempt_error="near_tee_catalog_unavailable")
+            updated[slot_name] = entry
+            continue
+        entry["last_attempt_outcome"] = "read"
+        entry["last_attempt_error"] = None
+        entry["last_read"] = build_receipt(slot_name=slot_name, slot=slot, profile=profile, facts=facts, raw=raw,
+            reason=reason, required=required, revision=configured.egress_revision, now=checked,
+            basis=BASIS_BACKGROUND_READ)
+        if reason is None:
+            entry["failing_reason"] = entry["failing_since"] = None
+        elif entry.get("failing_reason") != reason:
+            entry["failing_reason"], entry["failing_since"] = reason, checked
+        updated[slot_name] = entry
+    if updated != observations:
+        write_catalog_observations(updated)
+    return updated
+
+
+def refresh_interval_seconds(configuration) -> float:
+    """Cadence: the smallest enabled slot ``catalog_ttl_hours`` hint, at most
+    ``REFRESH_MAX_INTERVAL_HOURS``."""
+    setup = configuration.near_tee
+    hints = [int(slot.catalog_ttl_hours) for slot in ((setup.slots or {}).values() if setup is not None else ())
+        if slot is not None and slot.enabled]
+    return float(min(hints + [REFRESH_MAX_INTERVAL_HOURS]) * 3600)
+
+
+class NearTeeCatalogRefresher:
+    """Background, never-blocking re-read of NEAR's public catalog (#1178).
+
+    Runs once shortly after startup, then on the cadence hint. It is not
+    inference: no key, no operator content, no consent, no broker lease. Each
+    read keeps the catalog check's own timeout and byte cap. Failures are
+    recorded and logged; they never block a request.
+    """
+
+    def __init__(self, *, startup_delay: float = REFRESH_STARTUP_DELAY_SECONDS):
+        self._startup_delay = startup_delay
+        self._task = None
+
+    def start(self) -> None:
+        import asyncio
+        if not getattr(settings, "near_tee_catalog_refresh_enabled", True):
+            return
+        if self._task is None or self._task.done():
+            self._task = asyncio.get_running_loop().create_task(self._run(), name="near-tee-catalog-refresh")
+
+    async def stop(self) -> None:
+        import asyncio
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _run(self) -> None:
+        import asyncio
+        import logging
+        from .configuration import read_model_fabric_configuration
+        logger = logging.getLogger(__name__)
+        await asyncio.sleep(self._startup_delay)
+        while True:
+            interval = REFRESH_MAX_INTERVAL_HOURS * 3600.0
+            try:
+                configured = read_model_fabric_configuration()
+                interval = refresh_interval_seconds(configured)
+                await refresh_catalog_observations(configured)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("NEAR TEE background catalog read failed; dispatch is unaffected", exc_info=True)
+            await asyncio.sleep(interval)
+
+
+near_tee_catalog_refresher = NearTeeCatalogRefresher()
 
 
 async def fetch_catalog_record(model_id: str) -> bytes:

@@ -348,13 +348,13 @@ async def test_deepseek_vision_json_schema_is_established_only_by_a_current_proo
     assert (result.analyzed, result.failed) == (0, 1)
     assert (await _details(third))[2]["reason"] == "near_tee_output_truncated"
 
-    # Once that proof is no longer current the capability is gone again (fail
-    # closed to prompt-JSON): with only an expired json_schema proof the slot
-    # needs a new check and the default check returns to prompt-JSON.
+    # #1178: the json_schema proof does not age out (a one-time setup check);
+    # without a current proof the capability is gone (fail closed to prompt-JSON).
     from src.model_fabric.near_tee_vision import vision_structured_basis
     proof = await latest_structured_output_proof(profile)
     assert vision_structured_basis(catalog_lists=False, proof=proof) == "capability_proof"
-    assert vision_structured_basis(catalog_lists=False, proof=proof, now=proof.expires_at) is None
+    assert vision_structured_basis(catalog_lists=False, proof=proof,
+        now=proof.expires_at + 30 * 24 * 3600) == "capability_proof"
     assert vision_structured_basis(catalog_lists=False, proof=None) is None
     assert vision_structured_basis(catalog_lists=True, proof=None) == "catalog"
     assert vision_structured_basis(catalog_lists=False, proof=replace(proof, outcome="failed")) is None

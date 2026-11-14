@@ -422,7 +422,8 @@ async def test_catalog_check_receipts_gate_dispatch(client, model_fabric_workspa
     profile = near_tee_profile_for_slot("text", read_model_fabric_configuration().near_tee.slots["text"])
     assert catalog_receipt_block_reason("text", profile) is None
     stored = read_catalog_receipts()
-    assert catalog_receipt_block_reason("text", profile, now=stored["text"]["expires_at"] + 1) == RECEIPT_STALE
+    # #1178: the setup receipt does not expire by age; only its binding counts.
+    assert catalog_receipt_block_reason("text", profile, now=stored["text"]["checked_at"] + 30 * 24 * 3600) is None
     assert catalog_receipt_block_reason("text", replace(profile, model="z-ai/glm-5.3-flash")) == RECEIPT_STALE
     # A changed slot profile invalidates the receipt (bound to the profile hash).
     saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 5,
@@ -566,7 +567,11 @@ async def test_report_route_reaches_near_transport_with_billing_and_failures(cli
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_stale_receipt_blocks_before_admission(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+async def test_rebound_receipt_blocks_before_admission(client, model_fabric_workspace, keyless_openrouter, monkeypatch):
+    """A receipt whose binding no longer matches blocks before admission.
+
+    #1178 changed this from an age-based case (25h old receipt) to a binding
+    case: age alone never blocks (test_near_tee_no_time_expiry)."""
     from src.approval.runtime import reset_runtime_context, set_runtime_context
     from src.auth.service import authenticate_session
     from src.llm_runtime import completion_with_fallback
@@ -580,8 +585,7 @@ async def test_stale_receipt_blocks_before_admission(client, model_fabric_worksp
     assert (await client.post("/api/settings/model-fabric/near-tee/catalog-check",
         json={"expected_policy_revision": 5})).status_code == 200
     receipts = read_catalog_receipts()
-    receipts["text"]["checked_at"] -= 25 * 3600
-    receipts["text"]["expires_at"] = time.time() - 1
+    receipts["text"]["profile_hash"] = "0" * 64
     write_catalog_receipts(receipts)
     before = len(near.requests)
     operator = await authenticate_session(owner["session_id"], touch=False)

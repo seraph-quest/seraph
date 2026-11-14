@@ -62,7 +62,8 @@ NEAR_TEE_TEXT_PROFILE_ID = "near_tee.text"
 
 async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_000_000,
         request_cost_bound_microusd: int = 20_000, capabilities=("text", "structured_output"),
-        timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2):
+        timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2,
+        proof_age_seconds: float = 1.0):
     """A ready NEAR TEE text slot with every dispatch gate satisfied; no contact.
 
     - the canonical configuration (consented, enabled, behind the shared lane);
@@ -70,7 +71,9 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
     - a real catalog-check receipt produced by ``run_catalog_check`` over the
       intercepted NEAR fixture (the catalog GET is the only request made);
     - literal capability proofs for ``capabilities`` (+ health, latency_ms)
-      bound to the exact slot profile hash (not produced by any model call);
+      bound to the exact slot profile hash (not produced by any model call),
+      checked ``proof_age_seconds`` ago with a 600s advisory ``expires_at``
+      (NEAR TEE proofs do not age out, #1178);
     - the durable accounting ceiling matching the lane.
 
     Returns the installed intercepting ``NearFixture``: it answers only the
@@ -117,7 +120,8 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
     for capability in (*capabilities, "health", "latency_ms"):
         proof = build_model_route_proof(profile=profile, endpoint_class=candidate.endpoint_class,
             adapter=candidate.adapter, capability=capability, canary_version="near-tee-functional-fixture-v1",
-            outcome="passed", checked_at=time.time() - 1, expires_at=time.time() + 600,
+            outcome="passed", checked_at=time.time() - proof_age_seconds,
+            expires_at=time.time() - proof_age_seconds + 601,
             probe_receipt_id="near-tee-literal-fixture", probe_receipt_hash="c" * 64,
             proven_value=values.get(capability, "verified"))
         assert (await model_fabric_repository.persist_capability_proof(proof)).persisted

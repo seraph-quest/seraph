@@ -94,7 +94,7 @@ from src.model_fabric.contracts import (
     transport_endpoint,
 )
 from src.model_fabric.probe import CapabilityProbeObservation, run_capability_probe
-from src.model_fabric.proofs import proof_is_fresh
+from src.model_fabric.proofs import proof_aged_out, proof_is_fresh
 from src.model_fabric.receipts import sanitized_endpoint
 from src.model_fabric.repository import model_fabric_repository
 from src.model_fabric.runtime_status import latest_receipt_persistence, publish_receipt_persistence
@@ -322,6 +322,7 @@ class NearTeeSlotInput(BaseModel):
     timeout_seconds: float = Field(default=30, ge=1, le=120, allow_inf_nan=False)
     temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
     request_cost_bound_microusd: int = Field(strict=True, ge=1, le=1_000_000_000)
+    # Background catalog refresh cadence hint in hours (#1178); not an expiry.
     catalog_ttl_hours: int = Field(default=24, strict=True, ge=1, le=24)
     # Embedding slot only (1-64 inputs per request).
     max_batch_size: int | None = Field(default=None, strict=True, ge=1, le=64)
@@ -416,6 +417,9 @@ class CapabilityCanaryRequest(BaseModel):
     profile_id: str
     capability: str
     timeout_seconds: float = Field(default=10.0, ge=1.0, le=_MAX_CANARY_TIMEOUT_SECONDS)
+    # Stored as the proof's ``expires_at``. Advisory for NEAR TEE slot
+    # profiles, whose capability checks never expire by age (#1178); still
+    # accepted so older clients keep working.
     proof_ttl_seconds: int = Field(default=_DEFAULT_PROOF_TTL_SECONDS, ge=60, le=_MAX_PROOF_TTL_SECONDS)
     transformation_digest: str = DigestSentinel.NO_TRANSFORMATION
     redaction_applied: bool = False
@@ -772,6 +776,15 @@ async def _put_near_tee(body, persisted):
     review = max(bounds, default=None)
     await _require_review_covers_overrun(review)
     previous_key = await vault_repository.get(NEAR_TEE_VAULT_KEY) if raw_key.strip() else None
+    if setup.credential_fingerprint and setup.credential_fingerprint != (prior.credential_fingerprint if prior else None):
+        # ADR-035 amendment #1178: capability checks are a one-time setup gate
+        # bound to the credential; a new key needs them again. Recorded before
+        # publication, so a failed save errs towards a re-check.
+        from src.model_fabric.configuration import record_near_tee_credential_binding
+        try:
+            record_near_tee_credential_binding(setup.credential_fingerprint)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail="provider_policy_publication_unavailable") from exc
     mutated = False
     root = Path(settings.workspace_dir).resolve()
     try:
@@ -1503,7 +1516,9 @@ async def cancel_near_tee_embedding_reindex(request: Request):
 def _catalog_receipt_summary(receipt):
     if not isinstance(receipt, dict):
         return None
-    keys = ("slot", "model_id", "profile_hash", "checked_at_iso", "expires_at", "ttl_hours", "outcome",
+    # No expiry (#1178): ``basis`` names what produced the receipt and
+    # ``refresh_hours`` is the background cadence hint.
+    keys = ("slot", "model_id", "profile_hash", "checked_at_iso", "basis", "refresh_hours", "outcome",
         "reason_code", "provider_type", "attestation_supported", "verifiable", "is_ready", "readiness_basis",
         "input_modalities",
         "output_modalities", "features", "structured_outputs", "input_price_usd_per_million",
@@ -1511,8 +1526,10 @@ def _catalog_receipt_summary(receipt):
         "context_length", "max_output_tokens", "catalog_embedding_dimension", "required_cost_microusd", "response_sha256",
         "tee_hosted_per_catalog", "tee_verified", "e2ee")
     summary = {key: receipt.get(key) for key in keys}
-    if isinstance(summary.get("expires_at"), (int, float)):
-        summary["expires_at"] = datetime.fromtimestamp(summary["expires_at"], timezone.utc).isoformat()
+    # Receipts written before #1178 carry neither field.
+    summary["basis"] = summary.get("basis") or "setup_check"
+    if summary.get("refresh_hours") is None and isinstance(receipt.get("ttl_hours"), int):
+        summary["refresh_hours"] = receipt["ttl_hours"]
     return summary
 
 
@@ -1532,8 +1549,8 @@ def _vision_max_timeout_seconds() -> float:
 async def _near_tee_setup_status(configured, accounting):
     """Local-only NEAR TEE status; never reads the catalog or calls NEAR."""
     from src.model_fabric.near_tee_catalog import (
-        REASONING_RECOMMENDED_MAX_OUTPUT_TOKENS, TEE_LABEL_TEMPLATE, catalog_receipt_block_reason,
-        read_catalog_receipts, receipt_structured_outputs,
+        REASONING_RECOMMENDED_MAX_OUTPUT_TOKENS, TEE_LABEL_TEMPLATE, catalog_read_status, catalog_receipt_block_reason,
+        catalog_warning, last_confirmed, read_catalog_observations, read_catalog_receipts, receipt_structured_outputs,
     )
     from src.model_fabric.near_tee_vision import current_vision_structured_basis, structured_mode
     setup = configured.near_tee
@@ -1565,6 +1582,10 @@ async def _near_tee_setup_status(configured, accounting):
         receipts = read_catalog_receipts()
     except Exception:
         receipts = {}
+    try:
+        observations = read_catalog_observations()
+    except Exception:
+        observations = {}
     slots = {}
     for name in NEAR_TEE_IMPLEMENTED_SLOTS:
         slot = (setup.slots or {}).get(name)
@@ -1594,7 +1615,9 @@ async def _near_tee_setup_status(configured, accounting):
                         profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
                         endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability=capability)
                     if proof is None or not proof_is_fresh(proof):
-                        expired = proof is not None and proof.outcome == "passed" and proof.expires_at <= time.time()
+                        # NEAR TEE proofs never age out (#1178); only a missing
+                        # or rebound proof lands here.
+                        expired = proof is not None and proof_aged_out(proof)
                         proof_reason = f"{'proof_expired' if expired else 'proof_missing'}:{capability}"
                         break
                     if name == "vision" and capability == "structured_output":
@@ -1610,6 +1633,10 @@ async def _near_tee_setup_status(configured, accounting):
             else "configuration_required" if reason in {"near_tee_credential_required", "near_tee_catalog_receipt_missing"}
             or (reason or "").startswith("proof_missing") else "blocked")
         passed = isinstance(receipt, dict) and receipt.get("outcome") == "passed" and catalog_reason is None
+        # #1178: the setup receipt never expires; background reads only
+        # update "last confirmed" and raise a non-blocking warning.
+        confirmed = last_confirmed(name, profile, receipts=receipts, observations=observations) if passed else None
+        warning = catalog_warning(name, profile, receipts=receipts, observations=observations) if passed else None
         # PR3c: chat streaming and agent tool turns each need their own fresh
         # capability check (and tools in the catalog receipt) on this profile.
         # Only the text profile declares streaming and tool use.
@@ -1667,7 +1694,12 @@ async def _near_tee_setup_status(configured, accounting):
             "catalog_receipt": _catalog_receipt_summary(receipt),
             "catalog_receipt_current": catalog_reason is None,
             "tee_hosted_per_catalog": passed,
-            "tee_hosting_label": TEE_LABEL_TEMPLATE.format(as_of=receipt.get("checked_at_iso")) if passed else None,
+            "tee_hosting_label": TEE_LABEL_TEMPLATE.format(as_of=confirmed[1] if confirmed
+                else receipt.get("checked_at_iso")) if passed else None,
+            "catalog_last_confirmed_at": confirmed[1] if confirmed else None,
+            "catalog_last_confirmed_basis": confirmed[2] if confirmed else None,
+            "catalog_warning": warning,
+            "catalog_background_read": catalog_read_status(name, profile, observations=observations) if passed else None,
             "capability_check_timeout_seconds": min(180, int(slot.timeout_seconds) + 16)}
         if name == "embedding":
             from src.model_fabric.configuration import NEAR_TEE_EMBEDDING_EVIDENCE_REQUIRED

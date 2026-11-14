@@ -761,6 +761,10 @@ async def _lifespan_services(app: FastAPI):
         await historical_method_service.start()
         from src.operator.home_projection import home_projection
         home_projection.start()
+        # ADR-035 amendment #1178: informational background catalog reads;
+        # never blocks startup or dispatch.
+        from src.model_fabric.near_tee_catalog import near_tee_catalog_refresher
+        near_tee_catalog_refresher.start()
         with current_task_service():
             from src.guardian.goal_discovery import current_goal_discovery
             async with current_goal_discovery():
@@ -815,6 +819,8 @@ async def _lifespan_services(app: FastAPI):
                     finally:
                         await profiled_interaction_sessions.stop()
     finally:
+        from src.model_fabric.near_tee_catalog import near_tee_catalog_refresher
+        await near_tee_catalog_refresher.stop()
         from src.operator.home_projection import home_projection
         home_projection.stop()
         from src.work_board.historical_method import historical_method_service

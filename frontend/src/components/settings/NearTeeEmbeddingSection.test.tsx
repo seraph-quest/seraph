@@ -104,10 +104,10 @@ it("normalizes the embedding index fail-closed to lexical", () => {
 it("reports catalog-check outcomes per slot", async () => {
   const text: NearTeeSlotStatus = { ...slot, model_id: "Qwen/Qwen3.8-27B", profile_id: "near_tee.text", max_output_tokens: 1024,
     max_batch_size: null, status: "configuration_required", reason_code: "proof_missing:health", evidence_required: false,
-    catalog_receipt: { model_id: "Qwen/Qwen3.8-27B", checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null,
+    catalog_receipt: { model_id: "Qwen/Qwen3.8-27B", checked_at_iso: "2026-11-14T00:00:00+00:00",
       outcome: "passed", reason_code: null, required_cost_microusd: 1711 } };
   const embedding: NearTeeSlotStatus = { ...slot, catalog_receipt: { model_id: "Qwen/Qwen3-Embedding-0.6B",
-    checked_at_iso: "2026-11-14T00:00:00+00:00", expires_at: null, outcome: "failed",
+    checked_at_iso: "2026-11-14T00:00:00+00:00", outcome: "failed",
     reason_code: "near_tee_catalog_not_ready", required_cost_microusd: 82 } };
   const response = { ...saved(5), near_tee: { ...setup(embedding), slots: { text, embedding } } };
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(response), { status: 200 })));

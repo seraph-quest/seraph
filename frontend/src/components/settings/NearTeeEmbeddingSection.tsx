@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
-import { NEAR_TEE_API_BASE, NEAR_TEE_EMBEDDING_MODELS, normalizeModelFabricSettings } from "../../lib/modelFabric";
+import { NEAR_TEE_API_BASE, NEAR_TEE_EMBEDDING_MODELS, catalogBasisText, normalizeModelFabricSettings } from "../../lib/modelFabric";
 import type { ModelFabricSettingsStatus, NearTeeSetupInput, NearTeeSetupStatus, NearTeeSlotStatus } from "../../lib/modelFabric";
 
 interface Props {
@@ -102,7 +102,7 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
         max_input_tokens: number(draft.maxInput, "Maximum input tokens per request", 32_768),
         max_output_tokens: 1, max_batch_size: number(draft.batch, "Inputs per request", 64),
         timeout_seconds: number(draft.timeout, "Request timeout", 120, false), request_cost_bound_microusd: reserve,
-        catalog_ttl_hours: number(draft.ttl, "Catalog receipt lifetime", 24),
+        catalog_ttl_hours: number(draft.ttl, "Catalog refresh hours", 24),
         plaintext_provider_egress_acknowledged: draft.enabled && acknowledged } } };
     const next = await onSave({ expected_policy_revision: revision, near_tee: value });
     dirty.current = false;
@@ -149,6 +149,8 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
     <div className="flex justify-between gap-2 text-[10px]"><span>NEAR TEE · embedding slot · memory recall</span><span>{stale ? "stale retained" : readable(slot?.status ?? "disabled")}</span></div>
     <p className="mt-1 text-[9px] text-retro-text/60">Embeddings send canonical memory text to NEAR in plaintext. Vectors are stored locally in a namespace for this provider, model and measured dimension; older vectors are never mixed in. Nothing re-indexes automatically.</p>
     {blocked && <p className="mt-1 text-[9px]">{blocked}</p>}
+    {slot?.catalog_receipt?.outcome === "passed" && slot.catalog_receipt_current && <p className="mt-1 text-[9px]">{catalogBasisText(slot)}</p>}
+    {slot?.catalog_warning && <p role="status" className="mt-1 text-[9px]">Warning: {slot.catalog_warning.message}</p>}
     <p role="note" className="mt-1 text-[9px]">{index?.recall_mode === "semantic"
       ? `Recall: semantic (NEAR namespace, dimension ${index.measured_dimension ?? "?"}).`
       : "Recall: lexical. " + (index?.notice ?? "Semantic recall is unavailable until the NEAR embedding re-index completes.")
@@ -163,7 +165,7 @@ export function NearTeeEmbeddingSection({ setup, stale, revision, policyRevoked 
       <label>Inputs per request<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding batch size" type="number" min={1} max={64} value={draft.batch} onChange={e => update("batch", e.target.value)} /></label>
       <label>Request timeout · seconds<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding request timeout" type="number" min={1} max={120} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
       <label>Per-request reserve · USD<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding per-request reserve USD" inputMode="decimal" value={draft.reserveUsd} onChange={e => update("reserveUsd", e.target.value)} /></label>
-      <label>Catalog receipt lifetime · hours<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding catalog receipt hours" type="number" min={1} max={24} value={draft.ttl} onChange={e => update("ttl", e.target.value)} /></label>
+      <label>Catalog refresh · every hours (background, never blocks)<input className={inputClass + " mt-1 w-full"} aria-label="NEAR TEE embedding catalog refresh hours" type="number" min={1} max={24} value={draft.ttl} onChange={e => update("ttl", e.target.value)} /></label>
       {draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge NEAR TEE memory plaintext access" checked={acknowledged} onChange={e => setAcknowledged(e.target.checked)} /><span>I acknowledge that NEAR receives memory text in plaintext for embeddings. After indexing, new memories and recall queries are sent to NEAR. Seraph does not verify attestation and there is no end-to-end encryption.</span></label>}
     </fieldset>
     <div className="mt-2 flex flex-wrap gap-2 text-[10px]">

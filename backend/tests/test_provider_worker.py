@@ -372,12 +372,14 @@ async def test_a_degradable_storage_failure_degrades_instead_of_aborting(monkeyp
 async def test_readiness_fails_a_mandatory_provider_typed_and_recovers_it(monkeypatch):
     worker = attach(ProviderWorker())
     await worker.activate()
-    original = worker_module._PREDICATES["audit"]
+    original = worker_module._audit_write_probe
 
     async def fail():
         raise ProviderActivationError("audit", "audit_write_unavailable")
-    monkeypatch.setitem(worker_module._PREDICATES, "audit", fail)
-    snapshot = await worker.readiness()
+    # The audit write probe runs on a child (re)start recheck, never on a status read.
+    monkeypatch.setattr(worker_module, "_audit_write_probe", fail)
+    assert (await worker.readiness())["mandatory_ready"] is True
+    snapshot = await worker.readiness(probe_writes=True)
     assert snapshot["mandatory_ready"] is False
     assert {item["provider"]: (item["state"], item["reason_code"]) for item in snapshot["providers"]}["audit"] == (
         "failed", "audit_write_unavailable")
@@ -385,8 +387,8 @@ async def test_readiness_fails_a_mandatory_provider_typed_and_recovers_it(monkey
     from src.runtime_plugins.ownership import method_dependencies
     assert domain_provider_unavailable("seraph.memory.v1", *method_dependencies("memory.forget")) == \
         "native_provider_audit_unavailable"
-    monkeypatch.setitem(worker_module._PREDICATES, "audit", original)
-    assert (await worker.readiness())["mandatory_ready"] is True
+    monkeypatch.setattr(worker_module, "_audit_write_probe", original)
+    assert (await worker.readiness(probe_writes=True))["mandatory_ready"] is True
     worker.status["memory"].state, worker.status["memory"].reason_code = "degraded", "memory_tables_missing"
     await worker.readiness()
     assert worker.status["memory"].state == "active", "a degraded provider recovers when its predicate passes"
@@ -419,3 +421,162 @@ async def test_runtime_status_reports_rechecked_providers(client, app, monkeypat
     providers = response.json()["providers"]
     assert providers["mandatory_ready"] is True
     assert {item["provider"] for item in providers["providers"]} == {*MANDATORY, *DEGRADABLE}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["startup_failure", "running"])
+async def test_cancellation_during_the_drain_still_releases_the_lease(monkeypatch, tmp_path, async_db, phase):
+    """A CancelledError raised by the task drain still closes the gate, the engine and the lease."""
+    import asyncio
+    import src.app as app_module
+    from src.workspace.production import runtime_workspace_owner, runtime_workspace_owner_held
+    root = tmp_path / "data"
+    (root / "artifacts").mkdir(parents=True)
+    calls = _isolate_startup(app_module, monkeypatch, root)
+
+    async def cancelled_drain(**_):
+        calls.append("drain")
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(app_module, "drain_tracked_tasks", cancelled_drain)
+    if phase == "startup_failure":
+        monkeypatch.setattr(worker_module, "init_db", AsyncMock(side_effect=RuntimeError("init")))
+    else:
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def services(_app):
+            yield
+        monkeypatch.setattr(app_module, "_lifespan_services", services)
+    app = SimpleNamespace(state=SimpleNamespace())
+    with pytest.raises(asyncio.CancelledError):
+        async with app_module.lifespan(app):
+            assert runtime_workspace_owner_held()
+    assert calls == ["disconnect", "drain", "close_db"]
+    assert not runtime_workspace_owner_held()
+    assert state_gate() == (None, None) and current_worker() is None
+    with runtime_workspace_owner(root):
+        pass
+
+
+# ------------------------------------------------------------------ status reads under writer contention
+
+@pytest.fixture
+async def contended_db(tmp_path):
+    """An isolated file database whose sessions give up on a held writer lock after 50 ms."""
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlmodel import SQLModel
+    import src.db.models  # noqa: F401 - registers every table
+    from src.runtime_plugins.ownership import seed_legacy_inventory_sync
+    path = tmp_path / "contended.db"
+    sync = create_engine(f"sqlite:///{path}")
+    SQLModel.metadata.create_all(sync)
+    with sync.begin() as connection:
+        seed_legacy_inventory_sync(connection)
+    sync.dispose()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def configure(connection, _record):
+        connection.cursor().execute("PRAGMA busy_timeout=50")
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    with db_engine.override_session_factory(factory):
+        yield path
+    await engine.dispose()
+
+
+def _active_worker():
+    worker = attach(ProviderWorker())
+    for name in worker.status:
+        worker.status[name].state = "active"
+    worker._activated = True
+    return worker
+
+
+@pytest.mark.asyncio
+async def test_status_reads_never_write_and_a_contended_probe_is_unknown_not_failed(contended_db, monkeypatch):
+    import sqlite3
+    from sqlalchemy import select
+    from src.db.models import AuditEvent
+    monkeypatch.setattr(worker_module, "_AUDIT_PROBE_BACKOFF", (0.01, 0.01))
+    monkeypatch.setattr(settings, "vault_encryption_key", "")
+    worker = _active_worker()
+    holder = sqlite3.connect(contended_db, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")  # another writer holds the SQLite write lock
+    try:
+        probes = []
+        original = worker_module._audit_write_probe
+
+        async def counted():
+            probes.append(1)
+            return await original()
+        monkeypatch.setattr(worker_module, "_audit_write_probe", counted)
+        # Status reads are non-mutating: no write probe, audit stays active under contention.
+        for _ in range(3):
+            status = await worker.readiness()
+            assert {item["provider"]: item["state"] for item in status["providers"]}["audit"] == "active"
+        assert probes == [] and status["audit_write_probe"] is None
+        # A child (re)start probes writes: contention after bounded retries is unknown, not failed.
+        status = await worker.readiness(probe_writes=True)
+        assert probes == [1]
+        assert worker.status["audit"].state == "active" and worker.status["audit"].reason_code is None
+        assert status["audit_write_probe"]["outcome"] == "unknown"
+        assert status["audit_write_probe"]["reason_code"] == "audit_probe_contended"
+        assert status["audit_write_probe"]["checked_at"]
+        assert domain_provider_unavailable("seraph.audit.v1") is None
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    # Once the writer is free the probe passes and nothing persists.
+    status = await worker.readiness(probe_writes=True)
+    assert status["audit_write_probe"]["outcome"] == "passed"
+    async with db_engine.get_session() as db:
+        assert (await db.execute(select(AuditEvent).where(AuditEvent.event_type == "runtime_audit_ready"))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_contention_probe_failure_still_fails_audit(contended_db, monkeypatch):
+    from contextlib import asynccontextmanager
+    from sqlalchemy.exc import OperationalError
+    worker = _active_worker()
+    real = db_engine.get_session
+
+    @asynccontextmanager
+    async def broken_writes():
+        async with real() as db:
+            async def refuse(*_a, **_k):
+                raise OperationalError("SAVEPOINT", {}, Exception("disk I/O error"))
+            db.begin_nested = refuse
+            yield db
+    monkeypatch.setattr(db_engine, "get_session", broken_writes)
+    status = await worker.readiness(probe_writes=True)
+    assert worker.status["audit"].state == "failed"
+    assert worker.status["audit"].reason_code == "audit_write_unavailable"
+    assert status["audit_write_probe"]["outcome"] == "failed"
+    assert domain_provider_unavailable("seraph.audit.v1") == "native_provider_audit_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rechecks_and_shutdown_serialize_status(contended_db, monkeypatch):
+    import asyncio
+    worker = _active_worker()
+    inside = []
+    original = worker_module._tasks_predicate
+
+    async def slow_tasks():
+        inside.append("enter")
+        await asyncio.sleep(0.05)
+        inside.append("exit")
+        return await original()
+    monkeypatch.setitem(worker_module._PREDICATES, "tasks", slow_tasks)
+    first, second = await asyncio.gather(worker.readiness(), worker.readiness())
+    # The status lock serializes rechecks: never two predicate runs interleaved.
+    assert inside == ["enter", "exit", "enter", "exit"]
+    assert first["mandatory_ready"] and second["mandatory_ready"]
+    # Shutdown marks taken mid-recheck are never overwritten by that recheck.
+    recheck = asyncio.create_task(worker.readiness())
+    await asyncio.sleep(0.01)
+    worker.close_gate()
+    await recheck
+    assert all(worker.status[name].state == "deactivated" for name in worker.status)

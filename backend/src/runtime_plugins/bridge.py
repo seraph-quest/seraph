@@ -61,6 +61,10 @@ class HostBlocked(RuntimeError):
     """Only Cordis-dependent work is blocked; current Python core remains usable."""
 
 
+# A boot whose provider reports cannot be produced or acknowledged never admits (#1024).
+_PROVIDER_REPORT_BLOCKS = frozenset({"provider_reports_unavailable", "provider_report_not_acknowledged"})
+
+
 @dataclass
 class Pending:
     frame: dict[str, Any]
@@ -221,17 +225,30 @@ class CordisHost:
                 response = await self._rpc("bootstrap.hello", internal=True)
                 self._plugins = response["payload"]["plugins"]
                 self._verify_plugins(self._plugins)
-                self.state, self.reason = "ready", None
                 if self.provider_reports_source is not None:
-                    # Every boot's facades learn what Python currently hosts.
-                    await self.report_providers(await self.provider_reports_source())
+                    # Every boot's facades learn what Python currently hosts
+                    # before the host admits anything (#1024); a source or
+                    # report failure blocks this boot and stops the child.
+                    try:
+                        reports = await self.provider_reports_source()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - typed block, child stopped below
+                        raise HostBlocked("provider_reports_unavailable") from exc
+                    await self._send_provider_reports(reports)
+                self.state, self.reason = "ready", None
                 return True
             except asyncio.CancelledError:
                 self.process = await spawn
                 self.state, self.reason = "blocked", "startup_cancelled"
                 await self._stop_owned(preserve_blocked=True)
                 raise
-            except (OSError, HostBlocked, ProtocolError, asyncio.TimeoutError):
+            except HostBlocked as exc:
+                self.state, self.reason = "blocked", self.reason or (
+                    exc.args[0] if exc.args and exc.args[0] in _PROVIDER_REPORT_BLOCKS else "child_failed")
+                await self._stop_owned(preserve_blocked=True)
+                return False
+            except (OSError, ProtocolError, asyncio.TimeoutError):
                 self.state, self.reason = "blocked", self.reason or "child_failed"
                 await self._stop_owned(preserve_blocked=True)
                 return False
@@ -383,9 +400,12 @@ class CordisHost:
         the child never initiates one and nothing it answers can activate or
         deactivate a provider.
         """
-        from .protocol import validate_provider_report
         if not self.admitting:
             raise HostBlocked(self.reason or "runtime_not_ready")
+        return await self._send_provider_reports(reports)
+
+    async def _send_provider_reports(self, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from .protocol import validate_provider_report
         acknowledged = []
         for report in reports:
             report = validate_provider_report(dict(report), "provider.readiness")

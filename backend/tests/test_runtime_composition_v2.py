@@ -293,3 +293,80 @@ async def test_a_tampered_python_hosted_row_fails_the_whole_inventory(service_db
     with pytest.raises(ProviderActivationError) as activation:
         await _state_predicate(run_init=False)
     assert activation.value.reason_code == "composition_inventory_invalid"
+
+
+# ------------------------------------------------------------------ corrupt exact-set inventories (#1024 critic)
+
+_CORRUPTIONS = {
+    "authority_cordis_owner": ("seraph.authority.v1", {"owner_kind": "cordis"}),
+    "audit_foreign_digest": ("seraph.audit.v1", {"composition_digest": "c" * 64}),
+    "unknown_state": ("seraph.memory.v1", {"state": "bogus"}),
+    "unknown_owner_kind": ("seraph.goals.v1", {"owner_kind": "remote"}),
+    "epoch_zero": ("seraph.tasks.v1", {"epoch": 0}),
+    "malformed_digest": ("seraph.research.v1", {"composition_digest": "not-a-digest"}),
+    "malformed_receipt": ("seraph.scheduler.v1", {"recovery_receipt_ref": "bad receipt/ref"}),
+}
+
+
+@pytest.mark.parametrize("corruption", sorted(_CORRUPTIONS))
+def test_a_corrupt_exact_pre_a31_inventory_is_refused_and_never_mutated(tmp_path, corruption):
+    domain, change = _CORRUPTIONS[corruption]
+    engine = _sync_db(tmp_path / "corrupt.db", PRE_STATE_DOMAINS)
+    with engine.begin() as connection:
+        assignments = ", ".join(f"{column} = :{column}" for column in change)
+        connection.execute(text(f"UPDATE runtime_composition_states SET {assignments} WHERE runtime_domain = :d"),
+                           {**change, "d": domain})
+    before, _ = _rows(engine)
+    with pytest.raises(CompositionBindingError) as excinfo:
+        with engine.begin() as connection:
+            _upgrade(connection)
+    assert excinfo.value.reason_code == "composition_inventory_invalid"
+    rows, events = _rows(engine)
+    assert rows == before and STATE_DOMAIN not in rows and events == []
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_pre_a31_inventory_fails_state_activation_typed():
+    """init_db refuses the introduction; the state provider reports the typed inventory reason."""
+    from src.db.engine import init_db
+    from src.runtime_plugins.worker import ProviderActivationError, _state_predicate
+    await init_db()
+    async with get_session() as db:
+        await db.execute(delete(RuntimeCompositionState).where(RuntimeCompositionState.runtime_domain == STATE_DOMAIN))
+        await db.execute(text("UPDATE runtime_composition_states SET state = 'bogus' "
+                              "WHERE runtime_domain = 'seraph.memory.v1'"))
+        await db.commit()
+    with pytest.raises(ProviderActivationError) as excinfo:
+        await _state_predicate(run_init=True)
+    assert excinfo.value.reason_code == "composition_inventory_invalid"
+    async with get_session() as db:
+        domains = (await db.execute(select(RuntimeCompositionState.runtime_domain))).scalars().all()
+        assert STATE_DOMAIN not in domains
+        await db.execute(text("UPDATE runtime_composition_states SET state = 'ready' "
+                              "WHERE runtime_domain = 'seraph.memory.v1'"))
+        await db.commit()
+    await init_db()  # the repaired exact set gains its state row again
+
+
+# ------------------------------------------------------------------ frozen schema 1/2 rules
+
+def test_frozen_schema_1_and_2_rules_equal_the_base_derived_rules():
+    """The literal tables equal the rules captured by running 055ae90d's ownership code."""
+    from src.runtime_plugins.contracts import METHOD_DOMAINS
+    from src.runtime_plugins.ownership import (METHOD_DEPENDENCIES_V1, METHOD_DEPENDENCIES_V1_SCHEMA1,
+                                               method_dependencies)
+    base = json.loads((FIXTURES / "base_method_rules.json").read_text(encoding="utf-8"))
+    assert {method: list(deps) for method, deps in METHOD_DEPENDENCIES_V1.items()} == base["schema2"]
+    assert {method: list(deps) for method, deps in METHOD_DEPENDENCIES_V1_SCHEMA1.items()} == base["schema1"]
+    for method in base["schema2"]:
+        assert list(method_dependencies(method, state=False)) == base["schema2"][method]
+        assert list(method_dependencies(method, presets=False, state=False)) == base["schema1"][method]
+        assert set(method_dependencies(method, goal_bound=True, state=False)) == {
+            *base["schema2"][method], "seraph.goals.v1"}
+        # Schema 3 is the live rules: always the state owner on top.
+        assert STATE_DOMAIN in method_dependencies(method)
+    # A method introduced after #1024 has no schema 1/2 rule at all.
+    later = sorted(set(METHOD_DOMAINS) - set(base["schema2"]))
+    for method in later:
+        with pytest.raises(CompositionBindingError):
+            method_dependencies(method, state=False)

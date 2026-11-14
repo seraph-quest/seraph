@@ -179,3 +179,71 @@ async def test_every_host_restart_reports_current_providers_and_quiesce_is_best_
     finally:
         if host.process is not None and not host.snapshot()["cleanup"]["process_reaped"]:
             await host.stop()
+
+
+@needs_host
+@pytest.mark.asyncio
+async def test_reports_reach_the_child_before_it_admits_anything(service_db):
+    from pathlib import Path
+    from src.runtime_plugins.worker import ProviderWorker
+    worker = ProviderWorker()
+    for name in worker.status:
+        worker.status[name].state = "active"
+    worker._activated = True
+    host = CordisHost(node_path=Path(NODE))
+    states = []
+    original = host._rpc
+
+    async def observe(method, **kwargs):
+        if method == "provider.readiness":
+            states.append((host.state, host.admitting))
+        return await original(method, **kwargs)
+    host._rpc = observe
+    host.provider_reports_source = worker.current_reports
+    try:
+        assert await host.start(), host.snapshot()
+        assert len(states) == 7 and all(item == ("starting", False) for item in states)
+        assert host.admitting and len(host._provider_reports) == 7
+    finally:
+        await host.stop()
+
+
+@needs_host
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["inventory", "state_gate", "unexpected", "not_acknowledged"])
+async def test_a_boot_without_provider_reports_never_admits_and_stops_its_child(service_db, failure):
+    from pathlib import Path
+    from src.db.engine import StateProviderUnavailable
+    from src.runtime_plugins.bridge import HostBlocked
+    from src.runtime_plugins.ownership import CompositionBindingError
+    host = CordisHost(node_path=Path(NODE))
+    errors = {"inventory": CompositionBindingError("composition_inventory_invalid"),
+              "state_gate": StateProviderUnavailable("state_provider_deactivating"),
+              "unexpected": RuntimeError("anything else")}
+
+    async def source():
+        if failure in errors:
+            raise errors[failure]
+        return [{"domain": "seraph.state.v1", "state": "active", "epoch": 1, "composition_digest": "a" * 64,
+                 "reason_code": None}]
+    if failure == "not_acknowledged":
+        original = host._rpc
+
+        async def refuse(method, **kwargs):
+            if method == "provider.readiness":
+                raise HostBlocked("provider_report_not_acknowledged")
+            return await original(method, **kwargs)
+        host._rpc = refuse
+    host.provider_reports_source = source
+    try:
+        assert await host.start() is False
+        snapshot = host.snapshot()
+        assert host.admitting is False and host.state == "blocked"
+        assert host.reason == ("provider_report_not_acknowledged" if failure == "not_acknowledged"
+                               else "provider_reports_unavailable")
+        assert snapshot["cleanup"]["process_reaped"] is True
+        with pytest.raises(HostBlocked):
+            await host.request()
+    finally:
+        if host.process is not None and not host.snapshot()["cleanup"]["process_reaped"]:
+            await host.stop()

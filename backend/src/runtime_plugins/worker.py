@@ -20,6 +20,7 @@ worker's life.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import logging
 import os
@@ -122,6 +123,9 @@ async def _state_predicate(*, run_init: bool) -> None:
     if run_init:
         try:
             await init_db()
+        except CompositionBindingError as exc:
+            # A corrupt pre-#1024 inventory refuses the state introduction typed.
+            raise ProviderActivationError("state", exc.reason_code) from exc
         except Exception as exc:  # noqa: BLE001 - startup reports one typed reason
             raise ProviderActivationError("state", "state_init_db_failed") from exc
     try:
@@ -151,20 +155,58 @@ async def _authority_predicate() -> None:
         raise ProviderActivationError("authority", reason)
 
 
-async def _audit_predicate() -> None:
+class ProbeContended(RuntimeError):
+    """A write probe met a held SQLite writer lock: unknown, never failed."""
+
+
+# Bounded retry of the audit write probe under writer contention.
+_AUDIT_PROBE_BACKOFF = (0.05, 0.2, 0.5)
+
+
+def _is_lock_contention(exc: BaseException) -> bool:
+    text = str(getattr(exc, "orig", None) or exc).lower()
+    return "database is locked" in text or "database table is locked" in text or "busy" in text
+
+
+async def _audit_write_probe() -> None:
+    """Probe write inside a savepoint that is always rolled back.
+
+    It takes the SQLite writer lock, so it runs only at activation and on a
+    Cordis child (re)start, never on a status read. A held lock is retried
+    with bounded backoff and then reported as ``ProbeContended`` (unknown).
+    """
     from src.db import engine as db_engine
     from src.db.models import AuditEvent
+    for attempt, delay in enumerate((*_AUDIT_PROBE_BACKOFF, None)):
+        try:
+            async with db_engine.get_session() as db:
+                savepoint = await db.begin_nested()
+                db.add(AuditEvent(session_id=None, actor="runtime", event_type="runtime_audit_ready",
+                                  summary="Audit provider readiness probe", details_json="{}"))
+                await db.flush()
+                await savepoint.rollback()
+                await db.rollback()
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not _is_lock_contention(exc):
+                raise ProviderActivationError("audit", "audit_write_unavailable") from exc
+            if delay is None:
+                raise ProbeContended("audit_probe_contended") from exc
+            await asyncio.sleep(delay)
+
+
+async def _audit_predicate() -> None:
     try:
-        async with db_engine.get_session() as db:
-            # Probe write inside a savepoint that is always rolled back.
-            savepoint = await db.begin_nested()
-            db.add(AuditEvent(session_id=None, actor="runtime", event_type="runtime_audit_ready",
-                              summary="Audit provider readiness probe", details_json="{}"))
-            await db.flush()
-            await savepoint.rollback()
-            await db.rollback()
-    except Exception as exc:  # noqa: BLE001
-        raise ProviderActivationError("audit", "audit_write_unavailable") from exc
+        await _audit_write_probe()
+    except ProbeContended as exc:
+        # At activation nothing else may hold the writer; contention there is a failure.
+        raise ProviderActivationError("audit", "audit_write_contended") from exc
+
+
+async def _audit_read_predicate() -> None:
+    """Non-mutating status recheck: the audit table is present and readable."""
+    if await _missing_tables("audit", ("audit_events",)):
+        raise ProviderActivationError("audit", "audit_tables_missing")
 
 
 async def _tasks_predicate() -> None:
@@ -215,6 +257,10 @@ class ProviderWorker:
         self._owner = None
         self._activated = False
         self._closed = False
+        # Serializes every status mutation (activation, rechecks, shutdown marks).
+        self._status_lock = asyncio.Lock()
+        # Last audit write probe: {"checked_at", "outcome", "reason_code"}.
+        self.audit_probe: dict | None = None
 
     # ---------------------------------------------------------------- lock
 
@@ -242,6 +288,10 @@ class ProviderWorker:
 
     async def activate(self) -> None:
         """State, authority, audit and tasks or abort; then degradable providers."""
+        async with self._status_lock:
+            await self._activate()
+
+    async def _activate(self) -> None:
         from src.db.engine import set_state_gate
         if self._activated:
             return
@@ -255,6 +305,8 @@ class ProviderWorker:
             for name in MANDATORY[1:]:
                 await _PREDICATES[name]()
                 self.status[name].state = "active"
+                if name == "audit":
+                    self._record_audit_probe("passed", None)
         except ProviderActivationError as exc:
             self.status[exc.provider].state = "failed"
             self.status[exc.provider].reason_code = exc.reason_code
@@ -270,35 +322,62 @@ class ProviderWorker:
                 logger.warning("Provider %s degraded: %s", name, exc.reason_code)
         self._activated = True
 
-    async def readiness(self) -> dict:
+    def _record_audit_probe(self, outcome: str, reason_code: str | None) -> None:
+        from datetime import datetime, timezone
+        self.audit_probe = {"checked_at": datetime.now(timezone.utc).isoformat(), "outcome": outcome,
+                            "reason_code": reason_code}
+
+    async def readiness(self, *, probe_writes: bool = False) -> dict:
         """Re-run every activated provider's predicate; never activates anything.
 
         A mandatory provider whose predicate now fails becomes ``failed`` with
         its typed reason (its Cordis methods block); a degraded or failed
         provider whose predicate passes again recovers to ``active``.
+
+        Status reads (``probe_writes=False``) are non-mutating: audit is
+        rechecked read-only and the last write probe is reported with its
+        timestamp. A Cordis child (re)start probes writes; a write probe that
+        stays contended after its bounded retries is ``unknown`` and leaves
+        the audit provider's state unchanged rather than failing it.
         """
-        if not self._activated or self._closed:
+        async with self._status_lock:
+            if not self._activated or self._closed:
+                return self.snapshot()
+            checks = {"state": lambda: _state_predicate(run_init=False), **_PREDICATES,
+                      "audit": _audit_write_probe if probe_writes else _audit_read_predicate}
+            for name in PROVIDERS:
+                if self._closed:
+                    break  # shutdown began mid-recheck: its marks win
+                if self.status[name].state not in {"active", "degraded", "failed"}:
+                    continue
+                try:
+                    await checks[name]()
+                    if self._closed:
+                        break
+                    self.status[name].state, self.status[name].reason_code = "active", None
+                    if name == "audit" and probe_writes:
+                        self._record_audit_probe("passed", None)
+                except ProbeContended as exc:
+                    self._record_audit_probe("unknown", str(exc))
+                    logger.warning("Audit write probe contended; audit state left unchanged")
+                except ProviderActivationError as exc:
+                    if self._closed:
+                        break
+                    self.status[name].state = "failed" if name in MANDATORY else "degraded"
+                    self.status[name].reason_code = exc.reason_code
+                    if name == "audit" and probe_writes:
+                        self._record_audit_probe("failed", exc.reason_code)
             return self.snapshot()
-        checks = {"state": lambda: _state_predicate(run_init=False), **_PREDICATES}
-        for name in PROVIDERS:
-            if self.status[name].state not in {"active", "degraded", "failed"}:
-                continue
-            try:
-                await checks[name]()
-                self.status[name].state, self.status[name].reason_code = "active", None
-            except ProviderActivationError as exc:
-                self.status[name].state = "failed" if name in MANDATORY else "degraded"
-                self.status[name].reason_code = exc.reason_code
-        return self.snapshot()
 
     async def current_reports(self) -> list[dict]:
-        """Fresh readiness, as closed reports for a (re)started Cordis child."""
-        await self.readiness()
+        """Fresh readiness (with the audit write probe) as closed reports for a (re)started child."""
+        await self.readiness(probe_writes=True)
         return await self.provider_reports()
 
     def snapshot(self) -> dict:
         return {"providers": [self.status[name].payload() for name in PROVIDERS],
-                "mandatory_ready": all(self.status[name].state == "active" for name in MANDATORY)}
+                "mandatory_ready": all(self.status[name].state == "active" for name in MANDATORY),
+                "audit_write_probe": None if self.audit_probe is None else dict(self.audit_probe)}
 
     async def provider_reports(self) -> list[dict]:
         """Closed five-field reports for the child's facades: no handle or key."""

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+from types import MappingProxyType
 
 from sqlalchemy import select, text, update
 from src.db.models import AuditEvent, RuntimeCompositionState, WorkflowRunState
@@ -153,6 +154,57 @@ TURN_STEP_METHODS = frozenset({"agent-loop.startTurn", "guardian.startTurn", "bo
 SCHEMA_2_ORIGINS = frozenset({"guardian.startTurn", "delegation.startChild", "board-workers.startTurn"})
 
 
+# Frozen literal copy of the rules every binding schema 1 and 2 was written
+# under (manifest v1, goal_bound=False), captured from 055ae90d; never derived
+# from the live rules, so later rule edits cannot change how an old binding
+# decodes. Schema 1 (#1019) differs only in that turn steps did not bind the
+# presets owner. Methods introduced after #1024 exist in schema 3 only.
+METHOD_DEPENDENCIES_V1 = MappingProxyType({
+    "agent-loop.cancelTurn": ("seraph.agent-loop.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "agent-loop.inspectTurn": ("seraph.agent-loop.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "agent-loop.startTurn": ("seraph.agent-loop.v1", "seraph.agent-presets.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "artifacts.adopt": ("seraph.artifacts.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "artifacts.read": ("seraph.artifacts.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "artifacts.stage": ("seraph.artifacts.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "audit.append": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "authority.resolve": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "board-workers.startTurn": ("seraph.agent-presets.v1", "seraph.authority.v1", "seraph.board-workers.v1", "seraph.tasks.v1"),
+    "capabilities.describe": ("seraph.authority.v1", "seraph.capabilities.v1", "seraph.tasks.v1"),
+    "capabilities.invoke": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.capabilities.v1", "seraph.tasks.v1"),
+    "capabilities.list": ("seraph.authority.v1", "seraph.capabilities.v1", "seraph.tasks.v1"),
+    "connections.inspect": ("seraph.authority.v1", "seraph.connections.v1", "seraph.tasks.v1"),
+    "connections.invokeBoundAdapter": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.connections.v1", "seraph.tasks.v1"),
+    "conversation.accept": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "conversation.append": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "conversation.cancel": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "conversation.read": ("seraph.authority.v1", "seraph.conversation.v1", "seraph.tasks.v1"),
+    "delegation.startChild": ("seraph.agent-loop.v1", "seraph.agent-presets.v1", "seraph.authority.v1", "seraph.delegation.v1", "seraph.tasks.v1"),
+    "goals.read": ("seraph.authority.v1", "seraph.goals.v1", "seraph.tasks.v1"),
+    "guardian.startTurn": ("seraph.agent-presets.v1", "seraph.authority.v1", "seraph.guardian.v1", "seraph.tasks.v1"),
+    "inference.request": ("seraph.artifacts.v1", "seraph.audit.v1", "seraph.authority.v1", "seraph.inference.v1", "seraph.tasks.v1"),
+    "memory.applyReviewed": ("seraph.audit.v1", "seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "memory.forget": ("seraph.audit.v1", "seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "memory.propose": ("seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "memory.retrieve": ("seraph.authority.v1", "seraph.memory.v1", "seraph.tasks.v1"),
+    "research.buildPlan": ("seraph.authority.v1", "seraph.research.v1", "seraph.tasks.v1"),
+    "research.executeAccepted": ("seraph.authority.v1", "seraph.research.v1", "seraph.source-extraction.v1", "seraph.tasks.v1"),
+    "scheduler.disable": ("seraph.authority.v1", "seraph.scheduler.v1", "seraph.tasks.v1"),
+    "scheduler.dispatchDue": ("seraph.authority.v1", "seraph.scheduler.v1", "seraph.tasks.v1"),
+    "scheduler.register": ("seraph.authority.v1", "seraph.scheduler.v1", "seraph.tasks.v1"),
+    "source-extraction.extract": ("seraph.authority.v1", "seraph.source-extraction.v1", "seraph.tasks.v1"),
+    "tasks.admit": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.cancel": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.checkpoint": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.inspect": ("seraph.authority.v1", "seraph.tasks.v1"),
+    "tasks.settle": ("seraph.authority.v1", "seraph.tasks.v1"),
+})
+METHOD_DEPENDENCIES_V1_SCHEMA1 = MappingProxyType({**METHOD_DEPENDENCIES_V1,
+    "agent-loop.startTurn": ("seraph.agent-loop.v1", "seraph.authority.v1", "seraph.tasks.v1"),
+    "board-workers.startTurn": ("seraph.authority.v1", "seraph.board-workers.v1", "seraph.tasks.v1"),
+    "guardian.startTurn": ("seraph.authority.v1", "seraph.guardian.v1", "seraph.tasks.v1"),
+})
+
+
 def manifest_version_for(schema_version: int) -> str:
     """The method manifest a binding schema was written under."""
     return MANIFEST_VERSION if schema_version >= BINDING_SCHEMA else MANIFEST_VERSION_V1
@@ -164,10 +216,14 @@ def method_dependencies(method: str, *, goal_bound: bool = False, presets: bool 
     domain = METHOD_DOMAINS.get(method)
     if domain is None or type(goal_bound) is not bool:
         raise CompositionBindingError("composition_method_unsupported")
-    names = {"seraph.authority.v1", "seraph.tasks.v1", domain}
-    if state:
-        # Every method depends on the Python-hosted state owner (#1024, manifest v2).
-        names.add(STATE_DOMAIN)
+    if not state:
+        # Schema 1 and 2 bindings: the frozen manifest-v1 tables, never the live rules.
+        frozen = (METHOD_DEPENDENCIES_V1 if presets else METHOD_DEPENDENCIES_V1_SCHEMA1).get(method)
+        if frozen is None:
+            raise CompositionBindingError("composition_method_unsupported")
+        return tuple(sorted({*frozen, "seraph.goals.v1"})) if goal_bound else frozen
+    # Schema 3 (manifest v2): every method depends on the Python-hosted state owner (#1024).
+    names = {STATE_DOMAIN, "seraph.authority.v1", "seraph.tasks.v1", domain}
     if goal_bound or method == "goals.read":
         names.add("seraph.goals.v1")
     if method in {"artifacts.adopt", "audit.append"}:
@@ -486,13 +542,28 @@ def introduce_state_domain_sync(connection) -> bool:
     other partial or unknown inventory is left alone and keeps failing closed.
     It runs inside ``init_db``'s immediate writer, so also on the first start
     after a host-CLI restore of a pre-#1024 backup. Forward-only: an older
-    binary rejects the extra row with ``composition_inventory_invalid``.
+    binary rejects the extra row with ``composition_inventory_invalid``. An
+    exact-set inventory with any row that does not decode raises
+    ``composition_inventory_invalid`` (failing ``init_db`` and so the state
+    provider) and inserts nothing.
     """
     from datetime import datetime, timezone
     from uuid import uuid4
-    rows = connection.execute(text("SELECT runtime_domain FROM runtime_composition_states")).scalars().all()
-    if len(rows) != len(PRE_STATE_DOMAINS) or set(rows) != set(PRE_STATE_DOMAINS):
+    from types import SimpleNamespace
+    rows = [SimpleNamespace(**row._mapping) for row in connection.execute(text(
+        "SELECT runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref "
+        "FROM runtime_composition_states"))]
+    names = [row.runtime_domain for row in rows]
+    if len(names) != len(PRE_STATE_DOMAINS) or set(names) != set(PRE_STATE_DOMAINS):
         return False
+    # The exact prior set must also decode in full (owner, epoch, digest, state,
+    # receipt, and legacy owners for authority and audit) before anything is
+    # added: a corrupt inventory is refused typed and nothing is inserted.
+    try:
+        for row in rows:
+            _checked_row(row)
+    except CompositionBindingError as exc:
+        raise CompositionBindingError("composition_inventory_invalid") from exc
     inserted = connection.execute(text(
         "INSERT INTO runtime_composition_states "
         "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "

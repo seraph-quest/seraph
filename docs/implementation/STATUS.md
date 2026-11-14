@@ -806,11 +806,30 @@ An explicit, authenticated **catalog check** reads only NEAR's
 stores a content-safe receipt bound to the slot's complete profile hash and the
 current configuration revision, with an operator TTL (1–24 h); any later
 settings save requires a new check. It parses NEAR's catalog record shape
-(`metadata.architecture` modalities, `maxOutputLength`; absent readiness is
-not ready, an absent output limit allows at most 8192 output tokens). Dispatch re-validates the receipt locally and never
+(`metadata.architecture` modalities, `maxOutputLength`; an absent output limit
+allows at most 8192 output tokens). Readiness (#1167, ADR-035 amendment
+2026-11-14): `isReady: true` passes, an explicit `isReady: false` fails
+`near_tee_catalog_not_ready`, and an **absent** (or JSON `null`) `isReady`
+passes only on an
+otherwise eligible record (`vllm`, attestation supported, verifiable); the
+receipt records `is_ready: null` and `readiness_basis: absent_flag_attested`
+and Settings says readiness was inferred (this is how
+`deepseek-ai/DeepSeek-V4.1-Flash-1017` passes). Dispatch re-validates the receipt locally and never
 refreshes it; a missing, failed, changed or expired receipt blocks the slot.
 Dispatch also needs fresh capability-check proofs (operator-triggered,
-cost-bounded mechanics only, through the broker and ledger).
+cost-bounded mechanics only, through the broker and ledger). Structured
+callers (`general_task_planner`, `strategist_agent`, `session_consolidation`)
+need a fresh `structured_output` proof whatever NEAR's catalog lists; the
+catalog's `structured_outputs` feature is recorded as a fact, not a
+capability, and Settings shows the text slot's structured-output state
+(`structured_output_capability`) with a **Run structured output check**
+button. Capability checks send 64 output tokens, or up to 1024 (never above the
+slot's maximum output) when the receipt lists `reasoning`, because reasoning
+tokens count against `max_tokens`. An answer ended by the output bound with no
+content, or a JSON (`response_format`, vision) answer ended by it, fails as
+`near_tee_output_truncated` after its cost settles. For reasoning models
+Settings recommends a maximum output of at least 4096 (guidance only; the
+reserve must still cover it).
 
 Text routes (`completion_with_fallback`, guardian/report synthesis such as
 `end_of_day_goal_report`, `screenshot_observation_digest`, `daily_briefing`)
@@ -859,7 +878,7 @@ settles). Cordis requests above the slot's output limit are refused with
 the slot profile, which changes its hash: after upgrading, re-run the catalog
 check and every capability check. Vision is the separate slot below
 (PR4); embeddings: see below.
-Labels say "TEE-hosted per NEAR catalog as of <time>; NEAR gateway receives
+Labels say "TEE-hosted per NEAR catalog as of &lt;time&gt;; NEAR gateway receives
 plaintext; attestation not verified by Seraph; no end-to-end encryption".
 Evidence is intercepted-transport tests only: no live NEAR call, provider
 availability, price or model quality is established.
@@ -870,8 +889,8 @@ availability, price or model quality is established.
 adapter analyses screenshots, disabled by default. The operator picks one
 model from the closed ADR-035 vision allowlist (`z-ai/glm-5.3-flash`,
 `Qwen/Qwen3.8-27B`, `Qwen/Qwen3-VL-30B-A3B-Instruct`,
-`deepseek-ai/DeepSeek-V4.1-Flash-1017`; DeepSeek fails the catalog check while
-its readiness is absent), sets limits and a per-request reserve, and grants a
+`deepseek-ai/DeepSeek-V4.1-Flash-1017`; DeepSeek's absent readiness is
+inferred from its attested, verifiable vllm record since #1167), sets limits and a per-request reserve, and grants a
 **separate screenshot purpose consent**: enabling or changing the slot needs
 both the plaintext-to-NEAR acknowledgement and an explicit acknowledgement
 that screenshots reach the NEAR gateway in plaintext; the text slot's consent
@@ -884,10 +903,20 @@ The catalog check requires the image input modality for the vision slot,
 records NEAR's `structured_outputs` feature and adds a listed per-image price
 to the cost bound. Capability checks for the slot are `vision`,
 `structured_output`, `health` and `latency_ms` (mechanics only). The
-`structured_output` check sends an image in the runtime's request mode for the
-current receipt (strict json_schema or prompt-JSON) and its proof records that
-mode; dispatch with a proof of another mode is blocked
-(`near_tee_vision_structured_proof_mode_mismatch`). Each
+`structured_output` check sends an image in the runtime's effective request
+mode (strict json_schema or prompt-JSON) and its proof records that mode;
+dispatch with a current proof of another mode is blocked
+(`near_tee_vision_structured_proof_mode_mismatch`). The effective mode is
+json_schema when the receipt lists `structured_outputs` or, when NEAR's catalog
+omits it (#1167), when a current passing json_schema proof exists that no
+newer failed json_schema check contradicts (a failed check records its mode;
+the slot then needs a prompt-JSON check): the check
+endpoint accepts `structured_mode: "json_schema"` for that (Settings: **Run
+JSON-schema structured output check**; `prompt_json` is refused with
+`near_tee_vision_structured_mode_conflict` while the catalog lists the
+feature). Without either the slot uses prompt-JSON (fail closed); once the
+proof expires it falls back to prompt-JSON and needs a new check. Settings
+reports `structured_output_basis` (`catalog`, `capability_proof` or none). Each
 screenshot is one request of at most 8 MiB: the canonical id with
 `x-no-aliasing: true`, the image as a base64 data URL `image_url` part, and
 `response_format` json_schema when the current receipt lists
@@ -937,11 +966,11 @@ receipt or capability check clears it. NEAR's specialized-endpoints guide
 model but says nothing about aliasing or embedding billing. Until then memory
 recall stays lexical and NEAR receives no memory text.
 
-A second blocker remains even after an evidence amendment: the real catalog
-record for `Qwen/Qwen3-Embedding-0.6B` (lead's read 2026-11-13) has no
-`isReady` field and no dimension field, so under ADR-035's readiness rule the
-catalog check reports `near_tee_catalog_not_ready` (fixture-tested). The
-amendment must also decide how readiness is handled for this model.
+The real catalog record for `Qwen/Qwen3-Embedding-0.6B` (lead's read
+2026-11-13) has no `isReady` field and no dimension field. Since #1167 the
+catalog check infers readiness for it as for the other slots (vllm, attested,
+verifiable; basis `absent_flag_attested`, fixture-tested); the evidence gate
+above still blocks dispatch.
 
 Implemented mechanics (proven with intercepted transport and the gate lifted
 in tests only): the slot takes `Qwen/Qwen3-Embedding-0.6B` from the closed

@@ -47,7 +47,7 @@ Prices are USD per million input/output tokens.
 | `z-ai/glm-5.3-flash` | text, vision | text+image; tools, structured_outputs, reasoning, json_mode; ready; $0.08/$0.50; ctx 1,048,576 (base 100K) | Aliases span other families: `x-no-aliasing` is mandatory |
 | `Qwen/Qwen3.8-27B` | text, vision | text+image; tools, structured_outputs, reasoning; ready; $0.04/$1.35; ctx 262,144; max out 65,536 | — |
 | `Qwen/Qwen3-VL-30B-A3B-Instruct` | vision | text+image; structured_outputs, logprobs; ready; $0.15/$0.55; ctx 16,384; max out 8,192 | No tools: never text |
-| `deepseek-ai/DeepSeek-V4.1-Flash-1017` | text, vision | text+image; tools, reasoning; $0.30/$1.20; ctx 1,048,576; alias `deepseek-ai/DeepSeek-V4-Flash` | Metadata incomplete (`isReady` absent, sampling list empty, no structured outputs): the catalog check fails closed while `isReady` is absent; never for callers needing structured output |
+| `deepseek-ai/DeepSeek-V4.1-Flash-1017` | text, vision | text+image; tools, reasoning; $0.30/$1.20; ctx 1,048,576; alias `deepseek-ai/DeepSeek-V4-Flash` | Metadata incomplete (`isReady` absent, sampling list empty, no structured outputs). Amended 2026-11-14 (#1167): readiness is inferred from the attested, verifiable vllm record; structured output only through a current `structured_output` capability proof |
 | `Qwen/Qwen3.6-35B-A3B-FP8` | text | text only; tools, json_mode, structured_outputs, reasoning; ready; $0.17/$1.10; ctx 262K | Aliases include `Qwen3-30B-A3B-Instruct-2507` |
 | `Qwen/Qwen3-Embedding-0.6B` | embedding | embedding; $0.01/M (catalog list read) | Per-model fields re-read by the catalog check; before PR3d, source evidence must show that the embeddings endpoint and `/v1/billing/costs` honour `x-no-aliasing`, or the slot stays blocked |
 | `openai/whisper-large-v3` | none (reserved audio) | audio | Not selectable under this ADR; see Audio |
@@ -112,13 +112,44 @@ canonical id, complete profile hash, `checked_at`, the fields above (provider
 type, attestation/verifiable flags, readiness, modalities, features, prices,
 context), response SHA-256 and pass/fail reason. A pass requires `vllm`,
 attestation and verifiable true, readiness true, the slot's modality and
-features, and `request_cost_bound_microusd >= max_input_tokens x input price +
+features (readiness: see the amendment below), and `request_cost_bound_microusd >= max_input_tokens x input price +
 max_output_tokens x output price` at the receipt prices (reasoning tokens count
 within `max_output_tokens`). TTL is operator-set 1–24 hours, default 24. Precontact dispatch
 re-validates locally (receipt passing, same id and profile hash, unexpired);
 otherwise the slot blocks with `near_tee_catalog_receipt_stale` or the failure
 reason. Dispatch never refreshes the catalog. The receipt is an additional
 hosting gate, not a capability proof. Tests intercept this transport.
+
+**Amendment 2026-11-14 ([#1167](https://github.com/seraph-quest/seraph/issues/1167), operator direction).**
+NEAR's record for `deepseek-ai/DeepSeek-V4.1-Flash-1017` (read 2026-11-14)
+omits `isReady` and lists no `structured_outputs`, while the operator's live
+probe the same day showed chat, strict json_schema output, tool calling and a
+`/v1/attestation/report` with gateway and model attestations. Therefore:
+
+- Readiness: `isReady: true` passes; an explicit `isReady: false` fails; an
+  **absent** `isReady` (an explicit JSON `null` counts as absent) passes only
+  when the record is otherwise eligible
+  (`providerType=vllm`, `attestationSupported` true, `verifiable` true). The
+  receipt records `is_ready` as read and `readiness_basis`
+  (`catalog_ready` or `absent_flag_attested`), and Settings says readiness was
+  inferred. This applies to every slot, the embedding slot included (its
+  evidence gate is unchanged).
+- Structured output: the catalog's `structured_outputs` is recorded as a fact,
+  not a capability. Callers needing structured output keep needing a fresh
+  `structured_output` proof at dispatch. The vision slot sends json_schema when
+  the catalog lists the feature or, when it omits it, a current passing
+  json_schema `structured_output` proof on the exact profile exists and no
+  newer failed json_schema check contradicts it; otherwise it uses strictly
+  validated prompt-JSON. No proof and no feature means the capability is
+  unavailable.
+- Reasoning tokens count against `max_output_tokens`: capability checks of a
+  model whose receipt lists `reasoning` send up to 1024 output tokens (bounded
+  by the slot), Settings recommends a maximum output of at least 4096 for such
+  models, and an answer ended by the output bound without content, or a JSON
+  answer ended by it, is `near_tee_output_truncated` (cost settled, nothing
+  adopted).
+- Every other gate (model echo, `x-no-aliasing`, billing readback, Unknown
+  liability, cost bound, modality, context, output limit) is unchanged.
 
 ### Capability proofs kept
 
@@ -268,8 +299,9 @@ operator approval.
 
 The NEAR gateway sees plaintext for every inference purpose; the TEE label is
 NEAR's catalog claim at a dated time, not Seraph-verified confidentiality.
-Model choice narrows to the allowlist, and DeepSeek stays blocked until its
-catalog metadata is complete. One Unknown NEAR cost blocks all inference,
+Model choice narrows to the allowlist; since the 2026-11-14 amendment DeepSeek
+passes the catalog check with inferred readiness, and its structured output
+rests on capability proofs, not catalog metadata. One Unknown NEAR cost blocks all inference,
 chat included, until the operator settles it. Semantic recall is lexical until re-indexing.
 Voice stays unavailable. OpenRouter code remains until its liabilities clear.
 STATUS and the Current App Guide change only as slices merge.

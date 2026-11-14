@@ -184,7 +184,9 @@ def test_catalog_check_embedding_modality_cost_and_dimension():
     assert evaluate_catalog(texty, slot_name="embedding", slot=_slot(enabled=True))[0] == "near_tee_catalog_modality_missing"
     for changes, reason in (({"providerType": "chutes"}, "near_tee_catalog_provider_not_vllm"),
             ({"attestationSupported": False}, "near_tee_catalog_not_attested"),
-            ({"isReady": _ABSENT}, "near_tee_catalog_not_ready"),
+            ({"isReady": False}, "near_tee_catalog_not_ready"),
+            ({"isReady": _ABSENT, "attestationSupported": _ABSENT}, "near_tee_catalog_not_attested"),
+            ({"isReady": _ABSENT, "verifiable": _ABSENT}, "near_tee_catalog_not_verifiable"),
             ({"contextLength": 4096}, "near_tee_catalog_context_too_small")):
         facts = parse_catalog_record(json.dumps(embedding_catalog(**changes)).encode(), model_id=EMBED_MODEL)
         assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True))[0] == reason
@@ -196,13 +198,21 @@ def test_catalog_check_embedding_modality_cost_and_dimension():
             model_id=EMBED_MODEL)
 
 
-def test_real_catalog_record_parses_but_is_not_ready():
-    # ADR-035's isReady rule keeps the real record failing even after an
-    # evidence amendment; that amendment must decide isReady handling.
+def test_real_catalog_record_readiness_is_inferred_from_attestation():
+    # #1167 (ADR-035 amendment 2026-11-14): the real record omits isReady but
+    # is vllm, attested and verifiable, so the catalog check infers readiness
+    # (basis absent_flag_attested). The evidence gate still blocks dispatch.
+    from src.model_fabric.near_tee_catalog import READINESS_ABSENT_FLAG_ATTESTED, readiness_basis
     facts = parse_catalog_record(json.dumps(real_embedding_record()).encode(), model_id=EMBED_MODEL)
     assert facts.is_ready is None and facts.embedding_dimension is None
     assert facts.output_modalities == ("embedding",) and facts.context_length == 32768
-    assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True)) == ("near_tee_catalog_not_ready", 82)
+    assert readiness_basis(facts) == READINESS_ABSENT_FLAG_ATTESTED
+    assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True)) == (None, 82)
+    unattested = real_embedding_record()
+    unattested["metadata"]["attestationSupported"] = False
+    facts = parse_catalog_record(json.dumps(unattested).encode(), model_id=EMBED_MODEL)
+    assert readiness_basis(facts) is None
+    assert evaluate_catalog(facts, slot_name="embedding", slot=_slot(enabled=True))[0] == "near_tee_catalog_not_attested"
 
 
 def test_vector_parser_checks_echo_count_dimension_and_normalizes():

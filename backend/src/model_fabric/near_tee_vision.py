@@ -4,7 +4,9 @@ Builds the one screenshot request the governed vision slot may send: the
 stored canonical model id, one image as a base64 data URL in an
 ``image_url`` content part, and either ``response_format`` json_schema (when
 the slot's current catalog receipt lists NEAR's ``structured_outputs``
-feature) or the prompt's strict-JSON instruction. All gates run here before
+feature, or, when the catalog omits it, a current passing json_schema
+``structured_output`` capability proof establishes it; #1167) or the prompt's
+strict-JSON instruction. All gates run here before
 admission and raise ``NearTeeDenied`` (nothing reserved or sent): slot
 policy and purpose consent, catalog receipt freshness, the conservative
 input-token estimate against ``max_input_tokens``, the request byte cap, the
@@ -44,10 +46,14 @@ IMAGE_TOKEN_OVERHEAD = 64
 MAX_IMAGE_SIDE_PX = 32768
 STRUCTURED_SCHEMA_NAME = "seraph_screenshot_analysis_v1"
 # The structured_output capability proof of the vision slot is bound to the
-# request mode the runtime uses; dispatch requires the mode of the current
-# catalog receipt (json_schema when it lists structured_outputs).
+# request mode the runtime uses; dispatch requires the effective mode
+# (json_schema when the current catalog receipt lists structured_outputs or a
+# current json_schema proof establishes it, otherwise prompt-JSON).
 STRUCTURED_MODE_JSON_SCHEMA = "vision_json_schema"
 STRUCTURED_MODE_PROMPT_JSON = "vision_prompt_json"
+# Why the vision slot sends json_schema (#1167); None means prompt-JSON.
+STRUCTURED_BASIS_CATALOG = "catalog"
+STRUCTURED_BASIS_CAPABILITY_PROOF = "capability_proof"
 _CHECK_SCHEMA_NAME = "seraph_capability_check_v1"
 _CHECK_SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
     "additionalProperties": False}
@@ -56,6 +62,52 @@ _ONE_PIXEL_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42m
 
 def structured_mode(structured: bool) -> str:
     return STRUCTURED_MODE_JSON_SCHEMA if structured else STRUCTURED_MODE_PROMPT_JSON
+
+
+def vision_structured_basis(*, catalog_lists: bool, proof, failed_proof=None,
+                            now: float | None = None) -> str | None:
+    """Why the vision slot may send json_schema, or None for prompt-JSON (#1167).
+
+    The catalog's ``structured_outputs`` feature, or, when NEAR's record omits
+    it, a current passing ``structured_output`` capability proof that
+    exercised the json_schema mode on this exact profile and that no newer
+    failed json_schema (or unknown-mode) check contradicts. Without either the
+    json_schema capability stays unavailable (fail closed to prompt-JSON,
+    which is strictly validated). The proof is still required at dispatch.
+    """
+    from .proofs import proof_is_fresh
+    if catalog_lists:
+        return STRUCTURED_BASIS_CATALOG
+    if proof is None or proof.proven_value != STRUCTURED_MODE_JSON_SCHEMA or not proof_is_fresh(proof, now=now):
+        return None
+    if (failed_proof is not None and failed_proof.checked_at >= proof.checked_at
+            and failed_proof.proven_value in (None, STRUCTURED_MODE_JSON_SCHEMA)):
+        # A newer (or same-instant: fail closed) failed json_schema check
+        # withdraws the proof-based basis.
+        return None
+    return STRUCTURED_BASIS_CAPABILITY_PROOF
+
+
+async def latest_structured_output_proof(profile, *, failed: bool = False):
+    """The newest passing (or, with ``failed``, failed) ``structured_output``
+    proof bound to this exact profile, or None."""
+    from .repository import model_fabric_repository
+    from .selector import candidate_from_profile
+    candidate = candidate_from_profile(profile)
+    lookup = (model_fabric_repository.latest_failed_capability_proof if failed
+        else model_fabric_repository.latest_capability_proof)
+    return await lookup(
+        profile_schema_version=profile.schema_version, profile_contract_hash=profile.contract_hash,
+        profile_id=profile.id, model=profile.model, endpoint=candidate.endpoint,
+        endpoint_class=candidate.endpoint_class, adapter=candidate.adapter, capability="structured_output")
+
+
+async def current_vision_structured_basis(profile, *, catalog_lists: bool, now: float | None = None) -> str | None:
+    """``vision_structured_basis`` with this profile's stored proofs."""
+    if catalog_lists:
+        return STRUCTURED_BASIS_CATALOG
+    return vision_structured_basis(catalog_lists=False, proof=await latest_structured_output_proof(profile),
+        failed_proof=await latest_structured_output_proof(profile, failed=True), now=now)
 
 
 def structured_check_body(*, model: str, structured: bool, max_tokens: int) -> dict[str, object]:
@@ -144,7 +196,8 @@ async def prepare_near_tee_vision_call(
     if reason := catalog_receipt_block_reason("vision", profile, now=now, receipts=receipts,
             revision=configured.egress_revision):
         raise NearTeeDenied(reason)
-    structured = receipt_structured_outputs("vision", receipts=receipts)
+    structured = await current_vision_structured_basis(profile,
+        catalog_lists=receipt_structured_outputs("vision", receipts=receipts), now=now) is not None
     estimate = estimate_vision_input_tokens(prompt, width=width, height=height)
     if estimate > slot.max_input_tokens:
         # Rejected before contact (ADR-035): the image counts conservatively.
@@ -197,8 +250,10 @@ async def prepare_near_tee_vision_call(
             proofs.append(proof)
     mode = structured_mode(structured)
     structured_proof = next((proof for proof in proofs if proof.capability == "structured_output"), None)
-    if structured_proof is not None and structured_proof.proven_value != mode:
-        # The proof exercised another request mode than this receipt implies.
+    from .proofs import proof_is_fresh
+    if structured_proof is not None and proof_is_fresh(structured_proof, now=now) \
+            and structured_proof.proven_value != mode:
+        # The proof exercised another request mode than the effective one.
         raise _denied("near_tee_vision_structured_proof_mode_mismatch", context)
     decision = select_route(context, (candidate,), tuple(proofs), now=now,
         target_model_id=slot.model_id, target_api_key=key)

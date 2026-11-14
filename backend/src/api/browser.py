@@ -16,7 +16,7 @@ from src.approval.runtime import get_current_session_id, reset_runtime_context, 
 from src.api.capabilities import _require_authenticated_capability_operator
 from src.api.chat import _begin_rest_revocation_watch, _end_rest_revocation_watch, _ensure_rest_authorized
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
-from src.auth.service import auth_enabled, bind_operator_principal
+from src.auth.service import auth_enabled, bind_operator_principal, local_no_login_active
 from src.browser.sessions import browser_session_runtime
 from src.extensions.browser_providers import list_browser_provider_inventory
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
@@ -272,7 +272,7 @@ async def _bind_browser_operator(request: Request, owner_session_id: str | None)
             detail={"code": "browser_owner_session_mismatch"},
         )
     canonical_owner_session_id = requested_session_id or active_runtime_session_id or None
-    if canonical_owner_session_id and not active_runtime_session_id and auth_enabled():
+    if canonical_owner_session_id and not active_runtime_session_id and (auth_enabled() or local_no_login_active()):
         conversation = await session_manager.get(canonical_owner_session_id)
         if (
             conversation is None

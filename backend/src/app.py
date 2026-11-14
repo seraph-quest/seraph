@@ -83,7 +83,7 @@ async def _lifecycle_runtime_or_unavailable(domain: str) -> dict:
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
 from src.auth.middleware import OperatorAuthMiddleware
-from src.auth.service import validate_auth_configuration
+from src.auth.service import auth_mode_status, validate_auth_configuration
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -559,9 +559,40 @@ async def lifespan(app: FastAPI):
         raise shutdown_error
 
 
+async def _reconcile_operator_auth_mode() -> None:
+    """Ensure or retire the local no-login root and audit the auth mode (#1161)."""
+    from src.auth.service import AUTH_MODE_LOCAL_NO_LOGIN, reconcile_local_operator_root
+
+    from src.audit.repository import audit_repository
+
+    status = await reconcile_local_operator_root()
+    if status.get("mode") != AUTH_MODE_LOCAL_NO_LOGIN and not status.get("local_root_retired"):
+        return
+    local = status.get("mode") == AUTH_MODE_LOCAL_NO_LOGIN
+    try:
+        await audit_repository.log_event(
+            event_type="operator_auth_mode",
+            actor="system",
+            tool_name="operator_auth",
+            risk_level="high" if local else "medium",
+            policy_mode="full",
+            summary=(
+                "Local single-operator mode without login is active (loopback only)"
+                if local
+                else "Local no-login operator root retired because the mode is off"
+            ),
+            details=status,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning("operator auth mode audit could not be recorded", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan_services(app: FastAPI):
     """Start and stop the services; their ``.stop()`` calls run with the gate open."""
+    # The provider worker's activation already ran init_db (#1024), so the
+    # #1161 auth-mode reconcile runs here, against the open state gate.
+    await _reconcile_operator_auth_mode()
     from src.conversation.task_context import TaskContinuityService
     from src.work_board.repository import WorkBoardRepository
     from src.agent.session import session_manager
@@ -923,6 +954,8 @@ def create_app() -> FastAPI:
             "remote_inference_admission": remote_inference_admission,
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
+            # Which operator authentication mode is in effect (#1161).
+            "operator_auth": auth_mode_status(),
         }
 
     from src.api.router import api_router

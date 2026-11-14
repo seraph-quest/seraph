@@ -788,7 +788,14 @@ class AudioIngressWorker:
             raise ValueError("audio transport must be explicitly marked intercepted")
         self.transport = transport
         self.admission_broker = admission_broker or remote_inference_admission_broker
-        configured_root = Path(quarantine_root) if quarantine_root else Path(tempfile.gettempdir()) / "seraph-audio"
+        if quarantine_root:
+            configured_root = Path(quarantine_root)
+        else:
+            # The platform temp base is not operator-controlled and is often a
+            # symlink (macOS: /var -> /private/var, /tmp -> /private/tmp).
+            # Resolve only that base; the component check below still rejects
+            # any symlink at or under the resolved base.
+            configured_root = Path(os.path.realpath(tempfile.gettempdir())) / "seraph-audio"
         if not configured_root.is_absolute():
             raise ValueError("audio quarantine root must be an absolute server path")
         current = Path(configured_root.anchor)

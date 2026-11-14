@@ -122,3 +122,20 @@ async def test_malformed_persisted_principal_blocks_startup(tmp_path, bad):
     with pytest.raises(RuntimeError, match='malformed'):
         async with engine.begin() as db: await _ensure_operator_principals(db)
     await engine.dispose()
+
+
+def test_schema_guard_reads_a_cleanly_closed_wal_workspace(tmp_path):
+    """#1165: a WAL database closed cleanly has no -wal/-shm; mode=ro alone can't open it."""
+    import sqlite3
+    path = tmp_path / 'seraph.db'
+    db = sqlite3.connect(path)
+    db.execute('PRAGMA journal_mode=WAL')
+    db.execute('PRAGMA user_version=900')
+    db.execute('create table operator_sessions(principal_id text)')
+    db.commit()
+    db.close()
+    assert not Path(str(path) + '-wal').exists()
+    guard = Path(__file__).resolve().parents[2]/'scripts/operator_schema_guard.py'
+    assert subprocess.run(['python3', str(guard), str(path)], capture_output=True).returncode == 0
+    refusal = subprocess.run(['python3', str(guard), str(path), '--runtime-schema', '0'], capture_output=True, text=True)
+    assert refusal.returncode == 1 and 'restore' in refusal.stderr

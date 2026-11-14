@@ -21,7 +21,8 @@ import { MoltbookConnectionPanel } from "./settings/MoltbookConnectionPanel";
 import { ForgejoTitlePanel } from "./settings/ForgejoTitlePanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
-import { isLocalNoLoginSession, LocalNoLoginBadge, useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
+import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
+import { isLocalNoLoginSession, LocalNoLoginBadge } from "./auth/localNoLogin";
 import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {

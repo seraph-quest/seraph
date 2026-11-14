@@ -282,7 +282,14 @@ export interface NearTeeCatalogReceipt {
   outcome: "passed" | "failed" | string;
   reason_code: string | null;
   required_cost_microusd: number | null;
+  /** NEAR's catalog feature only; not a capability (#1167). */
   structured_outputs?: boolean;
+  /** NEAR's `isReady` flag: null when the catalog omits it. */
+  is_ready?: boolean | null;
+  /** "catalog_ready", "absent_flag_attested" (inferred, #1167) or null. */
+  readiness_basis?: string | null;
+  /** NEAR's catalog `supportedFeatures` (e.g. "reasoning"). */
+  features?: string[];
 }
 
 export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_provider_egress_acknowledged" | "screenshot_plaintext_egress_acknowledged"> {
@@ -299,6 +306,10 @@ export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_pro
   check_capabilities?: string[];
   /** Embedding slot: the ADR-035 source-evidence gate is still closed. */
   evidence_required?: boolean;
+  /** Why structured output is available: "catalog" (vision), "capability_proof" or null (#1167). */
+  structured_output_basis?: string | null;
+  /** Text slot: "ready" or the reason response_format callers are blocked. */
+  structured_output_capability?: string | null;
 }
 
 export interface NearTeeEmbeddingReindexJob {
@@ -341,6 +352,8 @@ export interface NearTeeSetupStatus {
   e2ee: false;
   /** Largest vision timeout the background analysis job can carry (job budget minus billing window and margin). */
   vision_max_timeout_seconds?: number;
+  /** Suggested minimum maximum-output for reasoning models (#1167); guidance only. */
+  reasoning_recommended_max_output_tokens?: number;
   slots: { text: NearTeeSlotStatus | null; vision?: NearTeeSlotStatus | null; embedding?: NearTeeSlotStatus | null };
   embedding_index?: NearTeeEmbeddingIndexStatus | null;
 }
@@ -583,7 +596,11 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
       expires_at: text(receipt.expires_at), outcome: String(receipt.outcome ?? "unknown"),
       reason_code: text(receipt.reason_code),
       required_cost_microusd: typeof receipt.required_cost_microusd === "number" ? receipt.required_cost_microusd : null,
-      structured_outputs: receipt.structured_outputs === true } : null,
+      structured_outputs: receipt.structured_outputs === true,
+      is_ready: typeof receipt.is_ready === "boolean" ? receipt.is_ready : null,
+      readiness_basis: receipt.readiness_basis === "catalog_ready" || receipt.readiness_basis === "absent_flag_attested"
+        ? receipt.readiness_basis : null,
+      features: stringArray(receipt.features) } : null,
     catalog_receipt_current: row.catalog_receipt_current === true,
     tee_hosted_per_catalog: row.tee_hosted_per_catalog === true,
     tee_hosting_label: text(row.tee_hosting_label),
@@ -592,6 +609,9 @@ function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"
     max_batch_size: integer("max_batch_size", 1, 64) ? row.max_batch_size as number : null,
     check_capabilities: stringArray(row.check_capabilities).filter(item => ["text", "vision", "structured_output", "embedding", "health", "latency_ms"].includes(item)),
     evidence_required: row.evidence_required === true,
+    structured_output_basis: row.structured_output_basis === "catalog" || row.structured_output_basis === "capability_proof"
+      ? row.structured_output_basis : null,
+    structured_output_capability: text(row.structured_output_capability),
   };
 }
 
@@ -636,6 +656,10 @@ export function normalizeNearTeeSetup(value: unknown): NearTeeSetupStatus | null
     disclosure: NEAR_TEE_DISCLOSURE, tee_verified: false, e2ee: false,
     vision_max_timeout_seconds: typeof row.vision_max_timeout_seconds === "number" && Number.isFinite(row.vision_max_timeout_seconds)
       && row.vision_max_timeout_seconds >= 1 && row.vision_max_timeout_seconds <= 120 ? row.vision_max_timeout_seconds : undefined,
+    reasoning_recommended_max_output_tokens: typeof row.reasoning_recommended_max_output_tokens === "number"
+      && Number.isSafeInteger(row.reasoning_recommended_max_output_tokens)
+      && row.reasoning_recommended_max_output_tokens >= 1 && row.reasoning_recommended_max_output_tokens <= 65_536
+      ? row.reasoning_recommended_max_output_tokens : undefined,
     slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text, "text"),
       vision: slots?.vision == null ? null : normalizeNearTeeSlot(slots.vision, "vision"),
       embedding: slots?.embedding == null ? null : normalizeNearTeeSlot(slots.embedding, "embedding") },

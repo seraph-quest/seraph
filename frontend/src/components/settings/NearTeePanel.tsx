@@ -36,6 +36,8 @@ const SLOTS: readonly SlotSpec[] = [
 ];
 /** Default background job budget (120 s) minus the 16 s billing window and a 10 s margin. */
 const DEFAULT_VISION_MAX_TIMEOUT = 94;
+/** Fallback for the backend's reasoning-model output guidance (#1167). */
+const DEFAULT_REASONING_MAX_OUTPUT = 4096;
 const inputClass = "min-w-0 border border-retro-text/20 bg-retro-bg px-1 py-0.5 text-retro-text disabled:opacity-40";
 
 function usd(value: number) { return (value / 1_000_000).toFixed(6).replace(/0+$/, "").replace(/\.$/, ""); }
@@ -109,6 +111,7 @@ export function NearTeePanel({ setup, stale, policyRevision, policyRevoked = fal
     {SLOTS.map(spec => <SlotEditor key={spec.name} spec={spec} slot={setup?.slots[spec.name] ?? null} stale={stale}
       revision={revision} setRevision={setRevision} policyRevoked={policyRevoked} laneCeilingMicrousd={laneCeilingMicrousd}
       maxTimeout={spec.name === "vision" ? Math.floor(setup?.vision_max_timeout_seconds ?? DEFAULT_VISION_MAX_TIMEOUT) : 120}
+      reasoningMaxOutput={setup?.reasoning_recommended_max_output_tokens ?? DEFAULT_REASONING_MAX_OUTPUT}
       credential={credential} clearCredential={() => setCredential("")} busy={busy} setBusy={setBusy} setError={setError}
       setMessage={setMessage} safeError={safeError} mounted={mounted} onSave={onSave} />)}
     {error && <div role="alert" className="mt-2 text-[10px] text-red-400">{error}</div>}
@@ -130,6 +133,7 @@ interface SlotEditorProps {
   policyRevoked: boolean;
   laneCeilingMicrousd?: number | null;
   maxTimeout: number;
+  reasoningMaxOutput: number;
   credential: string;
   clearCredential: () => void;
   busy: string | null;
@@ -141,7 +145,7 @@ interface SlotEditorProps {
   onSave: (payload: Record<string, unknown>) => Promise<ModelFabricSettingsStatus>;
 }
 
-function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, laneCeilingMicrousd, maxTimeout, credential, clearCredential,
+function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, laneCeilingMicrousd, maxTimeout, reasoningMaxOutput, credential, clearCredential,
   busy, setBusy, setError, setMessage, safeError, mounted, onSave }: SlotEditorProps) {
   const vision = spec.name === "vision";
   const [draft, setDraft] = useState(() => draftFrom(spec, slot));
@@ -220,14 +224,43 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
     } catch (reason) { if (mounted.current) setError(safeError(reason, "Capability check failed.")); }
     finally { if (mounted.current) setBusy(null); }
   }
+  /** One structured_output check (#1167): the text slot's JSON callers, or the vision json_schema mode. */
+  async function structuredCheck() {
+    setBusy("structured:" + spec.name); setError(null); setMessage(null);
+    try {
+      if (!slot) throw new Error(`Save the ${spec.name} slot first.`);
+      const response = await apiFetch(API_URL + "/api/settings/model-fabric/canary", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: slot.profile_id, capability: "structured_output", timeout_seconds: slot.capability_check_timeout_seconds,
+          proof_ttl_seconds: 86400, ...(vision ? { structured_mode: "json_schema" } : {}) }),
+      });
+      if (!response.ok) throw new Error("Capability check refused (structured_output): " + await detail(response));
+      const body = await response.json();
+      if (body?.outcome !== "passed") throw new Error("Capability check failed (structured_output): " + readable(body?.error_code ?? "unknown")
+        + (vision ? ". Run the vision capability check again to return to prompt-JSON requests." : "."));
+      if (mounted.current) setMessage(vision ? "JSON-schema structured output check passed (one billed NEAR request). Refresh to see the request mode."
+        : "Structured output check passed (one billed NEAR request). Refresh to see readiness.");
+    } catch (reason) { if (mounted.current) setError(safeError(reason, "Capability check failed.")); }
+    finally { if (mounted.current) setBusy(null); }
+  }
   const receipt = slot?.catalog_receipt;
+  const passedReceipt = receipt?.outcome === "passed";
+  const structuredBasis = slot?.structured_output_basis ?? (receipt?.structured_outputs ? "catalog" : null);
+  const reasoningModel = Boolean(passedReceipt && receipt?.features?.includes("reasoning"));
   const label = (text: string) => spec.prefix + " " + text;
   return <div className="mt-3 border-t border-retro-text/10 pt-2" aria-label={"NEAR TEE " + spec.title}>
     <div className="flex justify-between gap-2 text-[10px]"><span>NEAR TEE · {spec.title}</span><span>{stale ? "stale retained" : readable(slot?.status ?? "disabled")}</span></div>
     {vision && <p className="mt-1 text-[9px] text-retro-text/60">{NEAR_TEE_SCREENSHOT_DISCLOSURE} The daemon makes no cloud call: it uploads captures to this backend, which analyses them on this slot.</p>}
     {slot?.reason_code && <p className="mt-1 text-[9px]">Blocked: {readable(slot.reason_code)}</p>}
     <p className="mt-1 text-[9px]">{slot?.tee_hosting_label ?? (receipt ? `Catalog receipt ${receipt.outcome} at ${receipt.checked_at_iso ?? "unknown time"}${receipt.reason_code ? " · " + readable(receipt.reason_code) : ""}` : "No catalog receipt yet.")}</p>
-    {vision && receipt?.outcome === "passed" && <p className="mt-1 text-[9px]">{receipt.structured_outputs ? "Structured outputs listed in the catalog: JSON schema requests." : "No structured outputs in the catalog: prompt-JSON requests, strictly validated."}</p>}
+    {passedReceipt && receipt?.readiness_basis === "absent_flag_attested" && <p className="mt-1 text-[9px]">Readiness inferred: NEAR's catalog omits isReady; the record is vllm, attestation-supported and verifiable. An explicit not-ready flag would block.</p>}
+    {vision && passedReceipt && <p className="mt-1 text-[9px]">{structuredBasis === "catalog" ? "Structured outputs listed in the catalog: JSON schema requests."
+      : structuredBasis === "capability_proof" ? "Catalog omits structured outputs; a current capability check established JSON schema requests."
+      : "No structured outputs in the catalog and no current JSON-schema check: prompt-JSON requests, strictly validated."}</p>}
+    {!vision && passedReceipt && slot?.structured_output_capability && <p className="mt-1 text-[9px]">{slot.structured_output_capability === "ready"
+      ? "Structured output (JSON callers): ready, established by a current capability check."
+      : `Structured output (JSON callers): unavailable until a structured output check passes (${readable(slot.structured_output_capability)}).`}</p>}
+    {reasoningModel && Number(draft.maxOutput) < reasoningMaxOutput && <p className="mt-1 text-[9px]">Reasoning model: reasoning tokens count against the maximum output. Use at least {reasoningMaxOutput} so answers are not cut off (near tee output truncated).</p>}
     <fieldset disabled={busy !== null} className="mt-2 grid gap-2 text-[10px] sm:grid-cols-2">
       <label className="flex gap-2"><input type="checkbox" aria-label={`Enable NEAR TEE ${spec.name} slot`} checked={draft.enabled} onChange={e => update("enabled", e.target.checked)} />Enable {spec.name} slot</label>
       <label className="sm:col-span-2">{vision ? "Vision model" : "Text model"}<select className={inputClass + " mt-1 w-full"} aria-label={`NEAR TEE ${spec.name} model`} value={draft.model} onChange={e => update("model", e.target.value)}>
@@ -248,6 +281,7 @@ function SlotEditor({ spec, slot, stale, revision, setRevision, policyRevoked, l
       <button type="button" disabled={busy !== null} onClick={() => void save()}>{busy === "save:" + spec.name ? "Saving…" : saveLabel}</button>
       {vision && slot?.enabled && slot.consent_current && <button type="button" disabled={busy !== null} onClick={() => void save(true)}>Withdraw screenshot consent</button>}
       <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void capabilityCheck()}>{busy === "capability:" + spec.name ? "Running capability check…" : (vision ? "Run vision capability check" : "Run capability check")}</button>
+      {(!vision || (passedReceipt && !receipt?.structured_outputs)) && <button type="button" disabled={busy !== null || !slot?.enabled || !slot.catalog_receipt_current} onClick={() => void structuredCheck()}>{busy === "structured:" + spec.name ? "Running structured output check…" : (vision ? "Run JSON-schema structured output check" : "Run structured output check")}</button>}
     </div>
   </div>;
 }

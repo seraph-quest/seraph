@@ -1923,15 +1923,29 @@ refuses the mode with a named error unless all of these hold:
 `OPERATOR_AUTH_SECRET_HASH` is set; the test bypass is off;
 `BACKEND_BIND_HOST` names a loopback address (the managed
 `./manage.sh -e dev local` launcher exports `127.0.0.1` beside its
-`--host 127.0.0.1`), and any uvicorn `--host` argument is loopback with no
-inherited `--fd`/`--uds` listener; and the Host and Origin allow-lists each
-contain a loopback entry. The backend cannot introspect its listening socket,
-so the bind check relies on the launcher's declaration plus its own process
-arguments; the per-request peer check below is the enforcing boundary.
-Docker development is not supported because container peers are not loopback.
+`--host 127.0.0.1`); and the Host and Origin allow-lists each contain a
+loopback entry. Uvicorn binds its socket only after application startup, so
+the bind check fails closed on the process command line: it accepts only a
+`uvicorn` (or `python -m uvicorn`) invocation with an explicit loopback
+`--host`, at most one worker (`--workers`, `UVICORN_WORKERS`,
+`WEB_CONCURRENCY`), no inherited `--fd`/`--uds` listener, no non-loopback
+`UVICORN_HOST`, and loopback-only proxy trust (`--forwarded-allow-ips` /
+`FORWARDED_ALLOW_IPS`, so `*` is refused). `uvicorn.run(...)` entry points
+such as `backend/main.py` and gunicorn are refused because their bind is
+invisible to the process. The per-request checks below remain the enforcing
+boundary. Docker development is not supported because container peers are not
+loopback.
 
-Every request is still checked. The socket peer must be loopback (forwarding
-headers are ignored, `403 local_peer_forbidden`); `Host` must be in
+Every request is still checked. The peer must be loopback, and every hop in
+`X-Forwarded-For`, `X-Real-IP` and `Forwarded` must be loopback too
+(`403 local_peer_forbidden`). The Vite dev server proxies `/api` and `/ws`
+with `xfwd`, so if it is exposed on a LAN (for example
+`SERAPH_DEV_SERVER_HOST=0.0.0.0`) the remote client's address reaches the
+backend and is refused instead of appearing as the loopback proxy. A browser
+request marked `Sec-Fetch-Site: cross-site` is refused
+(`403 cross_site_forbidden`), which covers Origin-less no-cors GETs and image
+loads; only the paired selected-text companion's exact closed ingress is
+exempt. `Host` must be in
 `OPERATOR_AUTH_ALLOWED_HOSTS` and itself a loopback name, so configured LAN or
 `test` names are refused; state-changing requests and the WebSocket handshake
 need an `Origin` from `OPERATOR_AUTH_ALLOWED_ORIGINS` with a loopback host, and
@@ -1964,7 +1978,10 @@ Settings in place of Refresh/Sign out) and offers no login or setup screen.
 
 **Risk:** any local process, browser extension or page that passes the
 loopback, Host and Origin checks has full operator authority, including model
-inference, capability execution and artifact transfer. Use it only on a
+inference, capability execution and artifact transfer. A loopback reverse
+proxy that drops or rewrites `X-Forwarded-For` (unlike the managed Vite proxy)
+would let its remote clients appear local, so do not put any other proxy in
+front of the backend in this mode. Use it only on a
 single-user machine you control; production and test configuration are
 unchanged and still require their credential or explicit test bypass.
 

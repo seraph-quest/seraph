@@ -211,6 +211,8 @@ class RuntimeLifecycle:
         # Tasks cancelled past their bound that are still alive: their domain never activates beside them.
         self._held: dict[str, list[asyncio.Task]] = {}
         self._transition_tasks: dict[str, asyncio.Task] = {}
+        # The last live transition per domain, succeeded or failed, for the runtime status.
+        self._last_transition: dict[str, dict[str, Any]] = {}
         for domain in LIFECYCLE_DOMAINS:
             self._set_status(domain, "inactive", "lifecycle_not_started")
 
@@ -237,6 +239,8 @@ class RuntimeLifecycle:
                                           if task is not None and not task.done()])
         if domain in self._transitioning:
             status["transition"] = self._transitioning[domain]
+        if domain in self._last_transition:
+            status["last_transition"] = dict(self._last_transition[domain])
         return status
 
     def _lock(self, domain: str) -> asyncio.Lock:
@@ -642,9 +646,17 @@ class RuntimeLifecycle:
             self._transitioning[domain] = "transitioning"
             receipt = await transition_domain(domain, target, host=self.host or cordis_host, actor=actor,
                                               expected_epoch=expected_epoch, reason=reason)
-        except BaseException:
+        except BaseException as exc:
             self._transitioning.pop(domain, None)
             self._transition_tasks.pop(domain, None)
+            failure = (exc.reason_code if isinstance(exc, (LifecycleBlocked, CompositionBindingError))
+                       else "transition_cancelled" if isinstance(exc, asyncio.CancelledError)
+                       else "transition_failed")
+            self._last_transition[domain] = {"status": "failed", "target": target, "reason": failure,
+                                             "recovery": lifecycle_recovery(failure), "at": _now()}
+            # A failed transition is not a recovery: no "recovered" entry when the
+            # unchanged row reactivates at E.
+            self._notified.pop(domain, None)
             # Whatever happened, the row decides: reactivate if it is still ready (never while closing).
             self._last_attempt.pop(domain, None)
             if not self.closing:
@@ -653,9 +665,10 @@ class RuntimeLifecycle:
         self._transitioning.pop(domain, None)
         self._transition_tasks.pop(domain, None)
         self._last_attempt.pop(domain, None)
+        self._last_transition[domain] = {"status": "succeeded", "target": target, "epoch": receipt.get("epoch"),
+                                         "owner_kind": receipt.get("owner_kind"), "state": receipt.get("state"),
+                                         "at": _now()}
         await self.activate(domain)
-        self._set_status(domain, self._status[domain]["state"], self._status[domain]["reason"],
-                         self._active.get(domain), last_transition=receipt)
         return receipt
 
 

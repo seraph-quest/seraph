@@ -1193,9 +1193,12 @@ with `dispatch_owner_not_active` while dispatch is not active.
 Deactivation closes admission first, then drains in-flight work within the
 original bounds (scheduler wrappers 120 s; WorkBoard attempts
 `MAX_RUNTIME_SECONDS` plus a 30 s settlement window). An attempt still live
-past that bound goes through `WorkBoardDispatcher.drain_attempt_past_bound`:
-its capability's own cleanup hook, then `cancel_job_tree` (unresolved effects
-stay unknown, never forced or retried), then proof. A scheduler wrapper that
+past that bound goes through `WorkBoardDispatcher.drain_attempt_past_bound`,
+which runs the operator cancel's own stop sequence (`_stop_attempt_tree`:
+cancel-intent checkpoint, the capability's cleanup hook, `cancel_job_tree`) and
+its tree readback (the re-read root and every returned descendant; an
+uncertain external effect or a live row is never cancelled). Unresolved effects
+stay unknown, never forced or retried. A scheduler wrapper that
 owns no attempt is cancelled and awaited (its durable work keeps its lease).
 `runtime_lifecycle_quiesced` is audited only when nothing is alive and every
 cleanup is proven; otherwise `runtime_lifecycle_drain_unknown` names the
@@ -1216,7 +1219,9 @@ Live operator transitions of these two domains through
 one background step: drain at E while the row is still `ready`, then the
 fenced `transition_domain` writer (`ready → draining → blocked@E+1 → ready` in
 one transaction), then reactivation at E+1. Only one transition per domain runs
-at a time. A failure leaves the domain visibly blocked with its fix.
+at a time. A failure leaves the domain visibly blocked with its fix, or, when
+the row never moved, reactivates it at E without a "recovered" entry; the
+status shows `last_transition` (`succeeded` or `failed` with its reason).
 
 Visibility: `/api/runtime/status` gains `scheduler_runtime` and
 `dispatch_runtime` (`state`, `reason`, `recovery`, the row's `owner`,

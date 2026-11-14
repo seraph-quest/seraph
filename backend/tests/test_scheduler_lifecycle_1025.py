@@ -391,15 +391,13 @@ async def test_a_live_transition_with_unknown_drain_never_flips_the_owner(servic
     assert (row.epoch, row.state) == (1, "ready")
 
 
-async def test_dispatcher_drain_cleanup_uses_the_capability_hook_and_cancel_job_tree(monkeypatch):
-    """``drain_attempt_past_bound`` never only cancels: hook, then the tree cancel, then proof."""
+def _real_dispatcher(registry: dict, tree: list[dict]):
+    """A real WorkBoardDispatcher (real stop sequence, hook and tree readback) over a stub job store."""
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
-    from src.work_board import dispatcher as module
     from src.work_board.dispatcher import WorkBoardDispatcher
-    order: list[str] = []
-    task_row = SimpleNamespace(task_id="t1", capability_id="work.document-compare.v1", typed_input_json="{}")
-    attempt_row = SimpleNamespace(attempt_id="a1", workflow_run_id="job-1")
+    task_row = SimpleNamespace(task_id="t1", capability_id="inference.near-text.v1", typed_input_json="{}")
+    attempt_row = SimpleNamespace(task_id="t1", attempt_id="a1", workflow_run_id="job-1")
 
     class Db:
         async def get(self, model, key):
@@ -410,34 +408,73 @@ async def test_dispatcher_drain_cleanup_uses_the_capability_hook_and_cancel_job_
         yield Db()
 
     class Jobs:
+        def __init__(self):
+            self.rows = {"job-1": {"job_id": "job-1", "status": "running", "revision": 4,
+                                   "lease": {"owner": "dispatcher", "fencing_token": 7}}}
+            self.calls: list[str] = []
+
         async def get_job(self, job_id):
-            return {"job_id": job_id, "status": "running"}
+            return dict(self.rows[job_id]) if job_id in self.rows else None
+
+        async def record_checkpoint(self, job_id, *, checkpoint_id, state, owner, fencing_token, expected_revision):
+            self.calls.append(f"checkpoint:{checkpoint_id}:{state['reason_code']}")
 
         async def cancel_job_tree(self, job_id, *, reason):
-            order.append(f"tree:{job_id}:{reason}")
-            return [{"job_id": job_id, "status": "unknown_external_effect"}]
+            self.calls.append(f"tree:{job_id}")
+            self.rows["job-1"] = {"job_id": "job-1", "status": "cancelled"}
+            for item in tree:
+                self.rows[item["job_id"]] = dict(item)
+            return [{"job_id": "job-1", "status": "cancelled"}, *tree]
 
     dispatcher = WorkBoardDispatcher.__new__(WorkBoardDispatcher)
     dispatcher.session_provider = sessions
     dispatcher.jobs = Jobs()
-    dispatcher._active_worker_tasks = {}
-    monkeypatch.setattr(module, "_parse_typed_input", lambda task: {})
+    dispatcher._active_worker_tasks = registry
+    return dispatcher
 
-    async def hook(task, attempt, inputs, projection, *, reason):
-        order.append(f"hook:{task.capability_id}")
-        return [{"job_id": "job-1", "status": "unknown"}], False
 
-    dispatcher._cleanup_adapter = hook
-    outcome = await dispatcher.drain_attempt_past_bound("t1", "a1")
-    assert order == ["hook:work.document-compare.v1", "tree:job-1:dispatch_drain_timeout"]
-    assert outcome["status"] == "unknown" and outcome["cleanup_proven"] is False
+async def test_drain_cleanup_reads_the_tree_back_and_an_uncertain_descendant_is_unknown():
+    """The real stop sequence: checkpoint, hook, tree cancel, then the tree readback decides."""
+    finished = asyncio.get_running_loop().create_future()
+    finished.set_result(None)
+    registry = {("t1", "a1"): finished}
+    unresolved = _real_dispatcher(registry, [{"job_id": "child-1", "status": "unknown_external_effect"}])
+    outcome = await unresolved.drain_attempt_past_bound("t1", "a1")
+    # The hook alone passes (worker done) but the tree cancel left an unresolved effect.
+    assert unresolved.jobs.calls == ["checkpoint:cancel_requested:dispatch_drain_timeout", "tree:job-1"]
+    assert (outcome["status"], outcome["cleanup_proven"]) == ("unknown", False)
+    clean = _real_dispatcher(registry, [])
+    assert (await clean.drain_attempt_past_bound("t1", "a1"))["status"] == "cancelled"
 
-    async def proving_hook(task, attempt, inputs, projection, *, reason):
-        order.append("proven")
-        return [], True
 
-    dispatcher._cleanup_adapter = proving_hook
-    assert (await dispatcher.drain_attempt_past_bound("t1", "a1"))["status"] == "cancelled"
+async def test_an_uncertain_tree_at_the_drain_bound_never_audits_quiescence_or_flips(service_db, monkeypatch):  # noqa: F811
+    from src.runtime_plugins import lifecycle as module
+    from src.runtime_plugins.lifecycle import DRAIN_UNKNOWN_EVENT
+    monkeypatch.setattr(module, "_dispatch_drain_seconds", lambda: 0.2)  # the attempt is past its bound
+    from src.runtime_plugins.ownership import inventory
+    registry: dict = {}
+    dispatcher = _real_dispatcher(registry, [{"job_id": "child-1", "status": "unknown_external_effect"}])
+    lifecycle = _lifecycle(registry=lambda: registry)
+    lifecycle.attempt_cleanup = dispatcher.drain_attempt_past_bound
+    await lifecycle.activate(DISPATCH_DOMAIN)
+
+    async def stuck():
+        await asyncio.sleep(3600)
+
+    registry[("t1", "a1")] = asyncio.create_task(stuck())
+    with pytest.raises(LifecycleBlocked) as refused:
+        await lifecycle.transition(DISPATCH_DOMAIN, "cordis", actor="operator:test", expected_epoch=1,
+                                   reason="test")
+    assert refused.value.reason_code == "dispatch_drain_cleanup_unknown"
+    assert [event for event in await _events(QUIESCED_EVENT) if event["domain"] == DISPATCH_DOMAIN] == []
+    unknown = [event for event in await _events(DRAIN_UNKNOWN_EVENT) if event["domain"] == DISPATCH_DOMAIN]
+    assert unknown and unknown[0]["unknown"][0]["status"] == "unknown"
+    async with db_engine.get_session() as db:
+        row = (await inventory(db))[DISPATCH_DOMAIN]
+    assert (row.owner_kind, row.epoch, row.state) == ("legacy", 1, "ready")  # no flip
+    status = lifecycle.status(DISPATCH_DOMAIN)
+    assert status["last_transition"]["status"] == "failed"
+    assert status["last_transition"]["reason"] == "dispatch_drain_cleanup_unknown"
 
 
 async def test_a_scheduler_tick_in_flight_at_deactivation_finishes_within_its_bound(service_db):  # noqa: F811

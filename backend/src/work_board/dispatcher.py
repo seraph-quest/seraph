@@ -3794,43 +3794,8 @@ class WorkBoardDispatcher:
                 event=replay_event,
             )
 
-        # Mirror the board intent into the authoritative durable run before
-        # adapter cleanup.  A crash after this checkpoint is replayed from the
-        # persisted attempt binding and cannot silently relaunch work.
-        checkpoint_proven = True
-        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
-        if _status(projection) == "running" and _text(lease.get("owner")) and lease.get("fencing_token") is not None:
-            try:
-                await self.jobs.record_checkpoint(
-                    job_id,
-                    checkpoint_id="cancel_requested",
-                    state={"phase": "cancel_requested", "reason_code": "operator_cancelled"},
-                    owner=_text(lease.get("owner")),
-                    fencing_token=int(lease.get("fencing_token")),
-                    expected_revision=projection.get("revision"),
-                )
-            except Exception:
-                # The adapter/root readback below remains authoritative.  A
-                # failed checkpoint is treated as an unproven cleanup path.
-                logger.info("durable cancel intent checkpoint requires reconciliation for %s", job_id)
-                checkpoint_proven = False
-
-        cleanup_receipts, cleanup_proven = await self._cleanup_adapter(
-            task,
-            active,
-            inputs,
-            projection,
-            reason=reason,
-        )
-        # The common tree cleanup is still required after adapter-specific
-        # hooks: descendants are authoritative durable jobs and are cancelled
-        # before their root.  It is idempotent for a hook that already ended
-        # the root.
-        try:
-            receipts = await self.jobs.cancel_job_tree(job_id, reason=reason[:128])
-        except Exception:
-            receipts = []
-            cleanup_proven = False
+        cleanup_receipts, receipts, cleanup_proven, checkpoint_proven = await self._stop_attempt_tree(
+            task, active, inputs, projection, reason=reason, reason_code="operator_cancelled")
         root = await self.jobs.get_job(job_id)
         return await self._project_cancel_result(
             task,
@@ -3874,16 +3839,76 @@ class WorkBoardDispatcher:
             }
         return WorkBoardDispatcher._direct_expected_identity(task, attempt, inputs, projection)
 
+    async def _stop_attempt_tree(
+        self,
+        task: WorkBoardTask,
+        active: WorkBoardAttempt,
+        inputs: Mapping[str, Any],
+        projection: Mapping[str, Any],
+        *,
+        reason: str,
+        reason_code: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool, bool]:
+        """The one stop sequence shared by operator cancel and the #1025 lifecycle drain.
+
+        Checkpoint the cancel intent into the authoritative durable run, run the
+        capability cleanup hook, then cancel the durable tree. Returns
+        ``(hook_receipts, tree_receipts, cleanup_proven, checkpoint_proven)``;
+        callers then read the root back and require the tree readback.
+        """
+        job_id = _text(active.workflow_run_id)
+        # Mirror the board intent into the authoritative durable run before
+        # adapter cleanup.  A crash after this checkpoint is replayed from the
+        # persisted attempt binding and cannot silently relaunch work.
+        checkpoint_proven = True
+        lease = projection.get("lease") if isinstance(projection.get("lease"), Mapping) else {}
+        if _status(projection) == "running" and _text(lease.get("owner")) and lease.get("fencing_token") is not None:
+            try:
+                await self.jobs.record_checkpoint(
+                    job_id,
+                    checkpoint_id="cancel_requested",
+                    state={"phase": "cancel_requested", "reason_code": reason_code},
+                    owner=_text(lease.get("owner")),
+                    fencing_token=int(lease.get("fencing_token")),
+                    expected_revision=projection.get("revision"),
+                )
+            except Exception:
+                # The adapter/root readback below remains authoritative.  A
+                # failed checkpoint is treated as an unproven cleanup path.
+                logger.info("durable cancel intent checkpoint requires reconciliation for %s", job_id)
+                checkpoint_proven = False
+
+        cleanup_receipts, cleanup_proven = await self._cleanup_adapter(
+            task,
+            active,
+            inputs,
+            projection,
+            reason=reason,
+        )
+        # The common tree cleanup is still required after adapter-specific
+        # hooks: descendants are authoritative durable jobs and are cancelled
+        # before their root.  It is idempotent for a hook that already ended
+        # the root.
+        try:
+            receipts = await self.jobs.cancel_job_tree(job_id, reason=reason[:128])
+        except Exception:
+            receipts = []
+            cleanup_proven = False
+        return cleanup_receipts, receipts, cleanup_proven, checkpoint_proven
+
     async def drain_attempt_past_bound(self, task_id: str, attempt_id: str, *,
                                        reason: str = "dispatch_drain_timeout") -> dict[str, Any]:
         """#1025: stop one attempt still live past the lifecycle drain bound.
 
-        The attempt goes through its capability's own cleanup hook, then the
-        common ``cancel_job_tree`` (descendants before their root; unresolved
-        external effects stay in their authoritative unknown state). The result
-        is ``cleanup_proven`` only when the hook proves cleanup, the tree
-        cancel ran and the process-local worker is no longer alive; otherwise
-        it is ``unknown`` and the caller must not flip the owner.
+        The attempt goes through the operator cancel's own stop sequence
+        (``_stop_attempt_tree``: cancel-intent checkpoint, capability cleanup
+        hook, ``cancel_job_tree``) and its readback (``_cancel_tree_readback``
+        of the re-read root and every returned descendant). The result is
+        ``cleanup_proven`` only when the checkpoint and hook are proven, the
+        tree readback passes, the root is not in an uncertain external-effect
+        state and the process-local worker is no longer alive; otherwise it is
+        ``unknown`` and the caller must not flip the owner. The board attempt
+        itself is left to its existing lease recovery and reconciliation.
         """
         key = (task_id, attempt_id)
         worker = self._active_worker_tasks.get(key)
@@ -3901,13 +3926,18 @@ class WorkBoardDispatcher:
                 except Exception:
                     inputs = {}
                 projection = await self.jobs.get_job(job_id)
-                hook_receipts, proven = await self._cleanup_adapter(
-                    task, attempt, inputs, projection if isinstance(projection, Mapping) else {}, reason=reason)
-                receipts.extend(hook_receipts)
-                try:
-                    receipts.extend(await self.jobs.cancel_job_tree(job_id, reason=reason[:128]))
-                except Exception:
-                    proven = False
+                if not isinstance(projection, Mapping):
+                    projection = {}
+                # The operator cancel's own sequence: checkpoint, hook, tree cancel ...
+                hook_receipts, tree_receipts, hook_proven, checkpoint_proven = await self._stop_attempt_tree(
+                    task, attempt, inputs, projection, reason=reason, reason_code=reason[:64])
+                receipts.extend([*hook_receipts, *tree_receipts])
+                # ... then its readback: the root and every returned descendant are
+                # re-read; an uncertain external effect or live row is never "cancelled".
+                root = await self.jobs.get_job(job_id)
+                tree_proven = await self._cancel_tree_readback(job_id, root, [*hook_receipts, *tree_receipts])
+                proven = bool(hook_proven and checkpoint_proven and tree_proven
+                              and _status(root) not in UNCERTAIN_EXTERNAL_EFFECT_STATUSES)
         except Exception:
             logger.warning("drain cleanup for %s/%s unavailable", task_id, attempt_id, exc_info=True)
             proven = False

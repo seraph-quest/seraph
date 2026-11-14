@@ -8,6 +8,8 @@ fails closed at credential capture before transport.
 """
 from __future__ import annotations
 
+import json
+
 from src.model_fabric.configuration import (
     InferenceLaneConfig,
     ModelFabricConfiguration,
@@ -168,3 +170,55 @@ def restore_repository_repair_route_block(monkeypatch) -> None:
 
 from src.model_fabric import near_tee_vertical as _near_tee_vertical  # noqa: E402
 _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route_block
+
+
+# ── Scripted NEAR TEE gateway for research-style verticals (#1180) ─────
+
+# The NEAR TEE slot reserves its catalog-priced bound per request; for the
+# fixture slot (8192 input / 1024 output tokens) the catalog check requires
+# at least 1711 micro-USD. Research programmes fund that reserve.
+RESEARCH_REQUEST_BOUND_MICROUSD = 2_000
+
+
+def scripted_near_gateway(answer_for, *, uds_socket: str | None = None, cost_nano: int = 2_000):
+    """An intercepted NEAR gateway whose completions are ``await answer_for(body)``.
+
+    ``answer_for`` returns the assistant content (or raises, e.g. an
+    ``httpx`` transport error to model a lost response). Catalog and billing
+    requests are the shared fixture's. With ``uds_socket`` the real async
+    transport stays live only for that owned local Unix socket (an owned
+    public-web fixture); every other real transport is refused.
+    """
+    import inspect
+
+    import httpx
+    from tests.test_near_tee_text_slot import NearFixture
+
+    class Gateway(NearFixture):
+        def __init__(self):
+            super().__init__()
+            self.cost_nano = cost_nano
+            self.completions = 0
+
+        def install(self, monkeypatch):
+            real = httpx.AsyncHTTPTransport.handle_async_request
+            super().install(monkeypatch)
+            if uds_socket is not None:
+                async def owned_uds_only(transport, request):
+                    if getattr(transport._pool, "_uds", None) != uds_socket:
+                        raise AssertionError("provider transport contacted outside the NEAR fixture")
+                    return await real(transport, request)
+                monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", owned_uds_only)
+            return self
+
+        async def handler(self, request):
+            if request.method == "POST" and request.url.raw_path.decode() == "/v1/chat/completions":
+                assert request.url.host == "cloud-api.near.ai"
+                self.completions += 1
+                answer = answer_for(json.loads(request.content))
+                if inspect.isawaitable(answer):
+                    answer = await answer
+                self.answer = {"role": "assistant", "content": answer}
+                self.body_id = f"chatcmpl-scripted-{self.completions}"
+            return super().handler(request)
+    return Gateway()

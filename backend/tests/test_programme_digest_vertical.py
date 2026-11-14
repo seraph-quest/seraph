@@ -5,7 +5,6 @@ owners, actual SQLite, private artifacts, Task acceptance and write_file stay re
 """
 import hashlib
 import json
-from dataclasses import replace
 from datetime import datetime, timezone
 from datetime import timedelta
 
@@ -17,11 +16,10 @@ from sqlalchemy import select
 from tests.test_document_build_native_capacity import build_admission_lifecycle
 from tests.cordis_research import needs_cordis
 from tests.test_goal_discovery_vertical import public_http_fixture, research_cordis  # noqa: F401
-from tests.test_inference_accounting import accounting_db, setup_configuration
+from tests.near_tee_support import RESEARCH_REQUEST_BOUND_MICROUSD, prepare_near_tee_vertical, scripted_near_gateway
+from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth, ResponseBytes
 
-# ADR-035: the programme digest model step runs over the intercepted historical OpenRouter route
-pytestmark = pytest.mark.openrouter_legacy
 
 
 @needs_cordis
@@ -35,7 +33,6 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
     from src.guardian.discovery_search import DiscoverySearch
     from src.guardian.goal_discovery import GoalDiscoveryService
     from src.guardian.goal_programmes import goal_programme_service
-    from src.model_fabric.configuration import write_model_fabric_configuration
     from src.native_tools.registry import ToolRegistry
     from src.work_board.dispatcher import WorkBoardDispatcher
     from src.work_board.general_task import GeneralTaskService
@@ -43,47 +40,31 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
     from src.workflows.research_sources import physical_discovery_inputs
 
     workspace, engine, factory = accounting_db
-    configured = setup_configuration()
-    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
-        replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
-        egress_revision=configured.egress_revision + 1))
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
     monkeypatch.setattr(settings, "user_timezone", "UTC")
     jobs = DurableJobRepository()
-    await jobs.configure_inference_accounting(1000)
     calls, public_routes = [], []
-    original_client = httpx.AsyncClient
 
-    class InferenceBoundary(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request):
-            assert request.url.host == "openrouter.ai" and request.method == "POST"
-            body = json.loads(request.content)
-            if len(body["messages"]) == 1:
-                answer = "CANARY_OK"  # Existing route-health mechanical prerequisite.
-            else:
-                calls.append(body)
-                assert len(request.content) <= 8192
-                supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
-                if supplied.get("task") == "plan_queries":
-                    answer = json.dumps({"queries": ["public product release evidence"]})
-                elif "manifest_ref" in supplied:
-                    answer = json.dumps({"selected_result_ids": [supplied["results"][0]["result_id"]]})
-                else:
-                    source = supplied["untrusted_quoted_sources"][0]
-                    answer = json.dumps({"schema_version": 1, "perspective": "Prepare a public Goal discovery brief",
-                        "claims": [{"text": "The public fixture describes the selected release.", "citations": [
-                            {key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
-                        "uncertainty": ["Fixture mechanics do not establish semantic truth."], "contradictions": [], "no_learning": True})
-            payload = {"id": "owned-programme-digest", "choices": [{"message": {"role": "assistant", "content": answer}}],
-                "usage": {"cost": "0.000002", "prompt_tokens": 10, "completion_tokens": 10}}
-            return httpx.Response(200, request=request, headers={"content-type": "application/json"}, stream=ResponseBytes(json.dumps(payload).encode()))
+    def answer_for(body):
+        # ADR-035: the research model step on the intercepted NEAR TEE gateway.
+        calls.append(body)
+        assert len(json.dumps(body).encode()) <= 8192
+        supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
+        if supplied.get("task") == "plan_queries":
+            return json.dumps({"queries": ["public product release evidence"]})
+        if "manifest_ref" in supplied:
+            return json.dumps({"selected_result_ids": [supplied["results"][0]["result_id"]]})
+        source = supplied["untrusted_quoted_sources"][0]
+        return json.dumps({"schema_version": 1, "perspective": "Prepare a public Goal discovery brief",
+            "claims": [{"text": "The public fixture describes the selected release.", "citations": [
+                {key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
+            "uncertainty": ["Fixture mechanics do not establish semantic truth."], "contradictions": [], "no_learning": True})
 
-    def clients(**kwargs):
-        if "transport" not in kwargs:
-            kwargs["transport"] = InferenceBoundary()
-        return original_client(**kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", clients)
     socket_path, physical_contacts, controls = public_http_fixture
+    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, capabilities=("text",),
+        near=scripted_near_gateway(answer_for, uds_socket=socket_path),
+        request_cost_bound_microusd=RESEARCH_REQUEST_BOUND_MICROUSD)
+    original_client = httpx.AsyncClient
 
     class PublicBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
@@ -119,13 +100,10 @@ async def test_authenticated_digest_finding_native_task_physical_output(accounti
             login = await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})
             assert login.status_code == 200, login.text
             assert (await client.post("/api/auth/ownership/enroll")).status_code == 200
-            for capability in ("text", "latency_ms", "health"):
-                proof = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "openrouter", "capability": capability, "timeout_seconds": 30})
-                assert proof.status_code == 200 and proof.json()["outcome"] == "passed", proof.text
             created = await client.post("/api/goals", json={"title": "PRIVATE_GOAL_TITLE_CANARY", "description": "PRIVATE_GOAL_DESCRIPTION_CANARY"})
             assert created.status_code == 200, created.text
             goal_id = created.json()["id"]
-            request = {"expected_goal_revision": 1, "expected_grant_revision": 0, "public_brief": "Track public release evidence", "budget": {"max_inference_microusd": 500}}
+            request = {"expected_goal_revision": 1, "expected_grant_revision": 0, "public_brief": "Track public release evidence", "budget": {"max_inference_microusd": 10 * RESEARCH_REQUEST_BOUND_MICROUSD}}
             base = f"/api/goals/{goal_id}/programmes"
             preview = await client.post(base + "/preview", json=request)
             assert preview.status_code == 200, preview.text
@@ -317,52 +295,36 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
     from src.guardian.discovery_search import DiscoverySearch
     from src.guardian.goal_discovery import GoalDiscoveryService
     from src.guardian.goal_programmes import goal_programme_service
-    from src.model_fabric.configuration import write_model_fabric_configuration
     from src.workflows.job_runtime import DurableJobRepository
     from src.workflows.research_sources import physical_discovery_inputs
 
     workspace, engine, factory = accounting_db
-    configured = setup_configuration()
-    write_model_fabric_configuration(replace(model_fabric_settings._setup_configuration(
-        replace(configured.openrouter_setup, timeout_seconds=30), profiles=(), policies=()),
-        egress_revision=configured.egress_revision + 1))
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
     monkeypatch.setattr(settings, "user_timezone", "UTC")
     # This original fixture Root must remain valid at the same day's08local
     # delivery clock. Configure its lifetime before login; never renew old rows.
     monkeypatch.setattr(settings, "operator_auth_idle_seconds", 86400)
     monkeypatch.setattr(settings, "operator_auth_absolute_seconds", 86400)
-    jobs = DurableJobRepository(); await jobs.configure_inference_accounting(1000)
-    original_client = httpx.AsyncClient
+    jobs = DurableJobRepository()
     calls = []
-    class InferenceBoundary(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request):
-            assert request.url.host == "openrouter.ai" and request.method == "POST"
-            body = json.loads(request.content)
-            if len(body["messages"]) == 1:
-                answer = "CANARY_OK"
-            else:
-                calls.append(body)
-                supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
-                if supplied.get("task") == "plan_queries":
-                    answer = json.dumps({"queries": ["public grants deadline evidence"]})
-                elif "manifest_ref" in supplied:
-                    answer = json.dumps({"selected_result_ids": [supplied["results"][0]["result_id"]]})
-                else:
-                    source = supplied["untrusted_quoted_sources"][0]
-                    answer = json.dumps({"schema_version": 1, "perspective": "Prepare public evidence",
-                        "claims": [{"text": "The cited physical public source describes grants.", "citations": [
-                            {key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
-                        "uncertainty": ["Literal fixture mechanics only."], "contradictions": [], "no_learning": True})
-            payload = {"id": "owned-deadline", "choices": [{"message": {"role": "assistant", "content": answer}}],
-                "usage": {"cost": "0.000002", "prompt_tokens": 10, "completion_tokens": 10}}
-            return httpx.Response(200, request=request, headers={"content-type": "application/json"}, stream=ResponseBytes(json.dumps(payload).encode()))
-    def clients(**kwargs):
-        if "transport" not in kwargs:
-            kwargs["transport"] = InferenceBoundary()
-        return original_client(**kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", clients)
+    def answer_for(body):
+        # ADR-035: the research model step on the intercepted NEAR TEE gateway.
+        calls.append(body)
+        supplied = json.loads(body["messages"][1]["content"])["untrusted_public_data"]
+        if supplied.get("task") == "plan_queries":
+            return json.dumps({"queries": ["public grants deadline evidence"]})
+        if "manifest_ref" in supplied:
+            return json.dumps({"selected_result_ids": [supplied["results"][0]["result_id"]]})
+        source = supplied["untrusted_quoted_sources"][0]
+        return json.dumps({"schema_version": 1, "perspective": "Prepare public evidence",
+            "claims": [{"text": "The cited physical public source describes grants.", "citations": [
+                {key: source[key] for key in ("source_id", "first_line", "last_line", "span_sha256")}]}],
+            "uncertainty": ["Literal fixture mechanics only."], "contradictions": [], "no_learning": True})
     socket_path, physical_contacts, literal_source = cited_deadline_http_fixture
+    await prepare_near_tee_vertical(monkeypatch, jobs=jobs, capabilities=("text",),
+        near=scripted_near_gateway(answer_for, uds_socket=socket_path),
+        request_cost_bound_microusd=RESEARCH_REQUEST_BOUND_MICROUSD)
+    original_client = httpx.AsyncClient
     class PublicBoundary(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
             assert request.url.scheme == "https" and request.url.host == request.headers["host"]
@@ -387,9 +349,6 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
             login = await client.post("/api/auth/login", json={"password": "research-vertical-private-secret"})
             assert login.status_code == 200, login.text
             assert (await client.post("/api/auth/ownership/enroll")).status_code == 200
-            for capability in ("text", "latency_ms", "health"):
-                proof = await client.post("/api/settings/model-fabric/canary", json={"profile_id": "openrouter", "capability": capability, "timeout_seconds": 30})
-                assert proof.status_code == 200 and proof.json()["outcome"] == "passed", proof.text
             bindings, source_files = [], []
             pending_id, pending_deadline, failure_clock = None, None, None
             latest_fetch = None
@@ -406,7 +365,7 @@ async def test_actual_cited_deadline_owner_day_two_notice_cap_and_daemon_claim(a
                 assert created.status_code == 200, created.text
                 goal_id = created.json()["id"]
                 request = {"expected_goal_revision": 1, "expected_grant_revision": 0, "public_brief": "Track public grants deadlines",
-                    "budget": {"max_inference_microusd": 500}, "notification_limits": {"per_day": 2}}
+                    "budget": {"max_inference_microusd": 10 * RESEARCH_REQUEST_BOUND_MICROUSD}, "notification_limits": {"per_day": 2}}
                 base = f"/api/goals/{goal_id}/programmes"
                 preview = await client.post(base + "/preview", json=request)
                 assert preview.status_code == 200, preview.text

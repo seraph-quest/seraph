@@ -4165,7 +4165,8 @@ preview with redacted fixtures, not in a live managed cockpit.
   messages showed only in the optional **Conversation** window. The default
   section view had no visible chat, only a thin composer at the bottom.
 - **Needs you.** At the top of the navigation rail: pending approvals, from
-  `/api/approvals/pending`, open the approvals pane. Queued native desktop
+  `/api/approvals/pending`, open the approvals pane. The shell reads one page of
+  8, so a full page shows as **8+**. Queued native desktop
   notifications open Settings → Native. A link leads to Home for next steps,
   Inbox decisions and blocked work. If approvals have not loaded, the rail says
   so ("Approvals not confirmed · check again") instead of showing zero.
@@ -4176,10 +4177,19 @@ preview with redacted fixtures, not in a live managed cockpit.
   fix, usually a Settings section such as Models, Native, Policies or General.
   Expected configuration is labelled **No action needed** and never raises the
   summary. One example is the desktop daemon turned off by `DAEMON_ENABLED=false`.
-  Another is observer `data_quality=degraded`, which means some observer
-  sources (time, calendar, git, goals) have not refreshed for this operator
-  scope. Neither is a fault. The Seraph presence pane shows the second case as
-  **Partial context** rather than a red **Degraded**.
+- **Observer context.** `/api/observer/state` reports `data_quality_reason`
+  next to `data_quality`. It is a comma-separated list:
+  - `unscoped_fallback`: this operator scope has not been refreshed yet.
+  - `source_error:<type>`: the source raised or has no runner.
+  - `source_degraded:<type>`: the source reported itself degraded.
+  - `no_active_sources`: no observer source is enabled.
+
+  Only `unscoped_fallback` is shown as expected: **Not refreshed yet**,
+  **No action needed**, and **Partial context** in Seraph presence. A source
+  error, a degraded or missing source, or `stale` is a warning that names the
+  sources and raises the header summary; Seraph presence shows **Context
+  degraded**. A `degraded` value without a reason, as from an older backend,
+  is a warning ("reason not reported") and is never called expected.
 - **Chat model truth.** The label comes from
   `/api/runtime/status.effective_runtime`, the `chat_agent` path. Top-level
   `provider`/`model` are configured defaults and are never shown as the chat
@@ -4223,6 +4233,11 @@ Root causes of the defects reported in #1172 on `develop` @ 0850178d:
   "LOCAL GEMMA STALE" and build `v2026.4.11`. A bounded shell refresh now runs
   in every section: runtime status, observer state, pending approvals and the
   policy modes every 30 s, plus one continuity check per mount.
+- **Red "Degraded" presence.** Seraph presence turned any observer
+  `data_quality=degraded` into a red fault, but the frontend could not tell an
+  operator scope that has not refreshed yet from a failing source. The backend
+  now reports `data_quality_reason`, and only the not-yet-refreshed case is
+  shown as expected.
 - **Unknown chips.** "Desktop unknown", "bundle unknown", "budget ?",
   "state pending" and the "unknown tools/approval" chips came from data the
   shell had not loaded, shown without a reason. They became status items with

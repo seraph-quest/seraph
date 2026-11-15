@@ -178,16 +178,17 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
     await _approve_node_flow(client,flow)
     job_id=flow["job_id"]
     fresh=NodeRepoRepairExecutor(workspace_dir=flow["workspace"])
-    executed=[]
-    original_execute=NodeRepoRepairExecutor.execute_job
-    def observed_execute(self,job,*args,**kwargs):
-        executed.append({"deadline_seconds":job.deadline_seconds,"execution_deadline_at":job.execution_deadline_at,"started_at":time.time()})
-        try:
-            return original_execute(self,job,*args,**kwargs)
-        except BaseException as exc:
-            executed.append({"raised":repr(exc)[:300],"at":time.time()})
-            raise
-    monkeypatch.setattr(NodeRepoRepairExecutor,"execute_job",observed_execute)
+    # The executor SIGKILLs a supervisor that misses its deadline and leaves
+    # the zombie for its owner; this test is that owner (SIGCONT, waitpid
+    # below). Popen.__del__ reaps a dead child when garbage collection drops
+    # the executor's handle, so keep every handle alive until the test has
+    # reaped it; otherwise the outcome depends on collector timing (#1184).
+    retained_processes=[]
+    class RetainedPopen(subprocess.Popen):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs)
+            retained_processes.append(self)
+    monkeypatch.setattr(subprocess,"Popen",RetainedPopen)
     dispatch=asyncio.create_task(flow["dispatcher"].run_pass())
     owned_pid=None;owned_start=None;stopped=False
     try:
@@ -208,9 +209,7 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         elif failure!="nested_timeout":
             stopped=failure=="cleanup_deadline"
             assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGSTOP if stopped else signal.SIGKILL)
-        signalled_at=time.monotonic()
         await native._wait_for_task_set(dispatch,timeout=15,description="Actual Node lifecycle dispatch did not settle")
-        settled_after=time.monotonic()-signalled_at
         job=await durable_job_repository.get_job(job_id)
         assert job["status"] in {"cancelled","unknown_external_effect","failed"},job
         if failure in {"supervisor_death","cleanup_deadline"}:
@@ -218,19 +217,7 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         if failure=="nested_timeout":assert job["status"]=="failed",job
         authority={"job_id":job_id,"authority_digest":marker["authority_digest"],"attempt_id":marker["attempt_id"],"fencing_token":marker["fencing_token"]}
         if stopped:
-            try:
-                proc_stat=Path(f"/proc/{owned_pid}/stat").read_text()[:200]
-            except OSError as exc:
-                proc_stat=repr(exc)
-            print("NODE-DIAG-PROC",proc_stat,supervisor.start_identity(owned_pid),owned_start,
-                [getattr(item,"pid",None) for item in getattr(subprocess,"_active",[]) or []])
-            print("NODE-DIAG",json.dumps({"executed":executed,"settled_after":settled_after,"now":time.time(),
-                "job_deadline_at":str(job.get("deadline_at")),"failure_reason":job.get("failure_reason")},default=str))
-            assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT),{"settled_after_seconds":round(settled_after,2),
-                "checkpoints":[{"id":item.get("checkpoint_id"),"payload":{k:v for k,v in (item.get("payload") or {}).items()
-                    if any(word in k for word in ("deadline","expires","reason","status","phase","cleanup"))}} for item in job["checkpoints"][-10:]],
-                "job_deadline_at":job.get("deadline_at"),"lease":job.get("lease"),
-                "failure_reason":job.get("failure_reason")}
+            assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT)
             stopped=False
             await asyncio.to_thread(os.waitpid,owned_pid,0)
         await asyncio.sleep(2.2)
@@ -360,16 +347,6 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
     pending=await _approve_node_flow(client,flow)
     job_id=flow["job_id"]
     fresh=NodeRepoRepairExecutor(workspace_dir=flow["workspace"])
-    executed=[]
-    original_execute=NodeRepoRepairExecutor.execute_job
-    def observed_execute(self,job,*args,**kwargs):
-        executed.append({"deadline_seconds":job.deadline_seconds,"execution_deadline_at":job.execution_deadline_at,"started_at":time.time()})
-        try:
-            return original_execute(self,job,*args,**kwargs)
-        except BaseException as exc:
-            executed.append({"raised":repr(exc)[:300],"at":time.time()})
-            raise
-    monkeypatch.setattr(NodeRepoRepairExecutor,"execute_job",observed_execute)
     dispatch=asyncio.create_task(flow["dispatcher"].run_pass())
     try:
         deadline=time.monotonic()+15

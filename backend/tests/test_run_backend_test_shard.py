@@ -8,6 +8,8 @@ import pytest
 from _pytest.mark.expression import Expression
 
 from scripts.run_backend_test_shard import (
+    lane_pytest_args,
+    run_shard_single_process,
     CANCELLED_EVAL_CONSUMER_NODES,
     FULLY_RETIRED_EVAL_INVOCATIONS,
     main,
@@ -921,3 +923,51 @@ def test_junit_dir_keeps_pytests_own_report_for_an_ordinary_failure(tmp_path: Pa
     with patch("scripts.run_backend_test_shard.subprocess.run", side_effect=failing_run):
         assert run_shard_files(tmp_path, ["tests/test_alpha.py"], junit_dir=tmp_path / "junit") == 1
     assert report.read_text() == "<testsuites><testsuite name='pytest'/></testsuites>"
+
+
+def test_lane_args_load_the_quarantine_and_shuffle_plugins(capsys):
+    assert lane_pytest_args() == []
+    assert lane_pytest_args(quarantine="exclude", shuffle_seed=42) == [
+        "-p", "scripts.pytest_quarantine", "--quarantine=exclude",
+        "-p", "scripts.pytest_shuffle", "--shuffle-seed=42",
+    ]
+    assert "shuffle seed 42 (replay: --shuffle-seed=42)" in capsys.readouterr().out
+
+
+def test_cli_forwards_lane_flags_ahead_of_extra_pytest_args():
+    with patch.object(sys, "argv", ["runner", "--shard-count", "10", "--shard-index", "2",
+                                   "--quarantine", "exclude", "--shuffle-seed", "5", "--", "-x"]), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ), patch("scripts.run_backend_test_shard.run_shard_files", return_value=0) as run:
+        assert main() == 0
+    assert run.call_args.kwargs["pytest_args"] == [
+        "-p", "scripts.pytest_quarantine", "--quarantine=exclude",
+        "-p", "scripts.pytest_shuffle", "--shuffle-seed=5", "-x",
+    ]
+
+
+def test_cli_single_process_runs_the_whole_shard_in_one_pytest(tmp_path: Path):
+    with patch.object(sys, "argv", ["runner", "--shard-count", "10", "--shard-index", "2",
+                                   "--single-process", "--exclude-cancelled-eval-harness"]), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ), patch("scripts.run_backend_test_shard.run_shard_single_process", return_value=3) as single, patch(
+        "scripts.run_backend_test_shard.run_shard_files") as per_file:
+        assert main() == 3
+    per_file.assert_not_called()
+    assert single.call_args.args[1] == ["tests/test_alpha.py"]
+    assert single.call_args.kwargs["exclude_cancelled_eval_harness"] is True
+
+
+def test_single_process_command_keeps_retirement_and_writes_one_report(tmp_path: Path):
+    files = ["tests/test_alpha.py", "tests/test_eval_harness.py", "tests/test_operator_api.py"]
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
+        assert run_shard_single_process(tmp_path, files, exclude_cancelled_eval_harness=True,
+                                        junit_dir=tmp_path / "junit") == 0
+    assert mock_run.call_count == 1
+    command = mock_run.call_args.args[0]
+    assert "tests/test_alpha.py" in command and "tests/test_operator_api.py" in command
+    assert "tests/test_eval_harness.py" not in command
+    assert "--no-cov" in command
+    assert any(arg.startswith("--deselect=tests/test_operator_api.py::") for arg in command)
+    assert f"--junitxml={tmp_path / 'junit' / 'single-process.xml'}" in command

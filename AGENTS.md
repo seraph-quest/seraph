@@ -128,6 +128,7 @@ These commands are grounded in `manage.sh`, package manifests and
 | Docs typecheck and build/link check | `docs/` | `npm run typecheck` and `npm run build` |
 | Diff whitespace check | Repository root | `git diff --check` |
 | Test determinism ratchet | Repository root | `python3 scripts/check_test_determinism.py` (Python 3.12+); after removing a hazard, lower the baseline with `--update` |
+| Stress, classify or triage tests | `backend/` | `uv run python scripts/determinism_lanes.py stress --files <test file>`, `classify --junit-dir <dir>` or `triage <node id>` |
 
 There is no dedicated frontend lint script or configured backend lint/typecheck
 command in these manifests. Do not invent one or claim a build is a lint pass.
@@ -146,6 +147,24 @@ Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
 never-awaited coroutines are errors. A per-test watchdog dumps stacks after
 240 s and fails the test after 420 s. Any `filterwarnings` exception must be
 narrow and name its issue.
+
+Determinism lanes (#1220) never retry a test to turn a job green. A pull
+request's changed backend test files run 20 times under CPU contention in
+printed random orders (`stress-changed-tests`). A failed node is rerun alone
+only to classify it, as "deterministic" or "intermittent, k of N"; the job
+stays red. A daily scheduled workflow runs random order, one process per
+shard, a non-UTC timezone and the realtime files under contention.
+
+Flaky test triage, before an issue is titled "Flaky" or a test is
+quarantined: from `backend/`, run
+`uv run python scripts/determinism_lanes.py triage <node id>` at the failing
+commit. It runs the node 50 times alone and once in its file order. Record
+both counts in the issue. A node that fails every time is a defect, not a
+flake. Only a proven intermittent test may carry
+`@pytest.mark.quarantine(issue=N)` on that one test function: blocking lanes skip it, the non-blocking
+quarantine lane still runs it, and at most 10 may exist. A test leaves
+quarantine only through a fix that removes the marker and passes the stress
+job 50 of 50 (`stress --files <file> --runs 50`). There is no calendar expiry.
 
 Core startup does not require a provider key. Inference requires explicit
 configuration, consent, verified capability and budget; a configured route is

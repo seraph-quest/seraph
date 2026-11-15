@@ -727,6 +727,55 @@ def run_shard_files(
     return 0
 
 
+def lane_pytest_args(*, quarantine: str | None = None, shuffle_seed: int | None = None) -> list[str]:
+    """Plugin arguments for the quarantine and random-order lanes (#1220)."""
+    args: list[str] = []
+    if quarantine is not None:
+        args += ["-p", "scripts.pytest_quarantine", f"--quarantine={quarantine}"]
+    if shuffle_seed is not None:
+        print(f"[backend-shard] shuffle seed {shuffle_seed} (replay: --shuffle-seed={shuffle_seed})")
+        args += ["-p", "scripts.pytest_shuffle", f"--shuffle-seed={shuffle_seed}"]
+    return args
+
+
+def run_shard_single_process(
+    root: Path,
+    files: list[str],
+    *,
+    pytest_args: list[str] | None = None,
+    exclude_cancelled_eval_harness: bool = False,
+    junit_dir: Path | None = None,
+) -> int:
+    """Run every assigned file in one pytest process (#1220).
+
+    CI normally gives each file its own process, which hides state one file
+    leaks into the next. This lane exposes it. The specialized ``-k`` splits
+    are not applied: each file runs whole. Retirement matches the per-file
+    runner because every node of a fully retired invocation is also listed
+    in ``CANCELLED_EVAL_CONSUMER_NODES`` (pinned by a test) and deselected. No runner timeout applies; the per-test watchdog in
+    ``pyproject.toml`` and the job timeout bound a hang.
+    """
+    selected = [path for path in files
+                if not (exclude_cancelled_eval_harness and path == "tests/test_eval_harness.py")]
+    if not selected:
+        print("No backend tests assigned to this shard.")
+        return 0
+    extra_args = list(pytest_args or [])
+    if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
+        extra_args.append("--no-cov")
+    deselect = [f"--deselect={node}" for path in selected
+                for node in (CANCELLED_EVAL_CONSUMER_NODES.get(path, []) if exclude_cancelled_eval_harness else [])]
+    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect]
+    if junit_dir is not None:
+        junit_dir.mkdir(parents=True, exist_ok=True)
+        command += [f"--junitxml={junit_dir / 'single-process.xml'}", "-o", "junit_suite_name=single-process"]
+    print(f"[backend-shard] single process: {len(selected)} file(s)")
+    started_at = time.perf_counter()
+    completed = subprocess.run(command, cwd=root, check=False)
+    print(f"[backend-shard] single-process -> {completed.returncode} ({time.perf_counter() - started_at:.2f}s)")
+    return completed.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shard-count", type=int, required=True)
@@ -744,6 +793,18 @@ def main() -> int:
         "--junit-dir", type=Path, default=None,
         help="write one JUnit XML report per pytest invocation into this directory",
     )
+    parser.add_argument(
+        "--quarantine", choices=("exclude",), default=None,
+        help="skip tests marked quarantine(issue=...) (blocking lanes; #1220)",
+    )
+    parser.add_argument(
+        "--shuffle-seed", type=int, default=None,
+        help="run each invocation's tests in this seeded random order (printed; #1220)",
+    )
+    parser.add_argument(
+        "--single-process", action="store_true",
+        help="run the whole shard as one pytest process to expose cross-file leaks (#1220)",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     # Progress lines must reach the job log as each file ends, not at exit:
@@ -755,6 +816,15 @@ def main() -> int:
     extra_args = list(args.pytest_args)
     if extra_args[:1] == ["--"]:
         extra_args = extra_args[1:]
+    extra_args = lane_pytest_args(quarantine=args.quarantine, shuffle_seed=args.shuffle_seed) + extra_args
+    if args.single_process:
+        return run_shard_single_process(
+            root,
+            files,
+            pytest_args=extra_args,
+            exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
+            junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
+        )
     return run_shard_files(
         root,
         files,

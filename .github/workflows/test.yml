@@ -42,9 +42,18 @@ jobs:
       # Ratchet (#1218): per-file sleep / elapsed-time / ambient-state counts
       # must equal scripts/test_determinism_baseline.json exactly.
       - run: python3 scripts/check_test_determinism.py
+      # Quarantine (#1220): issue-named, capped markers; the files feed the
+      # non-blocking quarantine lane below.
+      - id: quarantine
+        run: echo "files=$(python3 scripts/check_test_determinism.py --quarantined-files | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+    outputs:
+      quarantined_files: ${{ steps.quarantine.outputs.files }}
 
   backend-tests:
     runs-on: ubuntu-24.04
+    # The environment action's own steps carry no per-step timeout. Setup,
+    # the 40-minute shard step and the 30-minute classification fit inside.
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
@@ -57,77 +66,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install shared Python 3.12.15
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12.15"
-          architecture: x64
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Prepare shared Python runtime
-        timeout-minutes: 3
-        run: |
-          /usr/bin/python3 -I -S -B scripts/prepare_ci_python_loader.py
-          "${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_shared_python.py
-
-      - name: Install dependencies
-        run: uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system
-
-      - name: Install reviewed Node 24.13.1 (npm 11.8.0) for the Cordis runtime
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24.13.1"
-
-      - name: Build the reviewed Cordis package for discovery and Cordis suites
-        working-directory: runtime/cordis
-        timeout-minutes: 5
-        run: |
-          # runtime/cordis/scripts/toolchain.mjs gates on exactly npm 11.8.0.
-          if [ "$(npm --version)" != "11.8.0" ]; then npm install -g npm@11.8.0; fi
-          test "$(npm --version)" = "11.8.0"
-          npm ci --ignore-scripts
-          npm run build
-          echo "SERAPH_CORDIS_TEST_NODE=$(command -v node)" >> "$GITHUB_ENV"
-
-      - name: Install Node 24.21.0 for native repository tests
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24.21.0"
-
-      - name: Install locked TypeScript fixture dependencies
-        working-directory: frontend
-        timeout-minutes: 5
-        run: npm ci --ignore-scripts
-
-      - name: Select and verify native Node test dependencies
-        timeout-minutes: 3
-        run: '"${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_node_runtime.py'
-
-      - name: Install Chromium and system dependencies
-        timeout-minutes: 10
-        run: |
-          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
-          uv run playwright install --with-deps chromium
-
-      - name: Enable bubblewrap for repository isolation tests (#1065)
-        timeout-minutes: 3
-        run: |
-          sudo apt-get install -y --no-install-recommends bubblewrap || { sudo apt-get update -q && sudo apt-get install -y --no-install-recommends bubblewrap; }
-          probe() { bwrap --unshare-all --unshare-user --die-with-parent --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 --symlink usr/bin /bin --proc /proc --dev /dev /usr/bin/true; }
-          if ! probe; then
-            # Ubuntu runners may restrict unprivileged user namespaces via
-            # AppArmor. Relax it on this disposable CI runner only, so the
-            # isolated repository path is genuinely exercised here.
-            echo "bwrap user namespace denied; relaxing kernel.apparmor_restrict_unprivileged_userns on this CI runner"
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          fi
-          if probe; then
-            echo "SERAPH_REQUIRE_REPO_ISOLATION_TESTS=1" >> "$GITHUB_ENV"
-          else
-            echo "::warning::bubblewrap isolation is unavailable on this runner; isolated repository tests will skip"
-          fi
+      - name: Prepare the backend test environment
+        uses: ./.github/actions/backend-test-env
 
       - name: List backend shard
         run: uv run python scripts/backend_test_shards.py --shard-count 10 --shard-index ${{ matrix.shard }}
@@ -137,7 +77,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: test-key
         timeout-minutes: 40
-        run: uv run python scripts/run_backend_test_shard.py --shard-count 10 --shard-index ${{ matrix.shard }} --file-timeout-seconds 900 --exclude-cancelled-eval-harness --keep-going --junit-dir test-results/junit
+        run: uv run python scripts/run_backend_test_shard.py --shard-count 10 --shard-index ${{ matrix.shard }} --file-timeout-seconds 900 --exclude-cancelled-eval-harness --keep-going --quarantine exclude --junit-dir test-results/junit
 
       - name: Upload JUnit report
         # Whenever the shard step ran, pass or fail; not after a setup failure.
@@ -147,6 +87,83 @@ jobs:
           name: backend-junit-shard-${{ matrix.shard }}
           path: backend/test-results/junit/
           if-no-files-found: error
+          retention-days: 30
+
+      # Classification, not a retry (#1220): each failed node reruns alone and
+      # is reported as deterministic or intermittent. The job stays red.
+      - name: Classify failures (job stays red)
+        if: failure()
+        env:
+          OPENROUTER_API_KEY: test-key
+        timeout-minutes: 30
+        run: uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 3 --run-timeout-seconds 450
+
+  # Changed-test stress (#1220): the backend test files this pull request adds
+  # or modifies run 20 times under 2x-core CPU contention, each run in a new
+  # printed random order. All 20 must pass; failures are classified, never
+  # retried. Intercepted transport only: no inference call, not an eval.
+  stress-changed-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare the backend test environment
+        uses: ./.github/actions/backend-test-env
+
+      - name: Stress changed test files
+        env:
+          OPENROUTER_API_KEY: test-key
+          BASE_REF: ${{ github.base_ref }}
+        run: uv run python scripts/determinism_lanes.py stress --base "origin/$BASE_REF" --run-timeout-seconds 900 --junit-dir test-results/stress
+
+      - name: Upload stress reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-stress-junit
+          path: backend/test-results/stress/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Quarantined tests still run and report on every change (#1220), but this
+  # lane never blocks a merge: a red X here is expected while a quarantined
+  # test is still intermittent.
+  quarantine-lane:
+    needs: test-determinism
+    if: needs.test-determinism.outputs.quarantined_files != ''
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare the backend test environment
+        uses: ./.github/actions/backend-test-env
+
+      - name: Run quarantined tests (non-blocking)
+        env:
+          OPENROUTER_API_KEY: test-key
+          QUARANTINED_FILES: ${{ needs.test-determinism.outputs.quarantined_files }}
+        # shellcheck disable=SC2086 # intentional word splitting of the file list
+        run: uv run python -m pytest -q --no-cov -p scripts.pytest_quarantine --quarantine=only --junitxml=test-results/quarantine/quarantine.xml $QUARANTINED_FILES
+
+      - name: Upload quarantine report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-quarantine-junit
+          path: backend/test-results/quarantine/
+          if-no-files-found: ignore
           retention-days: 30
 
   frontend-tests:

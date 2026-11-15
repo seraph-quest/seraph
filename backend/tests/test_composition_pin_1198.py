@@ -54,13 +54,14 @@ def _dump_domains(dump):
 
 
 async def test_pinned_set_is_the_adr_table_and_every_cutover_path_consults_it():
-    assert PINNED_DOMAINS == {"seraph.state.v1", "seraph.authority.v1", "seraph.audit.v1", TASKS}
+    # #1199 adds the credential vault (ADR-036 slice 2).
+    assert PINNED_DOMAINS == {"seraph.state.v1", "seraph.authority.v1", "seraph.audit.v1", TASKS, "seraph.vault.v1"}
     assert PYTHON_HOSTED_DOMAINS is PINNED_DOMAINS
     assert all(is_pinned_domain(domain) for domain in PINNED_DOMAINS)
     assert not is_pinned_domain("seraph.inference.v1") and not is_pinned_domain("seraph.agent-loop.v1")
-    # The ADR names inference, the execution guard, authentication and the vault; their pins are targets.
+    # The ADR names inference, the execution guard and authentication; their pins are targets.
     assert {item.service for item in TRUST_SERVICES if not item.owner_row_frozen} == {
-        "inference_policy", "execution_guard", "operator_authentication", "credential_vault"}
+        "inference_policy", "execution_guard", "operator_authentication"}
     # Every runtime domain has exactly one declared bundle, and the pinned ones are seraph-trust.
     assert set(DOMAIN_BUNDLES) == set(DOMAINS)
     assert all(DOMAIN_BUNDLES[domain] == "seraph-trust" for domain in PINNED_DOMAINS)

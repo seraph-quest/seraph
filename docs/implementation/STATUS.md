@@ -242,10 +242,34 @@ provider digests, live plugin states, pins, an empty effective patch) is in
 and offline through `./manage.sh -e dev composition dump`. It is built from an
 allow-list of codes and digests and holds no secrets (tested against a
 vault-seeded workspace). Partial because bundles are only declared (no bundle
-loader, profile or patch layer exists yet), the inference, execution guard,
-operator authentication and vault pins are still targets, and the offline
-dump reports no live plugin state. See the
+loader, profile or patch layer exists yet), the inference, execution guard and
+operator authentication pins are still targets, and the offline dump reports
+no live plugin state. See the
 [guide section](./12-current-app-guide.md#pinned-trust-domains-and-composition-dump-1198).
+
+**Pinned credential vault** from
+[#1199](https://github.com/seraph-quest/seraph/issues/1199) (ADR-036 slice 2) is
+**Partial**: the Python provider worker now hosts a mandatory `vault` provider
+(after state, authority, audit and tasks; a failure aborts startup typed, for
+example `vault_storage_unavailable`) whose predicate checks that the vault key
+resolves and that the encrypted `secrets` store is present and readable,
+without reading a key name or ciphertext or decrypting anything. It has its own
+runtime domain row, `seraph.vault.v1`, pinned in `seraph-trust` with the owner
+row frozen at the legacy Python owner like tasks (same predicate, refusal code
+and audit row). The row is added to an existing install once by a chained
+exact-prefix boot step onto the exact post-#1025 inventory, audited, touching
+no secret or key file; stored secrets stay readable with the same key. The
+vault is Python-only: no Cordis plugin, service method or child readiness
+report. Its dump entry and the provider status carry only codes and digests
+(tested against a vault-seeded workspace: no value, key material or key name in
+the dump, status, provider reports or logs). Partial because there is still no
+`seraph.vault.v1` service seam: vault consumers call the existing
+`src/vault` repository directly rather than through the provider, and a failed
+vault recheck after startup reports the provider `failed` but does not block
+those direct calls. The composition-time validator of §3 waits for the profile
+layer. Forward-only: an older binary rejects the extra row with
+`composition_inventory_invalid`. See the
+[guide section](./12-current-app-guide.md#pinned-credential-vault-1199).
 
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is

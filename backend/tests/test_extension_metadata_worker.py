@@ -252,3 +252,8 @@ async def test_actual_closed_loop_retains_worker_until_its_real_completion():
         thread.join(timeout=2)
         assert not thread.is_alive()
         assert finished.wait(2)
+
+
+def test_acceptance_probe_sleep():
+    # Throwaway probe for #1218/#1220 acceptance; never merged.
+    time.sleep(0)

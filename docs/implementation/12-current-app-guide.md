@@ -1031,7 +1031,8 @@ on import order.
 
 ### Python-hosted mandatory providers (#1024)
 
-Python always hosts the `state`, `authority`, `audit` and `tasks` providers
+Python always hosts the `state`, `authority`, `audit` and `tasks` providers,
+and since #1199 the `vault` provider
 (`runtime_plugins/worker.py`, operator decision on #1024): the database must be
 open before the ownership table can be read or the Node child started. The
 backend lifespan constructs one `ProviderWorker`, takes the workspace owner
@@ -1043,7 +1044,8 @@ production), the session tables and a resolvable Vault key (configured, or a
 regular 0600 `.vault-key`; an absent file is still generated on first use);
 `audit` writes a probe `runtime_audit_ready` row inside a savepoint that is
 always rolled back; `tasks` checks the job and board tables and opens the
-durable job repository. Any failure aborts startup with that provider's typed
+durable job repository; `vault` (#1199) is described
+[below](#pinned-credential-vault-1199). Any failure aborts startup with that provider's typed
 reason (for example `state_init_db_failed`, `authority_vault_key_unavailable`,
 `audit_write_unavailable`). `goals`, `memory` and `artifacts` follow and may
 only degrade. A Cordis callback blocks with `native_provider_<name>_unavailable`
@@ -1136,11 +1138,12 @@ maintenance handoff.
 
 ADR-036 §3 pins the `seraph-trust` services. `runtime_plugins/trust.py` is the
 one code copy of that table (`TRUST_SERVICES`) and of the §5 domain-to-bundle
-map (`DOMAIN_BUNDLES`). Four domains have frozen owner rows today
+map (`DOMAIN_BUNDLES`). Five domains have frozen owner rows today
 (`PINNED_DOMAINS`): `seraph.state.v1`, `seraph.authority.v1`, `seraph.audit.v1`
-(#1024) and `seraph.tasks.v1` (#1198). `seraph.inference.v1`, the execution
-guard, operator authentication and the credential vault are listed with
-`owner_row_frozen: false`: named as pinned targets, not yet enforced.
+(#1024), `seraph.tasks.v1` (#1198) and `seraph.vault.v1` (#1199).
+`seraph.inference.v1`, the execution guard and operator authentication are
+listed with `owner_row_frozen: false`: named as pinned targets, not yet
+enforced.
 `ownership.PYTHON_HOSTED_DOMAINS` is the same set.
 
 `is_pinned_domain` is the one predicate. A pinned row is always the legacy
@@ -1170,6 +1173,43 @@ keyless (`env -i`), opens the managed local workspace's `seraph.db` read-only,
 checks the reviewed Cordis package without starting the child, and exits
 non-zero unless the inventory decodes. It is dev-only; production reads the
 status route.
+
+### Pinned credential vault (#1199)
+
+ADR-036 §3 names the credential vault a pinned trust service. The provider
+worker hosts it as the mandatory `vault` provider, activated after `tasks`
+(dependency: `state`). Its predicate checks that the vault key resolves
+(configured, or a regular 0600 `.vault-key`; an absent file is still generated
+on first use) and that the encrypted `secrets` table is present and readable
+(`SELECT id ... LIMIT 1`). It reads no key name or ciphertext and decrypts
+nothing. Failures are typed: `vault_key_unavailable`, `vault_key_unsafe`,
+`vault_tables_missing`, `vault_storage_unavailable`.
+At startup a failure aborts boot. On a status recheck it marks the provider
+`failed` and `mandatory_ready: false`. `authority` keeps its own vault-key check
+and `authority_vault_key_*` codes, because operator local keys derive from the
+vault key.
+
+The vault has its own owner row, `seraph.vault.v1`, in `seraph-trust`. The row
+is pinned and frozen at the legacy Python owner like tasks: the same
+`is_pinned_domain` predicate, `composition_owner_not_transferable` refusal and
+`runtime_composition_pin_refused` audit row apply. A fresh inventory is seeded
+with it. On an existing install `init_db` adds it once
+(`ownership.introduce_vault_domain_sync`), and only onto the exact post-#1025
+inventory with every row decoding. The step inserts one legacy row plus one
+`runtime_composition_domain_introduced` audit event (`introduced_by: 1199`). It
+touches no other owner row, no `secrets` row and no key file, so stored
+secrets stay readable with the same key. Any other inventory is left alone. An
+older binary rejects the extra row (`composition_inventory_invalid`), so the
+step is forward-only. A restored pre-#1199 backup gains the row on its next
+start.
+
+The vault is Python-only (`worker.PYTHON_ONLY`). It has no Cordis plugin or
+service method, and its readiness is never sent to the child. In the
+composition dump its entry carries only the owner row's codes and the legacy
+digest, with `provider_digest: null`. Not yet built: a `seraph.vault.v1`
+service seam. Consumers still call `src/vault` (`VaultRepository`, `crypto`)
+directly, and a vault provider that fails after startup does not block those
+calls.
 
 ### Scheduler and dispatcher lifecycle (#1025)
 

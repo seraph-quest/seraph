@@ -1,6 +1,19 @@
 import os
 import shutil
 import tempfile
+import time
+
+# Hermetic inputs (#1219). This root conftest runs before any test module or
+# ``config.settings`` is imported, so these hold for the settings singleton.
+# Load no dotenv file: the repository's ``.env.dev`` is the operator's live
+# configuration and exists only in some checkouts. Set unconditionally, so an
+# inherited value cannot select a file either; tests that need a specific
+# file construct ``Settings(_env_file=...)`` themselves.
+os.environ["SERAPH_SETTINGS_ENV_FILE"] = ""
+# Production derives behaviour from the local hour and date. Pin the zone so
+# a run's result does not depend on the host's timezone setting.
+os.environ["TZ"] = "UTC"
+time.tzset()
 
 # Marks a WORKSPACE_DIR this conftest created, so it can be replaced per
 # xdist worker and removed at session end. An explicit WORKSPACE_DIR from the
@@ -34,8 +47,22 @@ if not os.environ.get("WORKSPACE_DIR") or (
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("SCHEDULER_ENABLED", "false")
-os.environ.setdefault("DEPLOYMENT_ENVIRONMENT", "test")
-os.environ.setdefault("OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS", "true")
+# Operator auth and screenshot analysis change the outcome of ordinary route
+# and observer tests. A shell that sourced an operator env file (``manage.sh``
+# sources it with ``set -a``) would export these, so pin them here instead of
+# per test. Tests that need another value set it in their own monkeypatch scope.
+os.environ["DEPLOYMENT_ENVIRONMENT"] = "test"
+os.environ["OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS"] = "true"
+for _ambient in (
+    "OPERATOR_AUTH_SECRET",
+    "OPERATOR_AUTH_SECRET_HASH",
+    "OPERATOR_AUTH_LOCAL_NO_LOGIN",
+    "OPERATOR_AUTH_ALLOWED_HOSTS",
+    "OPERATOR_AUTH_ALLOWED_ORIGINS",
+    "SCREEN_ANALYSIS_PROVIDER",
+    "LOCAL_VLM_BASE_URL",
+):
+    os.environ.pop(_ambient, None)
 
 
 def pytest_unconfigure(config):

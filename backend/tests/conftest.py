@@ -1,3 +1,4 @@
+import copy
 import importlib
 import os
 from contextlib import asynccontextmanager
@@ -29,6 +30,13 @@ def pytest_addoption(parser):
 
 
 from config.settings import settings
+# Register every SQLModel table before any fixture runs ``create_all``.
+# ``create_all`` creates only the tables whose models are already imported, so
+# without this a table's presence depended on which test imported it first.
+# ``test_hermetic_test_inputs`` keeps this list equal to the table owners in src.
+TABLE_MODEL_MODULES = ("src.db.models", "src.db.task_method_models")
+for _module in TABLE_MODEL_MODULES:
+    importlib.import_module(_module)
 from src.app import create_app
 from src.audit.repository import AuditRepository, audit_repository
 from src.llm_runtime import _reset_target_health
@@ -74,6 +82,36 @@ _PATCH_TARGETS = [
     "src.workflows.job_runtime.get_session",
     "src.workflows.production_workflow_guarantees.get_session",
 ]
+
+
+# ── Settings isolation ──────────────────────────────────
+
+_SETTINGS_SNAPSHOT_KEY = pytest.StashKey[dict]()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_setup(item):
+    # Taken before any fixture runs, so the restore below returns the shared
+    # settings object to exactly its pre-test state.
+    item.stash[_SETTINGS_SNAPSHOT_KEY] = copy.deepcopy(settings.__dict__)
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    yield
+    # Runs after every fixture finalizer, including ``monkeypatch`` undo, so a
+    # direct ``settings.x = ...`` assignment (or an in-place change to a nested
+    # settings model) in a test or fixture cannot leak into the next test.
+    snapshot = item.stash.get(_SETTINGS_SNAPSHOT_KEY, None)
+    if snapshot is None:
+        return
+    current = settings.__dict__
+    for name in [name for name in current if name not in snapshot]:
+        del current[name]
+    for name, value in snapshot.items():
+        if name not in current or current[name] != value:
+            current[name] = value
 
 
 # ── In-memory async DB fixture ──────────────────────────
@@ -179,11 +217,11 @@ def app():
 
 @pytest.fixture(autouse=True)
 def isolate_operator_auth_defaults(monkeypatch):
-    """Keep ordinary route tests independent of a copied live env file.
+    """Reset per-process auth state and keep catalog refresh off in tests.
 
-    Authentication-negative tests opt back into a configured secret or turn
-    the bypass off in their own monkeypatch scope.  The default applies only
-    to this test process; production settings and middleware are unchanged.
+    Operator auth settings need no reset here: the root conftest loads no env
+    file and pins the auth environment, and the settings restore above undoes
+    any per-test change.
     """
 
     from src.api.auth import _reset_login_throttle_for_tests
@@ -191,10 +229,6 @@ def isolate_operator_auth_defaults(monkeypatch):
     # Each test has its own database and client. Keep the process-local login
     # throttle in the same scope, while preserving throttling within a test.
     _reset_login_throttle_for_tests()
-    monkeypatch.setattr(settings, "deployment_environment", "test")
-    monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(settings, "operator_auth_secret", "")
-    monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
     # No background NEAR catalog reads in tests (#1178); tests drive
     # refresh_catalog_observations directly over intercepted transport.
     monkeypatch.setattr(settings, "near_tee_catalog_refresh_enabled", False)
@@ -205,10 +239,8 @@ def isolate_operator_auth_defaults(monkeypatch):
 @pytest_asyncio.fixture
 async def client(app, async_db, monkeypatch):
     """Async HTTP test client backed by the in-memory DB."""
-    # The repository's live ``.env.dev`` may be copied into the test process
-    # by managed tooling.  Keep this fixture's synthetic ASGI host and origin
-    # explicitly isolated instead of weakening production authentication.
-    monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
+    # The synthetic ASGI host ``test`` is in the default allowed hosts. Pin the
+    # allowed origins to the single cockpit origin this fixture's tests use.
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -348,15 +380,6 @@ def reset_audit_repository_method_patches():
     _restore_audit_repository_methods()
     yield
     _restore_audit_repository_methods()
-
-
-@pytest.fixture(autouse=True)
-def clear_ambient_screenshot_analysis_provider():
-    with (
-        patch.object(settings, "screen_analysis_provider", ""),
-        patch.object(settings, "local_vlm_base_url", ""),
-    ):
-        yield
 
 
 @pytest.fixture

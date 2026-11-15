@@ -227,6 +227,26 @@ and own no activation of the Python-hosted providers (operator decision on
 maintenance handoff. See the
 [guide section](./12-current-app-guide.md#python-hosted-mandatory-providers-1024).
 
+**Pinned trust domains and composition dump** from
+[#1198](https://github.com/seraph-quest/seraph/issues/1198) (ADR-036 slice 1) is
+**Partial**: `seraph.tasks.v1` joins state, authority and audit as a pinned
+`seraph-trust` domain. Its owner row stays the legacy Python owner; only its
+legacy epoch fence may move. One predicate (`runtime_plugins/trust.py`
+`is_pinned_domain`) is consulted by the cutover manifest, `transition_domain`,
+the operator owner API and the fenced owner CAS; a refused transfer answers
+`composition_owner_not_transferable` and the cutover and API paths write a
+`runtime_composition_pin_refused` audit row. A read-only composition dump
+(declared bundles, domain owners, epochs and owner digests, reviewed Cordis
+provider digests, live plugin states, pins, an empty effective patch) is in
+`/api/runtime/status` as `composition`, at `GET /api/runtime/composition/dump`,
+and offline through `./manage.sh -e dev composition dump`. It is built from an
+allow-list of codes and digests and holds no secrets (tested against a
+vault-seeded workspace). Partial because bundles are only declared (no bundle
+loader, profile or patch layer exists yet), the inference, execution guard,
+operator authentication and vault pins are still targets, and the offline
+dump reports no live plugin state. See the
+[guide section](./12-current-app-guide.md#pinned-trust-domains-and-composition-dump-1198).
+
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
 **Partial**: the one Python scheduler and the WorkBoard dispatcher run only

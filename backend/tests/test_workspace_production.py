@@ -357,9 +357,15 @@ with maintenance_fence(workspace):
             holder.stdin.write("x")
             holder.stdin.close()
         holder.wait(timeout=10)
-        if holder.returncode != 0:
-            assert holder.stderr is not None
-            raise AssertionError(holder.stderr.read())
+        try:
+            if holder.returncode != 0:
+                assert holder.stderr is not None
+                raise AssertionError(holder.stderr.read())
+        finally:
+            # Release the holder's output pipes (#1218).
+            for stream in (holder.stdout, holder.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):

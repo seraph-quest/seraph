@@ -356,3 +356,49 @@ def test_recovery_text_never_echoes_uncatalogued_operator_text():
     assert "ghp_1204" not in text and "forged" not in text and "redacted" in text
     pinned = _refused("patch_row_pinned", patch=[{"id": "seraph.tasks.v1#enabled", "value": False}])
     assert "redacted" in profiles.recovery_text(pinned)
+
+
+def test_the_patch_file_owner_must_be_the_service_user_root_or_the_workspace_owner(tmp_path, monkeypatch):
+    _write_patch(tmp_path, [{"id": SCHEDULER_ROW, "value": False}])
+    real_stat = os.stat
+    own = os.getuid()
+    # The file is owned by us; pretend the service user is someone else.
+    monkeypatch.setattr(profiles.os, "getuid", lambda: own + 4242)
+    # Workspace directory owned by a third uid: our file now has a foreign owner.
+    monkeypatch.setattr(profiles.os, "stat", lambda path, *a, **k: type("S", (), {"st_uid": own + 99})()
+                        if Path(path) == tmp_path else real_stat(path, *a, **k))
+    if own != 0:
+        with pytest.raises(CompositionProfileInvalid) as foreign:
+            load_operator_patch(tmp_path)
+        assert foreign.value.reason == "operator_patch_unsafe"
+    # A host-written file in a bind mount: owned by the workspace directory's owner.
+    monkeypatch.setattr(profiles.os, "stat", lambda path, *a, **k: type("S", (), {"st_uid": own})()
+                        if Path(path) == tmp_path else real_stat(path, *a, **k))
+    assert load_operator_patch(tmp_path) == [{"id": SCHEDULER_ROW, "value": False}]
+
+
+@pytest.mark.asyncio
+async def test_the_lifecycle_and_programme_digest_gates_see_the_booted_patch(tmp_path, monkeypatch):
+    from config.settings import settings
+    from src.guardian.programme_digest import source_schedule
+    from src.runtime_plugins.lifecycle import RuntimeLifecycle
+    from src.runtime_plugins.ownership import SCHEDULER_DOMAIN
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "deployment_environment", "development")
+    monkeypatch.setattr(settings, "composition_profile", "")
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+    _write_patch(tmp_path, [{"id": SCHEDULER_ROW, "value": False}])
+    boot_profile()
+    programme = {"state": "active", "reason_code": None, "cadence": "daily"}
+    blocked = source_schedule(programme, [], 1, None)
+    assert (blocked.next_source_state, blocked.next_source_reason) == ("unavailable", "scheduler_disabled")
+    lifecycle = RuntimeLifecycle()
+    lifecycle.managed = True
+    lifecycle.scheduler_enabled = scheduler_enabled(settings.scheduler_enabled)
+    status = await lifecycle.activate(SCHEDULER_DOMAIN)
+    assert (status["state"], status["reason"]) == ("disabled", "scheduler_disabled")
+    assert SCHEDULER_ROW in status["recovery"]
+    # The lifespan hands runtime_lifecycle.start this same effective value.
+    import inspect
+    from src import app as app_module
+    assert "scheduler_enabled=profile_scheduler_enabled(settings.scheduler_enabled)" in inspect.getsource(app_module)

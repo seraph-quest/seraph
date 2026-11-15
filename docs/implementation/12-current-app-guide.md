@@ -1218,8 +1218,8 @@ so backup and restore do not carry it. It must be 16 KiB or smaller, and it is
 parsed as closed JSON that refuses duplicate keys.
 
 **Refusal.** Any refusal raises `CompositionProfileInvalid`, so nothing boots: no
-lock, no database, no provider. The fix is logged ("Composition refused:
-<reason> …"). Profile reasons:
+lock, no database, no provider. The fix is logged (`Composition refused:
+<reason> …`). Profile reasons:
 - `profile_unknown`;
 - `profile_environment_mismatch`: for example `prod` in development, or `local`
   in production;

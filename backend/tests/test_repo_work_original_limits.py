@@ -18,9 +18,6 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_repo_work_task_publication import actual_native_source, _actual_source_callback_journey
 
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
-
 
 async def actual_original_limits(accounting_db, monkeypatch):
     factory, owner, service, jobs, binding, request = await actual_native_source(
@@ -83,9 +80,14 @@ async def test_actual_original_limits_drift_blocks_before_private_read(accountin
         from src.model_fabric.configuration import read_model_fabric_configuration, write_model_fabric_configuration
         async with configuration_mutation_lock:
             configured = read_model_fabric_configuration()
-            setup = replace(configured.openrouter_setup, request_cost_bound_microusd=1)
-            write_model_fabric_configuration(replace(configured, openrouter_setup=setup,
-                egress_revision=configured.egress_revision + 1), expected_revision=configured.egress_revision)
+            # #1184: the reviewed NEAR TEE text slot's request bound is lowered
+            # in a new consented policy revision.
+            revision = configured.egress_revision + 1
+            slot = replace(configured.near_tee.slots["text"], request_cost_bound_microusd=1,
+                purpose_consent_revision=revision)
+            write_model_fabric_configuration(replace(configured, near_tee=replace(configured.near_tee,
+                slots={**configured.near_tee.slots, "text": slot}), egress_revision=revision),
+                expected_revision=configured.egress_revision)
     reads = []
     def private_read(*args, **kwargs):
         reads.append(args)
@@ -156,7 +158,7 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
     await asyncio.wait_for(reached.wait(), timeout=15)
     mutation = asyncio.create_task(effective_policy.revoke_effective_policy(
         SimpleNamespace(state=SimpleNamespace(operator=operator)),
-        SimpleNamespace(grant_id="provider_policy:openrouter", expected_revision=configured.egress_revision,
+        SimpleNamespace(grant_id="provider_policy:near_tee", expected_revision=configured.egress_revision,
             idempotency_key="actual-automatic-stop-revoke")))
     await asyncio.sleep(0.1)
     assert not mutation.done()

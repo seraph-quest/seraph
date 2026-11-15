@@ -1,7 +1,10 @@
 """Passive Python providers for the canonical runtime domains (#1024, A3.1).
 
-Python always hosts ``state``, ``authority``, ``audit`` and ``tasks``: they are
-activated first, in that order, and a failure of any of them aborts startup.
+Python always hosts ``state``, ``authority``, ``audit``, ``tasks`` and
+``vault``: they are activated first, in that order, and a failure of any of
+them aborts startup. ``vault`` is the pinned credential vault (ADR-036 §3,
+#1199): a Python-only trust service with its own owner row and no Cordis
+facade, so its readiness is never reported to the child.
 ``goals``, ``memory`` and ``artifacts`` follow and may only degrade; their
 Cordis service methods then return a typed block. The Cordis plugins of the
 same names report readiness and own no activation (operator decision on
@@ -31,21 +34,25 @@ from src.db.engine import close_db, init_db
 
 logger = logging.getLogger(__name__)
 
-MANDATORY = ("state", "authority", "audit", "tasks")
+MANDATORY = ("state", "authority", "audit", "tasks", "vault")
 DEGRADABLE = ("goals", "memory", "artifacts")
 PROVIDERS = (*MANDATORY, *DEGRADABLE)
 # Fixed activation dependencies; a provider never activates before these.
 DEPENDENCIES = {
     "state": (), "authority": ("state",), "audit": ("state",), "tasks": ("state", "authority"),
     "goals": ("state", "authority"), "artifacts": ("state", "authority"),
-    "memory": ("state", "authority", "audit"),
+    "memory": ("state", "authority", "audit"), "vault": ("state",),
 }
 # Runtime domain served by each provider, for typed Cordis method blocks.
 DOMAIN_PROVIDERS = {f"seraph.{name}.v1": name for name in PROVIDERS}
+# Providers with no Cordis facade: Python-only trust services whose readiness
+# never crosses IPC (the child's closed report set has no such domain).
+PYTHON_ONLY = frozenset({"vault"})
 _AUTHORITY_TABLES = ("operator_sessions", "sessions")
 _TASK_TABLES = ("workflow_run_states", "work_board_tasks", "work_board_attempts")
 _GOAL_TABLES = ("goals",)
 _MEMORY_TABLES = ("memories", "memory_tombstones", "memory_proposals")
+_VAULT_TABLES = ("secrets",)
 
 
 class ProviderActivationError(RuntimeError):
@@ -94,8 +101,13 @@ def _pbkdf2_shape_valid(value: str) -> bool:
     return len(salt) == 16 and len(digest) == 32
 
 
-def _vault_key_resolves() -> str | None:
-    """Configured key, or a readable 0600 key file; absent is generated on first use."""
+def _vault_key_resolves(prefix: str = "authority_vault") -> str | None:
+    """Configured key, or a readable 0600 key file; absent is generated on first use.
+
+    Returns only a fixed ``<prefix>_key_*`` reason code; never the key, its file
+    contents or a secret name. Authority keeps this check because its local
+    signing keys derive from the vault key; the vault provider repeats it.
+    """
     from cryptography.fernet import Fernet
     from config.settings import settings
     configured = settings.vault_encryption_key
@@ -109,11 +121,11 @@ def _vault_key_resolves() -> str | None:
             return None
         info = os.lstat(path)
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-            return "authority_vault_key_unsafe"
+            return f"{prefix}_key_unsafe"
         Fernet(Path(path).read_bytes().strip())
         return None
     except (OSError, ValueError, TypeError):
-        return "authority_vault_key_unavailable"
+        return f"{prefix}_key_unavailable"
 
 
 async def _state_predicate(*, run_init: bool) -> None:
@@ -252,8 +264,29 @@ async def _artifacts_predicate() -> None:
         raise ProviderActivationError("artifacts", "artifacts_root_unavailable") from exc
 
 
+async def _vault_predicate() -> None:
+    """The pinned vault: its key resolves and its encrypted store is present and readable.
+
+    Reads only the row-id column, never a key name or ciphertext, and
+    decrypts nothing, so a status recheck can never surface vault content.
+    """
+    from sqlalchemy import text
+    from src.db import engine as db_engine
+    reason = _vault_key_resolves("vault")
+    if reason is not None:
+        raise ProviderActivationError("vault", reason)
+    if await _missing_tables("vault", _VAULT_TABLES):
+        raise ProviderActivationError("vault", "vault_tables_missing")
+    try:
+        async with db_engine.get_session() as db:
+            await db.execute(text("SELECT id FROM secrets LIMIT 1"))
+    except Exception as exc:  # noqa: BLE001 - startup reports one typed reason
+        raise ProviderActivationError("vault", "vault_storage_unavailable") from exc
+
+
 _PREDICATES = {
     "authority": _authority_predicate, "audit": _audit_predicate, "tasks": _tasks_predicate,
+    "vault": _vault_predicate,
     "goals": _goals_predicate, "memory": _memory_predicate, "artifacts": _artifacts_predicate,
 }
 
@@ -300,7 +333,7 @@ class ProviderWorker:
     # ---------------------------------------------------------------- activation
 
     async def activate(self) -> None:
-        """State, authority, audit and tasks or abort; then degradable providers."""
+        """State, authority, audit, tasks and vault or abort; then degradable providers."""
         async with self._status_lock:
             await self._activate()
 
@@ -405,6 +438,8 @@ class ProviderWorker:
             rows = await inventory(db)
         reports = []
         for name in PROVIDERS:
+            if name in PYTHON_ONLY:
+                continue
             row = rows.get(f"seraph.{name}.v1")
             status = self.status[name]
             if row is None or status.state not in {"active", "degraded", "failed"}:
@@ -468,5 +503,5 @@ def domain_provider_unavailable(*runtime_domains: str) -> str | None:
     return None
 
 
-__all__ = ["DEGRADABLE", "DEPENDENCIES", "MANDATORY", "PROVIDERS", "ProviderActivationError", "ProviderWorker",
-           "attach", "current_worker", "domain_provider_unavailable"]
+__all__ = ["DEGRADABLE", "DEPENDENCIES", "MANDATORY", "PROVIDERS", "PYTHON_ONLY", "ProviderActivationError",
+           "ProviderWorker", "attach", "current_worker", "domain_provider_unavailable"]

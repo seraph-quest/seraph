@@ -22,16 +22,12 @@ from tests.test_general_task_planner import accounting_db, prepare, forbid_exter
 from tests.test_repo_work_source import git
 from tests.test_repo_work_contracts import selection
 
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
-
-
 async def actual_publication(accounting_db, monkeypatch, *, goal_capacity=None, language='test_python', node_build=False, ordinary_prior=False, publication_profile=False, task_limits=None, work_limits=None, goal_limits=None):
-    # Repository publication/source mechanics given a usable repair route;
-    # its refusal on NEAR TEE is pinned in test_near_tee_vertical_journeys (#1159).
-    from tests.near_tee_support import assume_repository_repair_route_available
-    assume_repository_repair_route_available(monkeypatch)
+    # #1184: repository repair runs on the intercepted NEAR TEE text slot
+    # serving strategist_agent; its gateway is ``factory.repository_near_gateway``.
+    from tests.near_tee_support import prepare_repository_near_route
     _, owner = await prepare(accounting_db, monkeypatch)
+    accounting_db[2].repository_near_gateway = await prepare_repository_near_route(monkeypatch)
     workspace, _, factory = accounting_db
     if goal_capacity is not None:
         # This is the ORIGINAL Goal policy, established before the first C1
@@ -666,7 +662,6 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
         node_readback_drift=None, node_build=False, stop_at=None, publication_profile=False,
         unknown_model_cost=False, task_limits=None, work_limits=None, actual_model_cost_microusd=0,
         goal_capacity=2, create=None):
-    import httpx
     from src.auth.service import authenticate_session
     from src.api.workflows import RepoRepairEgressConsentRequest
     from src.workflows.repo_repair_source import (prepare_repository_native_source,
@@ -714,21 +709,18 @@ async def _actual_source_callback_journey(accounting_db, monkeypatch, three_iter
             '+exports.add = (a, b) => { while (true) {} };\n' if language == 'test_node' else
             '--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,3 @@\n def add(a, b):\n-    return a - b\n'
             '+    while True:\n+        pass\n')
+    assert egress['effective_upstream'] == 'near_tee'
+    assert egress['effective_profile_id'] == 'near_tee.text'
     contacted = []
-    def final_http(request):
-        assert str(request.url) == 'https://openrouter.ai/api/v1/chat/completions'
-        assert json.loads(request.content) == egress['request_body']
-        contacted.append(request)
-        usage = {'prompt_tokens': 1, 'completion_tokens': 1}
-        if not unknown_model_cost:
-            usage['cost'] = format(actual_model_cost_microusd / 1000000, '.6f')
-        return httpx.Response(200, json={'id': 'scripted-source-final-transport',
-            'usage': usage,
-            'choices': [{'message': {'role': 'assistant', 'content': json.dumps(output)}}]})
-    real_client = httpx.Client
-    def owned_client(*args, **kwargs):
-        return real_client(*args, **kwargs, transport=httpx.MockTransport(final_http))
-    monkeypatch.setattr(httpx, 'Client', owned_client)
+    near = factory.repository_near_gateway
+    def final_completion(body):
+        # #1184: NEAR receives exactly the consented body, nothing more.
+        assert body == egress['request_body']
+        contacted.append(body)
+        return json.dumps(output)
+    near.script = final_completion
+    near.cost_nano = actual_model_cost_microusd * 1000
+    near.billing_missing = unknown_model_cost
     before_child = await jobs.get_job(binding.invocation_id)
     from src.workflows.repo_repair import RepoRepairError
     with pytest.raises(RepoRepairError, match='preparation'):

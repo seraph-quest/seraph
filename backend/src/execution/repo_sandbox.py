@@ -378,6 +378,8 @@ class RepoSandboxError(RuntimeError):
         self.phase = phase
         self.terminal_status = terminal_status
         self.checkpoint_phases: tuple[str, ...] = ()
+        # Typed owner reap record of a supervisor this failure killed (#1212).
+        self.supervisor_reap: dict[str, Any] | None = None
 
 
 def _descriptor_flags(*, directory: bool = False) -> int:
@@ -3072,6 +3074,40 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
                 pass
             os.close(marker_dir_fd)
 
+    def _reap_supervisor_after_failure(self, job_id: str, process: subprocess.Popen, start: str) -> dict[str, Any]:
+        """Terminate, then kill, the exact failed supervisor and reap it (#1212).
+
+        SIGTERM asks the supervisor to clean its descendants; one that ignores
+        it (e.g. stuck reading a repository-made /dev/zero link, or stopped) is
+        killed after the existing 2 s grace and then reaped here, by its owner,
+        instead of by ``Popen.__del__``. Killing never proves descendant
+        cleanup, so the caller's job stays unknown with cleanup unproven. The
+        typed outcome is recorded on the job marker and returned.
+        """
+        from src.execution import repo_supervisor
+        from src.execution.process_reap import ProcessReapError, terminate_then_reap
+
+        def send(signum: int) -> bool:
+            return repo_supervisor.exact_signal(process.pid, start, signum)
+
+        try:
+            outcome = terminate_then_reap(process, send_signal=send, grace_seconds=2)
+        except ProcessReapError as exc:
+            outcome = exc.outcome
+        record = outcome.as_record()
+        try:
+            with self._job_marker_lock(job_id):
+                current = self._read_job_marker(job_id)
+                if current is not None:
+                    self._write_job_marker_locked(job_id, {**current, "supervisor_reap": record})
+                record["marker_recorded"] = current is not None
+        except (OSError, ValueError, RepoSandboxError):
+            # The reap already happened; never let marker contention replace
+            # the caller's unknown-effect failure. The record still travels
+            # on the raised error.
+            record["marker_recorded"] = False
+        return record
+
     def _read_job_marker(self, job_id: str) -> dict[str, Any] | None:
         try:
             marker_dir_fd = _open_trusted_directory(self._job_marker_directory)
@@ -3327,7 +3363,7 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
     def _run_supervised_python(self, job: RepoSandboxJob, *, stage: Path, runtime: dict, environment: dict,
             deadline: float, observe_process: Callable, before_spawn: Callable, posture: Mapping,
             isolation: Mapping | None = None) -> tuple[int, dict]:
-        from src.execution.repo_supervisor import PYTHON_PROFILE, finish_supervisor, exact_signal, start_identity
+        from src.execution.repo_supervisor import PYTHON_PROFILE, finish_supervisor, start_identity
         projection = iteration_process_projection(job.iteration_binding)
         token = self._job_stage_token(job)
         supervisor = Path(__file__).with_name("repo_supervisor.py")
@@ -3381,14 +3417,13 @@ class LocalRepoRepairExecutor(RootlessDockerRepoSandbox):
         except (OSError, ValueError, subprocess.SubprocessError, RepoSandboxError) as exc:
             marker = self._read_job_marker(job.job_id) or {}
             self._write_job_marker(job.job_id, {**marker, "status": "unknown_external_effect", "cleanup_proven": False})
+            reap = None
             if pid_start is not None and process.poll() is None:
-                exact_signal(process.pid, pid_start, signal.SIGTERM)
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    # A supervisor ignoring SIGTERM is killed; cleanup stays unproven.
-                    exact_signal(process.pid, pid_start, signal.SIGKILL)
-            raise RepoSandboxError("Original Python supervisor closure requires reconciliation", terminal_status="unknown_external_effect") from exc
+                # A supervisor ignoring SIGTERM is killed and reaped; cleanup stays unproven.
+                reap = self._reap_supervisor_after_failure(job.job_id, process, pid_start)
+            error = RepoSandboxError("Original Python supervisor closure requires reconciliation", terminal_status="unknown_external_effect")
+            error.supervisor_reap = reap
+            raise error from exc
         finally:
             if transport_complete:
                 for stream in (process.stdin, process.stdout, process.stderr):

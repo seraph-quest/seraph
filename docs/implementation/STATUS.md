@@ -227,6 +227,95 @@ and own no activation of the Python-hosted providers (operator decision on
 maintenance handoff. See the
 [guide section](./12-current-app-guide.md#python-hosted-mandatory-providers-1024).
 
+**Pinned trust domains and composition dump** from
+[#1198](https://github.com/seraph-quest/seraph/issues/1198) (ADR-036 slice 1) is
+**Partial**: `seraph.tasks.v1` joins state, authority and audit as a pinned
+`seraph-trust` domain. Its owner row stays the legacy Python owner; only its
+legacy epoch fence may move. One predicate (`runtime_plugins/trust.py`
+`is_pinned_domain`) is consulted by the cutover manifest, `transition_domain`,
+the operator owner API and the fenced owner CAS; a refused transfer answers
+`composition_owner_not_transferable` and the cutover and API paths write a
+`runtime_composition_pin_refused` audit row. A read-only composition dump
+(declared bundles, domain owners, epochs and owner digests, reviewed Cordis
+provider digests, live plugin states, pins, an empty effective patch) is in
+`/api/runtime/status` as `composition`, at `GET /api/runtime/composition/dump`,
+and offline through `./manage.sh -e dev composition dump`. It is built from an
+allow-list of codes and digests and holds no secrets (tested against a
+vault-seeded workspace). Partial because bundles select no code (the named
+profiles and patch layer arrived in #1204, below), the inference, execution guard and
+operator authentication pins are still targets, and the offline dump reports
+no live plugin state. See the
+[guide section](./12-current-app-guide.md#pinned-trust-domains-and-composition-dump-1198).
+
+**Pinned credential vault** from
+[#1199](https://github.com/seraph-quest/seraph/issues/1199) (ADR-036 slice 2) is
+**Partial**: the Python provider worker now hosts a mandatory `vault` provider
+(after state, authority, audit and tasks; a failure aborts startup typed, for
+example `vault_storage_unavailable`) whose predicate checks that the vault key
+resolves and that the encrypted `secrets` store is present and readable,
+without reading a key name or ciphertext or decrypting anything. It has its own
+runtime domain row, `seraph.vault.v1`, pinned in `seraph-trust` with the owner
+row frozen at the legacy Python owner like tasks (same predicate, refusal code
+and audit row). The row is added to an existing install once by a chained
+exact-prefix boot step onto the exact post-#1025 inventory, audited, touching
+no secret or key file; stored secrets stay readable with the same key. The
+vault is Python-only: no Cordis plugin, service method or child readiness
+report. Its dump entry and the provider status carry only codes and digests
+(tested against a vault-seeded workspace: no value, key material or key name in
+the dump, status, provider reports or logs). Partial because there is still no
+`seraph.vault.v1` service seam: vault consumers call the existing
+`src/vault` repository directly rather than through the provider, and a failed
+vault recheck after startup reports the provider `failed` but does not block
+those direct calls. The composition-time validator of §3 (#1204) now refuses any
+profile or patch row on the vault domain. Forward-only: an older binary rejects the extra row with
+`composition_inventory_invalid`. See the
+[guide section](./12-current-app-guide.md#pinned-credential-vault-1199).
+
+**Bundles, named profiles and the patch layer** from
+[#1204](https://github.com/seraph-quest/seraph/issues/1204) (A3.3 slice 1 of
+[#1026](https://github.com/seraph-quest/seraph/issues/1026), ADR-036 §4/§6) is
+**Partial**: `runtime_plugins/profiles.py` holds the reviewed bundle catalogue
+(the ten ADR-036 bundles: `seraph-trust`, five core bundles carrying today's
+domain rows, four app bundles), the named profiles `local`, `prod` and
+`headless`, and a closed patch-row catalogue. Before any provider activates, the
+lifespan validates the profile selected by `COMPOSITION_PROFILE` (empty derives
+it from `DEPLOYMENT_ENVIRONMENT`, so existing installs boot unchanged as `local`
+or `prod`). It also validates the layers in their fixed order (profile bundles,
+profile patch, operator patch `<workspace>/composition.patch.json`). It refuses
+to boot with a typed reason and a logged fix when one of these holds:
+- a profile omits or reorders `seraph-trust`, or drops a core bundle;
+- a patch row touches a pinned trust domain, names a security switch (no-login,
+  auth, bind host, deployment environment) or carries a non-catalogued or
+  non-boolean value;
+- `prod` meets no-login.
+
+The first composition flag is a row: `seraph.scheduler.v1#enabled`, with
+`SCHEDULER_ENABLED` as its base layer. A patch value changes actual scheduler
+activation (the engine, the lifecycle domain and the status/digest gates). The
+composition dump's `profile` (id, source, bundles, digest, patch presence) and
+`effective_patch` are now real, live and offline (`./manage.sh -e dev
+composition dump` passes the non-secret selection). Bundles are marked
+`selected`/`not_selected`. An uncatalogued patch row id is never echoed in the
+dump or the boot log. Agent file tools and process-tool path arguments are
+denied the patch file; a script the agent runs through the process runtime is
+not (the same boundary as `mcp-servers.json`, tracked in #1216).
+
+Partial because:
+- bundles select no code: the Cordis plugin set is still the one fixed reviewed
+  `profile.json`;
+- `headless` excludes `seraph-cockpit` only in the validated tree, since HTTP/WS
+  and the web cockpit are not plugin-owned until
+  [#1208](https://github.com/seraph-quest/seraph/issues/1208);
+- no catalogued row adds a reviewed alternative provider (such rows are refused
+  `patch_provider_unreviewed`);
+- the patch file is not a declared workspace state path, so backup and restore
+  do not carry it;
+- the other composition env flags move in
+  [#1206](https://github.com/seraph-quest/seraph/issues/1206).
+
+See the
+[guide section](./12-current-app-guide.md#bundles-named-profiles-and-the-patch-layer-1204).
+
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
 **Partial**: the one Python scheduler and the WorkBoard dispatcher run only
@@ -705,15 +794,22 @@ and settles from NEAR billing inside its broker lease, with no fallback. On
 NEAR TEE now: general-task and specialist planning, Work Board card
 proposals, guardian opportunity assessment and plan generation, research
 dossiers (child synthesis and programme discovery requests), Mail reply
-drafts, Calendar meeting prep and communication preparation. Repository work
-stays blocked on NEAR TEE: its repair iteration model step
-(`repo_repair_source`, whose consented exact request body and code-egress
-consent are bound to the retired OpenRouter target) has no NEAR TEE adapter,
-so the `repository_work` tool is never offered. A frozen tool set or explicit
-plan naming it, and an admitted repository child (including on resume), is
-refused with `near_tee_route_unsupported` before any planning, reservation or
-contact. A repository-worded intent submitted without that tool is ordinary
-NEAR planning (charged) and cannot produce a repository step. A NEAR TEE answer that is not adopted (for
+drafts, Calendar meeting prep, communication preparation and, since #1184,
+repository repair (`repo_repair_source`, **Partial**): its iteration consents
+to the exact NEAR TEE body (`finalize_iteration_egress` builds the body the
+text slot sends), its route digest names the NEAR target (fixed base, slot
+profile and contract hash, model, `x-no-aliasing`), its code-egress consent
+names `near_tee` and says the NEAR gateway receives the source and
+diagnostics as plaintext. While the call runs, a model-fabric egress binding
+lets the NEAR TEE adapter send only that exact request: any other body or
+target is refused in `prepare_near_tee_call`, before any reservation, and
+again at the precontact guard. The single-shot repair consent pins the same
+exact body and route digests. A repository-sized slot at real NEAR prices
+costs about 2.7k micro-USD per request, so the slot bound and Task/Goal limits
+must allow that (availability only). Every per-request gate (model echo,
+`x-no-aliasing`, billing readback, Unknown liability, cost bound) is
+unchanged; `near_tee_route_unsupported` is no longer produced and stays only
+as a label for Tasks already blocked with it. A NEAR TEE answer that is not adopted (for
 example `near_tee_output_truncated` for a JSON draft cut at the slot's output
 bound) settles its NEAR cost and blocks the Mail or Calendar card with that
 code. Every vertical blocks
@@ -880,7 +976,10 @@ JSON rejected) and calls to tools that were not offered fail closed. Streaming
 and tool turns each need their own fresh `streaming` / `tool_use` capability
 check. `/api/runtime/status` `chat_agent` reports the NEAR TEE route, model and
 dated catalog label when the slot is the active provider, otherwise the slot's
-blocked reason with no provider. Chat-turn result adoption authenticates the
+blocked reason with no provider. Its top-level `provider`/`model` (and the
+operator posture's runtime) name that same serving slot, or `none` / "not
+configured" when no slot serves chat; the environment default model appears
+only as `default_model` (#1189). Chat-turn result adoption authenticates the
 operator root session captured at admission behind a conversation-scoped chat
 principal (a revoked root or a different owner is not adopted; the cost still
 settles). Cordis requests above the slot's output limit are refused with

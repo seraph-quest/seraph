@@ -735,7 +735,10 @@ def _run_fixed(
         try:
             process_observer(process)
         except BaseException as exc:
-            _terminate_and_reap_process(process, deadline_at=deadline_at)
+            try:
+                _terminate_and_reap_process(process, deadline_at=deadline_at)
+            finally:
+                _close_child_streams(process)
             raise WorkerInputError("worker process identity observation failed") from exc
     stdout_buffer = bytearray()
     stderr_buffer = bytearray()
@@ -795,6 +798,18 @@ def _run_fixed(
             except BaseException as exc:
                 raise WorkerInputError("worker terminal identity observation failed") from exc
         return 124, bytes(stdout_buffer), bytes(stderr_buffer), True
+    finally:
+        # The owner closes the pipes it opened (#1224). A drain thread still
+        # reading (output cleanup exceeded the deadline) keeps its stream; it
+        # ends at EOF once the process group is gone.
+        if not stdout_thread.is_alive() and not stderr_thread.is_alive():
+            _close_child_streams(process)
+
+
+def _close_child_streams(process: subprocess.Popen) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is not None and not stream.closed:
+            stream.close()
 
 
 def _git(

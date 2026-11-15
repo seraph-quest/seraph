@@ -9,12 +9,10 @@ import hashlib
 import json
 import re
 
-from cryptography.fernet import Fernet
 import httpx
 import pytest
 from sqlalchemy import select
 
-from config.settings import settings
 from src.db.models import ApprovalRequest, ProjectSourceLink, ProjectSourceSnapshot, WorkBoardTask
 from src.extensions.github_consent import GitHubConsentRequest
 from src.extensions.github_followthrough import GitHubFollowthroughError, GitHubFollowthroughService
@@ -66,8 +64,9 @@ def github_item(number, *, pr=False, state="open", body=None, updated=None, labe
 
 
 async def connected(owner, fixture, monkeypatch, *, mode="active"):
-    monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
-    monkeypatch.setattr("src.vault.crypto._fernet", None)
+    # The workspace vault key stays: the NEAR TEE route's write-only key is
+    # already stored under it (#1184), and rotating it would make secret
+    # redaction fail closed.
     await vault_repository.store("project-source-fixture", "fixture-token", owner_principal_id=owner.principal_id)
     async def resolver(_host, _port):
         return ["93.184.216.34"]
@@ -208,7 +207,6 @@ def test_malformed_provider_items_are_refused_and_bodies_are_bounded():
     assert len(long["body"].encode()) == 6000 and long["body_truncated"] is True
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: finding-to-triage step runs over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 async def test_finding_becomes_an_inert_triage_task_quoting_the_source_as_data(
         accounting_db, monkeypatch, repository_admission_signer):
@@ -228,7 +226,8 @@ async def test_finding_becomes_an_inert_triage_task_quoting_the_source_as_data(
     ref = ProjectSourceRef.model_validate(synced["items"][0]["source_ref"])
     calls = []
     work = literal.plan.steps[0]
-    _scripted_planner(monkeypatch, {"schema_version": 1, "revision": 1, "steps": [{"step_id": "repair",
+    # #1184: the planner runs on the intercepted NEAR TEE slot.
+    _scripted_planner(factory.repository_near_gateway, {"schema_version": 1, "revision": 1, "steps": [{"step_id": "repair",
         "tool_id": "repository_work", "input": work.input, "depends_on": [],
         "output_contract": work.output_contract}]}, calls)
     service.planner = GeneralTaskPlanner()

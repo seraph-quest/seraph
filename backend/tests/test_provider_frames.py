@@ -13,7 +13,7 @@ from src.runtime_plugins.bridge import CordisHost
 from src.runtime_plugins.composition import (KNOWN_PLUGIN, MANDATORY_PLUGINS, PACKAGE_ROOT, PLUGIN_DEPENDENCIES,
                                              validate_profile)
 from src.runtime_plugins.protocol import ProtocolError, encode_frame, validate_frame, validate_provider_report
-from src.runtime_plugins.worker import DEPENDENCIES
+from src.runtime_plugins.worker import DEPENDENCIES, PYTHON_ONLY
 from tests.test_cordis_services_core import NODE, needs_host, service_db  # noqa: F401
 
 
@@ -53,6 +53,10 @@ def test_profile_dependencies_mirror_the_worker_activation_order():
     declared = {spec["id"]: tuple(spec["dependencies"]) for spec in _profile()["plugins"]}
     assert {key: value for key, value in declared.items() if value} == PLUGIN_DEPENDENCIES
     for provider, required in DEPENDENCIES.items():
+        if provider in PYTHON_ONLY:
+            # The pinned vault (#1199) is Python-only: no Cordis facade to mirror.
+            assert f"seraph.{provider}.v1" not in declared
+            continue
         assert declared[f"seraph.{provider}.v1"] == tuple(f"seraph.{name}.v1" for name in required)
 
 

@@ -1,6 +1,64 @@
+import ast
 import os
 import shutil
 import tempfile
+import time
+from pathlib import Path
+
+# Hermetic inputs (#1219). This root conftest runs before any test module or
+# ``config.settings`` is imported, so these hold for the settings singleton.
+# Load no dotenv file: the repository's ``.env.dev`` is the operator's live
+# configuration and exists only in some checkouts. Set unconditionally, so an
+# inherited value cannot select a file either; tests that need a specific
+# file construct ``Settings(_env_file=...)`` themselves.
+os.environ["SERAPH_SETTINGS_ENV_FILE"] = ""
+# Production derives behaviour from the local hour and date. Pin the zone so
+# a run's result does not depend on the host's timezone setting. The only
+# override is an explicit SERAPH_TEST_TZ, which the scheduled timezone lane
+# sets on purpose (#1220); an ambient TZ never selects the zone.
+os.environ["TZ"] = os.environ.get("SERAPH_TEST_TZ") or "UTC"
+time.tzset()
+
+# Settings fields read from the process environment as well. A shell that
+# sourced an operator env file (``manage.sh`` sources it with ``set -a``) would
+# export them, so remove every variable named after a ``Settings`` field
+# (matched case-insensitively, nested ``FIELD__KEY`` included) except
+# ``AMBIENT_SETTINGS_ALLOWED``. The names are read from the source with ``ast``
+# because importing ``config.settings`` would build the singleton too early.
+# Tests that need a value set it themselves, in their own monkeypatch scope.
+SETTINGS_SOURCE = Path(__file__).resolve().parent / "config" / "settings.py"
+# WORKSPACE_DIR is the caller's explicit test workspace (see below). CI sets
+# only OPENROUTER_API_KEY, to the same value this conftest defaults it to.
+AMBIENT_SETTINGS_ALLOWED = frozenset({"WORKSPACE_DIR"})
+
+
+def settings_field_names(source: Path = SETTINGS_SOURCE) -> frozenset[str]:
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "Settings":
+            return frozenset(
+                item.target.id
+                for item in node.body
+                if isinstance(item, ast.AnnAssign)
+                and isinstance(item.target, ast.Name)
+                and item.target.id != "model_config"
+            )
+    raise RuntimeError(f"no Settings class in {source}")
+
+
+def ambient_settings_variables(environ, fields: frozenset[str]) -> list[str]:
+    names = []
+    for name in environ:
+        if name.upper() in AMBIENT_SETTINGS_ALLOWED:
+            continue
+        lowered = name.lower()
+        if lowered in fields or lowered.split("__", 1)[0] in fields:
+            names.append(name)
+    return names
+
+
+for _ambient in ambient_settings_variables(os.environ, settings_field_names()):
+    del os.environ[_ambient]
 
 # Marks a WORKSPACE_DIR this conftest created, so it can be replaced per
 # xdist worker and removed at session end. An explicit WORKSPACE_DIR from the
@@ -34,8 +92,10 @@ if not os.environ.get("WORKSPACE_DIR") or (
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("SCHEDULER_ENABLED", "false")
-os.environ.setdefault("DEPLOYMENT_ENVIRONMENT", "test")
-os.environ.setdefault("OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS", "true")
+# Ordinary route tests run with the test-only auth bypass. Tests that need
+# another value set it in their own monkeypatch scope.
+os.environ["DEPLOYMENT_ENVIRONMENT"] = "test"
+os.environ["OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS"] = "true"
 
 
 def pytest_unconfigure(config):

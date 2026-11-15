@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import stat
 from types import SimpleNamespace
-import uuid
 
 import pytest
 from sqlmodel import select
@@ -34,20 +33,9 @@ from src.db.models import (
     WorkBoardTask,
     WorkflowRunState,
 )
-from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal, canonical_digest
+from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
-from src.model_fabric.configuration import (
-    ModelFabricConfiguration,
-    OpenRouterSetup,
-    openrouter_profile_for_setup,
-    write_model_fabric_configuration,
-)
-from src.model_fabric.contracts import EndpointClass
-from src.model_fabric.proofs import build_model_route_proof
-from src.model_fabric.receipts import RouteReceipt
-from src.model_fabric.repository import model_fabric_repository
-from src.security.trust_contract import EgressClass
 from src.work_board.contracts import (
     WorkBoardInputArtifactCreate,
     WorkBoardOwner,
@@ -136,72 +124,24 @@ async def test_repo_repair_public_projection_normalizes_minimal_docker_posture()
     assert "worker_image_digest" not in projection
 
 
-async def _configure_governed_openrouter_test_route() -> None:
-    """Install the same route proof required by the real model boundary."""
+async def _configure_governed_near_test_route(monkeypatch):
+    """#1184: the consented strategist route is the intercepted NEAR TEE slot.
 
-    setup = OpenRouterSetup(
-        model_ids=("openrouter/anthropic/claude-sonnet-4",),
-        capabilities=("text", "structured_output"),
-        allowed_upstreams=("anthropic",),
-        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
-        cloud_egress_acknowledged=True,
-        spend_ceiling_microusd=25_000,
-        credential_ref="env:OPENROUTER_API_KEY",
-    )
-    write_model_fabric_configuration(
-        ModelFabricConfiguration(
-            profiles=(openrouter_profile_for_setup(setup),),
-            openrouter_setup=setup,
-            status="ready",
-        )
-    )
-    await durable_job_repository.configure_inference_accounting(setup.spend_ceiling_microusd)
-    from src.llm_runtime import _provider_profile
+    The same real catalog receipt, capability proofs, key and accounting
+    ceiling the model boundary requires; returns the NEAR gateway whose
+    ``script`` answers each completion.
+    """
+    from tests.near_tee_support import prepare_repository_near_route
+    return await prepare_repository_near_route(monkeypatch, ceiling_microusd=25_000)
 
-    profile = _provider_profile("openrouter")
-    assert profile is not None
-    checked_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-    probe_started = checked_at - timedelta(seconds=1)
-    receipt = RouteReceipt(
-        receipt_id=f"repo-repair-producer-probe-{uuid.uuid4().hex}",
-        request_id=f"repo-repair-producer-request-{uuid.uuid4().hex}",
-        route_decision_id=f"repo-repair-producer-decision-{uuid.uuid4().hex}",
-        runtime_path="strategist_agent",
-        workload="background",
-        outcome="succeeded",
-        egress_class=setup.egress_class.value,
-        started_at=probe_started,
-        finished_at=probe_started + timedelta(milliseconds=100),
-        latency_ms=100,
-        actual_profile_id=profile.id,
-        actual_model=profile.model,
-        actual_adapter=profile.transport_adapter,
-        destination_class="remote",
-        trust_decision_id=f"repo-repair-producer-trust-{uuid.uuid4().hex}",
-    )
-    persisted = await model_fabric_repository.persist_route_receipt(receipt)
-    assert persisted.persisted is True
-    for capability, proven_value in (
-        ("text", "present"),
-        ("structured_output", "json"),
-        ("health", "healthy"),
-        ("latency_ms", 100),
-    ):
-        proof = build_model_route_proof(
-            profile=profile,
-            endpoint_class=EndpointClass.REMOTE,
-            adapter=profile.transport_adapter,
-            capability=capability,
-            canary_version="repo-repair-producer-v1",
-            outcome="passed",
-            checked_at=checked_at.timestamp(),
-            expires_at=checked_at.timestamp() + 3600,
-            probe_receipt_id=receipt.receipt_id,
-            probe_receipt_hash=receipt.receipt_hash,
-            proven_value=proven_value,
-        )
-        persisted_proof = await model_fabric_repository.persist_capability_proof(proof)
-        assert persisted_proof.persisted is True
+
+async def _configure_near_route_for_unit_store(monkeypatch, tmp_path, workspace):
+    """The NEAR TEE strategist route for contact-free generation unit tests."""
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    from tests.near_tee_support import prepare_repository_near_route
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
+    return await prepare_repository_near_route(monkeypatch, configure_accounting=False)
 
 
 def _repair_input(**overrides):
@@ -394,7 +334,6 @@ def test_repo_repair_input_requires_source_paths_inside_allowlist():
         )
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_repo_repair_real_input_producer_reaches_private_source_review(
     client, async_db, tmp_path: Path, monkeypatch, repo_sandbox_mode
@@ -431,14 +370,10 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "repo-repair-producer-auth-secret")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
-    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
-    monkeypatch.setattr(settings, "openrouter_provider_only", True)
-    monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
-    monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
     from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
     prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
-    await _configure_governed_openrouter_test_route()
+    near = await _configure_governed_near_test_route(monkeypatch)
     if real_sandbox:
         sandbox_settings = effective_sandbox_settings
         if not sandbox_settings.enabled:
@@ -542,10 +477,9 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             "expected_outcome": "The focused test passes.",
         }
 
-    def governed_transport(**kwargs):
+    def governed_transport(body):
         nonlocal model_calls
         model_calls += 1
-        body = kwargs["body"]
         base_digest = None
         for message in body.get("messages", []):
             content = message.get("content") if isinstance(message, dict) else None
@@ -560,11 +494,7 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
                 break
         if not isinstance(base_digest, str):
             raise AssertionError("governed repair transport did not receive the canonical source prompt")
-        content = json.dumps(_proposal_for_digest(base_digest), sort_keys=True)
-        message = SimpleNamespace(role="assistant", content=content)
-        response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
-        return response, {"id": "gen-repair-producer", "usage": {"cost": "0.0000101"},
-            "choices": [{"message": {"role": "assistant", "content": content}}]}
+        return json.dumps(_proposal_for_digest(base_digest), sort_keys=True)
 
     def execute_job(_sandbox, job, *, before_dispatch=None):
         nonlocal sandbox_calls
@@ -611,7 +541,10 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
     # executor remains the only mode-specific seam below: mocked uses a
     # deterministic executor receipt, local runs the real host executor, and
     # real runs the configured rootless executor.
-    monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", governed_transport)
+    # #1184: the governed seam is the intercepted NEAR TEE gateway; NEAR
+    # bills 10.1 micro-USD from its billing readback.
+    near.script = governed_transport
+    near.cost_nano = 10_100
     if real_sandbox:
         original_execute_job = RootlessDockerRepoSandbox.execute_job
 
@@ -747,7 +680,7 @@ async def test_repo_repair_real_input_producer_reaches_private_source_review(
             "expected_job_revision": int(job["revision"]),
             "source_packet_digest": packet.artifact_sha256,
             "expected_source_manifest_digest": packet.source_manifest_digest,
-            "expected_profile_id": "openrouter",
+            "expected_profile_id": "near_tee.text",
             "acknowledged_selected_source": True,
             "idempotency_key": "producer-consent",
         },
@@ -1904,8 +1837,8 @@ async def test_egress_consent_is_finite_and_exactly_idempotent(async_db, tmp_pat
             work_board_attempt_id="attempt:repair-consent",
             workflow_run_id="job:repair",
             packet=packet,
-            effective_profile_id="openrouter:strategist",
-            effective_upstream="openrouter",
+            effective_profile_id="near_tee.text",
+            effective_upstream="near_tee",
             request_key="request:repair",
             expires_at=now + timedelta(minutes=5),
             db=db,
@@ -1916,8 +1849,8 @@ async def test_egress_consent_is_finite_and_exactly_idempotent(async_db, tmp_pat
             work_board_attempt_id="attempt:repair-consent",
             workflow_run_id="job:repair",
             packet=packet,
-            effective_profile_id="openrouter:strategist",
-            effective_upstream="openrouter",
+            effective_profile_id="near_tee.text",
+            effective_upstream="near_tee",
             request_key="request:repair",
             expires_at=now + timedelta(minutes=5),
             db=db,
@@ -1933,8 +1866,8 @@ async def test_egress_consent_is_finite_and_exactly_idempotent(async_db, tmp_pat
                 work_board_attempt_id="attempt:repair-consent",
                 workflow_run_id="job:repair",
                 packet=packet,
-                effective_profile_id="openrouter:other",
-                effective_upstream="openrouter",
+                effective_profile_id="near_tee.other",
+                effective_upstream="near_tee",
                 request_key="request:repair",
                 expires_at=now + timedelta(minutes=5),
                 db=db,
@@ -1947,8 +1880,8 @@ async def test_egress_consent_is_finite_and_exactly_idempotent(async_db, tmp_pat
                 work_board_attempt_id="attempt:repair-consent",
                 workflow_run_id="job:repair",
                 packet=packet,
-                effective_profile_id="openrouter:strategist",
-                effective_upstream="openrouter",
+                effective_profile_id="near_tee.text",
+                effective_upstream="near_tee",
                 request_key="request:repair-2",
                 expires_at=now + REPO_REPAIR_MAX_CONSENT_TTL + timedelta(seconds=1),
                 db=db,
@@ -2005,8 +1938,8 @@ async def test_egress_consent_cannot_outlive_active_attempt_or_goal_window(async
                 work_board_attempt_id="attempt:expiry",
                 workflow_run_id="job:expiry",
                 packet=packet,
-                effective_profile_id="openrouter",
-                effective_upstream="openrouter",
+                effective_profile_id="near_tee.text",
+                effective_upstream="near_tee",
                 request_key="request:expiry",
                 expires_at=now + timedelta(minutes=3),
                 db=db,
@@ -2195,7 +2128,6 @@ async def test_inspect_rejects_reclaimed_attempt(async_db, tmp_path: Path, monke
         assert blocked.value.code == "repair_attempt_authority_invalid"
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_generate_blocks_before_model_contact_when_sandbox_preflight_fails(
     async_db, tmp_path: Path, monkeypatch
@@ -2204,6 +2136,8 @@ async def test_generate_blocks_before_model_contact_when_sandbox_preflight_fails
     (workspace / "repo" / "src").mkdir(parents=True)
     (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    # #1184: the strategist route is the intercepted NEAR TEE text slot.
+    await _configure_near_route_for_unit_store(monkeypatch, tmp_path, workspace)
     now = datetime.now(timezone.utc)
     sandbox = RootlessDockerRepoSandbox()
     sandbox.preflight = lambda: SimpleNamespace(
@@ -2263,8 +2197,8 @@ async def test_generate_blocks_before_model_contact_when_sandbox_preflight_fails
             work_board_attempt_id="attempt:preflight",
             workflow_run_id="job:preflight",
             packet=packet,
-            effective_profile_id="openrouter",
-            effective_upstream="openrouter",
+            effective_profile_id="near_tee.text",
+            effective_upstream="near_tee",
             request_key="request:preflight",
             expires_at=now + timedelta(minutes=5),
             db=db,
@@ -2299,7 +2233,6 @@ async def test_generate_blocks_before_model_contact_when_sandbox_preflight_fails
         assert checkpoint["payload"]["receipt"]["reason"] == "resource_controller_unavailable:cpu"
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_generate_adopts_private_response_checkpoint_without_second_model_contact(
     async_db, tmp_path: Path, monkeypatch
@@ -2312,6 +2245,8 @@ async def test_generate_adopts_private_response_checkpoint_without_second_model_
         "def test_value():\n    assert True\n", encoding="utf-8"
     )
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    # #1184: the strategist route is the intercepted NEAR TEE text slot.
+    await _configure_near_route_for_unit_store(monkeypatch, tmp_path, workspace)
     now = datetime.now(timezone.utc)
     sandbox = RootlessDockerRepoSandbox()
     sandbox.preflight = lambda: SimpleNamespace(
@@ -2375,8 +2310,8 @@ async def test_generate_adopts_private_response_checkpoint_without_second_model_
             work_board_attempt_id="attempt:response-recovery",
             workflow_run_id="job:response-recovery",
             packet=packet,
-            effective_profile_id="openrouter",
-            effective_upstream="openrouter",
+            effective_profile_id="near_tee.text",
+            effective_upstream="near_tee",
             request_key="request:response-recovery",
             expires_at=now + timedelta(minutes=5),
             db=db,
@@ -2667,7 +2602,6 @@ async def test_generate_adopts_private_response_checkpoint_without_second_model_
         assert model_calls == 1
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["session_revoked", "goal_revised"])
 async def test_generate_rechecks_authority_after_preflight_before_model_contact(
@@ -2681,6 +2615,8 @@ async def test_generate_rechecks_authority_after_preflight_before_model_contact(
     (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     (workspace / "repo" / "tests" / "test_app.py").write_text("def test_value():\n    assert True\n", encoding="utf-8")
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    # #1184: the strategist route is the intercepted NEAR TEE text slot.
+    await _configure_near_route_for_unit_store(monkeypatch, tmp_path, workspace)
     now = datetime.now(timezone.utc)
     sandbox = RootlessDockerRepoSandbox()
     sandbox.preflight = lambda: SimpleNamespace(
@@ -2735,8 +2671,8 @@ async def test_generate_rechecks_authority_after_preflight_before_model_contact(
             work_board_attempt_id=f"attempt:authority-race-{mutation}",
             workflow_run_id=f"job:authority-race-{mutation}",
             packet=packet,
-            effective_profile_id="openrouter",
-            effective_upstream="openrouter",
+            effective_profile_id="near_tee.text",
+            effective_upstream="near_tee",
             request_key=f"request:authority-race-{mutation}",
             expires_at=now + timedelta(minutes=5),
             db=db,
@@ -2797,13 +2733,14 @@ async def test_generate_rechecks_authority_after_preflight_before_model_contact(
         assert model_calls == 0
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_generate_rejects_route_drift_before_model_contact(async_db, tmp_path: Path, monkeypatch):
     workspace = tmp_path / "workspace"
     (workspace / "repo" / "src").mkdir(parents=True)
     (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    # #1184: the strategist route is the intercepted NEAR TEE text slot.
+    await _configure_near_route_for_unit_store(monkeypatch, tmp_path, workspace)
     now = datetime.now(timezone.utc)
     sandbox = RootlessDockerRepoSandbox()
     sandbox.preflight = lambda: SimpleNamespace(
@@ -2858,6 +2795,8 @@ async def test_generate_rejects_route_drift_before_model_contact(async_db, tmp_p
             work_board_attempt_id="attempt:route-drift",
             workflow_run_id="job:route-drift",
             packet=packet,
+            # A consent naming any other route (here the retired OpenRouter
+            # one) never authorizes contact on the NEAR TEE route.
             effective_profile_id="openrouter:strategist",
             effective_upstream="openrouter",
             request_key="request:route-drift",
@@ -2904,7 +2843,6 @@ async def test_generate_rejects_route_drift_before_model_contact(async_db, tmp_p
         assert model_calls == 0
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["goal", "session", "attempt_cancelled", "attempt_fenced"])
 async def test_generate_quarantines_response_when_authority_changes_after_model_contact(
@@ -2933,6 +2871,8 @@ async def test_generate_quarantines_response_when_authority_changes_after_model_
         "def test_value():\n    assert True\n", encoding="utf-8"
     )
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    # #1184: the strategist route is the intercepted NEAR TEE text slot.
+    await _configure_near_route_for_unit_store(monkeypatch, tmp_path, workspace)
     now = datetime.now(timezone.utc)
     sandbox = RootlessDockerRepoSandbox()
     sandbox.preflight = lambda: SimpleNamespace(
@@ -2971,7 +2911,7 @@ async def test_generate_quarantines_response_when_authority_changes_after_model_
                     job_id=job_id,
                     owner_id=owner.principal_id,
                     runtime_path="strategist_agent",
-                    profile_id="openrouter",
+                    profile_id="near_tee.text",
                     capability_version="1",
                     owner="worker:repo-repair",
                     fencing_token=1,
@@ -3009,8 +2949,8 @@ async def test_generate_quarantines_response_when_authority_changes_after_model_
             work_board_attempt_id=attempt_id,
             workflow_run_id=job_id,
             packet=packet,
-            effective_profile_id="openrouter",
-            effective_upstream="openrouter",
+            effective_profile_id="near_tee.text",
+            effective_upstream="near_tee",
             request_key=f"request:post-contact-{suffix}",
             expires_at=now + timedelta(minutes=5),
             db=db,

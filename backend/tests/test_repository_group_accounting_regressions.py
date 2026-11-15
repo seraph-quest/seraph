@@ -12,7 +12,9 @@ from tests.test_general_task_continuation_accounting import continuation_fixture
 from tests.test_general_task_persistence import task_runtime
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime
 
-# ADR-035: pins repository group accounting over the intercepted historical OpenRouter route
+# ADR-035: pins group accounting over the general-task continuation fixture's
+# historical OpenRouter planner route (continuation_fixture); repository
+# repair itself runs on NEAR TEE (#1184) and is not exercised here.
 pytestmark = pytest.mark.openrouter_legacy
 
 

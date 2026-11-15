@@ -172,12 +172,14 @@ async def test_runtime_status_exposes_release_and_model(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["version"] == "2026.11.14"
-    assert payload["build_id"] == "SERAPH_PRIME_v2026.11.14"
-    assert payload["provider"] == "openrouter"
-    assert payload["model"] == settings.default_model.removeprefix("openrouter/")
-    assert payload["model_label"] == settings.default_model.split("/")[-1]
-    assert payload["active_profile"] == "openrouter"
+    assert payload["version"] == "2026.11.15"
+    assert payload["build_id"] == "SERAPH_PRIME_v2026.11.15"
+    # ADR-035 (#1189): OpenRouter is retired and no NEAR TEE slot exists, so
+    # no model serves chat; the env default is reported only as the default.
+    assert payload["provider"] == "none"
+    assert payload["model"] == ""
+    assert payload["model_label"] == "not configured"
+    assert payload["active_profile"] == ""
     assert payload["default_provider"] == "openrouter"
     assert payload["default_model"] == settings.default_model
     assert isinstance(payload["provider_profiles"], list)
@@ -219,11 +221,12 @@ async def test_runtime_status_reports_openrouter_when_local_preference_is_stale(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "openrouter"
-    assert payload["model"] == "x-ai/grok-4.1-fast"
-    assert payload["model_label"] == "grok-4.1-fast"
-    assert payload["api_base"] == "https://openrouter.ai/api/v1"
-    assert payload["active_profile"] == "openrouter"
+    assert payload["provider"] == "none"
+    assert payload["model"] == ""
+    assert payload["model_label"] == "not configured"
+    assert payload["api_base"] == ""
+    assert payload["active_profile"] == ""
+    assert "grok" not in str(payload["effective_runtime"])
     assert payload["default_provider"] == "openrouter"
     assert payload["default_model"] == "openrouter/x-ai/grok-4.1-fast"
 
@@ -245,10 +248,12 @@ async def test_runtime_status_reports_openrouter_and_historical_vlm_metadata(cli
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "openrouter"
-    assert payload["api_base"] == "https://openrouter.ai/api/v1"
-    assert payload["active_profile"] == "openrouter"
-    assert payload["effective_runtime"]["provider"] == "openrouter"
+    assert payload["provider"] == "none"
+    assert payload["api_base"] == ""
+    assert payload["active_profile"] == ""
+    assert payload["effective_runtime"]["provider"] == "none"
+    assert payload["effective_runtime"]["model"] == ""
+    assert payload["effective_runtime"]["route_label"] == "not configured"
     # ADR-035: OpenRouter is retired and no NEAR TEE slot exists yet, so the
     # stored OpenRouter metadata is reported but no provider is active.
     effective = payload["effective_runtime"]
@@ -281,10 +286,10 @@ async def test_runtime_status_does_not_activate_direct_gpu_text(client):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "openrouter"
-    assert payload["api_base"] == "https://openrouter.ai/api/v1"
-    assert payload["effective_runtime"]["route_label"] == "openrouter"
-    assert payload["effective_runtime"]["provider_label"] == "openrouter"
+    assert payload["provider"] == "none"
+    assert payload["api_base"] == ""
+    assert payload["effective_runtime"]["route_label"] == "not configured"
+    assert payload["effective_runtime"]["provider_label"] == "none"
     assert payload["vlm_runtime"]["active"] is False
     assert payload["vlm_runtime"]["disabled_reason"] == "local_vlm_disabled_near_tee_only"
     assert payload["vlm_runtime"]["live_probe"]["checked"] is False
@@ -328,9 +333,10 @@ async def test_runtime_status_uses_openrouter_and_blanks_unsafe_legacy_endpoints
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["api_base"] == "https://openrouter.ai/api/v1"
+    # ADR-035 (#1189): no active provider, so no endpoint is reported as active.
+    assert payload["api_base"] == ""
     assert payload["default_api_base"] == ""
-    assert payload["effective_runtime"]["api_base"] == "https://openrouter.ai/api/v1"
+    assert payload["effective_runtime"]["api_base"] == ""
     assert all(profile.get("api_base") != unsafe_endpoint for profile in payload["provider_profiles"])
     serialized = str(payload)
     assert "password" not in serialized

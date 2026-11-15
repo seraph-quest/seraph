@@ -124,7 +124,8 @@ def lifecycle_recovery(reason: str) -> str:
     if reason == "lifecycle_not_started":
         return "Restart Seraph; the scheduler lifecycle did not start."
     if reason == "scheduler_disabled":
-        return "The scheduler is disabled (SCHEDULER_ENABLED=false); enable it and restart to run scheduled work."
+        return ("The scheduler is disabled (SCHEDULER_ENABLED=false, or the seraph.scheduler.v1#enabled row in "
+                "<workspace>/composition.patch.json); enable it and restart to run scheduled work.")
     return "Restart Seraph; if it stays blocked check /api/runtime/status for the owning domain."
 
 

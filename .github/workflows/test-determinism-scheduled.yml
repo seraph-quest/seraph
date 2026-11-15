@@ -1,0 +1,122 @@
+name: Test determinism (scheduled)
+
+# Daily determinism lanes on develop (#1220). They look for order dependence,
+# cross-file leaks, load sensitivity and timezone dependence that the per-PR
+# shards (one file per process, file order, UTC runner) cannot see. Every lane
+# prints its seed, uploads JUnit, and classifies failures by rerunning them
+# alone; nothing is retried to make a lane green.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-determinism-scheduled
+  cancel-in-progress: false
+
+jobs:
+  lanes:
+    runs-on: ubuntu-24.04
+    # Setup (~15 min) + lane step (70) + classification (30), with margin.
+    timeout-minutes: 130
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [random-order, single-process, timezone]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Prepare the backend test environment
+        uses: ./.github/actions/backend-test-env
+
+      - name: Run the ${{ matrix.lane }} lane
+        # Below the job timeout, so a slow lane fails this step and the
+        # JUnit upload still runs.
+        timeout-minutes: 70
+        env:
+          OPENROUTER_API_KEY: test-key
+          LANE: ${{ matrix.lane }}
+          SHARD: ${{ matrix.shard }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          common=(--shard-count 10 --shard-index "$SHARD" --exclude-cancelled-eval-harness --quarantine exclude --junit-dir test-results/junit)
+          case "$LANE" in
+            random-order)
+              # Each file runs in its own process, its tests in a seeded random order.
+              seed=$(( RUN_ID % 100000000 * 10 + SHARD ))
+              echo "random-order seed: $seed" | tee -a "$GITHUB_STEP_SUMMARY"
+              uv run python scripts/run_backend_test_shard.py "${common[@]}" --file-timeout-seconds 900 --keep-going --shuffle-seed "$seed" ;;
+            single-process)
+              # The whole shard in one pytest process, to expose cross-file leaks.
+              uv run python scripts/run_backend_test_shard.py "${common[@]}" --single-process --single-process-timeout-seconds 3900 ;;
+            timezone)
+              # One pass under UTC+14, far from the runner's UTC. The root
+              # conftest pins tests to UTC unless SERAPH_TEST_TZ opts in.
+              export SERAPH_TEST_TZ=Pacific/Kiritimati
+              echo "timezone: $SERAPH_TEST_TZ ($(TZ=$SERAPH_TEST_TZ date +%z))" | tee -a "$GITHUB_STEP_SUMMARY"
+              uv run python scripts/run_backend_test_shard.py "${common[@]}" --file-timeout-seconds 900 --keep-going ;;
+          esac
+
+      - name: Upload JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-${{ matrix.lane }}-shard-${{ matrix.shard }}
+          path: backend/test-results/junit/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Classify failures (lane stays red)
+        if: failure()
+        env:
+          OPENROUTER_API_KEY: test-key
+        timeout-minutes: 30
+        run: uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 5 --run-timeout-seconds 450 --deadline-minutes 25
+
+  realtime-under-contention:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Prepare the backend test environment
+        uses: ./.github/actions/backend-test-env
+
+      - name: Repeat the realtime lane under CPU contention
+        env:
+          OPENROUTER_API_KEY: test-key
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          files=$(python3 ../scripts/check_test_determinism.py --realtime-files)
+          if [ -z "$files" ]; then
+            echo "no test carries @pytest.mark.realtime yet; nothing to repeat" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # shellcheck disable=SC2086
+          uv run python scripts/determinism_lanes.py stress --files $files --runs 10 --seed "$RUN_ID" --budget-minutes 60 --deadline-minutes 95 --junit-dir test-results/junit
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-realtime
+          path: backend/test-results/junit/
+          if-no-files-found: ignore
+          retention-days: 30

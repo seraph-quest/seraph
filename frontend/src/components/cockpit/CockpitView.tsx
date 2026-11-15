@@ -10481,15 +10481,17 @@ export function CockpitView({ onSend, onSkipOnboarding }: CockpitViewProps) {
   const runtimeBlocked = runtimeStatus?.effective_runtime?.inference_ready === false
     || runtimeReadinessStatus === "configuration_required";
   const runtimeReadinessDegraded = runtimeReadinessStatus === "degraded";
+  // An empty effective model means no slot serves chat (#1189): fall through
+  // to the backend's "not configured" label rather than showing nothing.
   const runtimeModelLabel = (
     actualFabricRoute?.model
-    ?? attemptedFabricRoute?.model
-    ?? selectedFabricRoute?.model
-    ?? runtimeStatus?.effective_runtime?.model_label
-    ?? runtimeStatus?.effective_runtime?.model
-    ?? runtimeStatus?.model_label
-    ?? runtimeStatus?.model
-    ?? "unknown"
+    || attemptedFabricRoute?.model
+    || selectedFabricRoute?.model
+    || runtimeStatus?.effective_runtime?.model_label
+    || runtimeStatus?.effective_runtime?.model
+    || runtimeStatus?.model_label
+    || runtimeStatus?.model
+    || "unknown"
   )
     .replace(/^openrouter\//, "")
     .replace(/^anthropic\//, "")

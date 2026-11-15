@@ -357,9 +357,15 @@ with maintenance_fence(workspace):
             holder.stdin.write("x")
             holder.stdin.close()
         holder.wait(timeout=10)
-        if holder.returncode != 0:
-            assert holder.stderr is not None
-            raise AssertionError(holder.stderr.read())
+        try:
+            if holder.returncode != 0:
+                assert holder.stderr is not None
+                raise AssertionError(holder.stderr.read())
+        finally:
+            # Release the holder's output pipes (#1218).
+            for stream in (holder.stdout, holder.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def test_managed_cli_backup_restore_is_redacted_and_staged(tmp_path):
@@ -695,6 +701,12 @@ def test_managed_backup_and_restore_accept_the_near_tee_state_files(tmp_path):
     (root / "near-tee-catalog-observations.json").write_text('{"schema_version": "x", "observations": {}}')
     binding = '{"bound_since": 1.0, "fingerprint": "0123456789ab", "schema_version": "x"}'
     (root / "near-tee-credential-binding.json").write_text(binding)
+    # #1186: a crash mid-write leaves each writer's ``.<name>.<pid>.tmp``
+    # staging file behind; declared cache, it neither blocks nor is archived.
+    staging = [f".{name}.4242.tmp" for name in ("near-tee-catalog-receipts.json",
+               "near-tee-catalog-observations.json", "near-tee-credential-binding.json")]
+    for name in staging:
+        (root / name).write_text("{")
     environment = os.environ.copy()
     environment.update(_env(root))
     environment["PYTHONPATH"] = str(ROOT / "backend")
@@ -711,6 +723,7 @@ def test_managed_backup_and_restore_accept_the_near_tee_state_files(tmp_path):
                        for name in names)
         # The credential binding pairs with the archived proofs in seraph.db.
         assert any(name.endswith("near-tee-credential-binding.json") for name in names)
+        assert not any(name.endswith(".tmp") for name in names), names
     restore = subprocess.run(
         [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
         env=environment, cwd=ROOT, capture_output=True, text=True, check=False,

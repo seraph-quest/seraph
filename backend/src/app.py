@@ -70,6 +70,17 @@ async def _runtime_domains_or_unavailable() -> list[dict]:
 from src.runtime_plugins.bridge import cordis_host
 
 
+async def _composition_dump_or_unavailable() -> dict:
+    """The read-only, secret-free composition dump (ADR-036, #1198); never fails the status read."""
+    try:
+        from src.runtime_plugins.composition_dump import live_composition_dump
+        return await live_composition_dump(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Composition dump unavailable", exc_info=True)
+        return {"schema": "seraph-composition-dump.v1", "source": "live",
+                "inventory": {"state": "unavailable", "reason": "composition_dump_unavailable"}}
+
+
 async def _lifecycle_runtime_or_unavailable(domain: str) -> dict:
     """Scheduler/dispatch lifecycle owner and state (#1025); never fails the status read."""
     try:
@@ -431,6 +442,58 @@ def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, obje
     }
 
 
+NO_ACTIVE_CHAT_MODEL_LABEL = "not configured"
+
+
+def _adr035_chat_identity(
+    runtime: dict[str, str],
+    route_status: dict[str, object],
+) -> tuple[dict[str, str], dict[str, object]]:
+    """ADR-035 (#1189): report the model that actually serves chat.
+
+    Under the NEAR TEE-only policy the top-level ``provider``/``model`` name
+    the active NEAR TEE text slot, never the environment default model. With
+    OpenRouter retired and no active slot, chat has no model: both the
+    top-level identity and the effective route say "not configured" instead
+    of the stale retired default. Readiness and reasons are left untouched.
+    """
+    policy = route_status.get("active_provider_policy")
+    if policy not in {"near_tee_only", "none_openrouter_retired"}:
+        return runtime, route_status
+    model = str(route_status.get("model") or "") if policy == "near_tee_only" else ""
+    if model:
+        return {
+            **runtime,
+            "provider": str(route_status.get("provider") or ""),
+            "model": model,
+            "model_label": str(route_status.get("model_label") or _runtime_model_label(model)),
+            "api_base": str(route_status.get("api_base") or ""),
+            "active_profile": str(route_status.get("active_profile") or ""),
+        }, route_status
+    reported = {
+        **runtime,
+        "provider": "none",
+        "model": "",
+        "model_label": NO_ACTIVE_CHAT_MODEL_LABEL,
+        "api_base": "",
+        "active_profile": "",
+    }
+    if policy == "none_openrouter_retired":
+        route_status = {
+            **route_status,
+            "active_profile": "",
+            "provider": "none",
+            "provider_label": "none",
+            "model": "",
+            "model_label": "",
+            "mode": "blocked",
+            "route_label": NO_ACTIVE_CHAT_MODEL_LABEL,
+            "summary_label": f"{NO_ACTIVE_CHAT_MODEL_LABEL} · no active inference provider",
+            "api_base": "",
+        }
+    return reported, route_status
+
+
 def _augment_inference_readiness(
     route_status: dict[str, object],
     fabric_status: dict[str, object],
@@ -514,6 +577,24 @@ def _augment_near_tee_readiness(route_status: dict[str, object], fabric_status: 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from src.runtime_plugins.profiles import CompositionProfileInvalid, boot_profile, recovery_text, release_profile
+
+    # ADR-036 §3/§6 (#1204): validate the named profile and its patch layers
+    # before any provider activates; a refused composition never boots.
+    try:
+        boot_profile()
+    except CompositionProfileInvalid as exc:
+        logging.getLogger(__name__).error(recovery_text(exc))
+        raise
+    try:
+        async with _provider_worker_lifespan(app):
+            yield
+    finally:
+        release_profile()
+
+
+@asynccontextmanager
+async def _provider_worker_lifespan(app: FastAPI):
     # Python hosts the mandatory providers (#1024): the worker takes the
     # workspace owner lease (production: the container preflight proves the
     # /app/data bind, and the same lock inode is held for the whole backend
@@ -791,8 +872,9 @@ async def _lifespan_services(app: FastAPI):
                     init_scheduler()
                     await sync_scheduled_jobs()
                     from src.runtime_plugins.lifecycle import runtime_lifecycle
+                    from src.runtime_plugins.profiles import scheduler_enabled as profile_scheduler_enabled
                     for status in await runtime_lifecycle.start(cordis_host,
-                                                                scheduler_enabled=bool(settings.scheduler_enabled)):
+                                                                scheduler_enabled=profile_scheduler_enabled(settings.scheduler_enabled)):
                         if status.get("state") != "active":
                             logging.getLogger(__name__).warning("Runtime lifecycle %s: %s (%s)", status["domain"],
                                                                 status["state"], status.get("reason"))
@@ -842,7 +924,7 @@ def create_app() -> FastAPI:
     validate_auth_configuration()
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.11.14",
+        version="2026.11.15",
         debug=settings.debug,
         lifespan=lifespan,
     )
@@ -922,6 +1004,7 @@ def create_app() -> FastAPI:
             _effective_runtime_route_status(runtime, vlm_status),
             fabric_status,
         )
+        runtime, effective_runtime = _adr035_chat_identity(runtime, effective_runtime)
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",
@@ -948,6 +1031,8 @@ def create_app() -> FastAPI:
             # Which owner runs scheduled work and WorkBoard dispatch, and why not (#1025).
             "scheduler_runtime": await _lifecycle_runtime_or_unavailable("seraph.scheduler.v1"),
             "dispatch_runtime": await _lifecycle_runtime_or_unavailable("seraph.dispatch.v1"),
+            # Bundles, owners, epochs, provider digests and pins as booted (ADR-036, #1198).
+            "composition": await _composition_dump_or_unavailable(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

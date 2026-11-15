@@ -50,8 +50,8 @@ Inbox, follow progress on the Work board, and help Seraph learn what helps you.
 
 Available workflows depend on permissions, configuration, and host support.
 See [Development Status](docs/implementation/STATUS.md) for exact limits and
-[v2026.11.14 release notes](docs/implementation/23-release-2026-11-14.md) for the
-latest NEAR TEE inference, local mode and cockpit changes.
+[v2026.11.15 release notes](docs/implementation/24-release-2026-11-15.md) for the
+latest repository repair on NEAR TEE, composition profile and test determinism changes.
 
 ## Quick Start
 

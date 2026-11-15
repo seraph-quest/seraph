@@ -57,6 +57,9 @@ async def test_stock_repository_work_dispatch_prepares_original_child_with_goal_
     accounting_db, monkeypatch, repository_admission_signer, stock_current_method_lifetime,
 ):
     jobs, owner = await prepare(accounting_db, monkeypatch)
+    # #1184: the repair iteration's server bound is the NEAR TEE slot's.
+    from tests.near_tee_support import prepare_repository_near_route
+    await prepare_repository_near_route(monkeypatch)
     workspace, _, factory = accounting_db
     workspace.chmod(0o700)
     context = context_manager.get_context()

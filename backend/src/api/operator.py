@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import settings
 from src.agent.session import session_manager
-from src.app import _active_chat_runtime_status
+from src.app import _active_chat_runtime_status, _adr035_chat_identity, _effective_runtime_route_status
 from src.llm_runtime import provider_profile_statuses
 from src.operators.local_codex import (
     ExternalAgentRuntimeRemovedError,
@@ -1352,9 +1352,11 @@ def _runtime_status_payload() -> dict[str, Any]:
         runtime = _active_chat_runtime_status()
     except ExternalAgentRuntimeRemovedError as exc:
         raise HTTPException(status_code=410, detail=exc.payload()) from exc
+    # Same chat identity as /api/runtime/status (#1189); local metadata only.
+    runtime, _ = _adr035_chat_identity(runtime, _effective_runtime_route_status(runtime, {}))
     return {
-        "version": "2026.11.14",
-        "build_id": "SERAPH_PRIME_v2026.11.14",
+        "version": "2026.11.15",
+        "build_id": "SERAPH_PRIME_v2026.11.15",
         **runtime,
         "provider_profiles": provider_profile_statuses(),
         "timezone": settings.user_timezone,

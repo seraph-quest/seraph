@@ -253,8 +253,13 @@ These areas are intentionally excluded from the test suite:
 
 Tests run automatically on pushes to `develop` and `main`, plus pull requests targeting either branch, via GitHub Actions (`.github/workflows/test.yml`).
 
-Two parallel jobs:
-- **backend-tests**: Ubuntu, Python 3.12, `uv sync --group dev`, `uv run pytest -v`
-- **frontend-tests**: Ubuntu, Node 20, `npm ci`, `npm test`
+Jobs:
+- **test-determinism**: the per-file hazard ratchet (`scripts/check_test_determinism.py`) and the quarantine list.
+- **backend-tests**: 10 shards, one pytest process per file, quarantined tests skipped, a JUnit report uploaded per shard; failed nodes are rerun alone only to classify them (the job stays red). The toolchain comes from `.github/actions/backend-test-env`.
+- **stress-changed-tests** (pull requests): the backend test files the change adds or modifies, 20 runs under CPU contention in printed random orders.
+- **quarantine-lane**: quarantined tests only, non-blocking.
+- **frontend-tests** and **docs-contract**.
+
+`.github/workflows/test-determinism-scheduled.yml` runs daily on `develop`: random order, one process per shard, a UTC+14 pass and the realtime files under contention. The lane, triage and quarantine rules are in `AGENTS.md`.
 
 Redundant runs are cancelled automatically via concurrency groups.

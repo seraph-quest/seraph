@@ -384,7 +384,13 @@ def background_inference_status() -> dict[str, object]:
         })
     return {
         "schema_version": SCHEMA_VERSION,
-        "scheduler_enabled": bool(settings.scheduler_enabled),
+        "scheduler_enabled": _scheduler_enabled(),
         "error_code": error,
         "jobs": jobs,
     }
+
+
+def _scheduler_enabled() -> bool:
+    # The effective value after ADR-036 patch layers (#1204).
+    from src.runtime_plugins.profiles import scheduler_enabled
+    return scheduler_enabled(settings.scheduler_enabled)

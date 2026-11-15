@@ -1354,6 +1354,7 @@ async def _ensure_repo_repair_columns(conn) -> None:
             "diagnostics_sha256": "VARCHAR",
             "redaction_version": "VARCHAR",
             "serialized_request_sha256": "VARCHAR",
+            "request_route_digest": "VARCHAR",
             "combined_input_bytes": "INTEGER",
             "diagnostics_acknowledged": "BOOLEAN DEFAULT 0",
             "expires_at": "DATETIME",
@@ -2166,7 +2167,8 @@ async def init_db() -> None:
         # (fresh or pre-feature workspace). A partial inventory stays partial
         # so missing mandatory owners keep denying service invocations.
         from src.runtime_plugins.ownership import (introduce_dispatch_domain_sync, introduce_domains_sync,
-                                                   introduce_state_domain_sync, seed_legacy_inventory_sync)
+                                                   introduce_state_domain_sync, introduce_vault_domain_sync,
+                                                   seed_legacy_inventory_sync)
         await conn.run_sync(seed_legacy_inventory_sync)
         # Domains introduced after an inventory existed (#1020) are added once
         # as their legacy owner; nothing else in a partial inventory changes.
@@ -2177,6 +2179,9 @@ async def init_db() -> None:
         # Then the dispatcher lifecycle domain (#1025), only onto the exact
         # post-#1024 inventory: the next chained exact-prefix step.
         await conn.run_sync(introduce_dispatch_domain_sync)
+        # Then the pinned credential vault domain (#1199, ADR-036 §3), only onto
+        # the exact post-#1025 inventory; no secret or key file is touched.
+        await conn.run_sync(introduce_vault_domain_sync)
 
     # Reconcile legacy Done-parent links once the additive board schema exists.
     # The helper only materializes proof-backed handoffs; rows without an

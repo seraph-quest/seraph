@@ -3285,6 +3285,10 @@ def _near_tee_completion_sync(
                 details={"runtime_path": runtime_path, "provider": "near_tee", "reason": denied.code},
                 request_id=request_id)
         raise
+    # #1184: a repository iteration sends only its consented exact NEAR body
+    # to the consented NEAR target; anything else is refused before admission.
+    from src.workflows.repo_repair_source import verify_repository_iteration_near_call
+    verify_repository_iteration_near_call(call, runtime_path=runtime_path)
     started = False
 
     def operation():
@@ -4014,36 +4018,37 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         ]
 
     def prepare_repository_iteration_transport(self, messages, *, response_format, max_tokens):
-        """Prepare the fixed primary strategist body without contacting a provider.
+        """Prepare the exact NEAR TEE repository iteration body without contact (#1184).
 
         Preparation grants no dispatch authority. The capability's source
-        owner stages and consents these bytes; generate verifies its sealed
-        binding against the actual final body before broker admission.
+        owner stages and consents these bytes; the NEAR sync path verifies
+        its sealed binding against the actual final body and target before
+        broker admission. The body is the one ``generate`` sends for these
+        messages on the NEAR TEE text slot serving ``strategist_agent``
+        (same temperature and output bound); OpenRouter is never a target.
         """
         if (self._runtime_path != "strategist_agent"
-                or str(self.api_base or "").rstrip("/") != "https://openrouter.ai/api/v1"
                 or type(max_tokens) is not int or not 1 <= max_tokens <= 4096):
             raise PermissionError("fixed governed repository strategist route required")
-        controls = _openrouter_runtime_controls(self._runtime_profile)
-        if not controls:
-            raise PermissionError("current configured repository strategist profile required")
-        output_limit = min(max_tokens, int(controls["output_limit"]))
-        target = {"model_id": _profile_model_id(self._runtime_profile),
-            "api_base": self.api_base, "api_key": self.api_key,
-            "profile": self._runtime_profile, "source": "primary",
-            "options": dict(self._seraph_transport_options)}
-        reject_legacy_external_agent_model(target["model_id"])
-        target_messages = _messages_for_local_target(messages, target=target,
-            runtime_path="strategist_agent", reserved_output_tokens=output_limit)
-        body = finalized_openai_compatible_body(
-            model_id=_target_transport_model(target),
-            messages=self._provider_messages(target_messages),
-            options=_transport_json_value(target["options"]),
-            temperature=float(controls["temperature"]), max_tokens=output_limit,
-            additional_fields={"response_format": _transport_json_value(response_format)},
-        )
-        from src.workflows.repo_repair_source import repository_transport_route_digest
-        return {"body": body, "route_digest": repository_transport_route_digest(target, "strategist_agent")}
+        near_controls = _near_tee_runtime_controls("strategist_agent")
+        if not near_controls:
+            from src.model_fabric.near_tee_vertical import repository_repair_route_block
+            raise PermissionError(repository_repair_route_block() or "near_tee_slot_unconfigured")
+        temperature, output_limit = self._near_tee_turn_controls({}, near_controls)
+        if output_limit > max_tokens:
+            raise PermissionError("repository strategist output bound exceeds the consented maximum")
+        from src.model_fabric.near_tee_vertical import repository_iteration_near_transport
+        prepared = repository_iteration_near_transport(self._provider_messages(messages),
+            temperature=temperature, max_tokens=output_limit,
+            response_format=_transport_json_value(response_format))
+        return {"body": prepared["body"], "route_digest": prepared["route_digest"]}
+
+    def _near_tee_turn_controls(self, kwargs: dict[str, Any], near_controls: dict[str, Any]) -> tuple[float, int]:
+        """``(temperature, max_tokens)`` ``generate`` hands a NEAR TEE turn."""
+        temperature = kwargs.get("temperature", dict(getattr(self, "kwargs", {}) or {}).get("temperature"))
+        reserved = _reserved_output_tokens_from_kwargs(kwargs=kwargs, fallback=getattr(self, "_seraph_max_tokens", None))
+        return (float(settings.model_temperature if temperature is None else temperature),
+            min(reserved, int(near_controls["output_limit"])))
 
     def generate(
         self,
@@ -4148,6 +4153,11 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 response_format=_transport_json_value(response_format) if response_format is not None else None,
                 agent=True,
             )
+        from src.model_fabric.near_tee_egress import current_near_tee_egress_binding
+        if (egress_binding := current_near_tee_egress_binding()) is not None:
+            # #1184: consented code egress goes only to its exact NEAR TEE
+            # request; no other provider target may carry it.
+            raise PermissionError(egress_binding.refusal_code)
         primary_target = {
             "model_id": primary_model,
             "api_base": self.api_base,

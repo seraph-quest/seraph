@@ -1,3 +1,5 @@
+import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -7,6 +9,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = REPO_ROOT / ".env.dev"
+# Names the dotenv file this process loads. Unset keeps the historical
+# default (``REPO_ROOT/.env.dev``); an empty value loads no file; any other
+# value is the path to load. Neither ``manage.sh`` nor the compose files set
+# it, so the managed and container launchers are unchanged. The test suite
+# sets it empty so an operator's live configuration never enters a test.
+SETTINGS_ENV_FILE_ENV = "SERAPH_SETTINGS_ENV_FILE"
+
+
+def resolve_settings_env_file(environ: Mapping[str, str] | None = None) -> Path | None:
+    """Return the dotenv file this process's settings load, or ``None``."""
+    selected = (os.environ if environ is None else environ).get(SETTINGS_ENV_FILE_ENV)
+    if selected is None:
+        return DEFAULT_ENV_FILE
+    if selected == "":
+        return None
+    return Path(selected)
 
 
 RepoSandboxExecutorKind = Literal["local", "docker_rootless", "docker_rootful"]
@@ -146,6 +164,9 @@ class Settings(BaseSettings):
     browser_site_allowlist: str = ""  # comma-separated hostname patterns allowed for browse/search
     # Reviewed Node 22.12+/24 for the Cordis host (goal research); empty uses `node` on PATH.
     cordis_node_path: str = ""
+    # ADR-036 §6 named composition profile (#1204): local, prod or headless.
+    # Empty derives it from DEPLOYMENT_ENVIRONMENT (production -> prod, else local).
+    composition_profile: str = ""
     browser_site_blocklist: str = ""  # comma-separated hostname patterns blocked for browse/search
 
     # Phase 3.5 — Timeouts
@@ -245,7 +266,7 @@ class Settings(BaseSettings):
     llm_log_backup_count: int = 5          # keep 5 rotated files
 
     model_config = SettingsConfigDict(
-        env_file=DEFAULT_ENV_FILE,
+        env_file=resolve_settings_env_file(),
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         extra="ignore",

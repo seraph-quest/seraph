@@ -21,6 +21,7 @@ from sqlalchemy import select, text, update
 from src.db.models import AuditEvent, RuntimeCompositionState, WorkflowRunState
 
 from .contracts import METHOD_DOMAINS
+from .trust import PIN_REFUSED_REASON, PINNED_DOMAINS, is_pinned_domain
 
 # Every domain an inventory held before #1024, frozen as a literal: the
 # Python-hosted state domain is introduced only onto exactly this set.
@@ -36,10 +37,17 @@ STATE_DOMAIN = "seraph.state.v1"
 DISPATCH_DOMAIN = "seraph.dispatch.v1"
 SCHEDULER_DOMAIN = "seraph.scheduler.v1"
 PRE_DISPATCH_DOMAINS = (*PRE_STATE_DOMAINS, STATE_DOMAIN)
-DOMAINS = (*PRE_DISPATCH_DOMAINS, DISPATCH_DOMAIN)
-# Python always hosts these owners (#1024 operator decision): their rows are
-# always the legacy owner with the fixed legacy digest, never Cordis.
-PYTHON_HOSTED_DOMAINS = frozenset({STATE_DOMAIN, "seraph.authority.v1", "seraph.audit.v1"})
+# The pinned credential vault (ADR-036 §3, #1199): a Python-hosted trust
+# service with its own owner row and no Cordis plugin or service method. It is
+# introduced only onto exactly ``PRE_VAULT_DOMAINS`` (the post-#1025 set).
+VAULT_DOMAIN = "seraph.vault.v1"
+PRE_VAULT_DOMAINS = (*PRE_DISPATCH_DOMAINS, DISPATCH_DOMAIN)
+DOMAINS = (*PRE_VAULT_DOMAINS, VAULT_DOMAIN)
+# The pinned ``seraph-trust`` domains (ADR-036 §3, ``trust.PINNED_DOMAINS``):
+# state, authority and audit (#1024), tasks (#1198) and vault (#1199). Python always hosts
+# them: their rows are always the legacy owner with the fixed legacy digest,
+# never Cordis. Kept under its #1024 name for existing callers.
+PYTHON_HOSTED_DOMAINS = PINNED_DOMAINS
 # Domains added after an install's inventory was first seeded, with the issue
 # that introduced them. Boot inserts each missing one once as its legacy owner
 # (``introduce_domains_sync``); a missing original domain is never repaired.
@@ -383,7 +391,7 @@ class RuntimeCompositionBinding:
 
 def _checked_row(row) -> CompositionDependency:
     dependency = CompositionDependency(row.runtime_domain, row.owner_kind, row.epoch, row.composition_digest)
-    if row.runtime_domain in PYTHON_HOSTED_DOMAINS and (
+    if is_pinned_domain(row.runtime_domain) and (
             row.owner_kind != "legacy" or row.composition_digest != legacy_composition_digest(row.runtime_domain)):
         # A tampered or restored row can never hand a Python-hosted owner to Cordis.
         raise CompositionBindingError("composition_inventory_invalid")
@@ -633,6 +641,52 @@ def introduce_dispatch_domain_sync(connection) -> bool:
     return True
 
 
+def introduce_vault_domain_sync(connection) -> bool:
+    """Add the pinned ``seraph.vault.v1`` row to an exact post-#1025 inventory (#1199).
+
+    The next chained exact-prefix step after ``introduce_dispatch_domain_sync``:
+    it runs only when the inventory is exactly ``PRE_VAULT_DOMAINS`` and every
+    row decodes, inserts one legacy row (epoch 1, the fixed legacy digest,
+    ``ready``) plus one audit event, and changes no existing row. It touches no
+    ``secrets`` row and no key file, so every stored secret stays readable with
+    the same key. A second run sees the full set and adds nothing. Any other
+    partial or unknown inventory is left alone and keeps failing closed.
+    Forward-only: an older binary rejects the extra row with
+    ``composition_inventory_invalid``.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from types import SimpleNamespace
+    rows = [SimpleNamespace(**row._mapping) for row in connection.execute(text(
+        "SELECT runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref "
+        "FROM runtime_composition_states"))]
+    names = [row.runtime_domain for row in rows]
+    if len(names) != len(PRE_VAULT_DOMAINS) or set(names) != set(PRE_VAULT_DOMAINS):
+        return False
+    try:
+        for row in rows:
+            _checked_row(row)
+    except CompositionBindingError as exc:
+        raise CompositionBindingError("composition_inventory_invalid") from exc
+    inserted = connection.execute(text(
+        "INSERT INTO runtime_composition_states "
+        "(runtime_domain, owner_kind, epoch, composition_digest, state, recovery_receipt_ref) "
+        "SELECT :domain, 'legacy', 1, :digest, 'ready', NULL WHERE NOT EXISTS "
+        "(SELECT 1 FROM runtime_composition_states WHERE runtime_domain = :domain)"),
+        {"domain": VAULT_DOMAIN, "digest": legacy_composition_digest(VAULT_DOMAIN)}).rowcount
+    if inserted != 1:
+        return False
+    connection.execute(text(
+        "INSERT INTO audit_events (id, session_id, actor, event_type, tool_name, risk_level, policy_mode, summary, "
+        "details_json, created_at) VALUES (:id, NULL, 'system', 'runtime_composition_domain_introduced', NULL, "
+        "'low', 'full', :summary, :details, :at)"),
+        {"id": str(uuid4()), "summary": f"Runtime domain {VAULT_DOMAIN} introduced as its legacy owner",
+         "details": _canonical({"runtime_domain": VAULT_DOMAIN, "owner_kind": "legacy", "epoch": 1,
+                                "introduced_by": "1199", "prior_domains": len(PRE_VAULT_DOMAINS)}),
+         "at": datetime.now(timezone.utc).replace(tzinfo=None)})
+    return True
+
+
 def domain_ready_predicate(runtime_domain: str, owner_kind: str, epoch: int, composition_digest: str):
     """Standalone ``EXISTS`` fence for non-job writes (#1025): the exact owner is ready at ``epoch``."""
     from sqlalchemy.orm import aliased
@@ -695,9 +749,12 @@ async def transition_owner(db, *, runtime_domain: str, expected: CompositionDepe
     if _LIFECYCLE_FENCE_DEPTH.get() <= 0 or not db.in_transaction():
         raise CompositionBindingError("composition_stopped_writer_required")
     incoming = CompositionDependency(runtime_domain, owner_kind, epoch, composition_digest)
-    if runtime_domain in PYTHON_HOSTED_DOMAINS and owner_kind != "legacy":
-        # Python always hosts state, authority and audit (#1024).
-        raise CompositionBindingError("composition_owner_not_transferable")
+    if is_pinned_domain(runtime_domain) and (
+            owner_kind != "legacy" or composition_digest != legacy_composition_digest(runtime_domain)):
+        # A pinned trust domain (ADR-036 §3) never changes owner; only its legacy
+        # epoch fence may move. Raised before any write, so callers that can
+        # open their own transaction audit the refusal (``trust.record_pin_refusal``).
+        raise CompositionBindingError(PIN_REFUSED_REASON)
     if (type(expected) is not CompositionDependency or expected.runtime_domain != runtime_domain
             or expected_state not in STATES or state not in STATES):
         raise CompositionBindingError("composition_expected_binding_required")

@@ -4,7 +4,6 @@ import json
 import asyncio
 
 import pytest
-import httpx
 from sqlalchemy import select
 
 from src.db.models import WorkflowRunState, InferenceCostReservation, InferenceAccountingOwner
@@ -12,9 +11,6 @@ from src.workflows import repo_repair_source as source
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
-
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
 
 
 class _KeepOriginalSourceRunning(Exception):
@@ -326,22 +322,24 @@ async def test_startup_retains_real_unknown_provider_debt_after_registered_itera
     # No reservation or accounting evidence is inserted by this fixture.
     captured, responses = {}, []
     original_grant = source.grant_repository_iteration_consent
-    original_response = httpx.Response
+    from tests.test_near_tee_text_slot import NearFixture
+    original_handler = NearFixture.handler
 
     async def capture_grant(service, jobs, **kwargs):
         captured.update(service=service, jobs=jobs, job_id=kwargs["job_id"], owner=kwargs["owner"])
         return await original_grant(service, jobs, **kwargs)
 
-    def missing_second_bill(*args, **kwargs):
-        payload = kwargs.get("json")
-        if isinstance(payload, dict) and payload.get("id") == "scripted-source-final-transport":
-            responses.append(payload)
-            if len(responses) == 2:
-                payload["usage"].pop("cost")
-        return original_response(*args, **kwargs)
+    def missing_second_bill(fixture, request):
+        # #1184: NEAR's billing readback is unavailable for the second
+        # iteration's completion, so its cost is an Unknown liability.
+        path = request.url.raw_path.decode()
+        if request.method == "POST" and path == "/v1/chat/completions":
+            responses.append(path)
+            fixture.billing_missing = len(responses) == 2
+        return original_handler(fixture, request)
 
     monkeypatch.setattr(source, "grant_repository_iteration_consent", capture_grant)
-    monkeypatch.setattr(httpx, "Response", missing_second_bill)
+    monkeypatch.setattr(NearFixture, "handler", missing_second_bill)
     with pytest.raises(Exception):
         await _actual_source_callback_journey(accounting_db, monkeypatch, True, "test_python")
     assert len(responses) == 2

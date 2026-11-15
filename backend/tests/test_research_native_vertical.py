@@ -231,6 +231,13 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                     completed.set()
             controls["after_first_contact"] = hold_actual_provider_contact
             monkeypatch.setattr(work_board, "dispatcher", dispatcher)
+            # The cancel endpoint answers the proven result only after the
+            # cancelled worker actually returns; past its 5s wall-clock bound
+            # it answers cancellation_pending instead. A loaded runner can
+            # exceed that bound while the worker quiesces (#1196), so wait on
+            # the worker's completion itself, not on the clock.
+            from src.work_board import dispatcher as dispatcher_module
+            monkeypatch.setattr(dispatcher_module, "_RESEARCH_CANCEL_WORKER_WAIT_SECONDS", None)
             running = asyncio.create_task(dispatcher.run_pass())
             try:
                 await asyncio.wait_for(contacted.wait(), timeout=40)

@@ -71,7 +71,7 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
         request_cost_bound_microusd: int = 20_000, capabilities=("text", "structured_output"),
         timeout_seconds: float = 30.0, jobs=None, near=None, egress_revision: int = 2,
         max_input_tokens: int = 8192,
-        proof_age_seconds: float = 1.0):
+        proof_age_seconds: float = 1.0, configure_accounting: bool = True):
     """A ready NEAR TEE text slot with every dispatch gate satisfied; no contact.
 
     - the canonical configuration (consented, enabled, behind the shared lane);
@@ -133,7 +133,8 @@ async def prepare_near_tee_vertical(monkeypatch, *, ceiling_microusd: int = 1_00
             probe_receipt_id="near-tee-literal-fixture", probe_receipt_hash="c" * 64,
             proven_value=values.get(capability, "verified"))
         assert (await model_fabric_repository.persist_capability_proof(proof)).persisted
-    await (jobs or DurableJobRepository()).configure_inference_accounting(ceiling_microusd)
+    if configure_accounting:
+        await (jobs or DurableJobRepository()).configure_inference_accounting(ceiling_microusd)
     # Only the catalog read happened; no inference.
     assert [request.method for request in near.requests] == ["GET"]
     return near
@@ -149,13 +150,13 @@ def near_settled_rows(snapshot, runtime_path: str):
 
 
 def assume_repository_repair_route_available(monkeypatch) -> None:
-    """Precondition for repository registration/admission mechanics tests (#1159).
+    """Precondition for repository registration/admission mechanics tests.
 
     Those tests pin how the stock selector, native owner and child admission
-    behave given a usable repair route, independent of provider setup. With
-    OpenRouter retired the repair iteration step has no NEAR TEE adapter, so
-    it is refused with ``near_tee_route_unsupported`` before planning (pinned
-    in test_near_tee_vertical_journeys). No provider transport is enabled by
+    behave given a usable repair route, independent of provider setup. Since
+    #1184 the route is the NEAR TEE text slot serving ``strategist_agent``
+    (its journey is pinned in the repository suites, which install
+    ``prepare_repository_near_route``). No provider transport is enabled by
     this: model calls stay mocked/forbidden.
     """
     from src.model_fabric import near_tee_vertical
@@ -163,13 +164,102 @@ def assume_repository_repair_route_available(monkeypatch) -> None:
 
 
 def restore_repository_repair_route_block(monkeypatch) -> None:
-    """Undo ``assume_repository_repair_route_available`` (the retirement switch)."""
+    """Undo ``assume_repository_repair_route_available``."""
     from src.model_fabric import near_tee_vertical
     monkeypatch.setattr(near_tee_vertical, "repository_repair_route_block", _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK)
 
 
 from src.model_fabric import near_tee_vertical as _near_tee_vertical  # noqa: E402
 _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route_block
+
+
+# ── Repository repair on the intercepted NEAR TEE slot (#1184) ─────────
+
+# The repository suites keep their original 100 micro-USD request bound and
+# 1000 micro-USD lane ceiling. The intercepted catalog record is priced so
+# that bound covers the slot (input $0.001/M, output $0.01/M); the catalog
+# bound check itself is pinned with real prices in test_near_tee_text_slot.
+REPOSITORY_REQUEST_BOUND_MICROUSD = 100
+REPOSITORY_LANE_CEILING_MICROUSD = 1000
+REPOSITORY_MAX_INPUT_TOKENS = 32768
+
+
+def repository_catalog_record():
+    from tests.test_near_tee_text_slot import catalog_record
+    record = catalog_record()
+    record["inputCostPerToken"] = {"amount": 1, "scale": 9, "currency": "USD"}
+    record["outputCostPerToken"] = {"amount": 10, "scale": 9, "currency": "USD"}
+    return record
+
+
+def repository_near_gateway():
+    """An intercepted NEAR gateway for the repository repair iteration.
+
+    The test sets ``gateway.script = lambda body: content`` (or raises) once
+    it knows the consented body; every completion body is recorded in
+    ``gateway.completion_bodies``. ``gateway.cost_nano`` is NEAR's billed
+    cost; ``gateway.billing_missing`` models an Unknown cost.
+    """
+    def unexpected(_body):
+        raise AssertionError("unexpected NEAR completion: no repository answer scripted")
+
+    def answer(body):
+        gateway.completion_bodies.append(body)
+        return gateway.script(body)
+
+    gateway = scripted_near_gateway(answer, cost_nano=0)
+    gateway.catalog = repository_catalog_record()
+    gateway.script = unexpected
+    gateway.completion_bodies = []
+    return gateway
+
+
+async def prepare_repository_near_route(monkeypatch, *, gateway=None, jobs=None, egress_revision: int | None = None,
+        ceiling_microusd: int = REPOSITORY_LANE_CEILING_MICROUSD,
+        request_cost_bound_microusd: int = REPOSITORY_REQUEST_BOUND_MICROUSD, configure_accounting: bool = True):
+    """A ready NEAR TEE text slot serving ``strategist_agent``; no inference.
+
+    The repository repair iteration (and the planner) runs on it; when the
+    suite configured another route first, this is the next policy revision.
+    Text and
+    structured output capability proofs, a fresh broker, the write-only key, a real
+    catalog-check receipt and (unless ``configure_accounting`` is False, for
+    contact-free unit stores) the durable accounting ceiling. Returns the
+    installed ``repository_near_gateway`` (OpenRouter and every other host
+    fail the test).
+    """
+    gateway = gateway or repository_near_gateway()
+    install_isolated_broker(monkeypatch)
+    if egress_revision is None:
+        # A reviewed policy change on the same workspace and accounting lane
+        # as any route the suite configured first (never an in-place rewrite).
+        from src.model_fabric.configuration import read_model_fabric_configuration
+        egress_revision = max(2, read_model_fabric_configuration().egress_revision + 1)
+    return await prepare_near_tee_vertical(monkeypatch, near=gateway, jobs=jobs, egress_revision=egress_revision,
+        ceiling_microusd=ceiling_microusd, request_cost_bound_microusd=request_cost_bound_microusd,
+        max_input_tokens=REPOSITORY_MAX_INPUT_TOKENS, configure_accounting=configure_accounting)
+
+
+def install_isolated_broker(monkeypatch):
+    """A fresh process-local broker for this test (as test_near_tee_text_slot's
+    ``isolated_broker``): an Unknown NEAR cost keeps its serial lease blocked
+    by design, which must never leak into later tests in the same process."""
+    from src import llm_runtime
+    from src.api import model_fabric_settings as api
+    from src.model_fabric import execution, probe, remote_inference_admission
+    broker = remote_inference_admission.RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", broker)
+    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", broker)
+    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    monkeypatch.setattr(probe, "remote_inference_admission_broker", broker)
+    monkeypatch.setattr(api, "remote_inference_admission_broker", broker)
+    return broker
+
+
+def near_completion_requests(near):
+    """The intercepted NEAR chat-completions requests."""
+    return [request for request in near.requests
+        if request.method == "POST" and request.url.raw_path.decode() == "/v1/chat/completions"]
 
 
 # ── Scripted NEAR TEE gateway for research-style verticals (#1180) ─────
@@ -227,3 +317,20 @@ def scripted_near_gateway(answer_for, *, uds_socket: str | None = None, cost_nan
                 self.body_id = f"chatcmpl-scripted-{self.completions}"
             return super().handler(request)
     return Gateway()
+
+
+def script_repository_iteration(near, egress, output, *, contacted=None, cost_microusd: int = 0):
+    """Answer the next repository iteration with ``output`` (#1184).
+
+    The NEAR gateway must receive exactly the consented ``egress`` body;
+    ``contacted`` (a list) records each completion body. NEAR bills
+    ``cost_microusd``.
+    """
+    def answer(body):
+        assert body == egress["request_body"]
+        if contacted is not None:
+            contacted.append(body)
+        return json.dumps(output)
+    near.script = answer
+    near.cost_nano = cost_microusd * 1000
+    return near

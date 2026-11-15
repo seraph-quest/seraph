@@ -525,7 +525,8 @@ async def test_large_capture_is_downscaled_for_near_and_stored_unchanged(client,
     # The stored private capture is unchanged.
     artifacts = next(json.loads(item.removeprefix("capture_artifacts:"))
         for item in json.loads(observation.details_json) if item.startswith("capture_artifacts:"))
-    assert Image.open(artifacts["image_path"]).size == (5120, 2880)
+    with Image.open(artifacts["image_path"]) as stored:
+        assert stored.size == (5120, 2880)
 
 
 @pytest.mark.asyncio

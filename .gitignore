@@ -368,3 +368,6 @@ seraph-quest.github.io/
 # Durable local agent workspaces and private validation evidence
 /.agent-worktrees/
 /.agent-evidence/
+
+# Backend JUnit reports from scripts/run_backend_test_shard.py --junit-dir (#1218)
+backend/test-results/

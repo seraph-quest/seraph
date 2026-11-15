@@ -127,12 +127,54 @@ These commands are grounded in `manage.sh`, package manifests and
 | Docs ownership and claim checks | Repository root | `python3 scripts/check_docs_contract.py` and `python3 scripts/check_strategy_claims.py` |
 | Docs typecheck and build/link check | `docs/` | `npm run typecheck` and `npm run build` |
 | Diff whitespace check | Repository root | `git diff --check` |
+| Test determinism ratchet | Repository root | `python3 scripts/check_test_determinism.py` (Python 3.12+); after removing a hazard, lower the baseline with `--update` |
+| Stress, classify or triage tests | `backend/` | `uv run python scripts/determinism_lanes.py stress --files <test file>`, `classify --junit-dir <dir>` or `triage <node id>` |
 
 There is no dedicated frontend lint script or configured backend lint/typecheck
 command in these manifests. Do not invent one or claim a build is a lint pass.
 Use focused tests first; native/browser suites have additional profile-specific
 requirements documented by their owners. Never weaken assertions, deadlines or
 fixtures to make a check pass. Do not run tests against an operator workspace.
+
+Backend tests are held to a determinism ratchet (#1217, #1218).
+`scripts/check_test_determinism.py` counts sleeps, elapsed-time comparisons,
+skips on timeout, direct `settings`/`os.environ` assignment, `get_session`
+patches and raw `Popen` per file. Each count must equal
+`scripts/test_determinism_baseline.json`, so counts only go down. Synchronise
+on a cause (an event, gate or notification) instead. The only exemption is
+`@pytest.mark.realtime(reason=...)` for real kernel, SQLite or browser timing;
+it covers sleeps and clock comparisons only, and each marker is itself counted,
+so adding one is a reviewed baseline edit. Use `--rename OLD NEW` for a renamed
+test file.
+Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
+never-awaited coroutines are errors. A per-test watchdog dumps stacks after
+240 s and fails the test after 420 s. Any `filterwarnings` exception must be
+narrow and name its issue. Until #1235, `tests/test_repo_repair_executors.py`
+leaks an unreaped child at session end (`TRACKED_LEAK_FILES` in
+`backend/scripts/run_backend_test_shard.py`) and gets its exception as `-W`
+from the shard runner only; run it with
+`uv run python scripts/run_backend_test_shard.py --files tests/test_repo_repair_executors.py`,
+since plain `uv run pytest` on it fails on the leak.
+
+Determinism lanes (#1220) never retry a test to turn a job green. A pull
+request's changed backend test files run 20 times under CPU contention in
+printed random orders (`stress-changed-tests`), with watchdogs scaled to the
+contention. Files that do not fit its time budget, or runs cut by its hard
+deadline, are named in the job summary as not stressed. A failed node is rerun alone
+only to classify it, as "deterministic" or "intermittent, k of N"; the job
+stays red. A daily scheduled workflow runs random order, one process per
+shard, a non-UTC timezone and the realtime files under contention.
+
+Flaky test triage, before an issue is titled "Flaky" or a test is
+quarantined: from `backend/`, run
+`uv run python scripts/determinism_lanes.py triage <node id>` at the failing
+commit. It runs the node 50 times alone and once in its file order. Record
+both counts in the issue. A node that fails every time is a defect, not a
+flake. Only a proven intermittent test may carry
+`@pytest.mark.quarantine(issue=N)` on that one test function: blocking lanes skip it, the non-blocking
+quarantine lane still runs it, and at most 10 may exist. A test leaves
+quarantine only through a fix that removes the marker and passes the stress
+job 50 of 50 (`stress --files <file> --runs 50`). There is no calendar expiry.
 
 Core startup does not require a provider key. Inference requires explicit
 configuration, consent, verified capability and budget; a configured route is

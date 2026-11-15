@@ -3,7 +3,7 @@
 import asyncio
 import json
 import stat
-import time
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -574,8 +574,19 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
     monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "db_lock_retries", 7)
     monkeypatch.setitem(screenshot_folder_source._PERSISTENCE_STATS, "selection_db_lock_failures", 2)
 
+    # The pipeline summary never finishes on its own, so a timed-out response
+    # proves the endpoint abandoned it instead of waiting, with no wall-clock
+    # bound to race on a loaded runner (#1191).
+    pipeline_events = {"started": 0, "cancelled": 0, "completed": 0}
+
     async def slow_pipeline_summary(root=None):
-        await asyncio.sleep(2)
+        pipeline_events["started"] += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pipeline_events["cancelled"] += 1
+            raise
+        pipeline_events["completed"] += 1
         return {}
 
     with (
@@ -584,12 +595,10 @@ async def test_artifact_storage_returns_env_folder_when_pipeline_summary_times_o
         patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
         patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
     ):
-        started_at = time.monotonic()
         resp = await client.get("/api/settings/artifact-storage")
-        elapsed = time.monotonic() - started_at
 
     assert resp.status_code == 200
-    assert elapsed < 0.5
+    assert pipeline_events == {"started": 1, "cancelled": 1, "completed": 0}
     data = resp.json()
     assert data["screenshot_folder"]["path"] == str(screenshot_root.resolve())
     assert data["screenshot_folder"]["path_source"] == "SERAPH_SCREENSHOT_FOLDER"
@@ -609,28 +618,50 @@ async def test_artifact_storage_returns_partial_status_when_screenshot_summaries
     screenshot_root.mkdir()
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
 
+    # Both summaries block until the test releases them, so they cannot
+    # finish while the request is in flight. A partial response proves the
+    # endpoint answered from its timeout fallbacks instead of waiting for the
+    # slow work, with no wall-clock bound to race on a loaded runner (#1191).
+    release_folder_summary = threading.Event()
+    folder_summary_finished = threading.Event()
+    pipeline_events = {"started": 0, "cancelled": 0, "completed": 0}
+
     def slow_folder_summary(_root):
-        time.sleep(2)
-        return {}
+        try:
+            release_folder_summary.wait()
+            return {}
+        finally:
+            folder_summary_finished.set()
 
     async def slow_pipeline_summary(root=None):
-        await asyncio.sleep(2)
+        pipeline_events["started"] += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pipeline_events["cancelled"] += 1
+            raise
+        pipeline_events["completed"] += 1
         return {}
 
-    with (
-        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
-        patch.object(settings, "screen_analysis_provider", "local-vlm"),
-        patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
-        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
-        patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
-        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
-    ):
-        started_at = time.monotonic()
-        resp = await client.get("/api/settings/artifact-storage")
-        elapsed = time.monotonic() - started_at
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+            patch.object(settings, "screen_analysis_provider", "local-vlm"),
+            patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
+            patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+            patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
+            patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+        ):
+            resp = await client.get("/api/settings/artifact-storage")
+            # The response is complete while the filesystem summary is still
+            # blocked and the pipeline summary was abandoned, not awaited.
+            assert not folder_summary_finished.is_set()
+            assert pipeline_events == {"started": 1, "cancelled": 1, "completed": 0}
+    finally:
+        # Let the abandoned worker thread return instead of outliving the test.
+        release_folder_summary.set()
 
     assert resp.status_code == 200
-    assert elapsed < 0.5
     data = resp.json()
     assert data["screenshot_folder"]["summary_status"] == "partial"
     assert data["screenshot_folder"]["summary_failure"] == "summary_timeout"
@@ -649,32 +680,38 @@ async def test_health_and_sessions_stay_fast_when_artifact_summaries_are_slow(
     screenshot_root.mkdir()
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
 
+    # Both artifact summaries block until the test releases them. Health and
+    # sessions answering at all proves they do not wait on that slow work;
+    # the call counts prove they never reach it. No wall-clock bound (#1191).
+    release_folder_summary = threading.Event()
+    calls = {"folder": 0, "pipeline": 0}
+
     def slow_folder_summary(_root):
-        time.sleep(2)
+        calls["folder"] += 1
+        release_folder_summary.wait()
         return {}
 
     async def slow_pipeline_summary(root=None):
-        await asyncio.sleep(2)
+        calls["pipeline"] += 1
+        await asyncio.Event().wait()
         return {}
 
-    with (
-        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
-        patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
-        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
-        patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
-        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
-    ):
-        health_started = time.monotonic()
-        health_resp = await client.get("/health")
-        health_elapsed = time.monotonic() - health_started
-        sessions_started = time.monotonic()
-        sessions_resp = await client.get("/api/sessions")
-        sessions_elapsed = time.monotonic() - sessions_started
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+            patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
+            patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+            patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
+            patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+        ):
+            health_resp = await client.get("/health")
+            sessions_resp = await client.get("/api/sessions")
+    finally:
+        release_folder_summary.set()
 
     assert health_resp.status_code == 200
     assert sessions_resp.status_code == 200
-    assert health_elapsed < 1.0
-    assert sessions_elapsed < 1.0
+    assert calls == {"folder": 0, "pipeline": 0}
 
 
 @pytest.mark.asyncio

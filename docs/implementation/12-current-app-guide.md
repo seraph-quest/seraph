@@ -1031,7 +1031,8 @@ on import order.
 
 ### Python-hosted mandatory providers (#1024)
 
-Python always hosts the `state`, `authority`, `audit` and `tasks` providers
+Python always hosts the `state`, `authority`, `audit` and `tasks` providers,
+and since #1199 the `vault` provider
 (`runtime_plugins/worker.py`, operator decision on #1024): the database must be
 open before the ownership table can be read or the Node child started. The
 backend lifespan constructs one `ProviderWorker`, takes the workspace owner
@@ -1043,7 +1044,8 @@ production), the session tables and a resolvable Vault key (configured, or a
 regular 0600 `.vault-key`; an absent file is still generated on first use);
 `audit` writes a probe `runtime_audit_ready` row inside a savepoint that is
 always rolled back; `tasks` checks the job and board tables and opens the
-durable job repository. Any failure aborts startup with that provider's typed
+durable job repository; `vault` (#1199) is described
+[below](#pinned-credential-vault-1199). Any failure aborts startup with that provider's typed
 reason (for example `state_init_db_failed`, `authority_vault_key_unavailable`,
 `audit_write_unavailable`). `goals`, `memory` and `artifacts` follow and may
 only degrade. A Cordis callback blocks with `native_provider_<name>_unavailable`
@@ -1131,6 +1133,179 @@ no cache. A provider or child restart never touches `unknown_external_effect`
 or `cost_liability` jobs and never replays their effects. Backup and restore
 stay with the host CLI against a stopped backend; there is no in-process
 maintenance handoff.
+
+### Pinned trust domains and composition dump (#1198)
+
+ADR-036 §3 pins the `seraph-trust` services. `runtime_plugins/trust.py` is the
+one code copy of that table (`TRUST_SERVICES`) and of the §5 domain-to-bundle
+map (`DOMAIN_BUNDLES`). Five domains have frozen owner rows today
+(`PINNED_DOMAINS`): `seraph.state.v1`, `seraph.authority.v1`, `seraph.audit.v1`
+(#1024), `seraph.tasks.v1` (#1198) and `seraph.vault.v1` (#1199).
+`seraph.inference.v1`, the execution guard and operator authentication are
+listed with `owner_row_frozen: false`: named as pinned targets, not yet
+enforced.
+`ownership.PYTHON_HOSTED_DOMAINS` is the same set.
+
+`is_pinned_domain` is the one predicate. A pinned row is always the legacy
+owner with the fixed legacy digest: `register_cutover_domain` refuses a pinned
+domain, `transition_domain` and `POST
+/api/runtime/composition/domains/{domain}/owner` refuse it with
+`composition_owner_not_transferable` (HTTP 409) and first write a
+`runtime_composition_pin_refused` audit event (domain, target, path, reason)
+in its own transaction, and `transition_owner` refuses any owner or digest
+change before writing. A legacy-to-legacy epoch fence (draining, blocked at a
+higher epoch, ready) is not a transfer and still works, so an epoch change
+still blocks unstarted jobs bound to the old tasks epoch. An inventory whose
+tasks row names any other owner fails closed (`composition_inventory_invalid`).
+
+The composition dump (`runtime_plugins/composition_dump.py`, schema
+`seraph-composition-dump.v1`) is read-only. It lists each declared bundle with
+its domains; per domain the owner kind, epoch, state, owner digest, the
+reviewed Cordis provider digest and, live, the plugin state the child reports;
+the Cordis kernel facts (version, profile id, package and composition digests);
+the pinned domains and trust services; and, since #1204, the validated
+`profile` and the `effective_patch` rows (see below; the live dump reports
+`profile: null` only in a process that never booted through the lifespan). Only reason codes, digests,
+epochs and fixed names pass through; it reads no settings, environment values
+or vault content. The live dump is `composition` in `/api/runtime/status` and
+`GET /api/runtime/composition/dump` (authenticated). `./manage.sh -e dev
+composition dump [--node /absolute/node]` prints the offline dump: it runs
+keyless (`env -i`), opens the managed local workspace's `seraph.db` read-only,
+checks the reviewed Cordis package without starting the child, and exits
+non-zero unless the inventory decodes and the profile validates. It is dev-only; production reads the
+status route.
+
+### Bundles, named profiles and the patch layer (#1204)
+
+This is A3.3 slice 1 (#1026) of ADR-036 §4/§6. It is part of the composition
+bootstrap, not a plugin. `runtime_plugins/profiles.py` holds three reviewed
+catalogues:
+- **Bundles** (`BUNDLES`): `seraph-trust` (pinned), then the core bundles
+  `seraph-agent`, `seraph-models`, `seraph-capabilities`, `seraph-domains` and
+  `seraph-lifecycle`, which carry today's domain rows (`trust.DOMAIN_BUNDLES`).
+  Last come the app bundles `seraph-cockpit`, `seraph-channels`, `seraph-edge` and
+  `seraph-headless`, which have no domain rows yet.
+- **Profiles** (`PROFILES`):
+
+  | Profile | Bundles | `DEPLOYMENT_ENVIRONMENT` | Env file |
+  | --- | --- | --- | --- |
+  | `local` | all but `seraph-headless` | any non-production value (as auth and the worker accept) | `.env.dev` |
+  | `prod` | all but `seraph-headless` | `production` | `.env.prod` |
+  | `headless` | trust, core, `seraph-channels`, `seraph-headless` | either | either |
+
+  `COMPOSITION_PROFILE` selects one. Empty derives it: `production` gives
+  `prod`, and anything else gives `local`. So an install that never sets it boots
+  exactly as before. `test` is not a profile.
+- **Patch rows** (`PATCH_ROWS`): today only `seraph.scheduler.v1#enabled`
+  (boolean). Its base layer is the `SCHEDULER_ENABLED` environment flag.
+
+**Boot order.** The lifespan calls `boot_profile()` before the provider worker
+takes the workspace lock. That function applies the layers in a fixed order:
+profile bundles, then the profile's own patch, then the optional operator
+patch `<workspace>/composition.patch.json`, which looks like this:
+
+```json
+{"schema": "seraph-composition-patch.v1",
+ "rows": [{"id": "seraph.scheduler.v1#enabled", "value": false}]}
+```
+
+The file must be a regular file (never a symlink, FIFO or device) owned by the
+service user, root or the workspace directory's owner (a host-written file in
+a container bind mount), and must not be group- or world-writable. Agent file
+tools and process-tool path arguments are denied it
+(`_AGENT_DENIED_RUNTIME_PATHS`). A script the agent writes and runs through the
+process runtime (`python`/`node` with a workspace script) can still write it,
+as it can `mcp-servers.json`; the worst result is a refused boot or a flipped
+scheduler row, tracked in #1216. It is not yet a declared workspace state path,
+so backup and restore do not carry it. It must be 16 KiB or smaller, and it is
+parsed as closed JSON that refuses duplicate keys.
+
+**Refusal.** Any refusal raises `CompositionProfileInvalid`, so nothing boots: no
+lock, no database, no provider. The fix is logged (`Composition refused:
+<reason> …`). Profile reasons:
+- `profile_unknown`;
+- `profile_environment_mismatch`: for example `prod` in development, or `local`
+  in production;
+- `profile_no_login_forbidden`;
+- `profile_trust_bundle_missing`: `seraph-trust` is absent or not first;
+- `profile_core_bundle_missing`, `profile_bundle_unknown`,
+  `profile_bundle_duplicate`.
+
+Patch reasons:
+- `patch_row_pinned`: any row on a `seraph-trust` domain, including inference
+  and the vault;
+- `patch_row_security_setting`: `operator_auth_*`, deployment environment, bind
+  host, journal secrets, vault key;
+- `patch_provider_unreviewed`: no alternative provider is catalogued;
+- `patch_row_unknown`, `patch_value_invalid` (non-boolean, so no string can carry
+  a credential), `patch_row_duplicate`, `patch_row_invalid`, `patch_invalid`,
+  `patch_too_large`;
+- `operator_patch_unsafe`, `operator_patch_invalid`, `operator_patch_too_large`.
+
+Recovery: fix or remove the patch file, or correct `COMPOSITION_PROFILE`, then
+restart. The logged fix names a row only when it is catalogued; any other row
+id from the file is `redacted`.
+
+**Effective values.** `profiles.scheduler_enabled()` returns the last patch
+layer's value for a row, or the live `SCHEDULER_ENABLED` setting when no layer
+set it. The scheduler engine (`init_scheduler`), the runtime lifecycle's
+scheduler domain, the background-inference status and the programme digest gate
+all read it. The composition dump shows two fields:
+- `profile`: `state`, `profile_id`, `source` (`explicit` or
+  `deployment_environment`), `env_file`, `bundles`, `operator_patch`
+  (`present` or `absent`) and `digest`. When the profile is invalid it shows
+  `state: invalid`, `reason`, and `row_id` only when the row is catalogued
+  (otherwise `redacted`).
+- `effective_patch`: the rows that patch layers set, with their layer.
+
+Each bundle also carries `kind` and a `status` of `selected` or `not_selected`.
+The status is `declared` when no profile booted. `./manage.sh -e dev
+composition dump` passes only `COMPOSITION_PROFILE` and `DEPLOYMENT_ENVIRONMENT`
+into its keyless run.
+
+**Not yet built:**
+- Bundles select no code: the Cordis plugin set is still the one reviewed
+  `runtime/cordis/profile.json`.
+- `headless` drops `seraph-cockpit` from the validated tree only. The HTTP/WS API
+  and the web cockpit still run until they become plugin-owned (#1208).
+- The remaining composition environment flags move in #1206.
+
+### Pinned credential vault (#1199)
+
+ADR-036 §3 names the credential vault a pinned trust service. The provider
+worker hosts it as the mandatory `vault` provider, activated after `tasks`
+(dependency: `state`). Its predicate checks that the vault key resolves
+(configured, or a regular 0600 `.vault-key`; an absent file is still generated
+on first use) and that the encrypted `secrets` table is present and readable
+(`SELECT id ... LIMIT 1`). It reads no key name or ciphertext and decrypts
+nothing. Failures are typed: `vault_key_unavailable`, `vault_key_unsafe`,
+`vault_tables_missing`, `vault_storage_unavailable`.
+At startup a failure aborts boot. On a status recheck it marks the provider
+`failed` and `mandatory_ready: false`. `authority` keeps its own vault-key check
+and `authority_vault_key_*` codes, because operator local keys derive from the
+vault key.
+
+The vault has its own owner row, `seraph.vault.v1`, in `seraph-trust`. The row
+is pinned and frozen at the legacy Python owner like tasks: the same
+`is_pinned_domain` predicate, `composition_owner_not_transferable` refusal and
+`runtime_composition_pin_refused` audit row apply. A fresh inventory is seeded
+with it. On an existing install `init_db` adds it once
+(`ownership.introduce_vault_domain_sync`), and only onto the exact post-#1025
+inventory with every row decoding. The step inserts one legacy row plus one
+`runtime_composition_domain_introduced` audit event (`introduced_by: 1199`). It
+touches no other owner row, no `secrets` row and no key file, so stored
+secrets stay readable with the same key. Any other inventory is left alone. An
+older binary rejects the extra row (`composition_inventory_invalid`), so the
+step is forward-only. A restored pre-#1199 backup gains the row on its next
+start.
+
+The vault is Python-only (`worker.PYTHON_ONLY`). It has no Cordis plugin or
+service method, and its readiness is never sent to the child. In the
+composition dump its entry carries only the owner row's codes and the legacy
+digest, with `provider_digest: null`. Not yet built: a `seraph.vault.v1`
+service seam. Consumers still call `src/vault` (`VaultRepository`, `crypto`)
+directly, and a vault provider that fails after startup does not block those
+calls.
 
 ### Scheduler and dispatcher lifecycle (#1025)
 
@@ -1501,18 +1676,20 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > settleable through Inference accounting. Work verticals move to the NEAR
 > TEE text slot (#1159, **Partial**): general-task and specialist planning,
 > Work Board card proposals, guardian opportunity assessment and plans,
-> research dossiers, Mail reply drafts, Calendar meeting prep and
-> communication preparation run there, settling from NEAR billing with no
-> fallback. Repository work (repair) stays blocked on NEAR TEE: its tool is
-> not offered, and an explicit repository plan or admitted repository child
-> is refused with `near_tee_route_unsupported` before any contact. A
-> repository-worded request without that tool is planned (and charged) as
-> ordinary NEAR planning.
+> research dossiers, Mail reply drafts, Calendar meeting prep,
+> communication preparation and repository repair (#1184) run there,
+> settling from NEAR billing with no fallback. Repository repair's
+> code-egress review shows the exact NEAR request body and names NEAR
+> (`near_tee.text via near_tee`): the NEAR gateway receives the selected
+> source and diagnostics as plaintext, attestation is not verified by
+> Seraph, and only that consented body can be sent.
 > Without a ready slot each vertical blocks with its stable reason, which the
 > Work Board explains. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.
 > Chat reports the block as `route_reason: openrouter_retired`; Cordis
-> `inference.request` reports `openrouter_retired`. Without a NEAR TEE vision
+> `inference.request` reports the same precedence as the verticals
+> (`provider_policy_revoked` when model egress is revoked, then the slot's own
+> reason, else `openrouter_retired`/`no_active_provider`). Without a NEAR TEE vision
 > slot, screen analysis reports no cloud provider (`provider: ""`,
 > `provider_blocked_reason: openrouter_retired`); with one it reports
 > `provider: near_tee` once the operator chooses it (#1147 PR4). It always refuses `openrouter`; the next screen-analysis settings save rewrites a
@@ -2096,6 +2273,13 @@ Open `http://127.0.0.1:3001` for the cockpit and
 In a managed development shell, use `./manage.sh -e dev local run` and keep the
 foreground session open while verifying live behavior. Direct `uvicorn`, Vite,
 or detached child-process launches are not the supported lifecycle path.
+
+The backend settings object also reads the repository `.env.dev` directly
+unless `SERAPH_SETTINGS_ENV_FILE` names another file (empty means none).
+`manage.sh` and the compose files never set it. The backend test suite sets it
+empty, removes settings variables other than `WORKSPACE_DIR` from its
+environment, and runs in `TZ=UTC`, so neither a checkout's `.env.dev` nor a
+shell that sourced it can change a test result.
 
 Useful probes:
 

@@ -221,8 +221,11 @@ async def test_runtime_status_ignores_legacy_runtime_override_on_canonical_route
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "openrouter"
-    assert payload["active_profile"] == "openrouter"
+    # The legacy selection is ignored; under ADR-035 with no NEAR TEE slot no
+    # model serves chat, so the identity is "not configured" (#1189).
+    assert payload["provider"] == "none"
+    assert payload["model_label"] == "not configured"
+    assert "codex" not in payload["model"].lower() and "removed" not in payload["model"].lower()
 
 
 @pytest.mark.asyncio
@@ -237,8 +240,11 @@ async def test_runtime_status_ignores_legacy_custom_profile_on_canonical_route()
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["provider"] == "openrouter"
-    assert payload["active_profile"] == "openrouter"
+    # The legacy selection is ignored; under ADR-035 with no NEAR TEE slot no
+    # model serves chat, so the identity is "not configured" (#1189).
+    assert payload["provider"] == "none"
+    assert payload["model_label"] == "not configured"
+    assert "codex" not in payload["model"].lower() and "removed" not in payload["model"].lower()
 
 
 @pytest.mark.asyncio
@@ -287,8 +293,10 @@ def test_operator_runtime_payload_ignores_effective_legacy_override():
     with patch.object(settings, "runtime_model_overrides", "chat_agent=codex"):
         payload = _runtime_status_payload()
 
-    assert payload["provider"] == "openrouter"
-    assert payload["active_profile"] == "openrouter"
+    # Same identity as /api/runtime/status: no NEAR TEE slot, so "not configured" (#1189).
+    assert payload["provider"] == "none"
+    assert payload["model_label"] == "not configured"
+    assert "codex" not in payload["model"].lower()
 
 
 @pytest.mark.asyncio

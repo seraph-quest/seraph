@@ -3,14 +3,13 @@
 One held original Root blocks every repository Task in the workspace, so
 each ordinary path must end visible, bounded and recoverable: closed with
 cleanup proven and capacity released, after which a successor Task runs.
-Inference is scripted only at the iteration's own ``httpx.Client``
-transport; ``forbid_external_inference`` denies every other socket.
+Inference is scripted only at the intercepted NEAR TEE gateway (#1184);
+``forbid_external_inference`` denies every other socket.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 
-import httpx
 import pytest
 from sqlalchemy import select
 
@@ -19,10 +18,8 @@ from src.work_board.contracts import TaskLimits
 from src.work_board.repository import BoardError
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
+from tests.near_tee_support import script_repository_iteration
 from tests.test_repo_work_task_publication import actual_native_source, admit_existing_source_request
-
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
 
 
 async def _original(accounting_db, monkeypatch, **limits):
@@ -80,28 +77,20 @@ async def _execute(flow, patch):
     output = {"summary": "Scripted change", "base_snapshot_sha256": source["source_packet"]["base_snapshot_sha256"],
         "patch_unified_diff": patch, "allowed_paths": ["calculator.py", "tests/test_calculator.py"],
         "test_args": ["pytest", "-q", "tests/test_calculator.py"], "expected_outcome": "Checks run"}
-    def iteration_http(request):
-        assert json.loads(request.content) == egress["request_body"]
-        return httpx.Response(200, json={"id": "scripted-lane-iteration",
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": "0"},
-            "choices": [{"message": {"role": "assistant", "content": json.dumps(output)}}]})
-    real_client = httpx.Client
-    with pytest.MonkeyPatch.context() as transport:
-        transport.setattr(httpx, "Client", lambda *args, **kwargs:
-            real_client(*args, **kwargs, transport=httpx.MockTransport(iteration_http)))
-        await grant_repository_iteration_consent(service.repository_source_service, jobs, job_id=root_id,
-            owner=owner, request=RepoRepairEgressConsentRequest(expected_job_revision=preview["revision"],
-                source_packet_digest=packet["artifact_sha256"],
-                expected_source_manifest_digest=packet["source_manifest_sha256"],
-                expected_profile_id=egress["effective_profile_id"], acknowledged_selected_source=True,
-                idempotency_key="lane-contact", expected_iteration_index=review["iteration_index"],
-                expected_iteration_id=review["iteration_id"], expected_preparation_digest=review["preparation_digest"],
-                expected_request_body_digest=egress["request_body_digest"],
-                expected_request_route_digest=egress["request_route_digest"],
-                expected_egress_envelope_digest=egress["egress_envelope_digest"],
-                expected_diagnostics_digest=egress["diagnostics_digest"],
-                expected_redaction_version=egress["redaction_version"], acknowledged_diagnostics=True),
-            general_task_service=service, principal=flow["operator"].principal)
+    script_repository_iteration(flow["factory"].repository_near_gateway, egress, output)
+    await grant_repository_iteration_consent(service.repository_source_service, jobs, job_id=root_id,
+        owner=owner, request=RepoRepairEgressConsentRequest(expected_job_revision=preview["revision"],
+            source_packet_digest=packet["artifact_sha256"],
+            expected_source_manifest_digest=packet["source_manifest_sha256"],
+            expected_profile_id=egress["effective_profile_id"], acknowledged_selected_source=True,
+            idempotency_key="lane-contact", expected_iteration_index=review["iteration_index"],
+            expected_iteration_id=review["iteration_id"], expected_preparation_digest=review["preparation_digest"],
+            expected_request_body_digest=egress["request_body_digest"],
+            expected_request_route_digest=egress["request_route_digest"],
+            expected_egress_envelope_digest=egress["egress_envelope_digest"],
+            expected_diagnostics_digest=egress["diagnostics_digest"],
+            expected_redaction_version=egress["redaction_version"], acknowledged_diagnostics=True),
+        general_task_service=service, principal=flow["operator"].principal)
     async with flow["factory"]() as db:
         proposal = await db.get(RepoRepairProposal, "repository-proposal:" + review["iteration_id"])
     approval = await approval_repository.get(proposal.approval_id)

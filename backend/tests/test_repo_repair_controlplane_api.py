@@ -14,11 +14,9 @@ from pydantic import ValidationError
 
 from src.api import workflows as workflows_api
 from src.api.workflows import RepoRepairEgressConsentRequest
+from tests.near_tee_support import script_repository_iteration
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_inference_accounting import accounting_db
-
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
 
 
 def _legacy_consent() -> dict[str, object]:
@@ -26,7 +24,7 @@ def _legacy_consent() -> dict[str, object]:
         "expected_job_revision": 1,
         "source_packet_digest": "a" * 64,
         "expected_source_manifest_digest": "b" * 64,
-        "expected_profile_id": "openrouter",
+        "expected_profile_id": "near_tee.text",
         "acknowledged_selected_source": True,
         "idempotency_key": "legacy-consent",
     }
@@ -351,28 +349,8 @@ async def test_authenticated_source_preview_and_consent_use_actual_source_servic
             "expected_outcome": "The addition check passes",
         }
         contacted = []
-
-        def final_http(request):
-            assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
-            assert json.loads(request.content) == egress["request_body"]
-            contacted.append(request)
-            return httpx.Response(
-                200,
-                json={
-                    "id": "scripted-api-source-final-transport",
-                    "usage": {"cost": "0", "prompt_tokens": 1, "completion_tokens": 1},
-                    "choices": [
-                        {"message": {"role": "assistant", "content": json.dumps(output)}}
-                    ],
-                },
-            )
-
-        real_client = httpx.Client
-
-        def owned_client(*args, **kwargs):
-            return real_client(*args, **kwargs, transport=httpx.MockTransport(final_http))
-
-        monkeypatch.setattr(httpx, "Client", owned_client)
+        # #1184: the intercepted NEAR TEE gateway receives exactly the consented body.
+        script_repository_iteration(factory.repository_near_gateway, egress, output, contacted=contacted)
         accepted = await client.post(
             f"/api/workflows/repo-repair/{root_id}/code-egress-consent",
             json=consent_body,
@@ -411,7 +389,7 @@ async def _true():
     ("test_node", False), ("test_node", True)])
 async def test_authenticated_source_three_iteration_approval_execution_and_readback(
     accounting_db, monkeypatch, language, readback_drift, repository_admission_signer):
-    """Real auth/API/SQLite/CPU execution; only final HTTP bytes are scripted."""
+    """Real auth/API/SQLite/CPU execution; only the NEAR gateway answer is scripted."""
     import httpx
     from sqlalchemy import select
     from config.settings import settings
@@ -451,19 +429,13 @@ async def test_authenticated_source_three_iteration_approval_execution_and_readb
     expected_body = None
     output = None
 
-    def final_http(request):
-        assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
-        assert json.loads(request.content) == expected_body
-        contacted.append(json.loads(request.content))
-        return httpx.Response(200, json={
-            "id": "scripted-api-three-final-http",
-            "usage": {"cost": "0", "prompt_tokens": 1, "completion_tokens": 1},
-            "choices": [{"message": {"role": "assistant", "content": json.dumps(output)}}],
-        })
+    def final_completion(body):
+        # #1184: the intercepted NEAR TEE gateway receives exactly the consented body.
+        assert body == expected_body
+        contacted.append(body)
+        return json.dumps(output)
 
-    real_client = httpx.Client
-    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs:
-        real_client(*args, **kwargs, transport=httpx.MockTransport(final_http)))
+    factory.repository_near_gateway.script = final_completion
     app = create_app()
     prefix = f"/api/workflows/repo-repair/{root_id}"
     initial_child = await jobs.get_job(binding.invocation_id)

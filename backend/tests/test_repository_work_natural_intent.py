@@ -1,12 +1,12 @@
 """Natural bug request -> governed C1 plan -> reviewed repository_work -> local patch and pytest.
 
-Inference is replaced only at its owned HTTP transports: the planner's
-``httpx.AsyncClient`` and the repository iteration's ``httpx.Client``. Every
-other socket is denied by ``forbid_external_inference``; no provider is paid.
+Inference is replaced only at the intercepted NEAR TEE gateway (#1184): the
+planner and the repository iteration both run on the NEAR TEE text slot.
+Every other socket is denied by ``forbid_external_inference``; no provider
+is paid.
 """
 import json
 
-import httpx
 import pytest
 from sqlalchemy import select
 
@@ -16,36 +16,20 @@ from src.work_board.general_task_planner import GeneralTaskPlanner
 from src.workflows.repo_repair import RepoWorkInput
 from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
+from tests.near_tee_support import script_repository_iteration
 from tests.test_repo_work_task_publication import actual_native_source
-
-# ADR-035: pins natural-intent repository work whose planner runs over the intercepted historical OpenRouter route
-pytestmark = pytest.mark.openrouter_legacy
 
 
 NATURAL_REQUEST = ("Bug: in the example repository, calculator.add(1, 2) returns -1 instead of 3. "
                    "Fix calculator.py and run the repository's tests.")
 
 
-def _scripted_planner(monkeypatch, plan, calls):
-    """The model's literal reply at the planner's own transport boundary."""
-    class Reply(httpx.AsyncByteStream):
-        async def __aiter__(self):
-            yield json.dumps({"id": "scripted-natural-planner", "usage": {"cost": "0"},
-                "choices": [{"message": {"role": "assistant", "content": json.dumps(plan)}}]}).encode()
-
-    class PlannerTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request):
-            assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
-            body = json.loads(request.content)
-            planning = json.loads(body["messages"][1]["content"])
-            calls.append(planning)
-            return httpx.Response(200, request=request, stream=Reply())
-
-    original = httpx.AsyncClient
-    def owned(*args, **kwargs):
-        kwargs["transport"] = PlannerTransport()
-        return original(*args, **kwargs)
-    monkeypatch.setattr(httpx, "AsyncClient", owned)
+def _scripted_planner(near, plan, calls):
+    """The model's literal planning reply at the intercepted NEAR gateway."""
+    def answer(body):
+        calls.append(json.loads(body["messages"][1]["content"]))
+        return json.dumps(plan)
+    near.script = answer
 
 
 def _plan_review_and_accept(monkeypatch, planner_calls, reviews):
@@ -53,7 +37,7 @@ def _plan_review_and_accept(monkeypatch, planner_calls, reviews):
         # The literal fixture request supplies only the server-inspected
         # RepoWorkInput the scripted model will propose for this bug report.
         work = literal.plan.steps[0]
-        _scripted_planner(monkeypatch, {"schema_version": 1, "revision": 1, "steps": [{
+        _scripted_planner(factory.repository_near_gateway, {"schema_version": 1, "revision": 1, "steps": [{
             "step_id": "repair", "tool_id": "repository_work", "input": work.input,
             "depends_on": [], "output_contract": work.output_contract}]}, planner_calls)
         service.planner = GeneralTaskPlanner()
@@ -131,16 +115,7 @@ async def test_natural_bug_request_plans_reviewed_repository_work_and_returns_pa
         "test_args": ["pytest", "-q", "tests/test_calculator.py"],
         "expected_outcome": "The addition check passes"}
     contacted = []
-    def iteration_http(request):
-        assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
-        assert json.loads(request.content) == egress["request_body"]
-        contacted.append(request)
-        return httpx.Response(200, json={"id": "scripted-natural-iteration",
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": "0"},
-            "choices": [{"message": {"role": "assistant", "content": json.dumps(output)}}]})
-    real_client = httpx.Client
-    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs:
-        real_client(*args, **kwargs, transport=httpx.MockTransport(iteration_http)))
+    script_repository_iteration(factory.repository_near_gateway, egress, output, contacted=contacted)
     deadlines = []
     real_generate = FallbackLiteLLMModel.generate
     def observed_generate(self, *args, **kwargs):

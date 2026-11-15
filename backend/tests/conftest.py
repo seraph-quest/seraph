@@ -89,11 +89,26 @@ _PATCH_TARGETS = [
 _SETTINGS_SNAPSHOT_KEY = pytest.StashKey[dict]()
 
 
+def snapshot_settings() -> dict:
+    """Return a deep copy of the shared settings object's field values."""
+    return copy.deepcopy(settings.__dict__)
+
+
+def restore_settings(snapshot: dict) -> None:
+    """Return the shared settings object to ``snapshot``, in place."""
+    current = settings.__dict__
+    for name in [name for name in current if name not in snapshot]:
+        del current[name]
+    for name, value in snapshot.items():
+        if name not in current or current[name] != value:
+            current[name] = value
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_setup(item):
     # Taken before any fixture runs, so the restore below returns the shared
     # settings object to exactly its pre-test state.
-    item.stash[_SETTINGS_SNAPSHOT_KEY] = copy.deepcopy(settings.__dict__)
+    item.stash[_SETTINGS_SNAPSHOT_KEY] = snapshot_settings()
     yield
 
 
@@ -103,15 +118,14 @@ def pytest_runtest_teardown(item, nextitem):
     # Runs after every fixture finalizer, including ``monkeypatch`` undo, so a
     # direct ``settings.x = ...`` assignment (or an in-place change to a nested
     # settings model) in a test or fixture cannot leak into the next test.
+    # This also undoes settings changes made by a module-, class- or
+    # session-scoped fixture: such a fixture must set them per test instead.
     snapshot = item.stash.get(_SETTINGS_SNAPSHOT_KEY, None)
     if snapshot is None:
         return
-    current = settings.__dict__
-    for name in [name for name in current if name not in snapshot]:
-        del current[name]
-    for name, value in snapshot.items():
-        if name not in current or current[name] != value:
-            current[name] = value
+    # Items live for the whole session; do not keep every test's copy.
+    del item.stash[_SETTINGS_SNAPSHOT_KEY]
+    restore_settings(snapshot)
 
 
 # ── In-memory async DB fixture ──────────────────────────

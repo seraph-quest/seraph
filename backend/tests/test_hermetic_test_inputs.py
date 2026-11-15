@@ -19,13 +19,17 @@ from config.settings import (
     resolve_settings_env_file,
     settings,
 )
-from tests.conftest import TABLE_MODEL_MODULES
+from tests.conftest import TABLE_MODEL_MODULES, restore_settings, snapshot_settings
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _settings_env_file_in_fresh_process(env: dict[str, str]) -> str | None:
-    """Import ``config.settings`` in a new interpreter and report its env file."""
+    """Import ``config.settings`` in a new interpreter and report its env file.
+
+    With the selector unset the child loads the checkout's ``.env.dev`` if one
+    exists, exactly as the launcher would; this probe only reports the path.
+    """
     script = (
         "import json\n"
         "from config.settings import Settings\n"
@@ -122,6 +126,20 @@ def test_direct_settings_assignment_does_not_leak(phase):
     else:
         assert settings.agent_chat_timeout != _LEAK_SENTINEL
         assert settings.repo_sandbox.max_files != -1
+
+
+def test_restore_undoes_direct_and_nested_settings_changes():
+    # Order-independent check of the helpers the teardown hook calls.
+    before_timeout = settings.agent_chat_timeout
+    before_max_files = settings.repo_sandbox.max_files
+    snapshot = snapshot_settings()
+    settings.agent_chat_timeout = _LEAK_SENTINEL
+    settings.repo_sandbox.max_files = -1
+    settings.__dict__["not_a_field"] = 1
+    restore_settings(snapshot)
+    assert settings.agent_chat_timeout == before_timeout
+    assert settings.repo_sandbox.max_files == before_max_files
+    assert "not_a_field" not in settings.__dict__
 
 
 def _table_model_modules_in_src() -> set[str]:

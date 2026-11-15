@@ -51,6 +51,9 @@ os.environ.setdefault("SCHEDULER_ENABLED", "false")
 # and observer tests. A shell that sourced an operator env file (``manage.sh``
 # sources it with ``set -a``) would export these, so pin them here instead of
 # per test. Tests that need another value set it in their own monkeypatch scope.
+# This list covers the variables known to change test outcomes; other settings
+# variables in the process environment are the caller's explicit input (CI and
+# shard runners set some on purpose) and still reach the tests.
 os.environ["DEPLOYMENT_ENVIRONMENT"] = "test"
 os.environ["OPERATOR_AUTH_ALLOW_UNAUTHENTICATED_TESTS"] = "true"
 for _ambient in (

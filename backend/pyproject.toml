@@ -76,8 +76,6 @@ filterwarnings = [
     # collected in pytest's session-end gc pass, outside any test, where a
     # module or test mark cannot apply (seen for test_repo_repair_executors).
     # Files opened by path still fail.
-    "ignore:unclosed file <_io\\.(BufferedReader|FileIO) name=\\d+[ >]:ResourceWarning",
-    "ignore:subprocess \\d+ is still running:ResourceWarning",
     # #1223: pytest-asyncio 1.3.0 asks asyncio.get_event_loop() for the "old"
     # loop when it builds a scoped runner (plugin.py _temporary_event_loop_policy).
     # On a fresh main thread that implicitly creates a loop nobody closes; the

@@ -2274,6 +2274,13 @@ In a managed development shell, use `./manage.sh -e dev local run` and keep the
 foreground session open while verifying live behavior. Direct `uvicorn`, Vite,
 or detached child-process launches are not the supported lifecycle path.
 
+The backend settings object also reads the repository `.env.dev` directly
+unless `SERAPH_SETTINGS_ENV_FILE` names another file (empty means none).
+`manage.sh` and the compose files never set it. The backend test suite sets it
+empty, removes settings variables other than `WORKSPACE_DIR` from its
+environment, and runs in `TZ=UTC`, so neither a checkout's `.env.dev` nor a
+shell that sourced it can change a test result.
+
 Useful probes:
 
 ```bash

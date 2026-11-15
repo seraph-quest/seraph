@@ -218,6 +218,12 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         if failure=="nested_timeout":assert job["status"]=="failed",job
         authority={"job_id":job_id,"authority_digest":marker["authority_digest"],"attempt_id":marker["attempt_id"],"fencing_token":marker["fencing_token"]}
         if stopped:
+            try:
+                proc_stat=Path(f"/proc/{owned_pid}/stat").read_text()[:200]
+            except OSError as exc:
+                proc_stat=repr(exc)
+            print("NODE-DIAG-PROC",proc_stat,supervisor.start_identity(owned_pid),owned_start,
+                [getattr(item,"pid",None) for item in getattr(subprocess,"_active",[]) or []])
             print("NODE-DIAG",json.dumps({"executed":executed,"settled_after":settled_after,"now":time.time(),
                 "job_deadline_at":str(job.get("deadline_at")),"failure_reason":job.get("failure_reason")},default=str))
             assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT),{"settled_after_seconds":round(settled_after,2),

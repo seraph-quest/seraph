@@ -25,12 +25,12 @@ const context = vi.hoisted(() => ({
 vi.mock("../auth/OperatorAuthGate", () => ({ useOptionalOperatorAuth: () => context }));
 vi.mock("./WorkBoardPanel", () => ({ WorkBoardPanel: () => <section aria-label="Work board surface">board</section> }));
 
-const BUILD = "SERAPH_PRIME_v2026.11.14";
+const BUILD = "SERAPH_PRIME_v2026.11.15";
 
 // /api/runtime/status as captured on develop @ 0850178d: a stale configured
 // default at the top level, the real chat route in effective_runtime.
 const runtimeStatus = {
-  version: "2026.11.14",
+  version: "2026.11.15",
   build_id: BUILD,
   provider: "openrouter",
   model: "x-ai/grok-4.1-fast",

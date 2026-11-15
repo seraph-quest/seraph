@@ -319,7 +319,9 @@ def test_stress_scales_the_watchdogs_with_contention(tmp_path: Path, monkeypatch
     [(command, timeout)] = calls
     assert command[command.index("-o") + 1] == "timeout=1260"
     assert "faulthandler_timeout=720" in command
-    assert timeout >= 1260 + 60 or timeout < 1260  # either the scaled bound or the remaining deadline
+    # The per-invocation kill sits above the scaled pytest-timeout (900 s default
+    # raised to 1260 + 60), well inside the 75-minute run window.
+    assert timeout == 1320
 
 
 def test_classification_stops_at_its_deadline_and_says_so(monkeypatch) -> None:
@@ -328,7 +330,8 @@ def test_classification_stops_at_its_deadline_and_says_so(monkeypatch) -> None:
     monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: 1)
     [result] = lanes.classify_nodes(["tests/test_a.py::test_a"], runs=20, timeout=60, deadline=600)
     assert result.runs == 1
-    assert result.verdict == "deterministic (1 of 1 failed alone without added load) (stopped at the job deadline after 1 of 20 runs)"
+    assert result.verdict == ("insufficient runs: the job deadline allowed 1 of 20 (1 failed); "
+                              "rerun with determinism_lanes.py triage")
 
 
 def test_summarize_lists_each_node_and_flags_a_lane_that_reported_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -351,3 +354,24 @@ def test_summarize_lists_each_node_and_flags_a_lane_that_reported_nothing(tmp_pa
     assert "| `tests/test_chat_api.py::test_a` | failure |" in text
     assert "| `tests/test_chat_api.py::test_b` | passed |" in text
     assert "| `tests/test_chat_api.py` | error |" in text
+
+
+def test_a_run_cut_by_the_lane_deadline_is_not_a_failure(tmp_path: Path, monkeypatch, capsys) -> None:
+    readings = iter([0.0, 75 * 60 - 120.0])  # start, then 2 min left in the run window
+    monkeypatch.setattr(lanes.time, "monotonic", lambda: next(readings, 10**6))
+    monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: 124)
+    code = lanes.main(["stress", "--files", "tests/test_check_test_determinism.py", "--runs", "20",
+                       "--contention", "0", "--seed", "1", "--junit-dir", str(tmp_path)])
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "cut by the lane deadline; not counted" in output
+    assert "STRESS STOPPED" in output and "FAILED run" not in output
+
+
+def test_classification_does_not_count_a_deadline_kill(monkeypatch) -> None:
+    readings = iter([0.0, 500.0])  # 100 s left of a 600 s deadline on the second attempt
+    monkeypatch.setattr(lanes.time, "monotonic", lambda: next(readings))
+    codes = iter([1, 124])
+    monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: next(codes))
+    [result] = lanes.classify_nodes(["tests/test_a.py::test_a"], runs=20, timeout=450, deadline=600)
+    assert (result.runs, result.failures) == (1, 1)

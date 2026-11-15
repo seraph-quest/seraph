@@ -64,6 +64,9 @@ SYNTHETIC_CASES = frozenset({"shard-runner-timeout", "invocation-crashed"})
 # pytest exit codes that mean the node did not run (usage, internal, interrupted, none collected).
 NOT_RUN_CODES = frozenset({2, 3, 4, 5})
 NO_TESTS_COLLECTED = 5
+# Below this many completed reruns a deadline-cut classification is reported
+# as insufficient rather than as a verdict.
+MIN_CLASSIFY_RUNS = 5
 # The pyproject watchdogs (#1218). Under N x-core contention a healthy test runs
 # up to N+1 times slower, so the stress lane scales them to stay liveness
 # watchdogs, not gates.
@@ -218,6 +221,9 @@ class Classification:
         if self.runs == 0:
             return "not classified: no time left before the job deadline"
         if self.planned is not None and self.runs < self.planned:
+            if self.runs < MIN_CLASSIFY_RUNS:
+                return (f"insufficient runs: the job deadline allowed {self.runs} of {self.planned} "
+                        f"({self.failures} failed); rerun with determinism_lanes.py triage")
             return f"{self._verdict()} (stopped at the job deadline after {self.runs} of {self.planned} runs)"
         return self._verdict()
 
@@ -246,8 +252,12 @@ def classify_nodes(nodes: list[str], *, runs: int, timeout: float, under_load: b
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining < 30:
                 break
+            cut_by_deadline = remaining is not None and remaining < timeout
             code = run_pytest(pytest_command([node], watchdog_scale=watchdog_scale),
                               timeout=timeout if remaining is None else min(timeout, remaining))
+            if code == 124 and cut_by_deadline:
+                log(f"classify {node}: run {attempt}/{runs} cut by the deadline; not counted")
+                break
             done += 1
             if code in NOT_RUN_CODES:
                 not_run += 1
@@ -346,9 +356,17 @@ def lane_stress(args: argparse.Namespace) -> int:
                     break
                 report = junit_dir / f"run{run:02d}-{re.sub(r'[^A-Za-z0-9_.-]+', '_', label)}.xml"
                 began = time.perf_counter()
+                cut_by_deadline = remaining < run_timeout
                 code = run_pytest(pytest_command(invocation, seed=seed, junit=report, watchdog_scale=scale),
                                   timeout=min(run_timeout, remaining))
                 log(f"run {run}/{args.runs} seed {seed} {label} -> {code} ({time.perf_counter() - began:.1f}s)")
+                if code == 124 and cut_by_deadline:
+                    # Killed by the lane's own deadline, not the test's bound:
+                    # this run did not happen; it is not a failure.
+                    log(f"{label}: run {run} cut by the lane deadline; not counted")
+                    report.unlink(missing_ok=True)
+                    stopped = True
+                    break
                 if code == NO_TESTS_COLLECTED:
                     log(f"{label}: no test ran (all quarantined or none selected); not a failure")
                 elif code != 0:

@@ -87,7 +87,7 @@ def test_ci_retirement_cli_forwards_fixed_policy_and_preserves_arguments():
     assert run.call_args.args[1] == ["tests/test_alpha.py"]
     assert run.call_args.kwargs == {"pytest_args": ["-x"], "file_timeout_seconds": 900,
                                     "exclude_cancelled_eval_harness": True, "keep_going": False,
-                                    "junit_dir": None}
+                                    "junit_dir": None, "no_tests_ok": False}
 
 
 def test_cli_forwards_keep_going():
@@ -1015,3 +1015,10 @@ def test_single_process_timeout_leaves_a_synthetic_report(tmp_path: Path):
                                         timeout_seconds=60) == 124
     case = ElementTree.parse(tmp_path / "junit" / "single-process.xml").getroot().find("testsuite/testcase")
     assert case.get("name") == "shard-runner-timeout"
+
+
+def test_quarantine_only_lane_treats_an_invocation_without_quarantined_tests_as_empty(tmp_path: Path):
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=5)):
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py"], keep_going=True, no_tests_ok=True) == 0
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py"], keep_going=True) == 5

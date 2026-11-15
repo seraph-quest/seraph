@@ -671,6 +671,7 @@ def run_shard_files(
     exclude_cancelled_eval_harness: bool = False,
     keep_going: bool = False,
     junit_dir: Path | None = None,
+    no_tests_ok: bool = False,
 ) -> int:
     """Run each file in its own pytest process.
 
@@ -736,6 +737,11 @@ def run_shard_files(
                 f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)"
                 f"{f' timeout={timeout_seconds}s' if timeout_seconds is not None else ''}"
             )
+            if completed.returncode == 5 and no_tests_ok:
+                # The quarantine lane selects only quarantined tests; a -k split
+                # with none of them collects nothing, which is not a failure.
+                print(f"[backend-shard] {label}: no test selected in this invocation")
+                continue
             if completed.returncode != 0 and report_path is not None and not report_path.exists():
                 # A crash, OOM kill or os._exit leaves pytest no chance to write XML.
                 write_synthetic_junit(
@@ -840,8 +846,9 @@ def main() -> int:
         help="write one JUnit XML report per pytest invocation into this directory",
     )
     parser.add_argument(
-        "--quarantine", choices=("exclude",), default=None,
-        help="skip tests marked quarantine(issue=...) (blocking lanes; #1220)",
+        "--quarantine", choices=("exclude", "only"), default=None,
+        help="exclude: skip tests marked quarantine(issue=...) (blocking lanes); only: run nothing else "
+             "(the non-blocking quarantine lane) (#1220)",
     )
     parser.add_argument(
         "--shuffle-seed", type=int, default=None,
@@ -889,6 +896,7 @@ def main() -> int:
         exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
         keep_going=args.keep_going,
         junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
+        no_tests_ok=args.quarantine == "only",
     )
 
 

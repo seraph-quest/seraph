@@ -2,7 +2,8 @@
 
 The verticals (general task / specialist planning, Work Board proposals,
 guardian assessment and plans, research, Mail, Calendar, communication
-preparation and repository work) own their durable job, reservation,
+preparation, repository work and, since #1184, the repository repair
+iteration) own their durable job, reservation,
 adoption and accounting bindings and call the one shared broker directly.
 This module gives them the existing NEAR TEE adapter path without a new
 lane, queue, budget or ledger and without any fallback:
@@ -145,18 +146,84 @@ def vertical_route_block(runtime_path: str) -> str | None:
     return None
 
 
-def repository_repair_route_block() -> str | None:
-    """Why repository repair cannot run, or None (legacy test mode only).
+REPOSITORY_REPAIR_RUNTIME_PATH = "strategist_agent"
+REPOSITORY_REPAIR_NEAR_TEE_UPSTREAM = "near_tee"
 
-    #1159: the repository repair iteration model step (``repo_repair_source``)
-    binds its consented exact request body, route digest and code-egress
-    consent to the retired OpenRouter target and has no NEAR TEE adapter.
-    With OpenRouter retired it is blocked before any planning, reservation or
-    contact: ``near_tee_route_unsupported`` when a NEAR TEE slot serves the
-    route (never implying a provider outage), else the shared inactive reason.
+
+def repository_repair_route_block() -> str | None:
+    """Why repository repair cannot run, or None.
+
+    #1184: the repository repair iteration model step (``repo_repair_source``)
+    runs on the governed NEAR TEE text slot serving ``strategist_agent``: its
+    consented exact request body is the NEAR body, its route digest names the
+    NEAR target and its code-egress consent names NEAR. The shared
+    ``vertical_route_block`` precedence applies (egress revoked, the slot's
+    own reason, ``openrouter_retired`` / ``no_active_provider``); None when
+    the NEAR TEE text slot serves the route or in the explicit legacy test
+    mode.
     """
-    from .retirement import openrouter_only_route_block
-    return openrouter_only_route_block("strategist_agent")
+    return vertical_route_block(REPOSITORY_REPAIR_RUNTIME_PATH)
+
+
+def repository_repair_route_identity() -> tuple[str, str] | None:
+    """``(profile_id, upstream)`` the repository code-egress consent names.
+
+    The NEAR TEE text slot serving ``strategist_agent`` (local, no contact),
+    or None when none serves it: repository repair has no other route.
+    """
+    route = near_tee_vertical_route(REPOSITORY_REPAIR_RUNTIME_PATH)
+    if route is None:
+        return None
+    return route.profile_id, REPOSITORY_REPAIR_NEAR_TEE_UPSTREAM
+
+
+def repository_repair_output_tokens(maximum: int) -> int:
+    """Output tokens a repository repair request reserves: ``maximum`` capped
+    by the NEAR TEE slot's output bound (the body never asks for more)."""
+    route = near_tee_vertical_route(REPOSITORY_REPAIR_RUNTIME_PATH)
+    return min(int(maximum), route.max_output_tokens) if route is not None else int(maximum)
+
+
+def repository_repair_near_target(*, profile_id: str, profile_contract_hash: str, model_id: str) -> dict[str, Any]:
+    """The NEAR TEE target a repository iteration route digest binds (#1184).
+
+    The fixed NEAR base, the slot profile and its complete contract hash
+    (model and slot settings, cost bound included), the canonical model id
+    and ``x-no-aliasing``. A changed slot is a changed route.
+    """
+    from .configuration import NEAR_TEE_API_BASE
+    return {"source": "primary", "api_base": NEAR_TEE_API_BASE, "profile": profile_id, "model_id": model_id,
+        "options": {"provider_kind": NEAR_TEE_PROVIDER_KIND, "profile_contract_hash": profile_contract_hash,
+            "x-no-aliasing": True}}
+
+
+def repository_iteration_near_transport(messages: list[dict[str, Any]], *, temperature: float, max_tokens: int,
+                                        response_format: dict[str, Any]) -> dict[str, Any]:
+    """The exact NEAR TEE body and route digest of one repository iteration (#1184).
+
+    Pure and provider-free: the body ``prepare_near_tee_call`` builds for
+    these messages on the text slot serving ``strategist_agent``. The owner
+    stages and consents these bytes; the NEAR sync path refuses any other
+    body or target before contact. Raises ``PermissionError`` when no usable
+    NEAR TEE slot serves the route.
+    """
+    from .configuration import near_tee_slot, read_model_fabric_configuration
+    from .near_tee import NearTeeDenied, near_tee_text_body
+    from src.workflows.repo_repair_source import repository_transport_route_digest
+    configured = read_model_fabric_configuration()
+    route = near_tee_vertical_route(REPOSITORY_REPAIR_RUNTIME_PATH, configured)
+    if route is None or configured.egress_revoked:
+        raise PermissionError(vertical_route_block(REPOSITORY_REPAIR_RUNTIME_PATH) or "no_active_provider")
+    slot = near_tee_slot(configured, "text")
+    try:
+        body = near_tee_text_body(slot, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            response_format=response_format)
+    except NearTeeDenied as denied:
+        raise PermissionError(denied.code) from None
+    target = repository_repair_near_target(profile_id=route.profile_id,
+        profile_contract_hash=route.profile_contract_hash, model_id=slot.model_id)
+    return {"body": body, "route_digest": repository_transport_route_digest(target, REPOSITORY_REPAIR_RUNTIME_PATH),
+        "profile_id": route.profile_id, "request_cost_bound_microusd": route.request_cost_bound_microusd}
 
 
 def is_near_tee_context(context: Any) -> bool:

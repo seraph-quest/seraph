@@ -29,7 +29,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from config.settings import settings
-from src.model_fabric import retirement
+from src.model_fabric import near_tee_vertical, retirement
 from src.model_fabric.retirement import NO_ACTIVE_PROVIDER_REASON, OPENROUTER_RETIRED_REASON
 from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_work_board_m6_provider_free_journey import isolated_runtime  # noqa: F401
@@ -39,14 +39,13 @@ from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
 # Retired worlds: retained OpenRouter config, fresh install, a NEAR TEE text
 # slot with its credential missing (the NEAR reason wins, as in Settings), and
-# a NEAR TEE slot that serves the route. #1159: a vertical with a NEAR TEE
-# adapter makes progress in that last world (its full contract is pinned in
-# test_near_tee_vertical_journeys.py); ``near_tee_route_unsupported`` remains
-# only for a vertical still without one.
+# a NEAR TEE slot that serves the route. #1159/#1184: every vertical has a
+# NEAR TEE adapter and makes progress in that last world (its full contract
+# is pinned in test_near_tee_vertical_journeys.py); nothing is refused with
+# ``near_tee_route_unsupported`` any more.
 WORLDS = ["retained_openrouter", "fresh_install", "near_credential_missing", "near_serves_route"]
 EXPECTED = {"retained_openrouter": OPENROUTER_RETIRED_REASON, "fresh_install": NO_ACTIVE_PROVIDER_REASON,
-    "near_credential_missing": "near_tee_credential_required",
-    "near_serves_route": retirement.NEAR_TEE_ROUTE_UNSUPPORTED_REASON}
+    "near_credential_missing": "near_tee_credential_required", "near_serves_route": None}
 _ACTIVE_RUN_STATES = {"accepted", "queued", "running"}
 
 
@@ -135,7 +134,7 @@ def _assert_world(world):
     for route in ("strategist_agent", "general_task_planner", "readonly_research_child"):
         assert effective_workload_policy(route).allowed_provider_kinds == (("near_tee",) if near_serves else ())
         assert retirement.inactive_route_reason(route) == (None if near_serves else EXPECTED[world])
-        assert retirement.openrouter_only_route_block(route) == EXPECTED[world]
+        assert near_tee_vertical.vertical_route_block(route) == EXPECTED[world]
 
 
 async def _operator_session(monkeypatch, secret="vertical-no-provider-auth"):
@@ -774,4 +773,4 @@ async def test_settings_and_verticals_share_inference_block_precedence(client, m
     assert status.json()["inference_block_reason"] == expected
     for route in ("strategist_agent", "general_task_planner", "readonly_research_child"):
         assert retirement.inactive_route_reason(route) == expected
-        assert retirement.openrouter_only_route_block(route) == expected
+        assert near_tee_vertical.vertical_route_block(route) == expected

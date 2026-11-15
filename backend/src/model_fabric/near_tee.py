@@ -325,6 +325,35 @@ def near_tee_agent_message(payload: object, model: str, *, tool_names: tuple[str
     return result, None
 
 
+def near_tee_text_body(slot, *, messages: list[dict[str, object]], temperature: float, max_tokens: int,
+                       stream: bool = False, tools: bool = False,
+                       response_format: dict[str, object] | None = None) -> dict[str, object]:
+    """The exact NEAR TEE chat-completions body for ``slot`` (pure, no contact).
+
+    The one body shape ``prepare_near_tee_call`` sends: the stored canonical
+    model id, sanitized messages, the slot's output bound and temperature.
+    Repository repair (#1184) consents to the bytes this builds before any
+    contact; its NEAR call is then checked against the consented digest.
+    """
+    body: dict[str, object] = {
+        "model": slot.model_id,
+        "messages": _transport_messages(messages, tools=tools),
+        "max_tokens": max(1, min(int(max_tokens), slot.max_output_tokens)),
+        "temperature": float(slot.temperature if slot.temperature is not None else temperature),
+        "n": 1,
+        "stream": bool(stream),
+    }
+    if response_format is not None:
+        body["response_format"] = near_tee_response_format(response_format)
+    return body
+
+
+def near_tee_response_format(response_format: object) -> dict[str, object]:
+    if not isinstance(response_format, dict) or response_format.get("type") not in {"json_object", "json_schema"}:
+        raise NearTeeDenied("near_tee_request_invalid")
+    return response_format
+
+
 async def prepare_near_tee_call(
     *,
     context: InferenceRequestContext,
@@ -392,14 +421,8 @@ async def prepare_near_tee_call(
             expected_fingerprint=configured.near_tee.credential_fingerprint)
     except PermissionError as exc:
         raise NearTeeDenied(str(exc) or "near_tee_credential_unavailable") from None
-    body = {
-        "model": slot.model_id,
-        "messages": _transport_messages(messages, tools=bool(tools)),
-        "max_tokens": max(1, min(int(max_tokens), slot.max_output_tokens)),
-        "temperature": float(slot.temperature if slot.temperature is not None else temperature),
-        "n": 1,
-        "stream": bool(stream),
-    }
+    body = near_tee_text_body(slot, messages=messages, temperature=temperature, max_tokens=max_tokens,
+        stream=stream, tools=bool(tools))
     tool_names: tuple[str, ...] = ()
     if tools:
         body["tools"], tool_names = _transport_tools(tools)
@@ -413,10 +436,9 @@ async def prepare_near_tee_call(
             raise NearTeeDenied("near_tee_request_invalid")
         body["stop"] = list(stop)
     if response_format is not None:
-        if (ModelCapability.STRUCTURED_OUTPUT.value not in capabilities or not isinstance(response_format, dict)
-                or response_format.get("type") not in {"json_object", "json_schema"}):
+        if ModelCapability.STRUCTURED_OUTPUT.value not in capabilities:
             raise NearTeeDenied("near_tee_request_invalid")
-        body["response_format"] = response_format
+        body["response_format"] = near_tee_response_format(response_format)
     if len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()) > NEAR_TEE_REQUEST_CAP:
         raise NearTeeDenied("near_tee_request_too_large")
     bound = bind_final_inference_payload(context, body)
@@ -448,6 +470,11 @@ async def prepare_near_tee_call(
 
 
 def near_tee_precontact_reason(call: NearTeeCall, *, now: float | None = None) -> str | None:
+    # #1184: under a repository iteration witness only the consented exact
+    # body and NEAR target may leave (every NEAR text path runs this guard).
+    from src.workflows.repo_repair_source import repository_iteration_near_call_reason
+    if reason := repository_iteration_near_call_reason(call):
+        return reason
     return precontact_reason(headers=call.headers, deadline_at=call.context.deadline_at,
         inference_timeout_seconds=call.inference_timeout_seconds, now=now)
 

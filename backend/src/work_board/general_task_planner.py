@@ -166,9 +166,10 @@ class GeneralTaskPlanner:
         from src.model_fabric.near_tee_vertical import repository_repair_route_block
         if (any(item.tool_id == "repository_work" for item in descriptors)
                 and (reason := repository_repair_route_block())):
-            # #1159: repository repair cannot execute on NEAR TEE; refuse its
-            # planning before any group, job, reservation or contact so no
-            # planning money is spent on work that cannot run.
+            # #1184: repository repair runs only on the NEAR TEE text slot
+            # serving strategist_agent; without it, refuse planning before any
+            # group, job, reservation or contact so no planning money is spent
+            # on work that cannot run.
             raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
                 route_block=True, provider_contact="not_started")
         if reason := inactive_route_reason("general_task_planner"):

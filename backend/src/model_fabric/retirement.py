@@ -93,6 +93,9 @@ def assert_openrouter_contact_allowed(*, provider_kind: object = None, api_base:
 
 NO_ACTIVE_PROVIDER_LABEL = "No active inference provider — configure the NEAR TEE slot for this route in Settings"
 PROVIDER_POLICY_REVOKED_REASON = "provider_policy_revoked"
+# #1159 refusal of a vertical with no NEAR TEE adapter. Since #1184 every
+# vertical has one and nothing new is refused with it; the code stays so
+# Tasks already blocked with it keep their stable label.
 NEAR_TEE_ROUTE_UNSUPPORTED_REASON = "near_tee_route_unsupported"
 NEAR_TEE_ROUTE_UNSUPPORTED_LABEL = ("This capability is not yet available on NEAR TEE; tracked in #1159. "
     "Its model step still uses the retired OpenRouter adapter, so nothing was contacted")
@@ -155,19 +158,6 @@ def inactive_route_reason(runtime_path: str) -> str | None:
         if slot_name is not None and near_tee_slot(configured, slot_name) is not None:
             near_reason = near_tee_slot_block_reason(configured, slot_name)
     return inference_block_reason(configured, near_tee_ready=near_ready, near_tee_reason=near_reason)
-
-
-def openrouter_only_route_block(runtime_path: str) -> str | None:
-    """Route block for a vertical whose model step has no NEAR TEE adapter yet.
-
-    The inactive-route reason when no provider serves the route; otherwise,
-    when NEAR TEE serves it, ``near_tee_route_unsupported`` (#1159), because
-    the vertical cannot use NEAR TEE and must not imply a provider outage.
-    None only in the explicit legacy test mode.
-    """
-    if not openrouter_retired():
-        return None
-    return inactive_route_reason(runtime_path) or NEAR_TEE_ROUTE_UNSUPPORTED_REASON
 
 
 def inactive_route_label(reason: str) -> str:

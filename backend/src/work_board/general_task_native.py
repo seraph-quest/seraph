@@ -43,7 +43,7 @@ def _is_repository_work_child(child_projection) -> bool:
 
 
 def _repository_route_blocked() -> dict | None:
-    """The blocked no-contact outcome when repository repair has no route (#1159)."""
+    """The blocked no-contact outcome when repository repair has no route (#1159, #1184)."""
     from src.model_fabric.near_tee_vertical import repository_repair_route_block
     reason = repository_repair_route_block()
     if reason is None:

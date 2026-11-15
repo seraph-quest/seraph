@@ -843,6 +843,22 @@ def _repair_approval_fingerprint(row: RepoRepairProposalRow, expires_at: datetim
     )
 
 
+
+def repo_repair_effective_route() -> tuple[str, str]:
+    """``(profile_id, upstream)`` of the strategist route repair contacts (#1184).
+
+    Repository repair runs only on the governed NEAR TEE text slot serving
+    ``strategist_agent``: the profile is that slot's profile and the upstream
+    is ``near_tee`` (NEAR receives the consented source as plaintext).
+    Local and provider-free; raises when no NEAR TEE slot serves the route.
+    """
+    from src.model_fabric.near_tee_vertical import repository_repair_route_block, repository_repair_route_identity
+    identity = repository_repair_route_identity()
+    if identity is None:
+        raise RepoRepairError("model_route_blocked", repository_repair_route_block() or "near_tee_slot_unconfigured",
+            status_code=409)
+    return identity
+
 class RepoRepairService:
     """Owner-bound inspection, model proposal, consent, and resolution seam."""
 
@@ -3238,10 +3254,12 @@ class RepoRepairService:
             fencing_token=int(fencing_token),
         )
         try:
+            from src.model_fabric.near_tee_vertical import repository_repair_output_tokens
             context = build_canonical_inference_context(
                 REPO_REPAIR_RUNTIME_PATH,
                 payload=messages,
-                output_tokens=REPO_REPAIR_MAX_OUTPUT_TOKENS,
+                # #1184: the NEAR TEE slot's output bound (at most 4096).
+                output_tokens=repository_repair_output_tokens(REPO_REPAIR_MAX_OUTPUT_TOKENS),
                 timeout_seconds=120,
                 principal=principal,
                 session_id=principal.session_id,
@@ -3305,20 +3323,17 @@ class RepoRepairService:
                 temperature=0.2,
                 max_tokens=REPO_REPAIR_MAX_OUTPUT_TOKENS,
                 runtime_path=REPO_REPAIR_RUNTIME_PATH,
-                profile=consent.effective_profile_id,
             )
+            observed_profile, observed_upstream = repo_repair_effective_route()
         except Exception as exc:
             raise RepoRepairError("model_route_blocked", "The consented strategist profile is unavailable", status_code=409) from exc
-        observed_profile = str(model_kwargs.get("runtime_profile") or "")
-        observed_base = str(model_kwargs.get("api_base") or "").rstrip("/")
-        observed_upstream = "openrouter" if "openrouter.ai/api/v1" in observed_base else observed_base
         expected_upstream = str(consent.effective_upstream or "").strip().rstrip("/")
         if recovered_response is not None and (
             observed_profile != str(recovered_response.get("profile"))
             or str(recovered_response.get("upstream") or "") not in {observed_upstream, expected_upstream}
         ):
             raise RepoRepairError("repair_response_checkpoint_conflict", "The recovered response route no longer matches the consented route", status_code=409)
-        if observed_profile != str(consent.effective_profile_id) or expected_upstream not in {observed_upstream, "openrouter" if observed_upstream == "openrouter" else observed_base}:
+        if observed_profile != str(consent.effective_profile_id) or expected_upstream != observed_upstream:
             raise RepoRepairError(
                 "model_route_consent_mismatch",
                 "The effective model route does not match the finite egress consent",
@@ -3880,22 +3895,14 @@ class RepoRepairService:
                 )
             current_consent = current_consents[0]
             try:
-                current_model_kwargs = build_model_kwargs(
-                    temperature=0.2,
-                    max_tokens=REPO_REPAIR_MAX_OUTPUT_TOKENS,
-                    runtime_path=REPO_REPAIR_RUNTIME_PATH,
-                    profile=current_consent.effective_profile_id,
-                )
+                current_profile, current_upstream = repo_repair_effective_route()
             except Exception as exc:
                 raise RepoRepairError("model_route_blocked", "The governed strategist route is unavailable", status_code=409) from exc
-            current_profile = str(current_model_kwargs.get("runtime_profile") or "")
-            current_base = str(current_model_kwargs.get("api_base") or "").rstrip("/")
-            current_upstream = "openrouter" if "openrouter.ai/api/v1" in current_base else current_base
             expected_upstream = str(current_consent.effective_upstream or "").strip().rstrip("/")
             if (
                 current_profile != str(row.model_profile_id)
                 or current_profile != str(current_consent.effective_profile_id)
-                or expected_upstream not in {current_upstream, "openrouter" if current_upstream == "openrouter" else current_base}
+                or expected_upstream != current_upstream
             ):
                 raise RepoRepairError(
                     "model_route_consent_mismatch",

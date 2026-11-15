@@ -711,9 +711,13 @@ to the exact NEAR TEE body (`finalize_iteration_egress` builds the body the
 text slot sends), its route digest names the NEAR target (fixed base, slot
 profile and contract hash, model, `x-no-aliasing`), its code-egress consent
 names `near_tee` and says the NEAR gateway receives the source and
-diagnostics as plaintext, and the NEAR sync path (and the precontact guard)
-refuses any other body or target before contact. The single-shot repair
-consent names the same route. Every per-request gate (model echo,
+diagnostics as plaintext. While the call runs, a model-fabric egress binding
+lets the NEAR TEE adapter send only that exact request: any other body or
+target is refused in `prepare_near_tee_call`, before any reservation, and
+again at the precontact guard. The single-shot repair consent pins the same
+exact body and route digests. A repository-sized slot at real NEAR prices
+costs about 2.7k micro-USD per request, so the slot bound and Task/Goal limits
+must allow that (availability only). Every per-request gate (model echo,
 `x-no-aliasing`, billing readback, Unknown liability, cost bound) is
 unchanged; `near_tee_route_unsupported` is no longer produced and stays only
 as a label for Tasks already blocked with it. A NEAR TEE answer that is not adopted (for

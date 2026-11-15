@@ -198,26 +198,50 @@ failing. Therefore:
   ADR-036 is unaffected.
 
 **Amendment 2026-11-15 ([#1184](https://github.com/seraph-quest/seraph/issues/1184)).**
-Repository repair (`repo_repair_source`), the last vertical without a NEAR
-TEE path, runs on the text slot serving `strategist_agent`:
+Repository repair, the last vertical without a NEAR TEE path, runs on the
+text slot serving `strategist_agent`. This holds for both repair paths: the
+iterative source callback (`repo_repair_source`) and the single-shot
+`engineering.repo-repair.v1` proposal.
 
-- The operator consents to the exact NEAR TEE request body (the body the
-  text-slot adapter sends for those messages: canonical model id, slot
-  output bound and temperature, structured output schema; nothing else).
-  The route digest binds the fixed NEAR base, the slot profile and its
-  complete contract hash, the model and `x-no-aliasing`.
-- Code-egress consent names `near_tee` and states that the NEAR gateway
-  receives the selected source and diagnostics as plaintext, that
-  attestation is not verified by Seraph and that there is no end-to-end
-  encryption.
-- Before admission, and again in the precontact guard, a repository
-  iteration's NEAR call must carry exactly the consented body and target;
-  otherwise it is refused (`repository_iteration_final_transport_changed`)
-  with nothing reserved or sent. OpenRouter is never a repository target.
-- The iteration reserves the slot's request cost bound. Every other gate
-  is unchanged (model echo, `x-no-aliasing`, billing readback, Unknown
-  liability, cost bound, consent, serial lane); no time-based guard is added.
-  `near_tee_route_unsupported` is no longer produced.
+- Each consent pins one exact NEAR TEE request:
+  - The **body digest** of the body the text-slot adapter sends for those
+    messages: canonical model id, slot output bound and temperature, the
+    structured-output schema, nothing else.
+  - The **route digest**: the fixed NEAR base, the slot profile and its
+    complete contract hash, the model and `x-no-aliasing`.
+  - The iteration stores both digests with its prepared record and consent
+    row. The single-shot consent row stores them too
+    (`serialized_request_sha256`, `request_route_digest`).
+  - A single-shot consent granted without a usable NEAR TEE route pins
+    nothing. So does one granted before this amendment. Generation refuses
+    such a consent, and any request whose recomputed digests differ.
+- Code-egress consent names `near_tee` and says three things: the NEAR
+  gateway receives the selected source and diagnostics as plaintext, Seraph
+  does not verify attestation, and there is no end-to-end encryption.
+- While the model call runs, the owner binds the pinned pair through the
+  model fabric's `bind_near_tee_egress`. Every NEAR TEE text call made under
+  that binding is checked twice:
+  - in `prepare_near_tee_call`, before any admission or reservation, on every
+    path including streaming;
+  - in the precontact guard, under the contact writer, just before bytes
+    leave.
+- Any other body, target or request shape (stream, tools, no
+  `x-no-aliasing`, another runtime path) is refused with the binding's
+  stable code (`repository_iteration_final_transport_changed`,
+  `repository_repair_final_transport_changed`). A refusal at preparation
+  reserves nothing. A refusal at the guard is a durable never-contacted
+  denial. Nothing is sent in either case.
+- Under a binding, no non-NEAR target may run. OpenRouter is never a
+  repository target.
+- The iteration reserves the slot's request cost bound. Every other gate is
+  unchanged: model echo, `x-no-aliasing`, billing readback, Unknown
+  liability, cost bound, consent and the serial lane. No time-based guard is
+  added. `near_tee_route_unsupported` is no longer produced.
+- Availability note: at NEAR's real catalog prices a repository-sized slot
+  costs about 2.7k micro-USD per request (Qwen/Qwen3.8-27B, 32,768 input and
+  1,024 output tokens). The operator's slot bound, lane ceiling and Task and
+  Goal cost limits must allow that much per repair iteration. This affects
+  availability only, not the gates above.
 
 ### Capability proofs kept
 

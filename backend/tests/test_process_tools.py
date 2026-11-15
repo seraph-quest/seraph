@@ -1320,7 +1320,7 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monk
     assert not worker_root.exists()
 
 
-def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatch):
+def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatch, request):
     script_name = _write_script(
         "wave_process_stale_identity.py",
         """
@@ -1331,6 +1331,15 @@ def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatc
     started = start_process(command="python3", args_json=f'["{script_name}"]')
     process_id = started.split("process=")[1].split(",")[0]
     managed = process_runtime_manager._processes[process_id]
+
+    def reap_refused_child() -> None:
+        # The refused stop deliberately leaves the child running; reap it so
+        # no live Popen outlives the test (#1218). Popen.kill uses os.kill,
+        # not the patched killpg.
+        managed.popen.kill()
+        managed.popen.wait()
+
+    request.addfinalizer(reap_refused_child)
     assert managed.leader_identity is not None
     stale_identity = _ProcessLeaderIdentity(
         pid=managed.leader_identity.pid,

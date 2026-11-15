@@ -1744,6 +1744,12 @@ class _BoundedPipeCapture:
             # The parent closes a descendant-held pipe after bounded cleanup.
             return
         finally:
+            # The drain owns the pipe: release it once it is read to EOF (or
+            # the parent closed it), so no file object outlives the capture.
+            try:
+                self._stream.close()
+            except (OSError, ValueError):
+                pass
             self._done.set()
 
     @property

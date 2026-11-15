@@ -365,3 +365,88 @@ def test_snippet_lines_follow_ast_line_numbers(tmp_path: Path) -> None:
     tests, _ = make_tree(tmp_path, {"test_a.py": "x = ' '\nimport time\ntime.sleep(1)\n"})
     result = checker.scan(tests, tmp_path)
     assert [(finding.line, finding.snippet) for finding in result.findings] == [(3, "time.sleep(1)")]
+
+
+def test_quarantine_marker_must_name_an_issue(tmp_path: Path) -> None:
+    tests, _ = make_tree(tmp_path, {"test_a.py": """
+        import pytest
+
+        @pytest.mark.quarantine(issue=1234)
+        def test_named():
+            pass
+
+        @pytest.mark.quarantine(issue="#1235")
+        def test_named_string():
+            pass
+
+        @pytest.mark.quarantine
+        def test_bare():
+            pass
+
+        @pytest.mark.quarantine(issue="soon")
+        def test_not_an_issue():
+            pass
+
+        @pytest.mark.quarantine(reason="flaky")
+        def test_reason_only():
+            pass
+    """})
+    result = checker.scan(tests, tmp_path)
+    assert [issue for _, _, issue in result.quarantined] == ["1234", "1235"]
+    assert len(result.errors) == 3
+    assert all("pytest.mark.quarantine requires issue=" in error for error in result.errors)
+
+
+def test_quarantine_is_capped(tmp_path: Path) -> None:
+    body = "import pytest\n\n" + "".join(
+        f"@pytest.mark.quarantine(issue={1000 + index})\ndef test_{index}():\n    pass\n\n"
+        for index in range(checker.QUARANTINE_CAP + 1)
+    )
+    tests, _ = make_tree(tmp_path, {"test_a.py": body})
+    result = checker.scan(tests, tmp_path)
+    assert len(result.quarantined) == checker.QUARANTINE_CAP + 1
+    assert any("exceed the cap of 10" in error for error in result.errors)
+
+
+def test_quarantine_only_on_a_test_function_decorator(tmp_path: Path) -> None:
+    tests, _ = make_tree(tmp_path, {"test_a.py": """
+        import pytest
+
+        pytestmark = [pytest.mark.quarantine(issue=1)]
+        held = pytest.mark.quarantine(issue=2)
+
+        @pytest.mark.quarantine(issue=3)
+        class TestA:
+            def test_a(self):
+                pass
+
+        @pytest.mark.parametrize("x", [pytest.param(1, marks=pytest.mark.quarantine(issue=4))])
+        def test_param(x):
+            pass
+
+        @pytest.mark.quarantine(issue=5)
+        def test_ok():
+            pass
+    """})
+    result = checker.scan(tests, tmp_path)
+    assert sum("not a class or module" in error for error in result.errors) == 2
+    assert sum("only supported as a decorator on a test function" in error for error in result.errors) == 2
+    assert ("backend/tests/test_a.py", 17, "5") in result.quarantined
+
+
+def test_lane_file_listings(tmp_path: Path) -> None:
+    tests, baseline = make_tree(tmp_path, {
+        "test_q.py": "import pytest\n\n@pytest.mark.quarantine(issue=7)\ndef test_a():\n    pass\n",
+        "test_r.py": "import pytest\n\n@pytest.mark.realtime(reason='kernel signal')\ndef test_a():\n    pass\n",
+        "test_plain.py": "def test_a():\n    pass\n",
+    })
+    quarantined = run_tree(tests, tmp_path, baseline, "--quarantined-files")
+    realtime = run_tree(tests, tmp_path, baseline, "--realtime-files")
+    assert quarantined.returncode == realtime.returncode == 0
+    assert quarantined.stdout.split() == ["tests/test_q.py"]
+    assert realtime.stdout.split() == ["tests/test_r.py"]
+
+
+def test_quarantine_marker_is_registered_for_strict_markers() -> None:
+    pyproject = (ROOT / "backend/pyproject.toml").read_text(encoding="utf-8")
+    assert '"quarantine(issue):' in pyproject

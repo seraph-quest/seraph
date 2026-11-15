@@ -58,6 +58,7 @@ addopts = "--cov=src --cov-report=term-missing --strict-markers"
 markers = [
     "openrouter_legacy: explicitly re-enable retired OpenRouter (ADR-035) to pin historical mechanics; never production behavior",
     "realtime(reason): the test genuinely depends on real elapsed time (kernel signals, SQLite busy handler, a real browser); reason= is required. The only exemption in scripts/check_test_determinism.py (#1218)",
+    "quarantine(issue): a triaged intermittent test; issue= is required. Skipped by blocking lanes (--quarantine=exclude) and run by the non-blocking quarantine lane (#1220); leaves only through a fix with a 50-of-50 stress pass",
 ]
 # Determinism visibility (#1218). Leaked resources, unraisable exceptions and
 # never-awaited coroutines fail the test that produced them. Any narrower

@@ -57,5 +57,6 @@ def test_final_image_places_node_and_package_where_the_backend_resolves_them():
     assert re.search(r"^ADD \. /app$", final, re.M) and re.search(r"^WORKDIR /app$", final, re.M)
     in_image = PurePosixPath("/app/src/runtime_plugins/composition.py").parents[3] / "runtime" / "cordis"
     assert str(in_image) == "/runtime/cordis"
-    workflow = (REPO / ".github/workflows/test.yml").read_text()
+    # The backend CI toolchain lives in the composite action every test lane uses (#1220).
+    workflow = (REPO / ".github/actions/backend-test-env/action.yml").read_text()
     assert f'node-version: "{NODE}"' in workflow and f'test "$(npm --version)" = "{NPM_VERSION}"' in workflow

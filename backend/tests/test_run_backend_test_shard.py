@@ -931,7 +931,7 @@ def test_tracked_leak_filters_apply_only_to_the_listed_files(tmp_path: Path):
     args = tracked_warning_args([tracked])
     assert "-Wignore:unclosed file <_io.BufferedReader name=1:ResourceWarning" in args
     assert "-Wignore:unclosed file <_io.FileIO name=9:ResourceWarning" in args
-    assert "-Wignore:subprocess :ResourceWarning" in args
+    assert "-Wignore:subprocess 4:ResourceWarning" in args
     assert not any("name='" in arg or "name=0" in arg for arg in args)
     with patch("scripts.run_backend_test_shard.subprocess.run",
                return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
@@ -940,3 +940,17 @@ def test_tracked_leak_filters_apply_only_to_the_listed_files(tmp_path: Path):
     assert not any(arg.startswith("-W") for arg in first)
     assert sum(arg.startswith("-W") for arg in second) == len(args)
     assert all((Path(__file__).resolve().parents[1] / path).is_file() for path in TRACKED_LEAK_FILES)
+
+
+def test_cli_files_runs_the_given_files_instead_of_a_shard():
+    with patch.object(sys, "argv", ["runner", "--files", "tests/test_alpha.py", "tests/test_beta.py"]), patch(
+        "scripts.run_backend_test_shard.shard_for_index") as shard, patch(
+        "scripts.run_backend_test_shard.run_shard_files", return_value=0) as run:
+        assert main() == 0
+    shard.assert_not_called()
+    assert run.call_args.args[1] == ["tests/test_alpha.py", "tests/test_beta.py"]
+
+
+def test_cli_requires_a_shard_or_files():
+    with patch.object(sys, "argv", ["runner"]), pytest.raises(SystemExit):
+        main()

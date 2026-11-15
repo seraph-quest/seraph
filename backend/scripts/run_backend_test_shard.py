@@ -148,7 +148,7 @@ FULLY_RETIRED_EVAL_INVOCATIONS = {
 TRACKED_LEAK_FILTERS: tuple[str, ...] = (
     *(f"ignore:unclosed file <_io.{kind} name={digit}:ResourceWarning"
       for kind in ("BufferedReader", "FileIO") for digit in "123456789"),
-    "ignore:subprocess :ResourceWarning",
+    *(f"ignore:subprocess {digit}:ResourceWarning" for digit in "123456789"),
 )
 # The files whose runs failed without the filters (throwaway PR #1233).
 TRACKED_LEAK_FILES: frozenset[str] = frozenset({
@@ -765,8 +765,13 @@ def run_shard_files(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--shard-count", type=int, required=True)
-    parser.add_argument("--shard-index", type=int, required=True)
+    parser.add_argument("--shard-count", type=int)
+    parser.add_argument("--shard-index", type=int)
+    parser.add_argument(
+        "--files", nargs="+", default=None,
+        help="run these test files (relative to backend/) instead of a shard, with the same per-file "
+             "handling, e.g. the #1224 leak exceptions for TRACKED_LEAK_FILES",
+    )
     parser.add_argument("--file-timeout-seconds", type=int, default=None)
     parser.add_argument(
         "--exclude-cancelled-eval-harness", action="store_true",
@@ -787,7 +792,12 @@ def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
 
     root = Path(__file__).resolve().parents[1]
-    files = shard_for_index(root, shard_count=args.shard_count, shard_index=args.shard_index)
+    if args.files is not None:
+        files = list(args.files)
+    elif args.shard_count is None or args.shard_index is None:
+        parser.error("give --shard-count and --shard-index, or --files")
+    else:
+        files = shard_for_index(root, shard_count=args.shard_count, shard_index=args.shard_index)
     extra_args = list(args.pytest_args)
     if extra_args[:1] == ["--"]:
         extra_args = extra_args[1:]

@@ -544,7 +544,13 @@ def main(argv: list[str]) -> int:
         print(f"test determinism: cannot read baseline: {error}", file=sys.stderr)
         return 1
     if args.rename:
+        if result.errors:
+            print("test determinism: --rename refuses to write while there are scan errors", file=sys.stderr)
+            return 1
         for old, new in args.rename:
+            if not (root / new).is_file():
+                print(f"test determinism: --rename: {new} does not exist", file=sys.stderr)
+                return 1
             if old not in baseline:
                 print(f"test determinism: --rename: {old} has no baseline entry", file=sys.stderr)
                 return 1

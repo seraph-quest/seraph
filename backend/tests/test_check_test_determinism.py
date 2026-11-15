@@ -270,8 +270,11 @@ def test_rename_moves_the_baseline_entry_and_a_missing_file_says_how(tmp_path: P
     assert renamed.returncode == 0, renamed.stderr
     assert json.loads(baseline.read_text())["files"] == {"backend/tests/test_new.py": {"sleep": 1}}
     assert run_tree(tests, tmp_path, baseline).returncode == 0
-    unknown = run_tree(tests, tmp_path, baseline, "--rename", "backend/tests/test_gone.py", "backend/tests/x.py")
+    unknown = run_tree(tests, tmp_path, baseline, "--rename", "backend/tests/test_gone.py",
+                       "backend/tests/test_new.py")
     assert unknown.returncode == 1 and "has no baseline entry" in unknown.stderr
+    absent = run_tree(tests, tmp_path, baseline, "--rename", "backend/tests/test_new.py", "backend/tests/x.py")
+    assert absent.returncode == 1 and "backend/tests/x.py does not exist" in absent.stderr
 
 
 def test_realtime_marker_without_reason_is_an_error(tmp_path: Path) -> None:

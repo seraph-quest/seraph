@@ -148,7 +148,12 @@ test file.
 Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
 never-awaited coroutines are errors. A per-test watchdog dumps stacks after
 240 s and fails the test after 420 s. Any `filterwarnings` exception must be
-narrow and name its issue.
+narrow and name its issue. Until #1224 lands, nine repo worker/supervisor test
+files (`TRACKED_LEAK_FILES` in `backend/scripts/run_backend_test_shard.py`)
+still leak child pipes and get their exception as `-W` from the shard runner
+only; run them with
+`uv run python scripts/run_backend_test_shard.py --files tests/<file>.py`,
+since plain `uv run pytest` on them fails on the leak.
 
 Core startup does not require a provider key. Inference requires explicit
 configuration, consent, verified capability and budget; a configured route is

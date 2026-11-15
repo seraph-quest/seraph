@@ -1771,3 +1771,16 @@ def test_process_output_logs_live_outside_the_workspace():
     assert payload["worker_disposable"] is True
     assert payload["trust_partition"] == "session_disposable_worker"
     assert not str(payload["worker_root"]).startswith(str(Path(settings.workspace_dir).resolve()))
+
+
+def test_bounded_pipe_capture_closes_its_pipe_after_draining_to_eof():
+    """The drain owns the pipe: once it reads EOF the file object is closed (#1218)."""
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    capture = process_tools_module._BoundedPipeCapture(stream)
+    os.write(write_fd, b"drained output")
+    os.close(write_fd)
+    capture.finish(timeout=5.0)
+    assert capture.done
+    assert stream.closed
+    assert capture.text() == "drained output"

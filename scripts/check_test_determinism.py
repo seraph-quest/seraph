@@ -27,14 +27,21 @@ code inside child-script strings is not counted) and counts these hazards:
     ``get_session`` target (a string or f-string), outside ``backend/tests/support/``.
 ``popen``
     Raw ``subprocess.Popen(...)``, outside ``backend/tests/support/``.
+``realtime``
+    Each ``@pytest.mark.realtime(reason=...)`` marker. The marker is ratcheted
+    too: adding one takes a reviewed hand edit of the baseline (``--update``
+    only lowers counts).
 
 The per-file, per-category counts must equal the baseline exactly. A count
 above the baseline fails, and so does a count below it until the baseline is
 lowered with ``--update``, so the numbers only go down. ``--update`` never
-raises a count, and refuses to write while any file fails to scan. The only
-exemption is ``@pytest.mark.realtime(reason="...")`` (keyword ``reason`` is
-required) as a decorator on the enclosing test function or class, or in the
-module's ``pytestmark``.
+raises a count, and refuses to write while any file fails to scan. A renamed
+file keeps its entry with ``--rename OLD NEW``; a split file needs its counts
+moved by hand. The only exemption is ``@pytest.mark.realtime(reason="...")``
+(keyword ``reason`` is required) as a decorator on the enclosing test function
+or class, or in the module's ``pytestmark``. It exempts only ``sleep`` and
+``clock-compare``: a real-time test still may not mutate ambient state, patch
+``get_session`` or spawn unowned processes.
 """
 
 from __future__ import annotations
@@ -61,8 +68,10 @@ CATEGORIES = (
     "environ-assign",
     "get-session-patch",
     "popen",
+    "realtime",
 )
 SUPPORT_EXEMPT = frozenset({"get-session-patch", "popen"})
+REALTIME_EXEMPT = frozenset({"sleep", "clock-compare"})
 _REAL_TIME = ("Synchronise on a cause (event, gate, notification) instead, or mark a test that must "
               "use real time with @pytest.mark.realtime(reason=...).")
 REMEDY = {
@@ -73,6 +82,8 @@ REMEDY = {
     "environ-assign": "Use monkeypatch.setenv / delenv so the environment is restored.",
     "get-session-patch": "Route the test through the session-factory seam (tests/support/) instead.",
     "popen": "Spawn through an owning helper in tests/support/ that reaps the child.",
+    "realtime": ("A new realtime marker needs a reviewed baseline edit: raise this file's realtime count "
+                 "in scripts/test_determinism_baseline.json in the same change, with the reason."),
 }
 
 CLOCK_FUNCTIONS = frozenset(
@@ -175,6 +186,7 @@ class Scanner(ast.NodeVisitor):
         self.exempt: list[Finding] = []
         self.errors: list[str] = []
         self.exempt_depth = 0
+        self.module_exempt = False
         self.handler_stack: list[bool] = []
         self.tainted_stack: list[set[str]] = [self._tainted(tree.body)]
         self.module_exempt = self._module_exempt(tree)
@@ -189,6 +201,7 @@ class Scanner(ast.NodeVisitor):
                 f"{self.display_path}:{node.lineno}: pytest.mark.realtime requires a non-empty reason=..."
             )
             return False
+        self.record(node, "realtime")
         return True
 
     def _module_exempt(self, tree: ast.Module) -> bool:
@@ -198,12 +211,12 @@ class Scanner(ast.NodeVisitor):
             if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
                 continue
             values = node.value.elts if isinstance(node.value, (ast.List, ast.Tuple)) else [node.value]
-            if any(self._check_marker(node, value) for value in values):
+            if any([self._check_marker(node, value) for value in values]):
                 return True
         return False
 
     def _visit_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
-        exempt = any(self._check_marker(node, decorator) for decorator in node.decorator_list)
+        exempt = any([self._check_marker(node, decorator) for decorator in node.decorator_list])
         if exempt:
             self.exempt_depth += 1
         is_function = not isinstance(node, ast.ClassDef)
@@ -228,7 +241,7 @@ class Scanner(ast.NodeVisitor):
             return
         snippet = self.lines[node.lineno - 1].strip()[:120] if node.lineno <= len(self.lines) else ""
         finding = Finding(self.display_path, node.lineno, category, snippet)
-        if self.module_exempt or self.exempt_depth:
+        if (self.module_exempt or self.exempt_depth) and category in REALTIME_EXEMPT:
             self.exempt.append(finding)
         else:
             self.findings.append(finding)
@@ -495,6 +508,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="lower baseline counts to the current counts (never raises one); creates a missing baseline",
     )
     parser.add_argument("--list", action="store_true", help="print every counted finding")
+    parser.add_argument(
+        "--rename", nargs=2, metavar=("OLD", "NEW"), action="append", default=[],
+        help="move a renamed file's baseline entry (repo-relative paths, e.g. backend/tests/test_a.py); repeatable",
+    )
     return parser.parse_args(argv)
 
 
@@ -526,6 +543,18 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError) as error:
         print(f"test determinism: cannot read baseline: {error}", file=sys.stderr)
         return 1
+    if args.rename:
+        for old, new in args.rename:
+            if old not in baseline:
+                print(f"test determinism: --rename: {old} has no baseline entry", file=sys.stderr)
+                return 1
+            if new in baseline:
+                print(f"test determinism: --rename: {new} already has a baseline entry; merge by hand",
+                      file=sys.stderr)
+                return 1
+            baseline[new] = baseline.pop(old)
+        write_baseline(args.baseline, dict(sorted(baseline.items())))
+        print(f"test determinism: moved {len(args.rename)} baseline entr{'y' if len(args.rename) == 1 else 'ies'}")
     above, below = compare(current, baseline)
 
     by_location: dict[tuple[str, str], list[Finding]] = {}
@@ -548,10 +577,21 @@ def main(argv: list[str]) -> int:
         print(f"test determinism: baseline lowered for {len(below)} entr{'y' if len(below) == 1 else 'ies'}")
         return 1 if result.errors else 0
 
+    missing = sorted({path for path, *_ in below if not (root / path).exists()})
     for path, category, have, allowed in below:
+        if path in missing:
+            continue
         print(
             f"{path}: {category} count {have} is below the baseline {allowed}. "
             f"Lower the baseline: python3 scripts/check_test_determinism.py --update",
+            file=sys.stderr,
+        )
+    for path in missing:
+        print(
+            f"{path}: has a baseline entry but no longer exists. If it was renamed: "
+            f"python3 scripts/check_test_determinism.py --rename {path} <new path>. If it was split, "
+            "move its counts to the new files by hand in scripts/test_determinism_baseline.json. "
+            "If it was deleted: --update.",
             file=sys.stderr,
         )
     if above or below or result.errors:

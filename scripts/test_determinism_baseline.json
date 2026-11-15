@@ -7,7 +7,8 @@
     "settings-assign",
     "environ-assign",
     "get-session-patch",
-    "popen"
+    "popen",
+    "realtime"
   ],
   "files": {
     "backend/tests/conftest.py": {

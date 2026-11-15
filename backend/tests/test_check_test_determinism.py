@@ -102,7 +102,7 @@ def test_deleted_file_with_baseline_entry_fails_until_lowered(tmp_path: Path) ->
     (tests / "test_a.py").unlink()
     result = run_tree(tests, tmp_path, baseline)
     assert result.returncode == 1
-    assert "backend/tests/test_a.py: sleep count 0 is below the baseline 1" in result.stderr
+    assert "backend/tests/test_a.py: has a baseline entry but no longer exists" in result.stderr
 
 
 def test_sleep_rules(tmp_path: Path) -> None:
@@ -234,7 +234,44 @@ def test_realtime_marker_with_reason_is_the_only_exemption(tmp_path: Path) -> No
                 time.sleep(1)
         """,
     })
-    assert found == {"backend/tests/test_a.py": {"sleep": 1}}
+    # Each realtime marker is itself ratcheted.
+    assert found == {"backend/tests/test_a.py": {"sleep": 1, "realtime": 2},
+                     "backend/tests/test_b.py": {"realtime": 1}}
+
+
+def test_realtime_exempts_only_timing_categories(tmp_path: Path) -> None:
+    found = counts(tmp_path, {"test_a.py": """
+        import os
+        import subprocess
+        import time
+        import pytest
+
+        @pytest.mark.realtime(reason="kernel signal delivery")
+        def test_a():
+            started = time.monotonic()
+            time.sleep(1)
+            assert time.monotonic() - started >= 1
+            os.environ["X"] = "1"
+            subprocess.Popen(["true"])
+    """})
+    assert found == {"backend/tests/test_a.py": {"environ-assign": 1, "popen": 1, "realtime": 1}}
+
+
+def test_rename_moves_the_baseline_entry_and_a_missing_file_says_how(tmp_path: Path) -> None:
+    tests, baseline = make_tree(tmp_path, {"test_old.py": "import time\ntime.sleep(1)\n"})
+    assert run_tree(tests, tmp_path, baseline, "--update").returncode == 0
+    (tests / "test_old.py").rename(tests / "test_new.py")
+    missing = run_tree(tests, tmp_path, baseline)
+    assert missing.returncode == 1
+    assert "backend/tests/test_old.py: has a baseline entry but no longer exists" in missing.stderr
+    assert "--rename backend/tests/test_old.py <new path>" in missing.stderr
+
+    renamed = run_tree(tests, tmp_path, baseline, "--rename", "backend/tests/test_old.py", "backend/tests/test_new.py")
+    assert renamed.returncode == 0, renamed.stderr
+    assert json.loads(baseline.read_text())["files"] == {"backend/tests/test_new.py": {"sleep": 1}}
+    assert run_tree(tests, tmp_path, baseline).returncode == 0
+    unknown = run_tree(tests, tmp_path, baseline, "--rename", "backend/tests/test_gone.py", "backend/tests/x.py")
+    assert unknown.returncode == 1 and "has no baseline entry" in unknown.stderr
 
 
 def test_realtime_marker_without_reason_is_an_error(tmp_path: Path) -> None:

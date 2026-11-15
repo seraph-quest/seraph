@@ -50,8 +50,8 @@ Inbox, follow progress on the Work board, and help Seraph learn what helps you.
 
 Available workflows depend on permissions, configuration, and host support.
 See [Development Status](docs/implementation/STATUS.md) for exact limits and
-[v2026.10.7 release notes](docs/implementation/22-release-2026-10-07.md) for the
-latest guardian and feedback features.
+[v2026.11.14 release notes](docs/implementation/23-release-2026-11-14.md) for the
+latest NEAR TEE inference, local mode and cockpit changes.
 
 ## Quick Start
 

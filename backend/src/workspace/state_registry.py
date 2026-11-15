@@ -518,6 +518,11 @@ class WorkspaceConfig:
     max_depth: int = DEFAULT_MAX_INVENTORY_DEPTH
     max_total_bytes: int = DEFAULT_MAX_INVENTORY_TOTAL_BYTES
     max_file_bytes: int = DEFAULT_MAX_INVENTORY_FILE_BYTES
+    # Declared top-level files whose writer stages atomically through
+    # ``.<name>.<pid>.tmp`` beside them. A staging file left by a crash
+    # mid-write is cache state: never archived, read-only to agents, and it
+    # never blocks an inventory or backup as an unknown path.
+    atomic_staging_targets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         declared_paths = tuple(self.declared_paths)
@@ -568,7 +573,14 @@ class WorkspaceConfig:
         expected_names = [item.name for item in expected_objects]
         if len(expected_names) != len(set(expected_names)):
             raise AmbiguousWorkspaceRootsError("duplicate expected database object names")
+        staging_targets = tuple(self.atomic_staging_targets)
+        top_level_files = {item.logical_path for item in declared_paths if "/" not in item.logical_path}
+        if any(not isinstance(item, str) or item not in top_level_files for item in staging_targets):
+            raise WorkspaceStateError("atomic_staging_targets must name declared top-level paths")
+        if len(staging_targets) != len(set(staging_targets)):
+            raise AmbiguousWorkspaceRootsError("duplicate atomic staging targets")
         object.__setattr__(self, "declared_paths", declared_paths)
+        object.__setattr__(self, "atomic_staging_targets", staging_targets)
         object.__setattr__(self, "database_path", database_path)
         object.__setattr__(self, "external_references", external_references)
         object.__setattr__(self, "expected_database_objects", expected_objects)
@@ -576,6 +588,16 @@ class WorkspaceConfig:
         object.__setattr__(self, "max_depth", max_depth)
         object.__setattr__(self, "max_total_bytes", max_total_bytes)
         object.__setattr__(self, "max_file_bytes", max_file_bytes)
+
+
+def _atomic_staging_target(logical_path: str) -> str | None:
+    """The target of a top-level ``.<name>.<pid>.tmp`` staging file, else None."""
+    if "/" in logical_path or not logical_path.startswith(".") or not logical_path.endswith(".tmp"):
+        return None
+    name, _, pid = logical_path[1:-len(".tmp")].rpartition(".")
+    if not name or not pid.isascii() or not pid.isdigit():
+        return None
+    return name
 
 
 @dataclass(frozen=True)
@@ -1161,6 +1183,8 @@ class WorkspaceStateRegistry:
             if len(classes) != 1:
                 raise AmbiguousWorkspaceRootsError(f"workspace directory has multiple owners: {logical_path}")
             return descendants[0]
+        if _atomic_staging_target(logical_path) in self.config.atomic_staging_targets:
+            return WorkspacePathSpec(logical_path, WorkspaceStateClass.CACHE, required=False)
         raise UnknownWorkspacePathError(f"unknown workspace path: {logical_path}")
 
     def _make_entry(
@@ -1643,6 +1667,16 @@ _OPTIONAL_RUNTIME_TRANSIENT_PATHS = frozenset({
     "near-tee-catalog-receipts.json",
     "near-tee-catalog-observations.json",
 })
+# Runtime writers that stage through ``.<name>.<pid>.tmp`` (#1186): the NEAR
+# TEE catalog stores (near_tee_catalog.write_catalog_receipts /
+# write_catalog_observations) and the credential binding
+# (configuration._write_near_tee_credential_binding). A crash mid-write
+# leaves that file behind; declared, it cannot block a backup.
+_RUNTIME_ATOMIC_STAGING_TARGETS = (
+    "near-tee-catalog-receipts.json",
+    "near-tee-catalog-observations.json",
+    "near-tee-credential-binding.json",
+)
 # Canonical runtime state agent file tools may neither read nor write: MCP
 # server and stdio proxy settings (inline credentials are possible, and an
 # edit reconfigures tool egress outside the Settings consent flow) and private
@@ -1734,6 +1768,7 @@ def canonical_workspace_config(root: str | os.PathLike[str]) -> WorkspaceConfig:
             )
             for path, state_class in _RUNTIME_PATH_SPECS
         ),
+        atomic_staging_targets=_RUNTIME_ATOMIC_STAGING_TARGETS,
         database_path="seraph.db",
     )
 

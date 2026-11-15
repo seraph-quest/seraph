@@ -1512,7 +1512,9 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > Work Board explains. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.
 > Chat reports the block as `route_reason: openrouter_retired`; Cordis
-> `inference.request` reports `openrouter_retired`. Without a NEAR TEE vision
+> `inference.request` reports the same precedence as the verticals
+> (`provider_policy_revoked` when model egress is revoked, then the slot's own
+> reason, else `openrouter_retired`/`no_active_provider`). Without a NEAR TEE vision
 > slot, screen analysis reports no cloud provider (`provider: ""`,
 > `provider_blocked_reason: openrouter_retired`); with one it reports
 > `provider: near_tee` once the operator chooses it (#1147 PR4). It always refuses `openrouter`; the next screen-analysis settings save rewrites a

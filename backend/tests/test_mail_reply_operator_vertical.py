@@ -108,7 +108,9 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
 
     ``near=True`` runs the draft's model step on the ADR-035 NEAR TEE text slot
     (intercepted gateway via prepare_near_tee_vertical; any other host fails).
-    Without it the flow pins the historical OpenRouter route (module marker).
+    Its caller is tests/test_cordis_bound_adapters.py::mail_env, which is not
+    under this module's ``openrouter_legacy`` marker (#1186). Without it the
+    flow pins the historical OpenRouter route (this module's tests).
     """
     from src.api import auth, work_board, model_fabric_settings, goals, mail
     from src.model_fabric.configuration import write_model_fabric_configuration

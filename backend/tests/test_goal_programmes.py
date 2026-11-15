@@ -384,3 +384,10 @@ def test_programme_policy_binds_the_near_tee_research_route(tmp_path, monkeypatc
     policy = stage_programme_policy()
     assert policy.blocked_reason is None and policy.epoch == configured.egress_revision == 2
     assert policy.digest == current_near_tee_policy("text")[1]
+    # #1186: both read the one pure projection, which fails closed on its own.
+    from src.model_fabric.configuration import read_model_fabric_configuration
+    from src.model_fabric.effective_policy import near_tee_policy_from_configuration
+    current = read_model_fabric_configuration()
+    assert near_tee_policy_from_configuration(current, "text") == (current, policy.digest)
+    with pytest.raises(PermissionError):
+        near_tee_policy_from_configuration(ModelFabricConfiguration(status="ready", egress_revision=3), "text")

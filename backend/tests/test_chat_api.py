@@ -10,7 +10,6 @@ from src.approval.exceptions import ApprovalRequired
 from src.api.chat import _bind_chat_principal
 from src.audit.repository import audit_repository
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
-from src.utils.background import drain_tracked_tasks
 from src.vault.repository import vault_repository
 from src.model_fabric import NoCompliantModelRouteError
 
@@ -342,6 +341,12 @@ class TestChatAPI:
         )
         assert r2.json()["session_id"] == session_id
 
+    # The default in-memory test DB is one shared StaticPool connection, so a
+    # concurrent session's rollback (the accepted turn's tracked post-response
+    # memory consolidation checking in) can discard another session's flushed
+    # but uncommitted audit row (#1197). Production pools one connection per
+    # session; use that file-backed pool here.
+    @pytest.mark.parametrize("async_db", ["file"], indirect=True)
     @patch("src.memory.vector_store.search_formatted", return_value="")
     @patch("src.api.chat.create_onboarding_agent")
     async def test_chat_ingress_rejects_duplicate_before_model_dispatch(
@@ -361,13 +366,6 @@ class TestChatAPI:
 
         first = await client.post("/api/chat", json=payload)
         assert first.status_code == 200
-        # The accepted turn schedules post-response memory consolidation as a
-        # tracked background task. The in-memory test database is one shared
-        # StaticPool connection, so that task's session checkin (a pool reset
-        # rollback) could interleave with the duplicate request and silently
-        # discard its flushed but uncommitted audit row (#1197). Settle the
-        # first turn's background work before sending the retry.
-        await drain_tracked_tasks()
         payload["session_id"] = first.json()["session_id"]
         second = await client.post("/api/chat", json=payload)
 

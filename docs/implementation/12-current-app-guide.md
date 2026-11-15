@@ -1212,8 +1212,11 @@ patch `<workspace>/composition.patch.json`, which looks like this:
 The file must be a regular file (never a symlink, FIFO or device) owned by the
 service user, root or the workspace directory's owner (a host-written file in
 a container bind mount), and must not be group- or world-writable. Agent file
-and process tools are denied it (`_AGENT_DENIED_RUNTIME_PATHS`), so a model
-cannot write the operator layer. It is not yet a declared workspace state path,
+tools and process-tool path arguments are denied it
+(`_AGENT_DENIED_RUNTIME_PATHS`). A script the agent writes and runs through the
+process runtime (`python`/`node` with a workspace script) can still write it,
+as it can `mcp-servers.json`; the worst result is a refused boot or a flipped
+scheduler row, tracked in #1216. It is not yet a declared workspace state path,
 so backup and restore do not carry it. It must be 16 KiB or smaller, and it is
 parsed as closed JSON that refuses duplicate keys.
 

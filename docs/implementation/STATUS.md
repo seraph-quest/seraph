@@ -296,7 +296,9 @@ composition dump's `profile` (id, source, bundles, digest, patch presence) and
 `effective_patch` are now real, live and offline (`./manage.sh -e dev
 composition dump` passes the non-secret selection). Bundles are marked
 `selected`/`not_selected`. An uncatalogued patch row id is never echoed in the
-dump or the boot log. Agent file and process tools are denied the patch file.
+dump or the boot log. Agent file tools and process-tool path arguments are
+denied the patch file; a script the agent runs through the process runtime is
+not (the same boundary as `mcp-servers.json`, tracked in #1216).
 
 Partial because:
 - bundles select no code: the Cordis plugin set is still the one fixed reviewed

@@ -800,7 +800,10 @@ def run_shard_single_process(
         extra_args.append("--no-cov")
     deselect = [f"--deselect={node}" for path in selected
                 for node in (CANCELLED_EVAL_CONSUMER_NODES.get(path, []) if exclude_cancelled_eval_harness else [])]
-    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect]
+    # One process: if the #1235-tracked file is in the shard, its leak filters
+    # apply to the whole run (scheduled lane only).
+    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect,
+               *tracked_warning_args(selected)]
     report = junit_dir / "single-process.xml" if junit_dir is not None else None
     if report is not None:
         junit_dir.mkdir(parents=True, exist_ok=True)

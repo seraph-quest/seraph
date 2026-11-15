@@ -375,3 +375,11 @@ def test_classification_does_not_count_a_deadline_kill(monkeypatch) -> None:
     monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: next(codes))
     [result] = lanes.classify_nodes(["tests/test_a.py::test_a"], runs=20, timeout=450, deadline=600)
     assert (result.runs, result.failures) == (1, 1)
+
+
+def test_lanes_carry_the_tracked_leak_filters_for_tracked_files_only() -> None:
+    from scripts.run_backend_test_shard import TRACKED_LEAK_FILES
+    tracked = sorted(TRACKED_LEAK_FILES)[0]
+    [(_, plain)] = lanes.invocations_for(["tests/test_check_test_determinism.py"])
+    assert not any(arg.startswith("-W") for arg in plain)
+    assert all(any(arg.startswith("-W") for arg in args) for _, args in lanes.invocations_for([tracked]))

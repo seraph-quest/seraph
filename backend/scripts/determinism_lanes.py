@@ -48,6 +48,7 @@ try:
         CANCELLED_EVAL_CONSUMER_NODES,
         FULLY_RETIRED_EVAL_INVOCATIONS,
         pytest_invocations_for_target,
+        tracked_warning_args,
     )
 except ModuleNotFoundError:  # pragma: no cover - CI script entrypoint fallback
     from backend_test_shards import load_measured_durations
@@ -55,6 +56,7 @@ except ModuleNotFoundError:  # pragma: no cover - CI script entrypoint fallback
         CANCELLED_EVAL_CONSUMER_NODES,
         FULLY_RETIRED_EVAL_INVOCATIONS,
         pytest_invocations_for_target,
+        tracked_warning_args,
     )
 
 TEST_FILE = re.compile(r"^backend/(tests/(?:.+/)?test_[^/]+\.py)$")
@@ -165,7 +167,7 @@ def invocations_for(files: list[str], *, quiet: bool = False) -> list[tuple[str,
         for label, args in pytest_invocations_for_target(path):
             if (path, label) in FULLY_RETIRED_EVAL_INVOCATIONS:
                 continue
-            result.append((label, [*args, *deselect]))
+            result.append((label, [*args, *deselect, *tracked_warning_args([path])]))
     return result
 
 
@@ -253,7 +255,8 @@ def classify_nodes(nodes: list[str], *, runs: int, timeout: float, under_load: b
             if remaining is not None and remaining < 30:
                 break
             cut_by_deadline = remaining is not None and remaining < timeout
-            code = run_pytest(pytest_command([node], watchdog_scale=watchdog_scale),
+            module = node.split("::", 1)[0]
+            code = run_pytest(pytest_command([node, *tracked_warning_args([module])], watchdog_scale=watchdog_scale),
                               timeout=timeout if remaining is None else min(timeout, remaining))
             if code == 124 and cut_by_deadline:
                 log(f"classify {node}: run {attempt}/{runs} cut by the deadline; not counted")
@@ -431,7 +434,8 @@ def lane_triage(args: argparse.Namespace) -> int:
     log(f"triage {args.node} at {current_commit()}: {args.runs} runs alone, then once in file order")
     isolated = classify_nodes([args.node], runs=args.runs, timeout=args.run_timeout_seconds)[0]
     module = args.node.split("::", 1)[0]
-    file_order = run_pytest(pytest_command([module]), timeout=args.run_timeout_seconds)
+    file_order = run_pytest(pytest_command([module, *tracked_warning_args([module])]),
+                            timeout=args.run_timeout_seconds)
     summary = {
         "node": args.node,
         "commit": current_commit(),

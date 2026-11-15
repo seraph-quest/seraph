@@ -1271,6 +1271,134 @@ async def test_repository_repair_is_offered_on_near_with_near_consent(accounting
     assert near_inference_requests(near) == []
 
 
+# ── Repository Tasks whose NEAR TEE route is lost after planning (#1184) ──
+
+
+from tests.repository_admission_lifecycle import repository_admission_signer  # noqa: E402,F401
+
+
+async def _repository_task_then_near(accounting_db, monkeypatch, *, world, admit_child=False):
+    """Publish (and optionally admit the child of) a repository Task while the
+    NEAR TEE strategist route serves it, then lose that route in a new
+    reviewed policy revision: the slot disabled, or egress revoked (#1184).
+
+    Returns the stable block reason the shared precedence names."""
+    from dataclasses import replace
+    from src.model_fabric import near_tee_vertical
+    from src.model_fabric.configuration import read_model_fabric_configuration, write_model_fabric_configuration
+    from tests.test_repo_work_task_publication import actual_native_source, actual_publication
+    if admit_child:
+        factory, owner, service, jobs, binding, _request = await actual_native_source(accounting_db, monkeypatch,
+            claim_child=False)
+        task_id, parent_id = binding.task_id, binding.parent_job_id
+    else:
+        factory, _, owner, service, request = await actual_publication(accounting_db, monkeypatch)
+        async with factory.accounting_sessions() as db:
+            created = await service.create(db, owner, request.model_copy(update={"accept": True}))
+        task_id, parent_id, binding = created.task.task_id, None, None
+    near = factory.repository_near_gateway
+    # The signer fixture assumes a usable route; use the real route block.
+    from tests.near_tee_support import restore_repository_repair_route_block
+    restore_repository_repair_route_block(monkeypatch)
+    assert near_tee_vertical.repository_repair_route_block() is None
+    configured = read_model_fabric_configuration()
+    revision = configured.egress_revision + 1
+    if world == "slot_disabled":
+        slot = replace(configured.near_tee.slots["text"], enabled=False, purpose_consent_revision=None)
+        changed = replace(configured, egress_revision=revision,
+            near_tee=replace(configured.near_tee, slots={"text": slot}))
+    else:
+        changed = replace(configured, egress_revision=revision, egress_revoked=True)
+    write_model_fabric_configuration(changed, expected_revision=configured.egress_revision)
+    reason = near_tee_vertical.repository_repair_route_block()
+    assert reason == {"slot_disabled": "near_tee_slot_disabled",
+        "egress_revoked": retirement.PROVIDER_POLICY_REVOKED_REASON}[world]
+    return factory, owner, service, task_id, parent_id, binding, near, reason
+
+
+async def _assert_repository_closed_blocked(factory, task_id, near, reason, *, parent_id=None):
+    from src.db.models import InferenceCostReservation, WorkBoardAttempt, WorkBoardStatus, WorkBoardTask
+    from src.workflows.job_runtime import DurableJobRepository
+    async with factory.accounting_sessions() as db:
+        task = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one()
+        attempts = list((await db.execute(select(WorkBoardAttempt).where(
+            WorkBoardAttempt.task_id == task_id))).scalars())
+        reservations = list((await db.execute(select(InferenceCostReservation))).scalars())
+    assert task.status is WorkBoardStatus.blocked and task.block_reason == reason, (task.status,
+        task.block_kind, task.block_reason)
+    root_id = parent_id or attempts[-1].workflow_run_id
+    root = await DurableJobRepository().get_job(root_id)
+    assert root["status"] == "blocked" and root["failure_reason"] == reason, (root["status"], root["failure_reason"])
+    assert reservations == [] and near_inference_requests(near) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("world", ["slot_disabled", "egress_revoked"])
+async def test_repository_ready_step_closes_blocked_on_near_without_contact(accounting_db, monkeypatch,
+        repository_admission_signer, world):
+    from src.work_board.dispatcher import WorkBoardDispatcher
+    factory, owner, service, task_id, _parent, _binding, near, reason = await _repository_task_then_near(
+        accounting_db, monkeypatch, world=world)
+    dispatcher = WorkBoardDispatcher(session_provider=factory.accounting_sessions, general_tasks=service)
+    receipt = await dispatcher.run_pass()
+    assert receipt["claimed"] == 1 and receipt.get("completed", 0) == 0, receipt
+    await _assert_repository_closed_blocked(factory, task_id, near, reason)
+
+
+async def _assert_child_untouched(factory, binding, near):
+    from src.db.models import InferenceCostReservation
+    from src.workflows.job_runtime import DurableJobRepository
+    child = await DurableJobRepository().get_job(binding.invocation_id)
+    # Never claimed: no lease, attempt, effect, reservation or contact.
+    assert child["status"] == "accepted" and child["attempt_count"] == 0 and child["effects"] == []
+    async with factory.accounting_sessions() as db:
+        assert list((await db.execute(select(InferenceCostReservation))).scalars()) == []
+    assert near_inference_requests(near) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("world", ["slot_disabled", "egress_revoked"])
+async def test_repository_pending_child_resume_is_blocked_on_near_without_contact(accounting_db, monkeypatch,
+        repository_admission_signer, world):
+    """continue_native_wait: an admitted, never-claimed repository child (as
+    after a crash) resumes into a blocked no-contact outcome with the stable
+    reason instead of a lease/permission error."""
+    from src.auth.service import authenticate_session
+    from src.work_board.general_task_native import execute_interpreter
+    from src.workflows.job_runtime import DurableJobRepository
+    factory, owner, service, task_id, parent_id, binding, near, reason = await _repository_task_then_near(
+        accounting_db, monkeypatch, world=world, admit_child=True)
+    jobs = DurableJobRepository()
+    parent = await jobs.get_job(parent_id)
+    assert parent["status"] == "paused"
+    principal = (await authenticate_session(owner.session_id, touch=False)).principal
+    outcome = await execute_interpreter(service, jobs, job_id=parent_id, owner=None, fence=None,
+        principal=principal)
+    assert outcome["blocked"] is True and outcome["reason"] == reason
+    assert outcome["provider_contact_state"] == "not_started" and outcome["verified"] is False
+    await _assert_child_untouched(factory, binding, near)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("world", ["slot_disabled", "egress_revoked"])
+async def test_repository_approved_child_resume_is_blocked_on_near_without_contact(accounting_db, monkeypatch,
+        repository_admission_signer, world):
+    """The resume_child branch: an approved repository child is refused when its
+    NEAR TEE route was lost, before its repair step runs, with the stable reason."""
+    from src.auth.service import authenticate_session
+    from src.work_board.general_task_native import execute_interpreter
+    from src.workflows.job_runtime import DurableJobRepository
+    factory, owner, service, task_id, parent_id, binding, near, reason = await _repository_task_then_near(
+        accounting_db, monkeypatch, world=world, admit_child=True)
+    jobs = DurableJobRepository()
+    principal = (await authenticate_session(owner.session_id, touch=False)).principal
+    outcome = await execute_interpreter(service, jobs, job_id=parent_id, owner=None, fence=None,
+        principal=principal, resume_child={"binding": binding, "runtime_owner": "approved-resume-owner"})
+    assert outcome["blocked"] is True and outcome["reason"] == reason
+    assert outcome["provider_contact_state"] == "not_started"
+    await _assert_child_untouched(factory, binding, near)
+
+
 @pytest.mark.asyncio
 async def test_resume_projection_only_closes_proven_precontact_refusals():
     """Both dispatcher resume paths project a card blocked only for a

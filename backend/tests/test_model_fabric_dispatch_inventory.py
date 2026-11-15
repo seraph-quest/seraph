@@ -340,7 +340,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        5313,
+        5318,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -425,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4346,
+        4351,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -434,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4426,
+        4431,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -443,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4908,
+        4913,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -452,7 +452,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4987,
+        4992,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",

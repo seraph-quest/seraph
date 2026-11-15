@@ -14,11 +14,8 @@ from src.llm_runtime import FallbackLiteLLMModel
 from src.model_fabric.configuration import NEAR_TEE_API_BASE, near_tee_profile_for_slot, read_model_fabric_configuration
 from src.model_fabric.near_tee_vertical import repository_repair_near_target
 from src.security.trust_contract import canonical_digest
-from src.workflows import repo_repair_source
-from src.workflows.inference_accounting import InferenceAccountingError
 from src.workflows.repo_repair import RepoRepairError, RepoRepairService
-from src.workflows.repo_repair_source import (repository_transport_route_digest,
-    verify_repository_iteration_near_call, verify_repository_iteration_transport_body)
+from src.workflows.repo_repair_source import repository_transport_route_digest
 from tests.near_tee_support import NEAR_TEE_TEXT_MODEL, write_near_tee_text_configuration
 from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
@@ -99,39 +96,57 @@ def test_final_body_cap_includes_model_options_and_schema(configured_model):
             response_format={"type": "json_object"}, original_input_byte_limit=len(encoded) - 1)
 
 
-# ── The NEAR sync path checks the consented body and target (#1184) ──
+# ── The consented-egress binding checks body and target (#1184) ──
 #
-# The comparison only: the witness seal itself is never counterfeited here
-# (its own negatives live in test_repository_iteration_accounting); the
-# journeys in the repository suites run the sealed positive path.
+# The real ``bind_near_tee_egress`` binding and ``near_tee_egress_reason``
+# comparator (the one prepare_near_tee_call and the precontact guard run).
+# The call shape is a literal prepared-call projection; the sealed journeys
+# in test_repo_repair_near_egress and the repository suites run the real
+# adapter end to end.
+
+CODE = "repository_iteration_final_transport_changed"
 
 
 @pytest.fixture
-def consented(configured_model, monkeypatch):
+def consented(configured_model):
+    from src.model_fabric.near_tee_egress import bind_near_tee_egress
     prepared = configured_model.prepare_repository_iteration_transport([{"role": "user", "content": "safe"}],
         response_format=SCHEMA, max_tokens=4096)
-    witness = SimpleNamespace(_request_body_digest=canonical_digest(prepared["body"]),
-        _request_route_digest=prepared["route_digest"])
-    from src.model_fabric import accounting
-    monkeypatch.setattr(accounting, "current_repository_iteration_accounting_witness", lambda: witness)
-    monkeypatch.setattr(repo_repair_source, "assert_repository_iteration_witness", lambda _witness: None)
     profile, target = _near_target()
-    call = SimpleNamespace(body=dict(prepared["body"]), slot_name="text", stream=False, tool_names=(),
-        headers={"Authorization": "Bearer never-sent", "x-no-aliasing": "true"},
+    call = SimpleNamespace(body=json.loads(json.dumps(prepared["body"])), slot_name="text", stream=False,
+        tool_names=(), headers={"Authorization": "Bearer never-sent", "x-no-aliasing": "true"},
         context=SimpleNamespace(runtime_path="strategist_agent"),
         decision=SimpleNamespace(selected=SimpleNamespace(profile=profile)))
-    return call, target
+    with bind_near_tee_egress(runtime_path="strategist_agent", body_digest=canonical_digest(prepared["body"]),
+            route_digest=prepared["route_digest"], refusal_code=CODE):
+        yield call, target
 
 
-def test_consented_near_call_passes_the_sync_path_check(consented):
-    call, target = consented
-    verify_repository_iteration_near_call(call, runtime_path="strategist_agent")
-    assert repo_repair_source.repository_iteration_near_call_reason(call) is None
+def test_consented_near_call_passes_the_binding(consented):
+    from src.model_fabric.near_tee_egress import near_tee_egress_reason
+    call, _target = consented
+    assert near_tee_egress_reason(call) is None
+
+
+def test_no_binding_constrains_nothing_and_bindings_never_nest(configured_model):
+    from src.model_fabric.near_tee_egress import bind_near_tee_egress, near_tee_egress_reason
+    assert near_tee_egress_reason(SimpleNamespace(body={})) is None
+    with bind_near_tee_egress(runtime_path="strategist_agent", body_digest="a" * 64, route_digest="b" * 64,
+            refusal_code=CODE):
+        with pytest.raises(PermissionError, match=CODE):
+            with bind_near_tee_egress(runtime_path="strategist_agent", body_digest="c" * 64,
+                    route_digest="d" * 64, refusal_code=CODE):
+                pytest.fail("a nested binding widened the consented request")
+    with pytest.raises(PermissionError):
+        with bind_near_tee_egress(runtime_path="strategist_agent", body_digest="not-a-digest",
+                route_digest="b" * 64, refusal_code=CODE):
+            pytest.fail("a malformed binding was accepted")
 
 
 @pytest.mark.parametrize("change", ["extra_source", "model", "max_tokens", "no_aliasing", "stream", "tools",
-    "runtime_path", "openrouter_target"])
+    "runtime_path", "contract_hash", "openrouter_target"])
 def test_any_other_body_or_target_is_refused_before_contact(consented, change):
+    from src.model_fabric.near_tee_egress import near_tee_egress_reason
     call, target = consented
     if change == "extra_source":
         call.body["messages"] = [*call.body["messages"], {"role": "user", "content": "unconsented source"}]
@@ -147,14 +162,34 @@ def test_any_other_body_or_target_is_refused_before_contact(consented, change):
         call.tool_names = ("final_answer",)
     elif change == "runtime_path":
         call.context.runtime_path = "chat_agent"
+    elif change == "contract_hash":
+        profile = call.decision.selected.profile
+        call.decision.selected.profile = SimpleNamespace(id=profile.id, model=profile.model,
+            contract_hash="0" * 64)
     if change == "openrouter_target":
         # The historical OpenRouter target is never a repository destination.
-        with pytest.raises(InferenceAccountingError, match="repository_iteration_final_transport_changed"):
-            verify_repository_iteration_transport_body(call.body, target={**target,
-                "api_base": "https://openrouter.ai/api/v1", "options": {"provider": {"only": ["anthropic"]}}},
-                runtime_path="strategist_agent")
+        from src.model_fabric.near_tee_egress import is_near_tee_target
+        assert is_near_tee_target(target)
+        assert not is_near_tee_target({**target, "api_base": "https://openrouter.ai/api/v1",
+            "options": {"provider": {"only": ["anthropic"]}}})
         return
-    with pytest.raises(InferenceAccountingError, match="repository_iteration_final_transport_changed"):
-        verify_repository_iteration_near_call(call, runtime_path="strategist_agent")
-    assert (repo_repair_source.repository_iteration_near_call_reason(call)
-        == "repository_iteration_final_transport_changed")
+    assert near_tee_egress_reason(call) == CODE
+
+
+def test_real_catalog_prices_need_a_larger_repository_request_bound():
+    """Availability only (#1184): the repository suites price their fixture
+    catalog so a 100 micro-USD bound covers the slot. At NEAR's real
+    Qwen/Qwen3.8-27B prices ($0.04/M in, $1.35/M out) a repository-sized
+    slot (32,768 input, 1,024 output tokens) needs about 2.7k micro-USD per
+    request, so the operator's slot bound, lane ceiling and Task/Goal cost
+    limits must allow that much per repair iteration."""
+    from src.model_fabric.configuration import NearTeeSlot
+    from src.model_fabric.near_tee_catalog import evaluate_catalog, parse_catalog_record
+    from tests.test_near_tee_text_slot import catalog_record
+    facts = parse_catalog_record(json.dumps(catalog_record()).encode(), model_id=NEAR_TEE_TEXT_MODEL)
+    def slot(bound):
+        return NearTeeSlot(model_id=NEAR_TEE_TEXT_MODEL, max_input_tokens=32768, max_output_tokens=1024,
+            request_cost_bound_microusd=bound, enabled=False)
+    reason, required = evaluate_catalog(facts, slot_name="text", slot=slot(100))
+    assert reason == "near_tee_catalog_cost_bound_too_small" and 2_600 <= required <= 2_800
+    assert evaluate_catalog(facts, slot_name="text", slot=slot(required))[0] is None

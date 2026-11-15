@@ -269,3 +269,73 @@ async def test_closer_backs_off_a_root_whose_closure_stays_pending(accounting_db
     source._expiry_closer_retry_at[flow["root_id"]] = 0.0  # The back-off has elapsed.
     assert await stop.close_expired_repository_roots(source, jobs) == [flow["root_id"]]
     await _assert_released(flow, status="failed", reason="deadline_exhausted")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["slot_changed", "body_changed_at_guard"])
+async def test_refused_iteration_sends_nothing_to_near(accounting_db, monkeypatch, repository_admission_signer,
+        refusal):
+    """#1184: a repository iteration whose NEAR request is not the consented
+    one is refused with no NEAR completion and no contacted reservation:
+    a slot change after preparation (another route) before admission, or a
+    body changed after the pre-admission check at the contact guard."""
+    from dataclasses import replace
+    from src import llm_runtime
+    from src.api.workflows import RepoRepairEgressConsentRequest
+    from src.db.models import InferenceCostReservation
+    from src.model_fabric.configuration import read_model_fabric_configuration, write_model_fabric_configuration
+    from src.model_fabric.near_tee import NearTeeCall
+    from src.workflows.repo_repair_source import grant_repository_iteration_consent, repository_source_preview
+    from tests.near_tee_support import near_completion_requests
+    flow = await _original(accounting_db, monkeypatch)
+    service, jobs, owner, root_id = flow["service"], flow["jobs"], flow["owner"], flow["root_id"]
+    near = flow["factory"].repository_near_gateway
+    preview = await repository_source_preview(service.repository_source_service, jobs, job_id=root_id, owner=owner)
+    review, egress, packet = preview["repository_review"], preview["egress"], preview["source_packet"]
+    source = json.loads(egress["request_body"]["messages"][1]["content"])
+    script_repository_iteration(near, egress, {"summary": "Scripted change",
+        "base_snapshot_sha256": source["source_packet"]["base_snapshot_sha256"],
+        "patch_unified_diff": "--- a/calculator.py\n+++ b/calculator.py\n@@ -1,2 +1,2 @@\n def add(a, b):\n"
+            "-    return a - b\n+    return a + b\n",
+        "allowed_paths": ["calculator.py", "tests/test_calculator.py"],
+        "test_args": ["pytest", "-q", "tests/test_calculator.py"], "expected_outcome": "Checks run"})
+    if refusal == "slot_changed":
+        configured = read_model_fabric_configuration()
+        revision = configured.egress_revision + 1
+        slot = replace(configured.near_tee.slots["text"], temperature=0.7, purpose_consent_revision=revision)
+        write_model_fabric_configuration(replace(configured, egress_revision=revision,
+            near_tee=replace(configured.near_tee, slots={"text": slot})), expected_revision=configured.egress_revision)
+    else:
+        real = llm_runtime._execute_sync_with_gpu_admission
+
+        def mutate_then_admit(**kwargs):
+            (call,) = [cell.cell_contents for cell in kwargs["operation"].__closure__
+                if isinstance(cell.cell_contents, NearTeeCall)]
+            call.body["messages"].append({"role": "user", "content": "unconsented extra source"})
+            return real(**kwargs)
+        monkeypatch.setattr(llm_runtime, "_execute_sync_with_gpu_admission", mutate_then_admit)
+    with pytest.raises(Exception):
+        await grant_repository_iteration_consent(service.repository_source_service, jobs, job_id=root_id,
+            owner=owner, request=RepoRepairEgressConsentRequest(expected_job_revision=preview["revision"],
+                source_packet_digest=packet["artifact_sha256"],
+                expected_source_manifest_digest=packet["source_manifest_sha256"],
+                expected_profile_id=egress["effective_profile_id"], acknowledged_selected_source=True,
+                idempotency_key="refused-contact", expected_iteration_index=review["iteration_index"],
+                expected_iteration_id=review["iteration_id"], expected_preparation_digest=review["preparation_digest"],
+                expected_request_body_digest=egress["request_body_digest"],
+                expected_request_route_digest=egress["request_route_digest"],
+                expected_egress_envelope_digest=egress["egress_envelope_digest"],
+                expected_diagnostics_digest=egress["diagnostics_digest"],
+                expected_redaction_version=egress["redaction_version"], acknowledged_diagnostics=True),
+            general_task_service=service, principal=flow["operator"].principal)
+    assert near_completion_requests(near) == [] and near.completion_bodies == []
+    async with flow["factory"]() as db:
+        rows = list((await db.scalars(select(InferenceCostReservation))).all())
+    if refusal == "slot_changed":
+        # Refused when the consent re-finalizes the request: nothing reserved.
+        assert rows == []
+    else:
+        (denied,) = rows
+        assert denied.contact_started_at is None and denied.state == "reserved"
+        assert denied.recovery_reason == "provider_contact_denied"
+        assert "repository_iteration_final_transport_changed" in denied.evidence_json

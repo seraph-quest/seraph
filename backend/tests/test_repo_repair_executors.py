@@ -28,6 +28,10 @@ from src.execution.repo_sandbox import (
     persist_repo_sandbox_settings,
 )
 
+pytestmark = [
+    pytest.mark.filterwarnings("error::ResourceWarning"),
+    pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning"),
+]
 
 IMAGE = "ghcr.io/operator/seraph-repo-python-pytest@sha256:" + "a" * 64
 
@@ -371,9 +375,8 @@ def test_local_fresh_executor_fences_exact_unreaped_worker_pid(tmp_path: Path):
     try:
         identity = runner._pid_start_identity(process.pid)
         assert identity
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline and runner._pid_state(process.pid) != "Z":
-            time.sleep(0.01)
+        # Block until the direct child exits without reaping it (#1224).
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
         assert runner._pid_state(process.pid) == "Z"
         binding = {
             "executor_kind": "local",

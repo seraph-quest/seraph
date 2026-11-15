@@ -19,6 +19,10 @@ from config.settings import RepoSandboxSettings
 from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE, execution_plan, normalize_selection
 from src.execution.repo_sandbox import RepoSandboxError, RepoSandboxJob
 from src.execution import repo_supervisor as supervisor
+from tests.support.processes import spawned  # noqa: F401 - fixture
+
+pytestmark=[pytest.mark.filterwarnings("error::ResourceWarning"),
+            pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")]
 
 NODE = os.environ.get("SERAPH_TEST_NODE_RUNTIME") or shutil.which("node") or ""
 TYPESCRIPT = os.environ.get("SERAPH_TEST_TYPESCRIPT_ROOT") or str(Path(__file__).resolve().parents[2]/"frontend/node_modules/typescript")
@@ -434,19 +438,20 @@ def test_private_marker_lock_serializes_competing_process(tmp_path):
     assert metadata.st_uid==os.getuid() and metadata.st_mode & 0o777==0o600 and metadata.st_nlink==1
 
 
-def test_cancellation_check_to_rename_competing_process_is_monotonic(tmp_path,monkeypatch):
+def test_cancellation_check_to_rename_competing_process_is_monotonic(tmp_path,monkeypatch,spawned):
     executor=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=tmp_path)
     executor._write_job_marker("race",{"job_id":"race","profile":PROFILE,"attempt_id":"legacy-attempt","status":"running"})
-    ready=tmp_path/"cancel-ready";done=tmp_path/"cancel-done"
-    code="from pathlib import Path;from config.settings import RepoSandboxSettings;from src.execution.repo_node import NodeRepoRepairExecutor,PROFILE;import sys; e=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=Path(sys.argv[1]));Path(sys.argv[2]).write_text('ready');e.cancel(job_id='race');Path(sys.argv[3]).write_text('done')"
+    done=tmp_path/"cancel-done"
+    # Readiness by pipe (#1224): the competing child writes one byte just
+    # before it calls cancel(), and the test blocks on that read.
+    code="import os;from pathlib import Path;from config.settings import RepoSandboxSettings;from src.execution.repo_node import NodeRepoRepairExecutor,PROFILE;import sys; e=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=Path(sys.argv[1]));os.write(int(sys.argv[2]),b'R');os.close(int(sys.argv[2]));e.cancel(job_id='race');Path(sys.argv[3]).write_text('done')"
     process=None;rename=os.rename
     def interpose(source,target,**kwargs):
         nonlocal process
         if target==executor._job_marker_name("race") and process is None:
-            process=subprocess.Popen([sys.executable,"-c",code,str(tmp_path),str(ready),str(done)],cwd=Path(__file__).resolve().parents[1],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-            deadline=time.monotonic()+1
-            while not ready.exists() and time.monotonic()<deadline:time.sleep(.005)
-            assert ready.exists()
+            ready=spawned.ready_pipe()
+            process=spawned.popen([sys.executable,"-c",code,str(tmp_path),str(ready.child_fd),str(done)],ready=ready,cwd=Path(__file__).resolve().parents[1],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            assert ready.wait()==b"R"
             time.sleep(.05)
             assert not done.exists(),"Competing cancellation committed while writer held the marker lock"
         return rename(source,target,**kwargs)

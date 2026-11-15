@@ -711,14 +711,15 @@ class NodeRepoRepairExecutor(LocalRepoRepairExecutor):
             # cleanup. A supervisor that ignores SIGTERM (e.g. stuck reading a
             # repository-made /dev/zero link) is killed after a bounded grace;
             # the job stays unknown with cleanup unproven either way.
+            # The owner reaps the supervisor it signalled (#1212); the typed
+            # outcome is on the marker and the raised error.
+            reap=None
             if process is not None and process.poll() is None:
                 start=str(marker.get("pid_start_identity") or "")
-                exact_signal(process.pid,start,signal.SIGTERM)
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    exact_signal(process.pid,start,signal.SIGKILL)
-            raise RepoSandboxError(str(exc),phase="cleanup",terminal_status="unknown_external_effect") from exc
+                reap=self._reap_supervisor_after_failure(job.job_id,process,start)
+            error=RepoSandboxError(str(exc),phase="cleanup",terminal_status="unknown_external_effect")
+            error.supervisor_reap=reap
+            raise error from exc
         finally:
             current = self._read_job_marker(job.job_id) if job.iteration_binding is not None else None
             if job.iteration_binding is None or (current and current.get("phase") == "iteration_cleanup_verified" and current.get("cleanup_proven") is True):

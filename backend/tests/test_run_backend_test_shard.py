@@ -8,6 +8,8 @@ import pytest
 from _pytest.mark.expression import Expression
 
 from scripts.run_backend_test_shard import (
+    TRACKED_LEAK_FILES,
+    tracked_warning_args,
     CANCELLED_EVAL_CONSUMER_NODES,
     FULLY_RETIRED_EVAL_INVOCATIONS,
     main,
@@ -921,3 +923,20 @@ def test_junit_dir_keeps_pytests_own_report_for_an_ordinary_failure(tmp_path: Pa
     with patch("scripts.run_backend_test_shard.subprocess.run", side_effect=failing_run):
         assert run_shard_files(tmp_path, ["tests/test_alpha.py"], junit_dir=tmp_path / "junit") == 1
     assert report.read_text() == "<testsuites><testsuite name='pytest'/></testsuites>"
+
+
+def test_tracked_leak_filters_apply_only_to_the_listed_files(tmp_path: Path):
+    tracked = sorted(TRACKED_LEAK_FILES)[0]
+    assert tracked_warning_args(["tests/test_alpha.py"]) == []
+    args = tracked_warning_args([tracked])
+    assert "-Wignore:unclosed file <_io.BufferedReader name=1:ResourceWarning" in args
+    assert "-Wignore:unclosed file <_io.FileIO name=9:ResourceWarning" in args
+    assert "-Wignore:subprocess :ResourceWarning" in args
+    assert not any("name='" in arg or "name=0" in arg for arg in args)
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py", tracked]) == 0
+    first, second = (call.args[0] for call in mock_run.call_args_list)
+    assert not any(arg.startswith("-W") for arg in first)
+    assert sum(arg.startswith("-W") for arg in second) == len(args)
+    assert all((Path(__file__).resolve().parents[1] / path).is_file() for path in TRACKED_LEAK_FILES)

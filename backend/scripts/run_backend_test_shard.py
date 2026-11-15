@@ -136,6 +136,41 @@ FULLY_RETIRED_EVAL_INVOCATIONS = {
 }
 
 
+# #1224 (#1212), tracked exception to the warnings-as-errors policy (#1218).
+# These files exercise repo worker / supervisor paths that still leave
+# anonymous child pipes and killed-but-unreaped children to the garbage
+# collector, sometimes in pytest's session-end gc pass where no test-level mark
+# applies. The filters are passed as -W to these files' invocations only, so
+# the same leak anywhere else still fails. Delete with #1224 (PR #1228).
+# pytest treats a -W message as a literal prefix (re.escape), not a regex, so
+# "anonymous pipe" is spelled as one prefix per leading fd digit: a file opened
+# by path has a quoted name and never matches.
+TRACKED_LEAK_FILTERS: tuple[str, ...] = (
+    *(f"ignore:unclosed file <_io.{kind} name={digit}:ResourceWarning"
+      for kind in ("BufferedReader", "FileIO") for digit in "123456789"),
+    "ignore:subprocess :ResourceWarning",
+)
+# The files whose runs failed without the filters (throwaway PR #1233).
+TRACKED_LEAK_FILES: frozenset[str] = frozenset({
+    "tests/test_repo_isolation_integration.py",
+    "tests/test_repo_node_vertical.py",
+    "tests/test_repo_publication_prefix_vertical.py",
+    "tests/test_repo_publication_process_vertical.py",
+    "tests/test_repo_publication_runtime.py",
+    "tests/test_repo_publication_vertical.py",
+    "tests/test_repo_repair.py",
+    "tests/test_repo_repair_executors.py",
+    "tests/test_repo_repair_local_vertical.py",
+})
+
+
+def tracked_warning_args(paths: list[str] | tuple[str, ...]) -> list[str]:
+    """``-W`` filters for invocations that include a #1224-tracked file."""
+    if not TRACKED_LEAK_FILES.intersection(paths):
+        return []
+    return [f"-W{entry}" for entry in TRACKED_LEAK_FILTERS]
+
+
 RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_approvals_api.py": 1_200,
     "tests/test_context_window.py": 1_200,
@@ -678,6 +713,7 @@ def run_shard_files(
                       "all 10 selected source definitions are cancelled campaign consumers; not passed")
                 continue
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args,
+                       *tracked_warning_args([path]),
                        *(f"--deselect={node}" for node in retired_nodes)]
             report_path = junit_report_path(junit_dir, label) if junit_dir is not None else None
             if report_path is not None:

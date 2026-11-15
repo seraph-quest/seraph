@@ -17,7 +17,7 @@ import {
 // no-login): the top-level provider/model are a stale configured default
 // (OpenRouter/Grok) while chat runs on the NEAR TEE text slot.
 const nearRuntime = {
-  build_id: "SERAPH_PRIME_v2026.10.7",
+  build_id: "SERAPH_PRIME_v2026.11.14",
   provider: "openrouter",
   model: "x-ai/grok-4.1-fast",
   model_label: "grok-4.1-fast",
@@ -101,19 +101,19 @@ describe("deriveChatRuntimeIdentity", () => {
 
 describe("deriveVersionItem", () => {
   it("reports one version when UI and backend agree", () => {
-    const item = deriveVersionItem("SERAPH_PRIME_v2026.10.7", nearRuntime, "runtime_status");
-    expect(item).toMatchObject({ tone: "ok", value: "SERAPH_PRIME_v2026.10.7" });
+    const item = deriveVersionItem("SERAPH_PRIME_v2026.11.14", nearRuntime, "runtime_status");
+    expect(item).toMatchObject({ tone: "ok", value: "SERAPH_PRIME_v2026.11.14" });
   });
 
   it("never shows a retained earlier build as the backend version", () => {
-    const item = deriveVersionItem("SERAPH_PRIME_v2026.10.7", { ...nearRuntime, build_id: "SERAPH_PRIME_v2026.4.11" }, "retained");
-    expect(item.value).toBe("SERAPH_PRIME_v2026.10.7");
+    const item = deriveVersionItem("SERAPH_PRIME_v2026.11.14", { ...nearRuntime, build_id: "SERAPH_PRIME_v2026.4.11" }, "retained");
+    expect(item.value).toBe("SERAPH_PRIME_v2026.11.14");
     expect(item.tone).toBe("unknown");
     expect(item.value).not.toContain("2026.4.11");
   });
 
   it("flags a real mismatch with what to do", () => {
-    const item = deriveVersionItem("SERAPH_PRIME_v2026.10.7", { ...nearRuntime, build_id: "SERAPH_PRIME_v2026.11.0" }, "runtime_status");
+    const item = deriveVersionItem("SERAPH_PRIME_v2026.11.14", { ...nearRuntime, build_id: "SERAPH_PRIME_v2026.11.0" }, "runtime_status");
     expect(item.tone).toBe("warning");
     expect(item.reason).toMatch(/Reload the page/);
   });

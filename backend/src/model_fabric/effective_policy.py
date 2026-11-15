@@ -6,13 +6,65 @@ import asyncio
 from dataclasses import replace
 import hashlib
 import json
+import threading
 
 from fastapi import HTTPException
 
 from .configuration import _configuration_payload, read_model_fabric_configuration, write_model_fabric_configuration
 
 
-configuration_mutation_lock = asyncio.Lock()
+class LoopAgnosticLock:
+    """Process-wide async mutex that excludes across event loops and threads.
+
+    ``asyncio.Lock`` binds to the first loop that contends for it, but the
+    sync inference path resolves accounting coroutines with ``asyncio.run`` on
+    another thread. This lock wraps a ``threading.Lock`` and polls for it
+    without blocking the loop, so a waiter on any loop or thread is excluded
+    the same way and a cancelled waiter never leaves it held. It is not
+    reentrant, like the ``asyncio.Lock`` it replaces.
+    """
+
+    _MAX_POLL_SECONDS = 0.025
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._holder: int | None = None
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> bool:
+        delay = 0.001
+        while not self._lock.acquire(blocking=False):
+            holder = self._holder
+            if holder is not None:
+                from .execution import sync_bridge_blocked_callers
+                if holder in sync_bridge_blocked_callers():
+                    # The holder is blocked joining this bridge chain and can
+                    # never release: fail instead of deadlocking.
+                    raise RuntimeError("configuration_mutation_lock is held by the caller blocked on this sync bridge")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, self._MAX_POLL_SECONDS)
+        self._holder = threading.get_ident()
+        return True
+
+    def release(self) -> None:
+        self._holder = None
+        self._lock.release()
+
+    async def __aenter__(self) -> None:
+        await self.acquire()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.release()
+
+
+configuration_mutation_lock = LoopAgnosticLock()
+
+
+def _openrouter_retired() -> bool:
+    from .retirement import openrouter_retired
+    return openrouter_retired()
 
 
 def current_near_text_policy() -> tuple[object, str]:
@@ -32,8 +84,30 @@ def current_near_text_policy() -> tuple[object, str]:
     return configured, digest
 
 
-def current_inference_policy() -> tuple[object, str]:
+def _policy_digest(configured) -> str:
+    payload = _configuration_payload(configured)
+    # Credentials stay backend-only and do not grant egress authority.
+    for key in ("near_text", "openrouter_setup", "near_tee"):
+        if payload.get(key) is not None:
+            payload[key].pop("credential_fingerprint", None)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def current_near_tee_policy(slot: str = "text") -> tuple[object, str]:
+    """Exact NEAR TEE slot authority projection (ADR-035); fails closed."""
+    from .configuration import near_tee_slot_block_reason
     configured = read_model_fabric_configuration()
+    if reason := near_tee_slot_block_reason(configured, slot):
+        raise PermissionError(reason)
+    return configured, _policy_digest(configured)
+
+
+def current_inference_policy() -> tuple[object, str]:
+    return inference_policy_from_configuration(read_model_fabric_configuration())
+
+
+def inference_policy_from_configuration(configured) -> tuple[object, str]:
+    """Exact pure owner projection for an already validated configuration."""
     if configured.status != "ready" or configured.openrouter_setup is None or configured.egress_revoked or not configured.openrouter_setup.cloud_egress_acknowledged:
         raise PermissionError("provider_policy_revoked_or_unavailable")
     payload = _configuration_payload(configured)
@@ -46,7 +120,7 @@ def current_inference_policy() -> tuple[object, str]:
 async def effective_policy_grants(operator) -> list[dict[str, object]]:
     configured = read_model_fabric_configuration()
     setup = configured.openrouter_setup
-    if setup is None and configured.near_text is None:
+    if setup is None and configured.near_text is None and configured.near_tee is None:
         return []
     from src.workflows.job_runtime import durable_job_repository
 
@@ -62,14 +136,21 @@ async def effective_policy_grants(operator) -> list[dict[str, object]]:
             continue
         jobs.append({"job_id": row["job_id"], "state": job["status"], "kind": job.get("job_kind", "model_inference")})
     grants = []
+    from .configuration import effective_inference_lane
+    try:
+        lane = effective_inference_lane(configured)
+    except ValueError:
+        lane = None
+    # ADR-035: the provider-neutral lane owns the deployment ceiling.
+    lane_ceiling = lane.spend_ceiling_microusd if lane is not None else None
     if setup is not None:
         grants.append({"kind": "provider_policy", "grant_id": "provider_policy:openrouter", "record_id": "openrouter",
         "boundary": "inference_egress", "purpose": "governed model inference",
         "source": "explicitly consented current-root capability inputs", "destination": "https://openrouter.ai/api/v1",
-        "state": "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked or not setup.cloud_egress_acknowledged else "active",
+        "state": "retired" if _openrouter_retired() else "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked or not setup.cloud_egress_acknowledged else "active",
         "revision": configured.egress_revision, "expires_at": None,
         "origin": "deployment_policy", "limits": {"scope": "deployment", "request_timeout_seconds": setup.timeout_seconds,
-            "spend_ceiling_microusd": setup.spend_ceiling_microusd, "accounting_status": accounting["status"]},
+            "spend_ceiling_microusd": lane_ceiling, "accounting_status": accounting["status"]},
         "affected_jobs": jobs, "controls": ["revoke"], "authority_cache": False})
     near = configured.near_text
     if near is not None:
@@ -79,7 +160,23 @@ async def effective_policy_grants(operator) -> list[dict[str, object]]:
             "state": "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked else "disabled" if not near.enabled else "active" if near.plaintext_egress_consent_revision == configured.egress_revision else "blocked_consent",
             "revision": configured.egress_revision, "expires_at": None, "origin": "deployment_policy",
             "limits": {"scope": "deployment", "revoke_scope": "OpenRouter and NEAR",
-                "request_timeout_seconds": near.timeout_seconds, "spend_ceiling_microusd": near.spend_ceiling_microusd,
+                "request_timeout_seconds": near.timeout_seconds, "spend_ceiling_microusd": lane_ceiling,
+                "accounting_status": accounting["status"]}, "affected_jobs": jobs,
+            "controls": ["revoke"], "authority_cache": False})
+    tee = configured.near_tee
+    if tee is not None:
+        from .configuration import NEAR_TEE_IMPLEMENTED_SLOTS, near_tee_slot_block_reason
+        reasons = {slot: near_tee_slot_block_reason(configured, slot) for slot in NEAR_TEE_IMPLEMENTED_SLOTS
+            if (tee.slots or {}).get(slot) is not None}
+        grants.append({"kind": "provider_policy", "grant_id": "provider_policy:near_tee", "record_id": "near_tee",
+            "boundary": "inference_egress",
+            "purpose": "NEAR TEE-hosted slot inference; NEAR gateway receives plaintext",
+            "source": "explicitly consented current-root capability inputs", "destination": tee.api_base,
+            "state": "blocked_configuration" if configured.status != "ready" else "revoked" if configured.egress_revoked
+                else "active" if any(reason is None for reason in reasons.values()) else "disabled",
+            "revision": configured.egress_revision, "expires_at": None, "origin": "deployment_policy",
+            "limits": {"scope": "deployment", "revoke_scope": "OpenRouter and NEAR",
+                "slots": {slot: reason or "active" for slot, reason in reasons.items()},
                 "accounting_status": accounting["status"]}, "affected_jobs": jobs,
             "controls": ["revoke"], "authority_cache": False})
     return grants
@@ -96,11 +193,13 @@ async def revoke_effective_policy(request, body):
     grant_id = getattr(body, "grant_id", None)
     revision = getattr(body, "expected_revision", None)
     key = str(getattr(body, "idempotency_key", "") or "")
-    if grant_id not in {"provider_policy:openrouter", "provider_policy:near_text"} or type(revision) is not int or not 1 <= len(key) <= 256:
+    if grant_id not in {"provider_policy:openrouter", "provider_policy:near_text", "provider_policy:near_tee"} or type(revision) is not int or not 1 <= len(key) <= 256:
         raise HTTPException(status_code=422, detail="exact policy identity, revision and idempotency key required")
     async with configuration_mutation_lock:
         configured = read_model_fabric_configuration()
-        available = configured.openrouter_setup is not None if grant_id == "provider_policy:openrouter" else configured.near_text is not None
+        available = {"provider_policy:openrouter": configured.openrouter_setup,
+            "provider_policy:near_text": configured.near_text,
+            "provider_policy:near_tee": configured.near_tee}[grant_id] is not None
         if not available or configured.status != "ready":
             raise HTTPException(status_code=409, detail="provider policy unavailable")
         if configured.egress_revoked and configured.egress_revocation_key == key and configured.egress_revision == revision + 1:

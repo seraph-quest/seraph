@@ -279,6 +279,7 @@ async def test_foreign_sealed_evidence_cannot_rewrite_actual_near_settlement(act
     assert len(controls["calls"]) == 2
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: OpenRouter canary/contender legs of the shared NEAR/OpenRouter serial ledger
 @pytest.mark.asyncio
 async def test_actual_or_canaries_and_near_native_share_serial_priority_and_ledger(actual_billing_journey):
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
@@ -445,6 +446,7 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
         await asyncio.gather(worker, return_exceptions=True)
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: OpenRouter canary/contender legs of the shared NEAR/OpenRouter serial ledger
 @pytest.mark.asyncio
 async def test_near_lane_recovery_cannot_reconcile_real_openrouter_operation(actual_billing_journey):
     from config.settings import settings
@@ -469,6 +471,7 @@ async def test_near_lane_recovery_cannot_reconcile_real_openrouter_operation(act
     assert after['ledger_digest'] == snapshot['ledger_digest'] and after['committed_microusd'] == 3
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: OpenRouter canary/contender legs of the shared NEAR/OpenRouter serial ledger
 @pytest.mark.asyncio
 async def test_two_ready_ordinary_or_contenders_and_near_choose_highest_priority(actual_billing_journey, monkeypatch):
     from config.settings import settings

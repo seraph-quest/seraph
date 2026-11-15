@@ -5,6 +5,10 @@ import re
 import uuid
 from datetime import datetime, timezone
 from time import perf_counter
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.conversation.task_context import TaskContinuityService
 
 from sqlalchemy import func, or_, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -25,7 +29,6 @@ from src.db.models import (
     MemoryEpisodeType,
     Message,
     NativeNotificationOutbox,
-    OperatorSession,
     TelegramTransportOutbox,
     QueuedInsight,
     ScheduledJob,
@@ -35,6 +38,7 @@ from src.db.models import (
 from src.db.session_refs import ensure_sessions_exist
 from src.memory.episodes import build_message_episode
 from src.memory.flush import flush_session_memory
+from src.security.trust_contract import TrustPrincipal
 from src.tools.process_tools import SessionProcessCleanupError, process_runtime_manager
 
 logger = logging.getLogger(__name__)
@@ -124,6 +128,46 @@ def _coerce_datetime(value: object) -> datetime | None:
 
 class SessionManager:
     """DB-backed session manager replacing the old in-memory dict."""
+
+    def __init__(self):
+        self._task_continuity: "TaskContinuityService | None" = None
+
+    def bind_task_continuity(self, service: "TaskContinuityService | None") -> None:
+        """The application lifecycle is the only activation owner."""
+        self._task_continuity = service
+
+    async def get_task_continuity_context(self, session_id: str, *, trust_principal=None) -> str:
+        if not session_id or self._task_continuity is None:
+            return ""
+        async with get_session() as db:
+            session = await db.get(Session, session_id)
+            if session is None or session.continuity_task_id is None:
+                return ""
+            try:
+                principal = trust_principal if trust_principal is not None else get_current_trust_principal()
+                return await self._task_continuity.for_chat(db, session_id, principal)
+            except (SQLAlchemyError, ValueError):
+                return "Task continuity is unavailable; reload current task context in Work."
+
+    async def context_principal(self, session_id: str | None, *, trust_principal: TrustPrincipal | None = None) -> TrustPrincipal | None:
+        """Current chat transcript authority, never recovered task read scope."""
+        from src.auth.service import AuthFailure, authenticate_session
+        from src.security.trust_contract import AuthorityGrant, PrincipalType
+
+        principal = trust_principal if trust_principal is not None else get_current_trust_principal()
+        if (not session_id or principal is None or not principal.authenticated or principal.revoked
+            or principal.principal_type != PrincipalType.OPERATOR
+            or principal.session_id != session_id or not principal.operator_session_id
+            or AuthorityGrant.MODEL_INFERENCE not in principal.grants):
+            return None
+        try:
+            operator = await authenticate_session(principal.operator_session_id, touch=False)
+            if operator.principal.principal_id != principal.principal_id:
+                return None
+            conversation = await self.get(session_id, owner_principal_id=principal.principal_id)
+            return principal if conversation is not None else None
+        except (AuthFailure, SQLAlchemyError):
+            return None
 
     @staticmethod
     async def _claim_session_owner(db, session: Session, owner_principal_id: str | None) -> None:
@@ -278,42 +322,15 @@ class SessionManager:
                 and session.owner_principal_id != owner_principal_id
             ):
                 raise SessionOwnerMismatchError(session_id)
-            # Audio bytes live outside the database, so quarantine cleanup is a
-            # deletion precondition.  Keep the session and its durable job rows
-            # when cleanup cannot be proven; the worker's retention pass can
-            # then retry the server-owned paths instead of losing their receipt.
+            # #1179 retired voice input. Historical AudioIngressJob rows are
+            # kept (unused) but still hold a foreign key to this conversation,
+            # so they are deleted with it. The retired audio worker owned the
+            # quarantine files; their retention was at most 15 minutes and is
+            # not re-run here.
             audio_jobs_result = await db.execute(
                 select(AudioIngressJob).where(AudioIngressJob.session_id == session_id)
             )
             audio_jobs = list(audio_jobs_result.scalars().all())
-            try:
-                from src.guardian.audio_worker import cleanup_audio_job_paths
-            except Exception:
-                logger.warning(
-                    "Audio quarantine cleanup is unavailable while deleting session %s",
-                    session_id,
-                    exc_info=True,
-                )
-                return False
-            for audio_job in audio_jobs:
-                try:
-                    cleaned = cleanup_audio_job_paths(
-                        audio_job.raw_path,
-                        audio_job.normalized_path,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Audio quarantine cleanup failed while deleting session %s",
-                        session_id,
-                        exc_info=True,
-                    )
-                    return False
-                if not cleaned:
-                    logger.warning(
-                        "Audio quarantine cleanup is incomplete while deleting session %s",
-                        session_id,
-                    )
-                    return False
             try:
                 process_runtime_manager.stop_processes_for_session(
                     session_id,
@@ -378,12 +395,8 @@ class SessionManager:
             )
             for intervention in interventions.scalars().all():
                 await db.delete(intervention)
-            # Audio jobs hold a foreign key to the canonical conversation.  The
-            # quarantine preflight above succeeded, so delete the metadata rows
-            # only after their private paths are proven gone.
-            from src.guardian.audio_worker import forget_audio_job_review
+            # Historical audio rows hold a foreign key to the conversation.
             for audio_job in audio_jobs:
-                forget_audio_job_review(audio_job.request_id)
                 await db.delete(audio_job)
             # A deleted conversation can never resume an old native delivery.
             # Preserve the outbox receipt while cancelling active handoffs so
@@ -435,7 +448,7 @@ class SessionManager:
                 rows = (await db.execute(text(
                     """
                     SELECT
-                        s.id, s.title, s.created_at, s.updated_at,
+                        s.id, s.title, s.created_at, s.updated_at, s.continuity_task_id,
                         lm.content AS last_content, lm.role AS last_role
                     FROM sessions s
                     LEFT JOIN (
@@ -452,6 +465,7 @@ class SessionManager:
                     {
                         "id": r.id,
                         "title": r.title,
+                        "continuity_task_id": r.continuity_task_id,
                         "created_at": r.created_at if isinstance(r.created_at, str) else r.created_at.isoformat(),
                         "updated_at": r.updated_at if isinstance(r.updated_at, str) else r.updated_at.isoformat(),
                         "last_message": r.last_content[:100] if r.last_content else None,
@@ -469,46 +483,48 @@ class SessionManager:
         exclude_session_id: str | None = None,
         limit_sessions: int = 3,
         snippet_chars: int = 140,
+        trust_principal: TrustPrincipal | None = None,
     ) -> str:
-        """Summarize recent sessions outside the current thread for guardian state."""
+        """Bounded current-Root conversations only; task recovery selects no transcript."""
+        candidate = trust_principal if trust_principal is not None else get_current_trust_principal()
+        current_id = exclude_session_id or getattr(candidate, "session_id", None)
+        principal = await self.context_principal(current_id, trust_principal=candidate)
+        if principal is None:
+            return ""
+        limit_sessions = max(1, min(int(limit_sessions), 6))
+        snippet_chars = max(1, min(int(snippet_chars), 500))
         try:
             async with get_session() as db:
-                stmt = select(Session)
-                if exclude_session_id:
-                    stmt = stmt.where(Session.id != exclude_session_id)
+                recency = (select(Message.session_id, func.max(Message.created_at).label("latest_at"))
+                    .join(Session, Session.id == Message.session_id)
+                    .where(Session.owner_principal_id == principal.principal_id,
+                        Message.role.in_(["user", "assistant"]),
+                        Message.owner_principal_id == principal.principal_id,
+                        Message.operator_session_id == principal.operator_session_id)
+                    .group_by(Message.session_id).subquery())
+                stmt = (select(Session).join(recency, Session.id == recency.c.session_id)
+                    .where(Session.owner_principal_id == principal.principal_id, Session.id != current_id)
+                    .order_by(func.coalesce(recency.c.latest_at, Session.created_at).desc())
+                    .limit(limit_sessions))
                 session_result = await db.execute(stmt)
                 sessions = session_result.scalars().all()
                 if not sessions:
                     return ""
-
-                recency_stmt = (
-                    select(Message.session_id, func.max(Message.created_at))
-                    .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
-                    .group_by(Message.session_id)
-                )
-                if exclude_session_id:
-                    recency_stmt = recency_stmt.where(Message.session_id != exclude_session_id)
-                recency_rows = await db.execute(recency_stmt)
-                conversation_recency = {
-                    session_id: latest_at
-                    for session_id, latest_at in recency_rows.all()
-                }
-                sessions = sorted(
-                    sessions,
-                    key=lambda session: conversation_recency.get(session.id) or session.created_at,
-                    reverse=True,
-                )[:limit_sessions]
 
                 lines: list[str] = []
                 for session in sessions:
                     msg_result = await db.execute(
                         select(Message)
                         .where(Message.session_id == session.id)
+                        .where(Message.owner_principal_id == principal.principal_id)
+                        .where(Message.operator_session_id == principal.operator_session_id)
                         .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
                         .order_by(col(Message.created_at).desc())
                         .limit(1)
                     )
                     latest = msg_result.scalars().first()
+                    if latest is None:
+                        continue
                     title = session.title or "Untitled session"
                     if latest and latest.content:
                         snippet = latest.content.replace("\n", " ").strip()
@@ -867,10 +883,6 @@ class SessionManager:
         message_id: str,
         metadata_json: str,
         attachment_refs: object = None,
-        confirmation_job_id: str | None = None,
-        confirmation_digest: str | None = None,
-        confirmation_owner_principal_id: str | None = None,
-        confirmation_operator_session_id: str | None = None,
     ) -> tuple[Message, bool]:
         """Persist one user ingress before dispatch and detect safe retries.
 
@@ -878,96 +890,6 @@ class SessionManager:
         key.  SQLite's existing primary-key constraint closes the small race
         between concurrent retries without adding a parallel receipt table.
         """
-        confirmation_mode = any(
-            value is not None
-            for value in (
-                confirmation_job_id,
-                confirmation_digest,
-                confirmation_owner_principal_id,
-                confirmation_operator_session_id,
-            )
-        )
-        if confirmation_mode and not all(
-            isinstance(value, str) and value
-            for value in (
-                confirmation_job_id,
-                confirmation_digest,
-                confirmation_owner_principal_id,
-                confirmation_operator_session_id,
-            )
-        ):
-            raise ValueError("confirmation reservation fence is incomplete")
-        if confirmation_mode:
-            assert confirmation_job_id is not None
-            assert confirmation_digest is not None
-            assert confirmation_owner_principal_id is not None
-            assert confirmation_operator_session_id is not None
-            # Claim the durable job fence and insert the canonical message in
-            # the same transaction.  Cancellation can win before this update;
-            # once it does, no message reservation is possible.
-            async with get_session() as db:
-                # The worker's request-time re-authentication closes the
-                # normal path, but session revocation can race that check.  A
-                # A row lock makes this transaction the linearization point on
-                # databases that support ``FOR UPDATE``.  SQLite's serialized
-                # write transaction provides the same fail-closed ordering for
-                # the local-first runtime: a revoked or expired operator
-                # session cannot reserve a canonical message after this check.
-                authority_result = await db.execute(
-                    select(OperatorSession)
-                    .where(OperatorSession.id == confirmation_operator_session_id)
-                    .with_for_update()
-                )
-                authority = authority_result.scalars().first()
-                now = datetime.now(timezone.utc)
-                if authority is None or authority.revoked_at is not None:
-                    raise MessageIngressConflictError(message_id)
-                idle_expires_at = authority.idle_expires_at
-                absolute_expires_at = authority.absolute_expires_at
-                if idle_expires_at.tzinfo is None:
-                    idle_expires_at = idle_expires_at.replace(tzinfo=timezone.utc)
-                if absolute_expires_at.tzinfo is None:
-                    absolute_expires_at = absolute_expires_at.replace(tzinfo=timezone.utc)
-                if now >= idle_expires_at or now >= absolute_expires_at:
-                    raise MessageIngressConflictError(message_id)
-                claimed = await db.execute(
-                    update(AudioIngressJob)
-                    .where(
-                        AudioIngressJob.id == confirmation_job_id,
-                        AudioIngressJob.status == "confirming",
-                        AudioIngressJob.confirmed_transcript_digest == confirmation_digest,
-                        AudioIngressJob.owner_principal_id == confirmation_owner_principal_id,
-                        AudioIngressJob.operator_session_id == confirmation_operator_session_id,
-                    )
-                    .values(status="confirming_reserved", updated_at=datetime.now(timezone.utc))
-                )
-                if claimed.rowcount != 1:
-                    raise MessageIngressConflictError(message_id)
-                existing = await db.get(Message, message_id)
-                if existing is not None:
-                    if (
-                        existing.session_id != session_id
-                        or existing.role != "user"
-                        or not self._ingress_metadata_matches(existing.metadata_json, metadata_json)
-                        or existing.content != content
-                    ):
-                        raise MessageIngressConflictError(message_id)
-                    db.expunge(existing)
-                    return existing, True
-                try:
-                    message = await self._add_message_in_db(
-                        db,
-                        session_id,
-                        "user",
-                        content,
-                        metadata_json=metadata_json,
-                        message_id=message_id,
-                        attachment_refs=attachment_refs,
-                    )
-                except IntegrityError as exc:
-                    raise MessageIngressConflictError(message_id) from exc
-                return message, False
-
         existing = await self.get_message(message_id)
         if existing is not None:
             if (
@@ -1000,6 +922,32 @@ class SessionManager:
                 raise MessageIngressConflictError(message_id)
             return raced, True
         return message, False
+
+    async def add_message_if_absent_in_db(
+        self,
+        db,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        message_id: str,
+        metadata_json: str | None = None,
+    ) -> Message:
+        """Insert one row by its deterministic id inside the caller's transaction.
+
+        An existing row with the same id must be the identical message (session,
+        role, content, metadata); a replay is a no-op, anything else is a conflict.
+        """
+        if len(content) > 50_000:
+            content = content[:50_000] + "\n\n[truncated]"
+        existing = await db.get(Message, message_id)
+        if existing is not None:
+            if (existing.session_id != session_id or existing.role != role or existing.content != content
+                    or (existing.metadata_json or None) != (metadata_json or None)):
+                raise MessageIngressConflictError(message_id)
+            return existing
+        return await self._add_message_in_db(db, session_id, role, content, metadata_json=metadata_json,
+                                             message_id=message_id)
 
     async def _add_message_in_db(
         self,
@@ -1224,15 +1172,24 @@ class SessionManager:
         limit: int = 50,
         *,
         allow_memory_flush: bool = True,
+        trust_principal: TrustPrincipal | None = None,
+        require_current_owner: bool = False,
     ) -> str:
+        principal = None
+        if require_current_owner:
+            principal = await self.context_principal(session_id, trust_principal=trust_principal)
+            if principal is None:
+                return ""
         async with get_session() as db:
-            result = await db.execute(
-                select(Message)
+            stmt = (select(Message)
                 .where(Message.session_id == session_id)
                 .where(Message.role.in_(["user", "assistant"]))  # type: ignore[attr-defined]
                 .order_by(col(Message.created_at).desc())
-                .limit(200)
-            )
+                .limit(200))
+            if principal is not None:
+                stmt = stmt.where(or_(Message.owner_principal_id.is_(None), Message.owner_principal_id == principal.principal_id))
+                stmt = stmt.where(or_(Message.operator_session_id.is_(None), Message.operator_session_id == principal.operator_session_id))
+            result = await db.execute(stmt)
             messages = list(reversed(result.scalars().all()))
             if not messages:
                 return ""

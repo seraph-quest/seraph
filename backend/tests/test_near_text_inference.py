@@ -132,9 +132,14 @@ async def invoke(state,**kwargs):
 async def test_one_http_inference_then_exact_billing(transport_setup):
     state=transport_setup
     provider_id=str(uuid5(NAMESPACE_DNS,"completion-123"))
+    seen_paths=[]
     async def handler(request):
         assert request.headers["authorization"]=="Bearer private-fixture-key"
         assert request.headers["accept-encoding"]=="identity"
+        # ADR-035: near_text rides the shared NEAR client; every request,
+        # inference and billing readback, carries x-no-aliasing.
+        assert request.headers["x-no-aliasing"]=="true"
+        seen_paths.append(request.url.path)
         body=json.loads(request.content)
         if request.url.path.endswith("chat/completions"):
             assert body==dict(model=near_text.MODEL,messages=[dict(role="user",content="private question")],
@@ -148,6 +153,7 @@ async def test_one_http_inference_then_exact_billing(transport_setup):
     assert answer.text=="private answer" and "private answer" not in repr(answer)
     assert answer.receipt.cost_microusd==2 and answer.receipt.memory_status=="no_learning"
     assert len(state["calls"])==2 and len(state["evidence"])==1 and state["checks"]==3
+    assert seen_paths==["/v1/chat/completions","/v1/billing/costs"]
 
 
 @pytest.mark.asyncio

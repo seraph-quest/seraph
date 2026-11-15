@@ -650,6 +650,7 @@ async def test_done_projection_promotes_exact_pending_review_intent(async_db):
     stale_task = SimpleNamespace(
         task_id=task_id,
         task_revision=1,
+        capability_id=None,
         requires_review=False,
     )
     stale_attempt = SimpleNamespace(
@@ -755,7 +756,7 @@ async def test_wrong_fence_review_intent_cannot_promote_done_projection(async_db
         session_provider=async_db,
     )
     await dispatcher._project(
-        SimpleNamespace(task_id=task_id, task_revision=1, requires_review=False),
+        SimpleNamespace(task_id=task_id, task_revision=1, capability_id=None, requires_review=False),
         SimpleNamespace(
             attempt_id=attempt_id,
             fencing_token=15,

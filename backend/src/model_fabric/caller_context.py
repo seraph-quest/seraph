@@ -23,6 +23,8 @@ from .contracts import (
     ModelCapability,
 )
 from .configuration import effective_workload_policy
+from .contracts import NEAR_TEE_PROVIDER_KIND
+from .retirement import OpenRouterRetiredRouteError, ProviderRetiredError, openrouter_retired
 
 
 @dataclass(frozen=True)
@@ -35,11 +37,36 @@ class CanonicalRouteSpec:
 
 
 CANONICAL_ROUTE_SPECS: dict[str, CanonicalRouteSpec] = {
+    "audio_transcription": CanonicalRouteSpec(InferenceWorkload.INTERACTIVE,
+        (ModelCapability.TEXT, ModelCapability.AUDIO_INPUT), "audio_transcription",
+        ContentOrigin.EXTERNAL_UNTRUSTED, "interactive"),
+    "general_task_planner": CanonicalRouteSpec(
+        InferenceWorkload.INTERACTIVE,
+        (ModelCapability.TEXT, ModelCapability.STRUCTURED_OUTPUT),
+        "interactive_chat",
+        ContentOrigin.OPERATOR_INPUT,
+        "interactive",
+    ),
     "readonly_research_child": CanonicalRouteSpec(
         InferenceWorkload.REPORT,
         (ModelCapability.TEXT,),
         "report_synthesis",
         ContentOrigin.EXTERNAL_UNTRUSTED,
+        "normal",
+    ),
+    # #1018: Cordis inference.request purposes, through the same broker and ledger.
+    "cordis_interactive_inference": CanonicalRouteSpec(
+        InferenceWorkload.INTERACTIVE,
+        (ModelCapability.TEXT,),
+        "interactive_chat",
+        ContentOrigin.OPERATOR_INPUT,
+        "interactive",
+    ),
+    "cordis_background_inference": CanonicalRouteSpec(
+        InferenceWorkload.BACKGROUND,
+        (ModelCapability.TEXT,),
+        "agent_reasoning",
+        ContentOrigin.OPERATOR_INPUT,
         "normal",
     ),
     "chat_agent": CanonicalRouteSpec(
@@ -206,10 +233,26 @@ def build_canonical_inference_context(
 ) -> InferenceRequestContext:
     """Build one fail-closed context from a registered production route."""
     spec = canonical_route_spec(runtime_path)
+    # ADR-035: a usable NEAR TEE slot is the route's only active provider.
+    # Otherwise, with OpenRouter retired, fail closed first, before identity,
+    # accounting, admission or transport, so every caller gets its existing
+    # route-denial handling with the stable ``openrouter_retired`` reason.
+    try:
+        policy = effective_workload_policy(runtime_path)
+    except Exception:
+        if openrouter_retired():
+            # An unreadable policy is never a route; keep the stable denial.
+            raise OpenRouterRetiredRouteError() from ProviderRetiredError()
+        raise
+    near_tee_route = tuple(getattr(policy, "allowed_provider_kinds", ()) or ()) == (NEAR_TEE_PROVIDER_KIND,)
+    if openrouter_retired() and not near_tee_route:
+        raise OpenRouterRetiredRouteError() from ProviderRetiredError()
 
     effective_principal = principal or get_current_trust_principal()
     if effective_principal is None:
         raise PermissionError("inference context requires an authenticated runtime principal")
+    if runtime_path == "audio_transcription" and AuthorityGrant.INGRESS not in effective_principal.grants:
+        raise PermissionError("audio ingress authority required")
     if AuthorityGrant.MODEL_INFERENCE not in effective_principal.grants:
         raise PermissionError("inference principal lacks model_inference authority")
 
@@ -224,12 +267,15 @@ def build_canonical_inference_context(
         raise ValueError("inference principal must exactly match session and job identity")
 
     data_digest = canonical_digest(payload)
-    policy = effective_workload_policy(runtime_path)
     if bool(getattr(policy, "fallback_allowed", False)):
-        raise PermissionError("active OpenRouter inference forbids provider fallback")
+        raise PermissionError("governed inference forbids provider fallback")
     allowed_provider_kinds = tuple(getattr(policy, "allowed_provider_kinds", ()) or ())
-    if allowed_provider_kinds and set(allowed_provider_kinds) != {"openrouter"}:
+    if near_tee_route:
+        context_provider_kinds = allowed_provider_kinds
+    elif allowed_provider_kinds and set(allowed_provider_kinds) != {"openrouter"}:
         raise PermissionError("active OpenRouter inference requires an OpenRouter provider policy")
+    else:
+        context_provider_kinds = ("openrouter",)
     egress_class = policy.egress_class
     capabilities = spec.capabilities
     if streaming and ModelCapability.STREAMING not in capabilities:
@@ -279,7 +325,7 @@ def build_canonical_inference_context(
         fallback_allowed=False,
         gpu_priority=spec.gpu_priority,
         allowed_profile_ids=tuple(getattr(policy, "allowed_profile_ids", ()) or ()),
-        allowed_provider_kinds=("openrouter",),
+        allowed_provider_kinds=context_provider_kinds,
         redaction_applied=redaction_applied,
         estimated_cost_microusd=estimated_cost_microusd,
         owner_budget_microusd=owner_budget_microusd,

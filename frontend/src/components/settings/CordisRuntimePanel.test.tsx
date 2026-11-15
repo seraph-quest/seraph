@@ -1,0 +1,235 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, expect, it, vi } from "vitest";
+import { apiFetch } from "../../lib/api";
+import { normalizeChatRuntime, normalizeCordisRuntime, normalizeGuardianRuntime, normalizeRuntimeDomains } from "../../lib/cordisRuntime";
+import { CordisRuntimePanel } from "./CordisRuntimePanel";
+vi.mock("../../lib/api", () => ({ apiFetch: vi.fn() }));
+const snapshot = { state: "blocked", reason: "node_unsupported", profile_id: "core.cpu", cordis_version: "4.0.0-rc.10", node_version: "22.11.0", composition_digest: null, package_digest: null, plugins: [{ id: "authority", state: "blocked", reason: "host_unavailable" }], cleanup: { state: "not_started", process_reaped: false, resources_remaining: null, cordis_disposal: "not_started" } };
+const response = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+beforeEach(() => { vi.mocked(apiFetch).mockReset(); });
+it.each(["node_unsupported", "node_missing", "runtime_build_stale", "runtime_package_invalid_or_missing"])("shows actionable host block %s without inferring agent migration", async reason => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: { ...snapshot, reason } }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText(`blocked · ${reason}`)).toBeInTheDocument();
+  expect(screen.getByText(/Restore the reviewed host build/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /activate|restart/i })).toBeNull();
+});
+it("names the exact operator fix the backend reports for a blocked host", async () => {
+  const recovery = "Install Node 22.12+ or 24.x and set CORDIS_NODE_PATH to it (or put it first on PATH), then run ./manage.sh -e dev cordis build and restart with ./manage.sh -e dev local up.";
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: { ...snapshot, recovery } }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText(`Fix: ${recovery}`)).toBeInTheDocument();
+});
+it("preserves last confirmed state through failed metadata refresh", async () => {
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ cordis_runtime: snapshot })).mockResolvedValueOnce(response({}, 503));
+  render(<CordisRuntimePanel />); await screen.findByText("blocked · node_unsupported");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh Cordis host" }));
+  expect(await screen.findByText(/Host readiness unknown · stale metadata/)).toBeInTheDocument();
+  expect(screen.getByText(/Artifact settings remain usable/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Refresh Cordis host" })).toBeEnabled();
+});
+it("shows current verified readiness, then removes every active ready label after refresh failure", async () => {
+  const ready = { ...snapshot, state: "ready", reason: null, readiness: { state: "verified", checked_at: 1700000000000 }, plugins: [{ id: "authority", state: "ready", reason: null }] };
+  vi.mocked(apiFetch).mockResolvedValueOnce(response({ cordis_runtime: ready })).mockRejectedValueOnce(Error("timeout"));
+  render(<CordisRuntimePanel />);
+  await screen.findByText("ready");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh Cordis host" }));
+  await screen.findByText("Host readiness unknown · stale metadata");
+  expect(screen.queryByText("ready")).toBeNull();
+  expect(screen.getByText("authority: unknown · stale metadata")).toBeInTheDocument();
+  expect(screen.getByText(/Readiness: unknown · last verified: 2023-11-14/)).toBeInTheDocument();
+});
+it("treats legacy cached ready snapshots as unknown instead of current readiness", () => {
+  const parsed = normalizeCordisRuntime({ ...snapshot, state: "ready", reason: null, plugins: [{ id: "authority", state: "ready", reason: null }] });
+  expect(parsed?.state).toBe("blocked"); expect(parsed?.readiness.state).toBe("unknown");
+  expect(parsed?.plugins[0].state).toBe("blocked");
+});
+it("strips unexpected sensitive fields from its retained public projection", async () => {
+  const unsafe = { ...snapshot, api_key: "sensitive-token", pid: 123, nonce: "sensitive-nonce", environment: { SECRET: "value" }, plugins: [{ ...snapshot.plugins[0], stderr: "sensitive-stderr" }] };
+  const parsed = normalizeCordisRuntime(unsafe);
+  expect(JSON.stringify(parsed)).not.toMatch(/sensitive|environment|stderr|nonce|api_key|pid/);
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: unsafe }));
+  render(<CordisRuntimePanel />); await screen.findByText("blocked · node_unsupported");
+  expect(document.body.textContent).not.toMatch(/sensitive/);
+});
+it("reports missing host metadata as unavailable rather than ready", async () => {
+  vi.mocked(apiFetch).mockResolvedValue(response({ model_fabric: {} }));
+  render(<CordisRuntimePanel />);
+  await waitFor(() => expect(screen.getByText("Host state unavailable")).toBeInTheDocument());
+  expect(screen.queryByText("ready")).toBeNull();
+});
+it("names the actual chat agent loop, route and owner epoch from the server's owner row", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText("Chat: Cordis agent loop (cordis.agent-loop.v1) · route chat_agent · owner epoch 2")).toBeInTheDocument();
+  expect(screen.queryByText(/Chat fix:/)).toBeNull();
+});
+it("shows a blocked chat loop with its exact fix and never a legacy fallback", async () => {
+  const recovery = "Run ./manage.sh -e dev cordis build, then restart with ./manage.sh -e dev local up.";
+  const chat_runtime = { loop: "blocked", route: "chat_agent", owner_epoch: 2, reason: "cordis_runtime_build_stale", recovery };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText("Chat blocked · cordis_runtime_build_stale")).toBeInTheDocument();
+  expect(screen.getByText(`Chat fix: ${recovery}`)).toBeInTheDocument();
+  expect(screen.queryByText(/legacy agent loop/)).toBeNull();
+});
+it("drops a malformed chat runtime status instead of guessing a loop", () => {
+  expect(normalizeChatRuntime({ loop: "blocked", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null })).toBeNull();
+  expect(normalizeChatRuntime({ loop: "smolagents", route: "chat_agent", owner_epoch: 1, reason: null, recovery: null })).toBeNull();
+  expect(normalizeChatRuntime({ loop: "legacy.smolagents", route: "chat_agent", owner_epoch: null, reason: null, recovery: null, secret: "x" }))
+    .toEqual({ loop: "legacy.smolagents", route: "chat_agent", owner_epoch: null, reason: null, recovery: null, owner_kind: null });
+});
+
+it("rolls chat back to legacy only after an explicit confirmation naming the domain", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/runtime/composition/"))).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Roll chat back to legacy" }));
+  await waitFor(() => expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).includes("/runtime/composition/"))).toBe(true));
+  const [, init] = vi.mocked(apiFetch).mock.calls.find(([url]) => String(url).includes("/runtime/composition/"))!;
+  expect(JSON.parse(String((init as RequestInit).body))).toEqual({ target: "legacy", expected_epoch: 2, confirm_domain: "seraph.agent-loop.v1" });
+  expect(confirm.mock.calls[1][0]).toContain("seraph.agent-loop.v1");
+  confirm.mockRestore();
+});
+it("offers the cutover to Cordis from the legacy loop and surfaces a refused change", async () => {
+  const chat_runtime = { loop: "legacy.smolagents", route: "chat_agent", owner_epoch: 3, reason: null, recovery: null, owner_kind: "legacy" };
+  vi.mocked(apiFetch).mockImplementation(async (url: unknown) => String(url).includes("/runtime/composition/")
+    ? response({ detail: { code: "composition_not_quiescent" } }, 409) : response({ cordis_runtime: snapshot, chat_runtime }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cut chat over to Cordis" }));
+  expect(await screen.findByText("Chat loop change refused: composition_not_quiescent")).toBeInTheDocument();
+  confirm.mockRestore();
+});
+it("shows a blocked guardian loop and every non-ready runtime domain with its fix (#1020)", async () => {
+  const recovery = "Start the Cordis runtime (npm ci --prefix runtime/cordis --ignore-scripts, then ./manage.sh local up).";
+  const guardian_runtime = { loop: "blocked", owner_epoch: 2, reason: "cordis_host_unavailable", recovery };
+  const runtime_domains = [
+    { domain: "seraph.agent-loop.v1", owner_kind: "cordis", epoch: 2, state: "ready", reason: null, recovery: null },
+    { domain: "seraph.agent-presets.v1", owner_kind: null, epoch: null, state: "missing", reason: "composition_dependency_missing",
+      recovery: "Restart Seraph to seed the runtime inventory." }];
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, guardian_runtime, runtime_domains }));
+  render(<CordisRuntimePanel />);
+  expect(await screen.findByText("Scheduled guardian work blocked · cordis_host_unavailable")).toBeInTheDocument();
+  expect(screen.getByText(`Guardian fix: ${recovery}`)).toBeInTheDocument();
+  const pending = screen.getByRole("list", { name: "Runtime domains needing action" });
+  expect(pending).toHaveTextContent("seraph.agent-presets.v1: missing · composition_dependency_missing · fix: Restart Seraph to seed the runtime inventory.");
+  expect(pending).not.toHaveTextContent("seraph.agent-loop.v1");
+  expect(normalizeGuardianRuntime({ loop: "blocked", owner_epoch: 2, reason: null, recovery: null })).toBeNull();
+  expect(normalizeRuntimeDomains([{ domain: "x", owner_kind: "root", epoch: 1, state: "ready", reason: null, recovery: null }])).toEqual([]);
+});
+it("lists every domain when the backend reports the runtime inventory as unavailable (#1020)", async () => {
+  // The exact fallback rows /api/status emits when the inventory read raises.
+  const recovery = "Restart Seraph; the runtime inventory is unreadable.";
+  const runtime_domains = ["seraph.agent-loop.v1", "seraph.agent-presets.v1"].map(domain => (
+    { domain, owner_kind: null, epoch: null, state: "unavailable", reason: "runtime_domains_status_unavailable", recovery }));
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, runtime_domains }));
+  render(<CordisRuntimePanel />);
+  const pending = await screen.findByRole("list", { name: "Runtime domains needing action" });
+  for (const domain of ["seraph.agent-loop.v1", "seraph.agent-presets.v1"]) {
+    expect(pending).toHaveTextContent(`${domain}: unavailable · runtime_domains_status_unavailable · fix: ${recovery}`);
+  }
+});
+const posts = () => vi.mocked(apiFetch).mock.calls.filter(([url]) => String(url).includes("/runtime/composition/"))
+  .map(([url, init]) => [String(url).split("/domains/")[1], JSON.parse(String((init as RequestInit).body))]);
+const delegationRow = (owner_kind: string, epoch: number) => ({ domain: "seraph.delegation.v1", owner_kind, epoch, state: "ready", reason: null, recovery: null });
+it("rolls delegation back before chat, and cuts it over after chat, under one confirmation (#1020)", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("cordis", 5)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  await waitFor(() => expect(posts()).toHaveLength(2));
+  expect(posts()).toEqual([
+    ["seraph.delegation.v1/owner", { target: "legacy", expected_epoch: 5, confirm_domain: "seraph.delegation.v1" }],
+    ["seraph.agent-loop.v1/owner", { target: "legacy", expected_epoch: 2, confirm_domain: "seraph.agent-loop.v1" }]]);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm.mock.calls[0][0]).toContain("seraph.delegation.v1, then seraph.agent-loop.v1");
+  confirm.mockRestore();
+});
+it("cuts chat over first and then delegation", async () => {
+  const chat_runtime = { loop: "legacy.smolagents", route: "chat_agent", owner_epoch: 3, reason: null, recovery: null, owner_kind: "legacy" };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("legacy", 6)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cut chat over to Cordis" }));
+  await waitFor(() => expect(posts()).toHaveLength(2));
+  expect(posts().map(([domain, body]) => [domain, body.target])).toEqual([
+    ["seraph.agent-loop.v1/owner", "cordis"], ["seraph.delegation.v1/owner", "cordis"]]);
+  confirm.mockRestore();
+});
+it("leaves chat unchanged when the delegation rollback is refused", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  vi.mocked(apiFetch).mockImplementation(async (url: unknown) => String(url).includes("/runtime/composition/")
+    ? response({ detail: { code: "composition_not_quiescent" } }, 409)
+    : response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("cordis", 5)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  expect(await screen.findByText("Chat loop change refused: composition_not_quiescent (seraph.delegation.v1); chat was not changed."))
+    .toBeInTheDocument();
+  expect(posts().map(([domain]) => domain)).toEqual(["seraph.delegation.v1/owner"]);
+  confirm.mockRestore();
+});
+it("offers the delegation cutover when chat is on Cordis and delegation is legacy", async () => {
+  const chat_runtime = { loop: "blocked", route: "chat_agent", owner_epoch: 2, reason: "delegation_owner_not_ready", recovery: "Cut it over in Settings", owner_kind: "cordis" };
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("legacy", 7)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cut delegation over to Cordis" }));
+  await waitFor(() => expect(posts()).toHaveLength(1));
+  expect(posts()).toEqual([["seraph.delegation.v1/owner", { target: "cordis", expected_epoch: 7, confirm_domain: "seraph.delegation.v1" }]]);
+  confirm.mockRestore();
+});
+it("does not send a chat rollback that an unreadable delegation row would refuse", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  const runtime_domains = [{ domain: "seraph.delegation.v1", owner_kind: null, epoch: null, state: "unavailable",
+    reason: "runtime_domains_status_unavailable", recovery: "Restart Seraph; the runtime inventory is unreadable." }];
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  expect(await screen.findByText(/Delegation \(seraph.delegation.v1\) state is unknown/)).toBeInTheDocument();
+  expect(posts()).toEqual([]);
+  expect(screen.queryByRole("button", { name: "Cut delegation over to Cordis" })).toBeNull();
+  confirm.mockRestore();
+});
+it("names the delegation cutover after a refused second step", async () => {
+  const chat_runtime = { loop: "legacy.smolagents", route: "chat_agent", owner_epoch: 3, reason: null, recovery: null, owner_kind: "legacy" };
+  vi.mocked(apiFetch).mockImplementation(async (url: unknown) => String(url).includes("/domains/seraph.delegation.v1/")
+    ? response({ detail: { code: "composition_not_quiescent" } }, 409)
+    : response({ cordis_runtime: snapshot, chat_runtime, runtime_domains: [delegationRow("legacy", 6)] }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Cut chat over to Cordis" }));
+  expect(await screen.findByText(/delegation was refused: composition_not_quiescent .*Cut delegation over to Cordis/)).toBeInTheDocument();
+  confirm.mockRestore();
+});
+it("rolls chat back alone when the delegation row is missing", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  const runtime_domains = [{ domain: "seraph.delegation.v1", owner_kind: null, epoch: null, state: "missing",
+    reason: "composition_dependency_missing", recovery: "Restart Seraph to seed the runtime inventory." }];
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  await waitFor(() => expect(posts()).toHaveLength(1));
+  expect(posts().map(([domain, body]) => [domain, body.target])).toEqual([["seraph.agent-loop.v1/owner", "legacy"]]);
+  confirm.mockRestore();
+});
+it("holds the chat rollback for an invalid inventory row too", async () => {
+  const chat_runtime = { loop: "cordis.agent-loop.v1", route: "chat_agent", owner_epoch: 2, reason: null, recovery: null, owner_kind: "cordis" };
+  const runtime_domains = [{ domain: "seraph.delegation.v1", owner_kind: null, epoch: null, state: "blocked",
+    reason: "composition_inventory_invalid", recovery: "Repair the runtime composition inventory." }];
+  vi.mocked(apiFetch).mockResolvedValue(response({ cordis_runtime: snapshot, chat_runtime, runtime_domains }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<CordisRuntimePanel />);
+  fireEvent.click(await screen.findByRole("button", { name: "Roll chat back to legacy" }));
+  expect(await screen.findByText(/Delegation \(seraph.delegation.v1\) state is unknown/)).toBeInTheDocument();
+  expect(posts()).toEqual([]);
+  confirm.mockRestore();
+});

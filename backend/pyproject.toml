@@ -1,6 +1,6 @@
 [project]
 name = "backend"
-version = "2026.10.7"
+version = "2026.11.14"
 description = "Seraph's backend service"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,12 +31,16 @@ dependencies = [
     "Pillow>=11.0.0",
     # Fixed optional deterministic document parser (ADR-017)
     "pypdf==6.19.0",
+    "python-docx==1.2.0",
+    "openpyxl==3.1.5",
     # Phase 3.5 — Context Window
     "tiktoken>=0.8",
     # Vault
     "cryptography>=43.0.0",
     # Reliability
     "slowapi>=0.1.9",
+    "xlsxwriter==3.2.9",
+    "reportlab==5.0.1",
 ]
 
 [dependency-groups]
@@ -50,3 +54,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 addopts = "--cov=src --cov-report=term-missing"
+markers = [
+    "openrouter_legacy: explicitly re-enable retired OpenRouter (ADR-035) to pin historical mechanics; never production behavior",
+]

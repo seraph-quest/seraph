@@ -1,5 +1,7 @@
 import { API_URL } from "../config/constants";
 import { apiFetch } from "./api";
+import { normalizeConnectedRequest, relatedSources } from "./connectionSync";
+import type { ConnectedSource, RelatedSources } from "./connectionSync";
 
 const MAIL_BASE = "/api/capabilities/mail";
 const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
@@ -43,6 +45,8 @@ export interface MailLabelMetadata {
 }
 
 export interface MailConsentMetadata {
+  sync_metadata_limit?: number;
+  created_at?: string;
   consent_id: string;
   connection_id: string;
   connection_revision: number;
@@ -133,6 +137,7 @@ export interface MailReplyTaskReceipt {
 }
 
 export interface MailDraftResponse {
+  related_sources?: RelatedSources;
   status: "pending" | "blocked" | "verified";
   task_id: string;
   recovery_action?: string;
@@ -453,7 +458,7 @@ function label(value: unknown): MailLabelMetadata {
 
 function consent(value: unknown): MailConsentMetadata {
   if (!isRecord(value)) fail("The consent receipt was not an object.");
-  exactKeys(value, ["consent_id", "connection_id", "connection_revision", "goal_id", "goal_revision", "label_ids", "window_days", "max_messages", "source_read_allowed", "source_revision", "model_egress_allowed", "model_revision", "allowed_body_fields", "expires_at", "state", "revision"], "consent");
+  exactKeys(value, ["consent_id", "connection_id", "connection_revision", "goal_id", "goal_revision", "label_ids", "window_days", "max_messages", "source_read_allowed", "source_revision", "model_egress_allowed", "model_revision", "allowed_body_fields", "expires_at", "state", "revision", ...(value.sync_metadata_limit === undefined ? [] : ["sync_metadata_limit"]), ...(value.created_at === undefined ? [] : ["created_at"])], "consent");
   const fields = listOfStrings(value.allowed_body_fields, "allowed body fields", BODY_FIELDS.length) as MailBodyField[];
   if (!fields.every((field) => BODY_FIELDS.includes(field))) fail("The consent receipt has an unsupported body field.");
   if (value.state !== "active" && value.state !== "revoked" && value.state !== "expired") fail("The consent receipt has an invalid state.");
@@ -467,6 +472,8 @@ function consent(value: unknown): MailConsentMetadata {
     label_ids: labels,
     window_days: 7,
     max_messages: boundedInteger(value.max_messages, "message limit", 1, 10),
+    sync_metadata_limit: value.sync_metadata_limit === undefined ? 0 : boundedInteger(value.sync_metadata_limit, "sync metadata limit", 0, 50),
+    created_at: value.created_at === undefined ? undefined : timestamp(value.created_at, "consent creation"),
     source_read_allowed: booleanValue(value.source_read_allowed, "source consent"),
     source_revision: positiveInteger(value.source_revision, "source revision"),
     model_egress_allowed: booleanValue(value.model_egress_allowed, "model consent"),
@@ -668,11 +675,12 @@ function draftResponse(value: unknown): MailDraftResponse {
     return { status, task_id: opaqueId(value.task_id, "task ID"), recovery_action: nullableString(value.recovery_action, "recovery action", 128) ?? undefined, memory_status: "no_learning" };
   }
   if (status !== "verified" || !isRecord(value.draft)) fail("The verified draft response is invalid.");
-  exactKeys(value, ["status", "task_id", "draft", "message_revision", "memory_status", "sent", "saved_to_provider"], "verified draft");
+  exactKeys(value, ["status", "task_id", "draft", "message_revision", "memory_status", "sent", "saved_to_provider", ...(value.related_sources === undefined ? [] : ["related_sources"])], "verified draft");
   const draft = value.draft;
   exactKeys(draft, ["subject", "plainbody", "caveats"], "draft body");
   return {
     status: "verified",
+    ...(value.related_sources === undefined ? {} : { related_sources: relatedSources(value.related_sources) }),
     task_id: opaqueId(value.task_id, "task ID"),
     draft: { subject: safeString(draft.subject, "draft subject", 500), plainbody: plainText(draft.plainbody, "draft body", 64 * 1024), caveats: listOfStrings(draft.caveats, "draft caveats", 16) },
     message_revision: digest(value.message_revision, "message revision"),
@@ -898,6 +906,7 @@ export function listMailConsents(connectionId?: string, signal?: AbortSignal): P
 }
 
 export interface CreateMailConsentRequest {
+  acknowledge_sync_metadata?: boolean;
   schema_version: 1;
   connection_id: string;
   expected_connection_revision: number;
@@ -931,8 +940,8 @@ export function readMailMessage(messageBindingId: string, request: { connection_
   return mailRequest(`${MAIL_BASE}/messages/${id(messageBindingId, "message binding ID")}/read`, json("POST", request, signal), readResponse);
 }
 
-export function createMailReplyTask(request: { schema_version: 1; connection_id: string; expected_connection_revision: number; message_binding_id: string; expected_message_revision: string; mail_consent_id: string; expected_source_consent_revision: number; expected_model_consent_revision: number; goal_id: string; expected_goal_revision: number; reply_intent: string; style: "brief" | "formal"; idempotency_key: string }, signal?: AbortSignal): Promise<MailReplyTaskReceipt> {
-  return mailRequest(`${MAIL_BASE}/reply-tasks`, json("POST", request, signal), replyResponse);
+export function createMailReplyTask(request: { connected_sources?: ConnectedSource[]; acknowledge_connected_sources?: true; schema_version: 1; connection_id: string; expected_connection_revision: number; message_binding_id: string; expected_message_revision: string; mail_consent_id: string; expected_source_consent_revision: number; expected_model_consent_revision: number; goal_id: string; expected_goal_revision: number; reply_intent: string; style: "brief" | "formal"; idempotency_key: string }, signal?: AbortSignal): Promise<MailReplyTaskReceipt> {
+  return mailRequest(`${MAIL_BASE}/reply-tasks`, json("POST", normalizeConnectedRequest(request), signal), replyResponse);
 }
 
 export function getMailReplyDraft(taskId: string, signal?: AbortSignal): Promise<MailDraftResponse> {

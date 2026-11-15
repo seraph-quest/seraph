@@ -62,6 +62,7 @@ from src.tools.filesystem_tool import (
     _read_workspace_text_bounded,
     _safe_resolve,
     _write_workspace_text_bounded,
+    assert_agent_readable,
 )
 from src.workflows.job_runtime import (
     DurableJobIdentity,
@@ -89,9 +90,79 @@ NO_LEARNING = "no_learning"
 
 logger = logging.getLogger(__name__)
 
-_HTML_SCRIPT_RE = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1\s*>", re.I | re.S)
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+# Linear equivalents of ``<!--.*?-->`` (S), ``<(script|style|noscript)\b[^>]*>.*?</\1\s*>``
+# (I, S) and ``<[^>]+>``: identical output, but an unclosed construct is scanned
+# once instead of once per opening (adversarial pages stalled the regex forms).
+_HTML_SCRIPT_OPEN_RE = re.compile(r"<(script|style|noscript)\b", re.I)
+# ``\1`` under re.I compares CPython's simple lowercase of each character. Only
+# U+0130 (to ``i``) and U+212A (to ``k``) map onto ASCII letters; ``ı`` and ``ſ``
+# lowercase to themselves, so they match only themselves.
+_SIMPLE_LOWER = {"\u0130": "i", "\u212a": "k"}
+_FOLD_CANDIDATES = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u0130\u0131\u017f\u212a"
+
+
+def _simple_lower(char: str) -> str:
+    return _SIMPLE_LOWER.get(char, char.lower() if char.isascii() else char)
+
+
+def _closing_class(char: str) -> str:
+    """Characters a re.I backreference to ``char`` accepts in the closing tag."""
+    members = [candidate for candidate in _FOLD_CANDIDATES if _simple_lower(candidate) == _simple_lower(char)]
+    if char not in members:
+        members.append(char)
+    return "[" + "".join(re.escape(member) for member in members) + "]"
+
+
+def _strip_comments(value: str) -> str:
+    parts, cursor = [], 0
+    while (start := value.find("<!--", cursor)) >= 0:
+        end = value.find("-->", start + 4)
+        if end < 0:
+            break  # No later opening can close either.
+        parts.append(value[cursor:start])
+        cursor = end + 3
+    return "".join(parts) + value[cursor:]
+
+
+def _strip_scripts(value: str) -> str:
+    parts, cursor, position, closing = [], 0, 0, {}
+    while (opening := _HTML_SCRIPT_OPEN_RE.search(value, position)) is not None:
+        start = opening.start()
+        name_end = value.find(">", opening.end())
+        if name_end < 0:
+            break  # ``[^>]*>`` can never complete for this or any later opening.
+        name = opening.group(1)
+        key = name.lower()
+        cached = closing.get(key)
+        if cached is None or (cached[0] != -1 and cached[0] < name_end + 1):
+            letters = "".join(_closing_class(c) for c in name)
+            pattern = re.compile(r"</" + letters + r"\s*>")
+            found = pattern.search(value, name_end + 1)
+            cached = (found.start(), found.end()) if found else (-1, -1)
+            closing[key] = cached
+        if cached[0] < 0:
+            position = start + 1  # No closing after here: this opening never matches.
+            continue
+        parts.append(value[cursor:start])
+        parts.append("\n")
+        cursor = position = cached[1]
+    return "".join(parts) + value[cursor:]
+
+
+def _strip_tags(value: str) -> str:
+    parts, cursor, position = [], 0, 0
+    while (start := value.find("<", position)) >= 0:
+        end = value.find(">", start + 1)
+        if end < 0:
+            break
+        if end == start + 1:
+            position = start + 1  # ``<>`` needs at least one character.
+            continue
+        parts.append(value[cursor:start])
+        cursor = position = end + 1
+    return "".join(parts) + value[cursor:]
+
+
 _REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?im)(authorization\s*:\s*bearer\s+)[^\s]+"), r"\1[REDACTED]"),
     (re.compile(r"(?im)(\b(?:api[_-]?key|secret|token|password)\b\s*[:=]\s*[\"']?)[^\s,\"']+"), r"\1[REDACTED]"),
@@ -625,6 +696,12 @@ def parse_sources(raw: Sequence[Mapping[str, Any]]) -> tuple[SourceSpec, ...]:
                 raise SourceWatchError("workspace_secret_path_blocked", str(exc)) from exc
             if target.startswith("/") or ".." in Path(target).parts or target.startswith("~"):
                 raise SourceWatchError("workspace_path_invalid")
+            # Watched text reaches the model, so the registry decides what a
+            # workspace source may name, not only the secret-name lists.
+            try:
+                assert_agent_readable(_safe_resolve(target), file_path=target, operation="source_watch_read")
+            except ValueError as exc:
+                raise SourceWatchError("workspace_secret_path_blocked", str(exc)) from exc
         priority = item.get("priority", 3)
         if isinstance(priority, bool) or not 1 <= int(priority) <= 5:
             raise SourceWatchError("source_priority_invalid")
@@ -701,10 +778,10 @@ def _schedule_enabled(schedule: Mapping[str, Any], *, default: bool = True) -> b
 def normalize_source_text(content: str, *, html_content: bool = False) -> str:
     value = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
     if html_content:
-        value = _COMMENT_RE.sub("", value)
-        value = _HTML_SCRIPT_RE.sub("\n", value)
+        value = _strip_comments(value)
+        value = _strip_scripts(value)
         value = re.sub(r"</(p|div|li|h[1-6]|br|tr|section|article)>", "\n", value, flags=re.I)
-        value = _HTML_TAG_RE.sub("", value)
+        value = _strip_tags(value)
         value = html.unescape(value)
     lines = [" ".join(line.split()) for line in value.split("\n")]
     normalized = "\n".join(line for line in lines if line).strip()
@@ -1049,6 +1126,7 @@ async def _read_source(source: SourceSpec, *, authority_check=None) -> tuple[str
     try:
         _assert_not_secret_like_path(source.target, "source_watch_read")
         resolved = _safe_resolve(source.target)
+        assert_agent_readable(resolved, file_path=source.target, operation="source_watch_read")
         stat_result = resolved.stat()
         if not resolved.is_file() or stat_result.st_nlink != 1:
             raise SourceWatchError("workspace_source_not_regular")

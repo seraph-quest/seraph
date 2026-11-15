@@ -22,10 +22,22 @@ from src.security.trust_contract import EgressClass
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError, account_charge_microusd
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
+from tests.async_wait_support import started_or_raise
+
+# ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
+# witness mechanics that still settle retained liabilities; retired-route
+# denial is covered in test_openrouter_retirement.py.
+pytestmark = pytest.mark.openrouter_legacy
 
 
 @pytest_asyncio.fixture
 async def accounting_db(tmp_path, monkeypatch):
+    # Register both canonical SQLModel owners before materializing this file DB.
+    # Reviewed-method selection can otherwise register its table during a later
+    # test, after create_all, leaving full-metadata readback without that table.
+    from src.db import models as _models  # noqa: F401
+    from src.db import task_method_models as _task_method_models  # noqa: F401
+
     root = tmp_path / "workspace"
     root.mkdir()
     monkeypatch.setattr(settings, "workspace_dir", str(root))
@@ -56,6 +68,17 @@ async def accounting_db(tmp_path, monkeypatch):
     factory.accounting_sessions = sessions
     yield root, engine, factory
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_accounting_db_materializes_all_canonical_model_tables(accounting_db):
+    from sqlalchemy import inspect
+    from src.db.task_method_models import TaskMethodActive
+
+    async with accounting_db[1].connect() as connection:
+        tables = await connection.run_sync(lambda db: set(inspect(db).get_table_names()))
+    assert TaskMethodActive.__tablename__ in tables
+    assert set(SQLModel.metadata.tables).issubset(tables)
 
 
 def setup_configuration(*, ceiling=1000, bound=100):
@@ -324,6 +347,11 @@ async def test_restore_carries_latest_ledger_and_missing_witness_refuses(account
     # DB into the same descriptor-owned root; witness stays outside it.
     assert retain_inference_accounting(active=root, target=restored, database_path="seraph.db") == receipt
     shutil.copy2(restored / "seraph.db", root / "seraph.db")
+    assert (await repository.inference_accounting_snapshot())["reason_code"] == "general_task_group_lookup_invalid"
+    from src.db.engine import _ensure_inference_group_lookup
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        await _ensure_inference_group_lookup(connection)
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["committed_microusd"] == 13 and snapshot["remaining_microusd"] == 987
     assert snapshot["operations"][0]["owner_id"] == "service:accounting"
@@ -341,8 +369,17 @@ async def test_all_billable_kinds_missing_ledger_invalid_owner_never_contact(acc
         calls.append("forbidden")
     for runtime_path in ("chat_agent", "embedding", "capability_probe", "screen_artifact_analysis", "audio_transcription"):
         candidate = replace(request("missing:" + runtime_path), runtime_path=runtime_path)
-        with pytest.raises(ValueError, match="continuity_unavailable"):
+        # Audio has an explicit v3/native-only contract; legacy setup denies
+        # it before the shared ledger is consulted. Other billable kinds keep
+        # their original continuity-first failure and never reach a callback.
+        denial = "audio_route_retired" if runtime_path == "audio_transcription" else "continuity_unavailable"  # #1179
+        with pytest.raises(ValueError, match=denial):
             await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(candidate, provider)
+    from src.db.models import WorkflowRunState, InferenceCostReservation
+    from sqlalchemy import select
+    async with accounting_db[2].accounting_sessions() as db:
+        assert (await db.execute(select(WorkflowRunState))).scalars().all() == []
+        assert (await db.execute(select(InferenceCostReservation))).scalars().all() == []
     await DurableJobRepository().configure_inference_accounting(1000)
     with pytest.raises(ValueError, match="authority_invalid"):
         await RemoteInferenceAdmissionBroker(durable_accounting=True).execute(request("invalid-owner", owner="unbound-principal"), provider)
@@ -350,46 +387,167 @@ async def test_all_billable_kinds_missing_ledger_invalid_owner_never_contact(acc
 
 
 @pytest.mark.asyncio
-async def test_priority_serial_execution_cancel_and_revocation_retain_cost(accounting_db):
+async def test_priority_serial_execution_cancel_and_revocation_retain_cost(accounting_db, monkeypatch):
+    from sqlalchemy import event, text
+    import sys
     from src.model_fabric.configuration import read_model_fabric_configuration
+    root, engine, _factory = accounting_db
     setup_configuration()
     repository = DurableJobRepository()
     await repository.configure_inference_accounting(1000)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     started, release = asyncio.Event(), asyncio.Event()
+    changed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    requests = {
+        "active": request("active"),
+        "background": request("background", priority=RemoteInferencePriority.SCREENSHOT_BACKGROUND),
+        "foreground": request("foreground"),
+    }
+    # Convert the earliest original deadline once; preparation receives no extra time.
+    barrier_deadline = loop.time() + min(item.deadline_at for item in requests.values()) - time.time()
+    prepared, enqueued, failures, trace, tasks = {}, {}, [], [], []
+    def observe(phase, outcome, **details):
+        task = asyncio.current_task()
+        trace.append({"monotonic": loop.time(), "phase": phase, "outcome": outcome,
+                      "task": task.get_name() if task else None, **details})
+    def broker_observer(phase, original, completions):
+        async def observed(candidate, **kwargs):
+            if candidate.operation_id not in requests:
+                return await original(candidate, **kwargs)
+            observe(phase, "enter", operation_id=candidate.operation_id)
+            try:
+                actual = await original(candidate, **kwargs)
+            except BaseException as exc:
+                failures.append(exc)
+                observe(phase, "error", operation_id=candidate.operation_id, error=type(exc).__name__)
+                changed.set()
+                raise
+            # Retain the actual result solely as a completion notification.
+            completions[candidate.operation_id] = actual
+            observe(phase, "return", operation_id=candidate.operation_id)
+            changed.set()
+            return actual
+        return observed
+    monkeypatch.setattr(broker, "_prepare_accounting", broker_observer("prepare", broker._prepare_accounting, prepared))
+    monkeypatch.setattr(broker, "enqueue", broker_observer("enqueue", broker.enqueue, enqueued))
+    # Observe delegated original durable phases, without changing their inputs/results.
+    for phase in ("admit_job", "queue_job", "claim_job", "reserve_inference_cost"):
+        original = getattr(DurableJobRepository, phase)
+        def repository_observer(phase, original):
+            async def observed(self, *args, **kwargs):
+                observe(phase, "enter")
+                try:
+                    actual = await original(self, *args, **kwargs)
+                except BaseException as exc:
+                    observe(phase, "error", error=type(exc).__name__)
+                    raise
+                observe(phase, "return")
+                return actual
+            return observed
+        monkeypatch.setattr(DurableJobRepository, phase, repository_observer(phase, original))
+    def statement_observer(connection, cursor, statement, parameters, context, executemany):
+        verb = statement.split(None, 1)[0].upper() if statement.strip() else ""
+        if verb in {"BEGIN", "COMMIT", "ROLLBACK"}:
+            observe("sql", verb, connection=id(connection))
+    def commit_observer(connection):
+        observe("sql", "COMMIT", connection=id(connection))
+    def rollback_observer(connection):
+        observe("sql", "ROLLBACK", connection=id(connection))
+    listeners = (("before_cursor_execute", statement_observer), ("commit", commit_observer),
+                 ("rollback", rollback_observer))
+    for name, listener in listeners:
+        event.listen(engine.sync_engine, name, listener)
+    async def wait_for(predicate):
+        while not predicate():
+            changed.clear()
+            if failures:
+                raise failures[0]
+            await changed.wait()
+        if failures:
+            raise failures[0]
     order = []
     async def active():
         order.append("active")
         started.set()
+        changed.set()
         await release.wait()
         return {"usage": {"cost": "0.000001"}}
     async def queued(name):
         order.append(name)
         return {"usage": {"cost": "0.000001"}}
-    first = asyncio.create_task(broker.execute(request("active"), active))
-    await started.wait()
-    background = asyncio.create_task(broker.execute(request("background", priority=RemoteInferencePriority.SCREENSHOT_BACKGROUND), lambda: queued("background")))
-    foreground = asyncio.create_task(broker.execute(request("foreground"), lambda: queued("foreground")))
-    # Observe the canonical reservations rather than timing a scheduler race.
-    for _ in range(50):
-        snapshot = await repository.inference_accounting_snapshot()
-        if len(snapshot.get("operations", [])) == 3:
-            break
-        await asyncio.sleep(0.01)
-    assert len(snapshot["operations"]) == 3
-    release.set()
-    await asyncio.gather(first, background, foreground)
-    assert order == ["active", "foreground", "background"]
-    assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 3
-    async def revoke_after_charge():
-        from src.model_fabric.accounting import capture_inference_usage
-        capture_inference_usage({"usage": {"cost": "0.000005"}})
-        configured = read_model_fabric_configuration()
-        write_model_fabric_configuration(replace(configured, egress_revoked=True, egress_revision=configured.egress_revision + 1))
-        return {"content": "must not adopt"}
-    with pytest.raises((PermissionError, InferenceAccountingError)):
-        await broker.execute(request("revoked-after-contact"), revoke_after_charge)
-    assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 8
+    succeeded = False
+    try:
+        async with asyncio.timeout_at(barrier_deadline):
+            tasks.append(asyncio.create_task(broker.execute(requests["active"], active), name="accounting-active"))
+            await wait_for(started.is_set)
+            tasks.append(asyncio.create_task(broker.execute(requests["background"], lambda: queued("background")), name="accounting-background"))
+            tasks.append(asyncio.create_task(broker.execute(requests["foreground"], lambda: queued("foreground")), name="accounting-foreground"))
+            await wait_for(lambda: {"background", "foreground"} <= prepared.keys())
+            await wait_for(lambda: {"background", "foreground"} <= enqueued.keys())
+            observe("canonical_snapshot", "enter")
+            snapshot = await repository.inference_accounting_snapshot()
+            observe("canonical_snapshot", "return", status=snapshot["status"],
+                    operations=[{"operation_id": row["operation_id"], "job_id": row["job_id"],
+                                 "state": row["state"]} for row in snapshot["operations"]])
+            assert snapshot["status"] == "ready"
+            assert len(snapshot["operations"]) == 3
+            assert {row["operation_id"]: row["job_id"] for row in snapshot["operations"]} == {
+                operation_id: prepared[operation_id].job_id for operation_id in requests}
+            assert {row["operation_id"]: row["state"] for row in snapshot["operations"]} == {
+                "active": "contact_started", "background": "reserved", "foreground": "reserved"}
+            release.set()
+            # Observer timeout must not cancel children before our single cleanup cancel.
+            await asyncio.wait(tasks)
+            for task in tasks:
+                task.result()
+        assert order == ["active", "foreground", "background"]
+        assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 3
+        async def revoke_after_charge():
+            from src.model_fabric.accounting import capture_inference_usage
+            capture_inference_usage({"usage": {"cost": "0.000005"}})
+            configured = read_model_fabric_configuration()
+            write_model_fabric_configuration(replace(configured, egress_revoked=True, egress_revision=configured.egress_revision + 1))
+            return {"content": "must not adopt"}
+        with pytest.raises((PermissionError, InferenceAccountingError)):
+            await broker.execute(request("revoked-after-contact"), revoke_after_charge)
+        assert (await repository.inference_accounting_snapshot())["committed_microusd"] == 8
+        observe("assertions", "passed", order=order, committed_microusd=8)
+        succeeded = True
+    finally:
+        primary = sys.exception()
+        release.set()
+        for task in tasks:
+            if not succeeded and not task.done():
+                task.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        observe("cleanup", "return", tasks=[{"name": task.get_name(), "done": task.done(),
+            "cancelled": task.cancelled(), "error": type(result).__name__ if isinstance(result, BaseException) else None}
+            for task, result in zip(tasks, results)])
+        if primary is not None:
+            for task, result in zip(tasks, results):
+                if isinstance(result, BaseException) and result is not primary:
+                    primary.add_note(f"Accounting owned task {task.get_name()}: {type(result).__name__}: {result}")
+        # Partial preparation rows are diagnostic only; cleanup never transitions them.
+        if not succeeded:
+            try:
+                async with engine.connect() as connection:
+                    rows = (await connection.execute(text("SELECT operation_id, state FROM inference_cost_reservations"))).all()
+                    jobs = (await connection.execute(text("SELECT id, status FROM workflow_run_states"))).all()
+                    observe("failure_rows", "read", operations=[list(row) for row in rows],
+                            jobs=[list(row) for row in jobs])
+            except Exception as exc:
+                observe("failure_rows", "error", error=type(exc).__name__)
+                if primary is not None:
+                    primary.add_note(f"Accounting cleanup readback failed: {type(exc).__name__}: {exc}")
+        for name, listener in listeners:
+            event.remove(engine.sync_engine, name, listener)
+        try:
+            (root.parent / "accounting-observation-trace.json").write_text(json.dumps(trace, indent=2) + "\n")
+        except Exception as exc:
+            if primary is None:
+                raise
+            primary.add_note(f"Accounting trace write failed: {type(exc).__name__}: {exc}")
 
 
 @pytest.mark.asyncio
@@ -426,6 +584,13 @@ async def test_witness_before_commit_crash_explicit_maintenance_retains_contact(
     with maintenance_fence(workspace):
         receipt = reconcile_accounting_checkpoint(root=root, registry=registry)
     assert receipt["status"] == "reconciled" and receipt["execution_authority_changed"] is False
+    # Dependency-free maintenance does not classify the private projection.
+    # Canonical startup must backfill it before accounting/group use resumes.
+    assert (await repository.inference_accounting_snapshot())["reason_code"] == "general_task_group_lookup_invalid"
+    from src.db.engine import _ensure_inference_group_lookup
+    async with engine.begin() as connection:
+        await connection.exec_driver_sql("BEGIN IMMEDIATE")
+        await _ensure_inference_group_lookup(connection)
     after = await repository.inference_accounting_snapshot()
     assert after["status"] == "ready" and after["unknown_microusd"] == 100
     assert after["operations"][0]["state"] == "contact_started"
@@ -470,7 +635,7 @@ async def test_shared_sync_async_stream_broker_one_active(accounting_db):
     async def consume():
         return [part async for part in broker.stream(request("mixed-stream"), stream_provider)]
     streaming = asyncio.create_task(consume())
-    await started.wait()
+    await started_or_raise(started, streaming)
     def sync_provider():
         order.append("sync")
         return {"usage": {"cost": "0.000001"}}
@@ -507,7 +672,7 @@ async def test_cancel_before_and_after_contact_retains_unknown_without_replay(ac
     async def forbidden():
         calls.append("must not contact")
     active = asyncio.create_task(broker.execute(request("cancel-contacted"), contacted))
-    await started.wait()
+    await started_or_raise(started, active)
     queued = asyncio.create_task(broker.execute(request("cancel-queued"), forbidden))
     for _ in range(50):
         snapshot = await repository.inference_accounting_snapshot()
@@ -535,3 +700,106 @@ async def test_cancel_before_and_after_contact_retains_unknown_without_replay(ac
     with pytest.raises((ValueError, InferenceAccountingError)):
         await recreated.execute(request("cancel-contacted"), forbidden)
     assert calls == ["contacted"]
+
+
+@pytest.mark.asyncio
+async def test_status_snapshot_never_takes_the_writer_lock_but_persists_the_period_fence(accounting_db, monkeypatch):
+    """#702: status polls ran BEGIN IMMEDIATE and queued behind any writer."""
+    import sqlite3
+    import threading
+    from sqlalchemy import event
+    from src.workspace import accounting_witness
+    from src.workspace.production import read_lifecycle_receipt, write_lifecycle_receipt
+    root, engine, _factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.configure_inference_accounting(1000)
+    statements = []
+    event.listen(engine.sync_engine, "before_cursor_execute",
+        lambda _conn, _cursor, statement, *_args: statements.append(" ".join(statement.split()[:2]).upper()))
+
+    ready = await repository.inference_accounting_snapshot()
+    assert ready["status"] == "ready" and ready["accounting_continuity_verified"] is True
+    assert "BEGIN IMMEDIATE" not in statements
+    assert not [item for item in statements if item.split()[0] in {"INSERT", "UPDATE", "DELETE"}]
+
+    held, release = threading.Event(), threading.Event()
+    def foreign_writer():
+        connection = sqlite3.connect(root / "seraph.db", isolation_level=None, timeout=30)
+        connection.execute("BEGIN IMMEDIATE")
+        held.set()
+        release.wait(10)
+        connection.execute("COMMIT")
+        connection.close()
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    writer.start()
+    assert held.wait(5)
+    try:
+        started = time.monotonic()
+        contended = await repository.inference_accounting_snapshot()
+        assert time.monotonic() - started < 1.0
+        assert contended["status"] == "ready" and contended["revision"] == ready["revision"]
+    finally:
+        release.set()
+        writer.join(10)
+
+    # A new period is a clock-rollback fence: it is still persisted, under the
+    # writer transaction, exactly once.
+    following = f"{int(ready['period_id'][:4]) + 1}{ready['period_id'][4:]}"
+    monkeypatch.setattr(accounting_witness, "utc_period", lambda now=None: following)
+    statements.clear()
+    rolled = await repository.inference_accounting_snapshot()
+    assert rolled["reason_code"] == "accounting_period_review_required"
+    assert rolled["period_high_water"] == following and rolled["revision"] == ready["revision"] + 1
+    assert "BEGIN IMMEDIATE" in statements
+    statements.clear()
+    assert (await repository.inference_accounting_snapshot())["revision"] == rolled["revision"]
+    assert "BEGIN IMMEDIATE" not in statements
+
+    # A witness ahead of the snapshot (a writer between witness and commit)
+    # is settled by the serialized path, which keeps failing closed if real.
+    workspace = ProductionWorkspace(host_root=root)
+    receipt = read_lifecycle_receipt(workspace)
+    receipt["inference_accounting"] = {**receipt["inference_accounting"], "revision": rolled["revision"] + 1}
+    write_lifecycle_receipt(workspace, receipt)
+    statements.clear()
+    diverged = await repository.inference_accounting_snapshot()
+    assert diverged["status"] == "blocked" and diverged["reason_code"] == "accounting_continuity_unavailable"
+    assert "BEGIN IMMEDIATE" in statements
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ahead_on_read", [1, 2])
+async def test_status_snapshot_falls_back_to_serialized_read_when_witness_moves(accounting_db, monkeypatch, ahead_on_read):
+    """#702 review: an unserialized read can see a witness persisted ahead of its commit.
+
+    Whichever receipt read observes the moved witness, the snapshot must not
+    report broken continuity without the serialized read confirming it.
+    """
+    from sqlalchemy import event
+    from src.workflows import inference_accounting
+    root, engine, _factory = accounting_db
+    setup_configuration()
+    repository = DurableJobRepository()
+    await repository.configure_inference_accounting(1000)
+    ready = await repository.inference_accounting_snapshot()
+    statements = []
+    event.listen(engine.sync_engine, "before_cursor_execute",
+        lambda _conn, _cursor, statement, *_args: statements.append(" ".join(statement.split()[:2]).upper()))
+    real_read = inference_accounting.read_lifecycle_receipt
+    reads = []
+
+    def witness_ahead_once(workspace):
+        receipt = real_read(workspace)
+        reads.append(receipt)
+        if len(reads) == ahead_on_read:
+            # The unserialized read observes a writer between witness and commit.
+            return {**receipt, "inference_accounting": {**receipt["inference_accounting"],
+                "revision": receipt["inference_accounting"]["revision"] + 1}}
+        return receipt
+
+    monkeypatch.setattr(inference_accounting, "read_lifecycle_receipt", witness_ahead_once)
+    settled = await repository.inference_accounting_snapshot()
+    assert settled["status"] == "ready" and settled["revision"] == ready["revision"]
+    # Read 1 is the unserialized verification; a moved witness there escalates.
+    assert ("BEGIN IMMEDIATE" in statements) is (ahead_on_read == 1)

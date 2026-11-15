@@ -20,8 +20,98 @@ _current_usage: ContextVar[dict[str, object] | None] = ContextVar("inference_acc
 _current_policy_digest: ContextVar[str | None] = ContextVar("inference_contact_policy_digest", default=None)
 _profile_bindings: ContextVar[dict[str, str]] = ContextVar("inference_accounting_profiles", default={})
 _current_runtime: ContextVar[str | None] = ContextVar("inference_accounting_runtime", default=None)
+_current_profile: ContextVar[str | None] = ContextVar("inference_accounting_profile", default=None)
 _near_billing: ContextVar[dict[str, object] | None] = ContextVar("near_billing_evidence", default=None)
 _near_contact: ContextVar[object | None] = ContextVar("near_contact_authority", default=None)
+_task_group: ContextVar[object | None] = ContextVar("general_task_accounting_group", default=None)
+_precontact_guard: ContextVar[object | None] = ContextVar("inference_precontact_guard", default=None)
+
+
+@contextmanager
+def bind_precontact_guard(guard):
+    """Run ``guard()`` under the contact writer before contact is recorded.
+
+    A non-None reason code becomes a durable, sealed provider-contact denial
+    (never contacted): the reservation is released and the serial lease is
+    not blocked. Used for checks that must hold when bytes would leave, such
+    as the deadline still leaving the NEAR billing window (ADR-035).
+    """
+    if not callable(guard):
+        raise InferenceAccountingError("precontact_guard_invalid")
+    token = _precontact_guard.set(guard)
+    try:
+        yield
+    finally:
+        _precontact_guard.reset(token)
+
+
+@contextmanager
+def bind_general_task_accounting(group, *, role="initial_proposal", task_id=None,
+                                 task_attempt_id=None, plan_revision=0,
+                                 selected_grant_digest=None, parent_owner=None, parent_fence=None,
+                                 delegation_invocation_id=None, delegation_request_digest=None,
+                                 preparation_binding=None):
+    from src.work_board.contracts import TaskProposalGroupV1
+    if not isinstance(group, TaskProposalGroupV1) or role not in {"initial_proposal", "continuation", "specialist", "communication_preparation"}:
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    if role != "specialist" and (delegation_invocation_id is not None or delegation_request_digest is not None):
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    if role != "communication_preparation" and preparation_binding is not None:
+        raise InferenceAccountingError("general_task_group_binding_invalid")
+    if role == "specialist":
+        from src.workflows.general_task_accounting import GeneralTaskGroupReservationEvidenceV1
+        from src.work_board.general_task import digest
+        try:
+            GeneralTaskGroupReservationEvidenceV1(group=group, group_digest=digest(group.model_dump(mode="json")),
+                role=role, call_ordinal=1, original_operation_id=delegation_invocation_id,
+                original_job_id=delegation_invocation_id, initial_proposal_operation_id=None,
+                task_id=task_id, task_attempt_id=task_attempt_id, plan_revision=plan_revision,
+                selected_grant_digest=selected_grant_digest, parent_owner=parent_owner, parent_fence=parent_fence,
+                delegation_invocation_id=delegation_invocation_id, delegation_request_digest=delegation_request_digest)
+        except (ValueError, TypeError):
+            raise InferenceAccountingError("general_task_group_binding_invalid") from None
+    elif role == "communication_preparation":
+        from src.work_board.communication_contracts import CommunicationPreparationBinding
+        from src.work_board.communication_preparation import preparation_admission
+        if (type(preparation_binding) is not CommunicationPreparationBinding
+            or preparation_binding.group != group or task_id is not None or task_attempt_id is not None
+            or plan_revision != 0 or selected_grant_digest is not None or parent_owner is not None or parent_fence is not None):
+            raise InferenceAccountingError("general_task_group_binding_invalid")
+        try:
+            preparation_admission(preparation_binding)
+        except PermissionError as exc:
+            raise InferenceAccountingError("general_task_group_binding_invalid") from exc
+    token = _task_group.set({"group": group, "role": role, "task_id": task_id,
+        "task_attempt_id": task_attempt_id, "plan_revision": plan_revision,
+        "selected_grant_digest": selected_grant_digest, "parent_owner": parent_owner,
+        "parent_fence": parent_fence, "preparation_binding": preparation_binding,
+        **({"delegation_invocation_id": delegation_invocation_id,
+            "delegation_request_digest": delegation_request_digest} if role == "specialist" else {})})
+    try:
+        yield
+    finally:
+        _task_group.reset(token)
+
+
+@contextmanager
+def bind_repository_iteration_accounting(witness):
+    """The fixed source producer alone joins repository work to C1's group."""
+    from src.workflows.repo_repair_source import assert_repository_iteration_witness
+    try:
+        assert_repository_iteration_witness(witness)
+    except (PermissionError, TypeError, ValueError) as exc:
+        raise InferenceAccountingError("repository_iteration_witness_invalid") from exc
+    token = _task_group.set({"group": witness.group, "role": "repository_iteration",
+        "repository_witness": witness})
+    try:
+        yield
+    finally:
+        _task_group.reset(token)
+
+
+def current_repository_iteration_accounting_witness():
+    binding = _task_group.get()
+    return binding.get("repository_witness") if isinstance(binding, dict) and binding.get("role") == "repository_iteration" else None
 
 
 @contextmanager
@@ -36,16 +126,32 @@ def bind_near_contact_authority(witness):
         _near_contact.reset(token)
 
 
-def _policy_for_runtime(runtime_path):
+def near_tee_profile_slot(runtime_path, profile_id):
+    """The NEAR TEE slot of an accounting operation, or None (ADR-035)."""
+    if runtime_path == "near_text_native":
+        return None
+    from .configuration import near_tee_slot_for_profile
+    return near_tee_slot_for_profile(profile_id)
+
+
+def is_near_operation(runtime_path, profile_id) -> bool:
+    """NEAR operations settle only from NEAR billing evidence."""
+    return runtime_path == "near_text_native" or near_tee_profile_slot(runtime_path, profile_id) is not None
+
+
+def _policy_for_runtime(runtime_path, profile_id=None):
     if runtime_path == "near_text_native":
         from .effective_policy import current_near_text_policy
         return current_near_text_policy()
+    if (slot := near_tee_profile_slot(runtime_path, profile_id)) is not None:
+        from .effective_policy import current_near_tee_policy
+        return current_near_tee_policy(slot)
     return current_inference_policy()
 
 
 def current_near_accounting_operation_id() -> str:
     collector = _near_billing.get()
-    if _current_runtime.get() != "near_text_native" or collector is None:
+    if not is_near_operation(_current_runtime.get(), _current_profile.get()) or collector is None:
         raise InferenceAccountingError("near_accounting_context_required")
     return collector["operation_id"]
 
@@ -98,7 +204,12 @@ def assert_current_inference_policy() -> None:
     if expected is not None:
         from src.auth.cancellation import assert_runtime_not_revoked
         assert_runtime_not_revoked()
-        _configured, actual = _policy_for_runtime(_current_runtime.get())
+        from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+        # ADR-035: the retirement fence covers OpenRouter (every non-NEAR
+        # broker path); NEAR text and NEAR TEE operations are not fenced.
+        if not is_near_operation(_current_runtime.get(), _current_profile.get()) and openrouter_retired():
+            raise InferenceAccountingError(OPENROUTER_RETIRED_REASON)
+        _configured, actual = _policy_for_runtime(_current_runtime.get(), _current_profile.get())
         if expected != actual:
             raise InferenceAccountingError("provider_policy_revision_changed")
 
@@ -115,10 +226,103 @@ class _AccountingHandle:
     ephemeral: bool
     contacted: bool = False
     committed_denial: object | None = None
+    profile_id: str | None = None
+
+
+@dataclass
+class _SettlementContext:
+    handle: _AccountingHandle
+    usage: dict[str, object]
+    settlement: dict[str, object] | None = None
+    failed: bool = False
+
+
+_current_settlement: ContextVar[_SettlementContext | None] = ContextVar("inference_settlement_owner", default=None)
 
 
 class DurableInferenceBrokerMixin:
     """No independent executor: delegates scheduling to the existing broker."""
+
+    async def _before_release(self, lease):
+        context = _current_settlement.get()
+        if not self.durable_accounting or context is None:
+            return await super()._before_release(lease)
+        handle = context.handle
+        with self._condition:
+            operation = self._operations.get(lease.operation_id)
+            if (operation is None or self._active_operation_id != lease.operation_id
+                or operation.request is not handle.request or not operation.callback_completed
+                or operation.request.job_id != lease.job_id or operation.request.owner_id != lease.owner_id
+                or operation.fencing_token != lease.fencing_token):
+                from .gpu_admission import GpuAdmissionLeaseError
+                raise GpuAdmissionLeaseError("Accounting release identity is stale",
+                    receipt=self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token"))
+        if context.failed:
+            return False
+        if context.settlement is not None:
+            return True
+
+        async def settle():
+            row = await self._finish_accounting(handle, payload=context.usage)
+            snapshot = await handle.repository.inference_accounting_snapshot(job_id=handle.job_id)
+            matches = [item for item in snapshot.get("operations", ())
+                if item.get("operation_id") == handle.request.operation_id]
+            if snapshot.get("accounting_continuity_verified") is not True or len(matches) != 1:
+                raise InferenceAccountingError("accounting_settlement_readback_failed")
+            persisted = matches[0]
+            fields = ("operation_id", "job_id", "owner_id", "policy_digest", "payload_digest",
+                      "bound_microusd", "job_fencing_token", "revision", "state",
+                      "actual_cost_microusd", "contact_started_at")
+            if (persisted.get("job_id") != handle.job_id
+                or persisted.get("owner_id") != handle.request.owner_id
+                or persisted.get("policy_digest") != handle.policy_digest
+                or any(persisted.get(key) != row.get(key) for key in fields)):
+                raise InferenceAccountingError("accounting_settlement_readback_failed")
+            known = persisted.get("state") == "settled" and type(persisted.get("actual_cost_microusd")) is int
+            unknown = persisted.get("state") == "unknown" and persisted.get("contact_started_at") is not None
+            no_contact = persisted.get("contact_started_at") is None and (
+                persisted.get("state") == "released" or (handle.committed_denial is not None
+                    and persisted.get("state") == "reserved" and persisted.get("recovery_reason") == "provider_contact_denied"))
+            if not (known or unknown or no_contact):
+                raise InferenceAccountingError("accounting_settlement_readback_failed")
+            context.settlement = row
+
+        # This exact owned task is always awaited to completion, including repeated
+        # caller cancellation. No detached writer may outlive a released lease.
+        task = asyncio.create_task(settle())
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        try:
+            task.result()
+        except BaseException:
+            context.failed = True
+            return False
+        if cancelled:
+            raise asyncio.CancelledError
+        return True
+
+    def _before_release_sync(self, lease):
+        if not self.durable_accounting or _current_settlement.get() is None:
+            return super()._before_release_sync(lease)
+        from .execution import _run_awaitable_sync
+        return _run_awaitable_sync(self._before_release(lease))
+
+    async def _settlement_after_release(self, context):
+        # Denial quiescence authority requires the actual failed/inactive broker
+        # operation. Its original proof is recorded only after that real release.
+        if context.failed:
+            return None
+        if context.settlement is None:
+            return await self._finish_accounting(context.handle, payload=context.usage)
+        if context.handle.committed_denial is not None:
+            await self._record_denial_quiescence(context.handle)
+        return context.settlement
 
     async def reconcile_settled_near_operation(
         self, *, operation_id: str, job_id: str, expected_revision: int, operator,
@@ -149,8 +353,10 @@ class DurableInferenceBrokerMixin:
             if len(rows) != 1:
                 return deferred("settled_operation_unavailable")
             row = rows[0]
+            near_text_row = row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text"
+            near_tee_row = near_tee_profile_slot(row.get("runtime_path"), row.get("profile_id")) is not None
             if (row.get("job_id") != job_id or row.get("revision") != expected_revision
-                or row.get("runtime_path") != "near_text_native" or row.get("profile_id") != "near.text"):
+                or not (near_text_row or near_tee_row)):
                 return deferred("settled_operation_changed")
             actual = row.get("actual_cost_microusd")
             if (row.get("state") != "settled" or row.get("contact_started_at") is None
@@ -165,7 +371,7 @@ class DurableInferenceBrokerMixin:
             except KeyError:
                 return {"status": "absent", "reason_code": "no_local_operation"}
             if (receipt.operation_id != operation_id or receipt.job_id != job_id
-                or receipt.owner_id != row["owner_id"] or receipt.runtime_path != "near_text_native"):
+                or receipt.owner_id != row["owner_id"] or receipt.runtime_path != row.get("runtime_path")):
                 return deferred("broker_identity_changed")
             if (receipt.status == "failed" and not receipt.reconciliation_required
                 and receipt.callback_completed and receipt.cost_settled_microusd == actual):
@@ -212,22 +418,56 @@ class DurableInferenceBrokerMixin:
 
         created_job = None
         try:
+            if request.runtime_path == "audio_transcription":
+                # #1179 retired voice input: no audio transcription is ever
+                # reserved or contacted again, whatever the configuration.
+                raise InferenceAccountingError("audio_route_retired")
             if not isinstance(request.owner_id, str) or not request.owner_id.startswith(("operator:", "service:")) or len(request.owner_id) > 256:
                 raise InferenceAccountingError("accounting_job_authority_invalid")
+            from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+            bound_profile = _profile_bindings.get().get(request.operation_id)
+            tee_slot = near_tee_profile_slot(request.runtime_path, bound_profile)
+            if request.runtime_path != "near_text_native" and tee_slot is None and openrouter_retired():
+                # ADR-035: every non-NEAR broker path is an OpenRouter route.
+                # Deny before any reservation, so no Unknown liability arises.
+                raise InferenceAccountingError(OPENROUTER_RETIRED_REASON)
             from .configuration import read_model_fabric_configuration
             persisted = read_model_fabric_configuration()
             if persisted.status == "degraded":
                 raise InferenceAccountingError(persisted.error_code or "provider_policy_continuity_unavailable")
-            configured, policy_digest = _policy_for_runtime(request.runtime_path)
+            try:
+                configured, policy_digest = _policy_for_runtime(request.runtime_path, bound_profile)
+            except PermissionError as exc:
+                if tee_slot is None:
+                    raise
+                raise InferenceAccountingError(str(exc) or "near_tee_policy_unavailable") from None
             near = request.runtime_path == "near_text_native"
-            setup = configured.near_text if near else configured.openrouter_setup
-            bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
-            from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
-            if near:
+            if tee_slot is not None:
+                # Exact NEAR TEE slot binding: the canonical route's slot (or
+                # the capability check's exact profile) and its own reserve.
+                from .configuration import near_tee_slot, route_slot_for_task_class
+                from .caller_context import canonical_route_spec
+                if request.runtime_path != "capability_probe":
+                    try:
+                        route_slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class)
+                    except ValueError:
+                        route_slot = None
+                    if route_slot != tee_slot:
+                        raise InferenceAccountingError("accounting_profile_binding_invalid")
+                setup = configured.near_tee
+                tee_config = near_tee_slot(configured, tee_slot)
+                bound = tee_config.request_cost_bound_microusd
+            else:
+                setup = configured.near_text if near else configured.openrouter_setup
+                bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
+            from .configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION, route_slot_for_task_class
+            if tee_slot is not None:
+                pass
+            elif near:
                 if _profile_bindings.get().get(request.operation_id) != "near.text":
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
                 bound = setup.request_cost_bound_microusd
-            elif setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            elif setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
                 from .caller_context import canonical_route_spec
                 profile_id = _profile_bindings.get().get(request.operation_id)
                 if request.runtime_path == "capability_probe":
@@ -235,7 +475,7 @@ class DurableInferenceBrokerMixin:
                     if slot is None:
                         raise InferenceAccountingError("accounting_profile_binding_invalid")
                 else:
-                    slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class)
+                    slot = route_slot_for_task_class(canonical_route_spec(request.runtime_path).task_class, schema_version=setup.schema_version)
                 route = (setup.routes or {}).get(slot)
                 if route is None or not route.enabled or profile_id != f"openrouter.{slot}" or slot != "text" and (setup.purpose_consents or {}).get(slot) != configured.egress_revision:
                     raise InferenceAccountingError("accounting_profile_binding_invalid")
@@ -243,8 +483,23 @@ class DurableInferenceBrokerMixin:
             if type(bound) is not int or bound <= 0:
                 raise InferenceAccountingError("accounting_server_bound_required")
             request = replace(request, estimated_cost_microusd=bound)
+            task_binding = _task_group.get()
+            repository_witness = current_repository_iteration_accounting_witness()
+            expected_task_route = ("strategist_agent" if repository_witness is not None
+                or (task_binding is not None and task_binding.get("role") == "communication_preparation")
+                else "general_task_planner")
+            if task_binding is not None and request.runtime_path != expected_task_route:
+                raise InferenceAccountingError("general_task_group_runtime_invalid")
             binding = current_remote_inference_receipt_binding()
             ephemeral = binding is None or not binding.job_id
+            if repository_witness is not None and (ephemeral
+                or binding.repository_iteration_witness is not repository_witness
+                or request.operation_id != repository_witness.operation_id):
+                raise InferenceAccountingError("repository_iteration_receipt_binding_invalid")
+            if not ephemeral and binding.repository_iteration_witness is not None and repository_witness is None:
+                raise InferenceAccountingError("repository_iteration_receipt_binding_invalid")
+            if ephemeral and task_binding is not None and task_binding.get("role") == "communication_preparation":
+                raise InferenceAccountingError("communication_preparation_native_binding_required")
             if near and ephemeral:
                 raise InferenceAccountingError("near_native_binding_required")
             if near and _near_contact.get() is None:
@@ -259,11 +514,11 @@ class DurableInferenceBrokerMixin:
                     reservation = await rebind_funded_child(repository, request=request,
                         owner=binding.owner, fencing_token=binding.fencing_token,
                         policy_digest=policy_digest,
-                        profile_id=_profile_bindings.get().get(request.operation_id, setup.profile_id),
+                        profile_id=_profile_bindings.get().get(request.operation_id, getattr(setup, "profile_id", None)),
                         bound=bound)
                     return _AccountingHandle(request, repository, binding.job_id,
                         binding.owner, binding.fencing_token, policy_digest,
-                        reservation["sequence"], False)
+                        reservation["sequence"], False, profile_id=bound_profile)
             snapshot = await repository.inference_accounting_snapshot()
             if snapshot["status"] != "ready":
                 raise InferenceAccountingError(str(snapshot.get("reason_code") or "accounting_continuity_unavailable"))
@@ -285,6 +540,9 @@ class DurableInferenceBrokerMixin:
                         idempotency_key=request.operation_id),
                     inputs={"payload_digest": request.data_digest, "runtime_path": request.runtime_path},
                     session_id=request.session_id or None, priority=min(100, request.priority.rank * 20),
+                    operator_session_id=request.session_id if task_binding else None,
+                    goal_id=task_binding["group"].goal_id if task_binding else None,
+                    goal_revision=task_binding["group"].goal_revision if task_binding else None,
                     declared_authority={"principal": request.owner_id, **({"service_id": request.owner_id} if owner_kind == "service" else {})},
                     service_id=request.owner_id if owner_kind == "service" else None,
                     deadline_at=datetime.fromtimestamp(request.deadline_at, timezone.utc),
@@ -306,13 +564,14 @@ class DurableInferenceBrokerMixin:
                 operation_id=request.operation_id, job_id=job_id, owner_id=request.owner_id,
                 payload_digest=request.data_digest, policy_digest=policy_digest,
                 runtime_path=request.runtime_path,
-                profile_id=_profile_bindings.get().get(request.operation_id, setup.profile_id),
+                profile_id=_profile_bindings.get().get(request.operation_id, getattr(setup, "profile_id", None)),
                 bound_microusd=bound, owner_ceiling_microusd=request.owner_budget_microusd,
                 priority=request.priority.rank, deadline_at=request.deadline_at,
                 owner=owner, fencing_token=fence,
+                general_task_binding=task_binding,
             )
             return _AccountingHandle(request, repository, job_id, owner, fence, policy_digest,
-                reservation["sequence"], ephemeral)
+                reservation["sequence"], ephemeral, profile_id=bound_profile)
         except Exception as exc:
             from .remote_inference_admission import RemoteInferenceBindingError
             if created_job is not None:
@@ -320,12 +579,25 @@ class DurableInferenceBrokerMixin:
                 await repository.transition_job(job_id, "blocked", owner=owner, fencing_token=fence,
                     reason=getattr(exc, "code", "accounting_admission_blocked"),
                     result_summary="Inference admission blocked before provider contact; no_learning")
-            raise RemoteInferenceBindingError(getattr(exc, "code", "accounting_admission_blocked")) from exc
+            rejected = RemoteInferenceBindingError(getattr(exc, "code", "accounting_admission_blocked"))
+            if request.runtime_path == "audio_transcription":
+                rejected.code = getattr(exc, "code", "accounting_admission_blocked")
+            raise rejected from exc
 
     async def _contact_accounting(self, handle):
         from src.workflows.inference_accounting import InferenceProviderContactDenied
         try:
             contact_kwargs = {"near_contact_witness": _near_contact.get()} if handle.request.runtime_path == "near_text_native" else {}
+            if _task_group.get() is not None:
+                contact_kwargs["general_task_binding"] = _task_group.get()
+            guard = _precontact_guard.get()
+            if guard is not None:
+                try:
+                    reason = guard()
+                except Exception as exc:
+                    reason = getattr(exc, "code", None) or "precontact_guard_failed"
+                if reason is not None:
+                    contact_kwargs["precontact_denial"] = str(reason)[:128]
             await handle.repository.contact_inference_provider(handle.request.operation_id,
                 owner=handle.owner, fencing_token=handle.fence, policy_digest=handle.policy_digest, **contact_kwargs)
         except InferenceProviderContactDenied as error:
@@ -337,13 +609,16 @@ class DurableInferenceBrokerMixin:
         # callback. Individual HTTP adapters check again at their final post.
         assert_current_inference_policy()
 
-    async def _finish_accounting(self, handle, *, payload=None, reason=None):
+    async def _record_denial_quiescence(self, handle):
         if handle.committed_denial is not None:
             from src.workflows.inference_accounting import _completed_denial_quiescence
             proof = _completed_denial_quiescence(handle.committed_denial, handle.request, self)
             if proof is not None:
                 await handle.repository.record_provider_denial_quiescence(proof)
-        near = handle.request.runtime_path == "near_text_native"
+
+    async def _finish_accounting(self, handle, *, payload=None, reason=None):
+        await self._record_denial_quiescence(handle)
+        near = is_near_operation(handle.request.runtime_path, handle.profile_id)
         billing = (_near_billing.get() or {}).get("evidence") if near else None
         billing_kwargs = {"near_billing_evidence": billing} if near else {}
         row = await handle.repository.settle_inference_cost(handle.request.operation_id,
@@ -351,10 +626,19 @@ class DurableInferenceBrokerMixin:
             reason=reason or ("provider_account_usage" if handle.contacted else "blocked_before_contact"))
         adoption_allowed = True
         try:
-            adoption_allowed = _policy_for_runtime(handle.request.runtime_path)[1] == handle.policy_digest
+            adoption_allowed = _policy_for_runtime(handle.request.runtime_path, handle.profile_id)[1] == handle.policy_digest
             if handle.request.owner_id.startswith("operator:"):
                 from src.auth.service import authenticate_session
-                operator = await authenticate_session(handle.request.session_id, touch=False)
+                root_id = handle.request.session_id
+                if handle.request.operator_session_id and handle.request.runtime_path != "audio_transcription":
+                    # A conversation-scoped chat principal (REST/WebSocket turn):
+                    # the operator root session captured immutably at admission
+                    # must still authenticate as the same owner to adopt.
+                    root_id = handle.request.operator_session_id
+                if handle.request.runtime_path == "audio_transcription":
+                    # #1179: a retired audio route can never adopt a result.
+                    raise InferenceAccountingError("audio_route_retired")
+                operator = await authenticate_session(root_id, touch=False)
                 adoption_allowed = adoption_allowed and operator.principal.principal_id == handle.request.owner_id
         except Exception:
             adoption_allowed = False
@@ -402,8 +686,12 @@ class DurableInferenceBrokerMixin:
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
         runtime_token = _current_runtime.set(handle.request.runtime_path)
-        billing_token = _near_billing.set({"operation_id": handle.request.operation_id} if handle.request.runtime_path == "near_text_native" else None)
+        profile_token = _current_profile.set(handle.profile_id)
+        billing_token = _near_billing.set({"operation_id": handle.request.operation_id}
+            if is_near_operation(handle.request.runtime_path, handle.profile_id) else None)
         completed = False
+        settlement_context = _SettlementContext(handle, usage)
+        settlement_token = _current_settlement.set(settlement_context)
 
         async def callback():
             await self._contact_accounting(handle)
@@ -417,7 +705,7 @@ class DurableInferenceBrokerMixin:
         try:
             self._restore_order(handle)
             result = await super().execute(handle.request, callback, **kwargs)
-            settlement = await self._finish_accounting(handle, payload=usage)
+            settlement = await self._settlement_after_release(settlement_context)
             completed = True
             if not settlement["result_adoption_allowed"]:
                 raise InferenceAccountingError("inference_result_authority_changed")
@@ -426,14 +714,18 @@ class DurableInferenceBrokerMixin:
         finally:
             try:
                 if not completed:
-                    await asyncio.shield(self._finish_accounting(handle, payload=usage))
+                    await asyncio.shield(self._settlement_after_release(settlement_context))
             finally:
+                _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
                 _current_runtime.reset(runtime_token)
+                _current_profile.reset(profile_token)
                 _near_billing.reset(billing_token)
 
     def execute_sync(self, request, operation, **kwargs):
+        if request.runtime_path == "audio_transcription":
+            raise InferenceAccountingError("audio_async_nonstreaming_required")
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:
@@ -444,7 +736,15 @@ class DurableInferenceBrokerMixin:
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
+        # ADR-035: NEAR TEE settles from its own billing readback, which the
+        # transport captures inside this lease.
+        runtime_token = _current_runtime.set(handle.request.runtime_path)
+        profile_token = _current_profile.set(handle.profile_id)
+        billing_token = _near_billing.set({"operation_id": handle.request.operation_id}
+            if is_near_operation(handle.request.runtime_path, handle.profile_id) else None)
         completed = False
+        settlement_context = _SettlementContext(handle, usage)
+        settlement_token = _current_settlement.set(settlement_context)
 
         def callback():
             _run_awaitable_sync(self._contact_accounting(handle))
@@ -458,7 +758,7 @@ class DurableInferenceBrokerMixin:
         try:
             self._restore_order(handle)
             result = super().execute_sync(handle.request, callback, **kwargs)
-            settlement = _run_awaitable_sync(self._finish_accounting(handle, payload=usage))
+            settlement = _run_awaitable_sync(self._settlement_after_release(settlement_context))
             completed = True
             if not settlement["result_adoption_allowed"]:
                 raise InferenceAccountingError("inference_result_authority_changed")
@@ -467,12 +767,18 @@ class DurableInferenceBrokerMixin:
         finally:
             try:
                 if not completed:
-                    _run_awaitable_sync(self._finish_accounting(handle, payload=usage))
+                    _run_awaitable_sync(self._settlement_after_release(settlement_context))
             finally:
+                _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
+                _current_runtime.reset(runtime_token)
+                _current_profile.reset(profile_token)
+                _near_billing.reset(billing_token)
 
     async def stream(self, request, operation, **kwargs):
+        if request.runtime_path == "audio_transcription":
+            raise InferenceAccountingError("audio_async_nonstreaming_required")
         if request.runtime_path == "near_text_native":
             raise InferenceAccountingError("near_async_nonstreaming_required")
         if not self.durable_accounting:
@@ -483,7 +789,15 @@ class DurableInferenceBrokerMixin:
         usage: dict[str, object] = {}
         usage_token = _current_usage.set(usage)
         policy_token = _current_policy_digest.set(handle.policy_digest)
+        # ADR-035: a NEAR TEE stream settles from the billing readback its
+        # transport captures after the stream ends, inside this lease.
+        runtime_token = _current_runtime.set(handle.request.runtime_path)
+        profile_token = _current_profile.set(handle.profile_id)
+        billing_token = _near_billing.set({"operation_id": handle.request.operation_id}
+            if is_near_operation(handle.request.runtime_path, handle.profile_id) else None)
         completed = False
+        settlement_context = _SettlementContext(handle, usage)
+        settlement_token = _current_settlement.set(settlement_context)
 
         async def callback():
             await self._contact_accounting(handle)
@@ -496,7 +810,7 @@ class DurableInferenceBrokerMixin:
             self._restore_order(handle)
             async for item in super().stream(handle.request, callback, **kwargs):
                 yield item
-            settlement = await self._finish_accounting(handle, payload=usage)
+            settlement = await self._settlement_after_release(settlement_context)
             completed = True
             if not settlement["result_adoption_allowed"]:
                 raise InferenceAccountingError("inference_result_authority_changed")
@@ -504,7 +818,11 @@ class DurableInferenceBrokerMixin:
         finally:
             try:
                 if not completed:
-                    await asyncio.shield(self._finish_accounting(handle, payload=usage))
+                    await asyncio.shield(self._settlement_after_release(settlement_context))
             finally:
+                _current_settlement.reset(settlement_token)
                 _current_usage.reset(usage_token)
                 _current_policy_digest.reset(policy_token)
+                _current_runtime.reset(runtime_token)
+                _current_profile.reset(profile_token)
+                _near_billing.reset(billing_token)

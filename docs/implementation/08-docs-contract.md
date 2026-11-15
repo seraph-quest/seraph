@@ -9,6 +9,25 @@ for Seraph's product definition and accepted target architecture. Its ADRs own
 locked decisions. No roadmap, research document, issue, or archived strategy
 document can define a competing target.
 
+## Standing No-Evals Boundary
+
+Apply the Constitution's
+[no-evals and provider-free implementation direction](./00-project-constitution.md#no-evals-and-provider-free-implementation)
+to docs, plans, issues, PRs, migration, and completion criteria. Do not propose,
+plan, create, or run evals without an explicit operator request. Do not add paid,
+free, local, synthetic, benchmark, harness, model-judge, hidden-corpus, or canary
+substitutes, spending requests, or future eval gates. Implementation and
+acceptance remain provider-free and may not use ambient credentials.
+
+Ordinary isolated regression, integration, and security tests and actual local
+effect/readback remain required. Describe an ordinary task's outcome or readback
+directly; do not label it an eval or infer a quality/improvement claim. Reviewed
+self-improvement from ordinary task traces, corrections, and skills remains a
+product capability, independent of cancelled #771. Preserve historical receipts
+and label their limits; historical language cannot restore cancelled work or
+authorize calls. Product inference for ordinary approved tasks keeps its normal
+consent, grant, routing, and budget requirements.
+
 ## Ownership
 
 | Surface | Owns | Does not own |
@@ -25,7 +44,7 @@ Capabilities use exactly these lifecycle states:
 
 - **Shipped** — available on `develop` with named proof.
 - **Partial** — usable on `develop` with named missing boundaries.
-- **Experimental** — opt-in canary with explicit limits and rollback.
+- **Experimental** — explicit opt-in with declared limits and rollback.
 - **Planned** — accepted tracked work with no shipped implementation.
 - **Deprecated** — present temporarily with a replacement/removal issue.
 - **Excluded** — intentionally outside Seraph's capability boundary.

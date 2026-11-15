@@ -86,7 +86,8 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
       if (!mounted.current) return;
       setMetadata(next.near_text); setRevision(next.egress_revision); setRevoked(next.egress_revoked ?? false);
       setRetained(false); setAcknowledged(false);
-      if (sharedCeilingLocked && next.openrouter_setup?.spend_ceiling_microusd) setDraft(current => ({ ...current, ceilingUsd: usd(next.openrouter_setup!.spend_ceiling_microusd!) }));
+      const laneCeiling = next.inference_lane?.spend_ceiling_microusd ?? next.openrouter_setup?.spend_ceiling_microusd;
+      if (sharedCeilingLocked && laneCeiling) setDraft(current => ({ ...current, ceilingUsd: usd(laneCeiling) }));
       setMessage("Current settings loaded; edits retained. Review plaintext access before saving.");
     } catch (reason) { if (mounted.current) { setRetained(true); setMessage(safeError(reason)); } }
     finally { window.clearTimeout(timeout); if (mounted.current) setRefreshing(false); }
@@ -114,7 +115,7 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
       if (!next.near_text || next.near_text_metadata_unavailable) throw new Error("Settings saved without complete NEAR metadata. Refresh to inspect the result.");
       dirty.current = false; setMetadata(next.near_text); setRevision(next.egress_revision);
       setRevoked(next.egress_revoked ?? false); setRetained(false); setAcknowledged(false);
-      setDraft(draftFrom(next.near_text, next.openrouter_setup?.spend_ceiling_microusd));
+      setDraft(draftFrom(next.near_text, next.inference_lane?.spend_ceiling_microusd ?? next.openrouter_setup?.spend_ceiling_microusd));
       setMessage("NEAR settings saved. Configuration does not prove provider availability.");
     } catch (reason) { if (mounted.current) setError(safeError(reason)); }
     finally { if (mounted.current) setBusy(false); }
@@ -132,7 +133,7 @@ export function NearTextPanel({ setup, stale, policyRevision, policyRevoked = fa
       <label>Request timeout · seconds<input className={inputClass + " mt-1 w-full"} aria-label="NEAR request timeout" type="number" min={1} max={45} value={draft.timeout} onChange={e => update("timeout", e.target.value)} /></label>
       <label>Per-request reserve · USD<input className={inputClass + " mt-1 w-full"} aria-label="NEAR per-request reserve USD" inputMode="decimal" value={draft.reserveUsd} onChange={e => update("reserveUsd", e.target.value)} /></label>
       <label>Shared deployment ceiling · USD<input className={inputClass + " mt-1 w-full"} aria-label="NEAR shared deployment ceiling USD" inputMode="decimal" readOnly={sharedCeilingLocked} value={draft.ceilingUsd} onChange={e => update("ceilingUsd", e.target.value)} /></label>
-      <p className="sm:col-span-2 text-[9px] text-retro-text/60">OpenRouter and NEAR use one shared budget. {sharedCeilingLocked ? "Change that ceiling in OpenRouter settings." : "This funds the shared deployment budget; no OpenRouter key is required."} A reserve is a local admission hold, not a provider-enforced spending maximum.</p>
+      <p className="sm:col-span-2 text-[9px] text-retro-text/60">All providers use one shared budget. {sharedCeilingLocked ? "Change that ceiling under Shared inference lane." : "This funds the shared deployment budget; no OpenRouter key is required."} A reserve is a local admission hold, not a provider-enforced spending maximum.</p>
       {draft.enabled && !carryConsent && <label className="sm:col-span-2 flex items-start gap-2"><input type="checkbox" aria-label="Acknowledge NEAR plaintext access" checked={acknowledged} onChange={e => setAcknowledged(e.target.checked)} /><span>I acknowledge that NEAR receives my question in plaintext over HTTPS. Global revocation affects both OpenRouter and NEAR.</span></label>}
       {draft.enabled && carryConsent && <p className="sm:col-span-2 text-[9px]">Current plaintext consent applies to this unchanged route.</p>}
     </fieldset>

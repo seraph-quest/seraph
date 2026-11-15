@@ -12,8 +12,9 @@ function Harness() {
   const [goalId, setGoalId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [filtered, setFiltered] = useState(true);
-  const status = useAttentionGoalFocus(setGoalId, () => setFiltered(false));
-  return <><button onClick={() => { setOpen(true); appEventBus.emit("attention:inspect-goal", { principalId: "owner", sessionId: "root", goalId: "goal" }); }}>Open originating goal</button>{open && <><span>{goalId ?? "no selection"}</span><span>{filtered ? "filtered" : "reset filters"}</span>{status && <p role="status">{status}</p>}</>}</>;
+  const [programme, setProgramme] = useState<string | null>(null);
+  const status = useAttentionGoalFocus(setGoalId, () => setFiltered(false), setProgramme);
+  return <><button onClick={() => { setOpen(true); appEventBus.emit("attention:inspect-goal", { principalId: "owner", sessionId: "root", goalId: "goal" }); }}>Open originating goal</button>{open && <><span>{goalId ?? "no selection"}</span><span>{programme ?? "no programme"}</span><span>{filtered ? "filtered" : "reset filters"}</span>{status && <p role="status">{status}</p>}</>}</>;
 }
 const goal = { id: "goal", title: "Current scoped goal", children: [] };
 const fetchMock = vi.fn();
@@ -55,3 +56,6 @@ it.each(["expired", "invalid"])("rejects %s finite operator scope before reading
   context.session = { ...context.session, absolute_expires_at: kind === "expired" ? "2000-01-01T00:00:00Z" : "invalid" };
   render(<Harness />); fireEvent.click(screen.getByText("Open originating goal")); expect(fetchMock).not.toHaveBeenCalled(); expect(screen.getByText("no selection")).toBeInTheDocument();
 });
+
+it("does not select another Goal revision for a Home metadata target", async () => { fetchMock.mockResolvedValue({ ok: true, json: async () => [{ ...goal, revision: 3 }] }); render(<Harness />); fireEvent.click(screen.getByText("Open originating goal")); await screen.findByText("goal"); act(() => appEventBus.emit("attention:inspect-goal", { principalId: "owner", sessionId: "root", goalId: "goal", goalRevision: 2, programmeId: "exact-programme" })); await screen.findByText(/exact Goal revision changed/); expect(screen.getByText("no selection")).toBeInTheDocument(); expect(screen.getByText("no programme")).toBeInTheDocument(); });
+it("forwards the exact Home programme only after current owner and Goal revision readback", async () => { fetchMock.mockResolvedValue({ ok: true, json: async () => [{ ...goal, revision: 3 }] }); render(<Harness />); fireEvent.click(screen.getByText("Open originating goal")); await screen.findByText("goal"); act(() => appEventBus.emit("attention:inspect-goal", { principalId: "owner", sessionId: "root", goalId: "goal", goalRevision: 3, programmeId: "exact-programme" })); await screen.findByText("exact-programme"); expect(fetchMock).toHaveBeenCalledTimes(2); });

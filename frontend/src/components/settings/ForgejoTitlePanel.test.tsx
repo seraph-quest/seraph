@@ -53,6 +53,42 @@ describe("fixed Forgejo title controls", () => {
     await waitFor(() => expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(false));
     expect(fetch.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method)).toBe(true);
   });
+  it("keeps a read acknowledgment given right after metadata renders, before passive effects run", async () => {
+    const fetch = vi.fn((url: unknown, _init?: RequestInit) => response(metadata(url))); vi.stubGlobal("fetch", fetch);
+    // Click in the first microtask after the metadata commit: a reset effect
+    // keyed on the new connection revision used to run later and erase it.
+    let clicked = false;
+    const observer = new MutationObserver(() => {
+      const ack = screen.queryByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement | null;
+      if (!clicked && ack && screen.queryByText(/Connection: active/)) { clicked = true; fireEvent.click(ack); }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    await waitFor(() => expect(clicked).toBe(true));
+    observer.disconnect();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect((screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByRole("button", { name: "Grant finite read consent" }).hasAttribute("disabled")).toBe(false);
+  });
+  it("does not restore an acknowledgment when the authority returns to an earlier value", async () => {
+    const fetch = vi.fn((url: unknown, _init?: RequestInit) => response(metadata(url))); vi.stubGlobal("fetch", fetch);
+    render(<ForgejoTitlePanel ownerPrincipalId="owner" ownerSessionId="root" />);
+    const ack = () => screen.getByLabelText("Acknowledge Forgejo finite private reads") as HTMLInputElement;
+    await waitFor(() => {
+      expect(screen.getByText(/Connection: active/)).toBeTruthy();
+      expect(screen.getByRole("option", { name: "Finite title" })).toBeTruthy();
+    });
+    fireEvent.click(ack());
+    await waitFor(() => expect(ack().checked).toBe(true));
+    // Goal X ("") -> Y ("goal") -> X: the ack given for X lapses on Y and
+    // must stay cleared when X returns; it needs a fresh explicit click.
+    fireEvent.change(screen.getByLabelText("Forgejo finite Goal"), { target: { value: "goal" } });
+    await waitFor(() => expect(ack().checked).toBe(false));
+    fireEvent.change(screen.getByLabelText("Forgejo finite Goal"), { target: { value: "" } });
+    await waitFor(() => expect((screen.getByLabelText("Forgejo finite Goal") as HTMLSelectElement).value).toBe(""));
+    expect(ack().checked).toBe(false);
+    expect(screen.getByRole("button", { name: "Grant finite read consent" }).hasAttribute("disabled")).toBe(true);
+  });
   it("rejects a genuine canonical-shaped job whose owner differs from the current Root", async () => {
     sessionStorage.setItem(scope + ".job", id);
     const fetch = vi.fn((url: unknown, _init?: RequestInit) => response(String(url).includes("/jobs/")

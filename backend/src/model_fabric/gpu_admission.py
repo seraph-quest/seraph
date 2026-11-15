@@ -173,6 +173,10 @@ class GpuAdmissionRequest:
     # Immutable payload binding for the durable accounting boundary. Model
     # contents remain outside both the broker and the accounting ledger.
     data_digest: str = ""
+    # The authenticated operator root session behind a conversation-scoped
+    # principal, captured once at admission; durable result adoption
+    # authenticates this immutable value, never ambient runtime state.
+    operator_session_id: str = ""
 
     def __post_init__(self) -> None:
         for field_name in ("operation_id", "job_id", "owner_id"):
@@ -194,7 +198,7 @@ class GpuAdmissionRequest:
         if len(runtime_path) > 128:
             raise ValueError("runtime_path must be <= 128 characters")
         object.__setattr__(self, "runtime_path", runtime_path)
-        for field_name in ("session_id", "capability_version"):
+        for field_name in ("session_id", "capability_version", "operator_session_id"):
             value = str(getattr(self, field_name) or "").strip()
             if len(value) > 256:
                 raise ValueError(f"{field_name} must be <= 256 characters")
@@ -249,6 +253,7 @@ class GpuAdmissionRequest:
                 else getattr(context, "uncertain_on_error", None)
             ),
             data_digest=str(getattr(context, "data_digest", "") or ""),
+            operator_session_id=str(getattr(principal, "operator_session_id", "") or ""),
         )
 
 
@@ -631,6 +636,13 @@ class GpuAdmissionBroker(Generic[T]):
                 with self._condition:
                     self._async_waiters.discard(waiter)
 
+    async def _before_release(self, lease: GpuAdmissionLease) -> bool:
+        """Protected owner finalization, outside the broker condition lock."""
+        return True
+
+    def _before_release_sync(self, lease: GpuAdmissionLease) -> bool:
+        return True
+
     async def release(
         self,
         lease: GpuAdmissionLease,
@@ -644,6 +656,7 @@ class GpuAdmissionBroker(Generic[T]):
             raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
         if reason_code is not None:
             reason_code = _normalize_reason_code(reason_code, field_name="reason_code")
+        finalized = await self._before_release(lease)
         with self._condition:
             operation = self._operations.get(lease.operation_id)
             if (
@@ -657,6 +670,10 @@ class GpuAdmissionBroker(Generic[T]):
             ):
                 receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
                 raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if not finalized:
+                return self._hold_for_reconciliation_locked(operation,
+                    reason_code="accounting_settlement_unavailable",
+                    observed_at=self._observed_at_locked(operation))
             if operation.status == "blocked":
                 return self._finish_blocked_callback_locked(operation)
             observed_at = self._observed_at_locked(operation)
@@ -1129,6 +1146,7 @@ class GpuAdmissionBroker(Generic[T]):
             raise ValueError("GPU release outcome must be succeeded, failed, or cancelled")
         if reason_code is not None:
             reason_code = _normalize_reason_code(reason_code, field_name="reason_code")
+        finalized = self._before_release_sync(lease)
         with self._condition:
             operation = self._operations.get(lease.operation_id)
             if (
@@ -1142,6 +1160,10 @@ class GpuAdmissionBroker(Generic[T]):
             ):
                 receipt = self._receipt_for_lease_locked(lease, reason_code="stale_owner_or_fencing_token")
                 raise GpuAdmissionLeaseError("GPU lease owner or fencing token is stale", receipt=receipt)
+            if not finalized:
+                return self._hold_for_reconciliation_locked(operation,
+                    reason_code="accounting_settlement_unavailable",
+                    observed_at=self._observed_at_locked(operation))
             if operation.status == "blocked":
                 return self._finish_blocked_callback_locked(operation)
             observed_at = self._observed_at_locked(operation)

@@ -93,7 +93,7 @@ it("retains the exact authored update or safe rollback action before any lifecyc
 
 it("removes cached literal output on current-read denial and immediately on owner/session/task change",async()=>{
  let deny=false;vi.mocked(apiFetch).mockImplementation(async(url)=>String(url).endsWith("output")?(deny?new Response('{}',{status:409}):new Response('PRIVATE ORIGINAL OUTPUT',{headers:{"content-type":"text/plain"}})):new Response(JSON.stringify({...state,report_available:true})));
- const mounted=render(<JsonFormatterPanel {...props}/>);fireEvent.click(await screen.findByRole("button",{name:"Read verified JSON output"}));await screen.findByText('PRIVATE ORIGINAL OUTPUT');
+ const mounted=render(<JsonFormatterPanel {...props}/>);const read=await screen.findByRole("button",{name:"Read verified JSON output"});await waitFor(()=>expect(read).toBeEnabled());fireEvent.click(read);await screen.findByText('PRIVATE ORIGINAL OUTPUT');
  deny=true;fireEvent.click(screen.getByRole("button",{name:"Read verified JSON output"}));await screen.findByRole("alert");expect(screen.queryByText('PRIVATE ORIGINAL OUTPUT')).toBeNull();expect(screen.getByRole("button",{name:"Read verified JSON output"})).toBeDisabled();
  deny=false;fireEvent.click(screen.getByRole("button",{name:"Refresh formatter state"}));await waitFor(()=>expect(screen.getByRole("button",{name:"Read verified JSON output"})).toBeEnabled());fireEvent.click(screen.getByRole("button",{name:"Read verified JSON output"}));await screen.findByText('PRIVATE ORIGINAL OUTPUT');
  mounted.rerender(<JsonFormatterPanel {...props} ownerPrincipalId="operator:other" ownerSessionId="other-root" task={{...task,task_id:"other-task"}}/>);expect(screen.queryByText('PRIVATE ORIGINAL OUTPUT')).toBeNull();

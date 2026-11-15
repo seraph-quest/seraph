@@ -523,7 +523,7 @@ async def test_artifact_storage_marks_legacy_gpu_vlm_runtime_inactive(client, tm
     runtime = data["local_runtime"]["vlm_runtime"]
     assert runtime["mode"] == "gpu-server"
     assert runtime["active"] is False
-    assert runtime["disabled_reason"] == "local_vlm_disabled_openrouter_only"
+    assert runtime["disabled_reason"] == "local_vlm_disabled_near_tee_only"
     assert runtime["base_url"] == "http://192.168.1.26:8001"
     assert runtime["backend_url"] == "http://192.168.1.26:8000/v1"
     assert runtime["chat_api_base"] == "http://192.168.1.26:8001/v1"
@@ -1038,7 +1038,10 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"
         screenshot_root = tmp_path / "screenshots"
-        resp = await client.put(
+        before = (await client.get("/api/settings/screen-analysis")).json()
+        # ADR-035: OpenRouter is retired, so selecting it as the screenshot
+        # provider is refused with the stable reason and nothing is saved.
+        refused = await client.put(
             "/api/settings/screen-analysis",
             json={
                 "enabled": True,
@@ -1049,12 +1052,25 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
                 "screenshot_folder": str(screenshot_root),
             },
         )
+        assert refused.status_code == 422
+        assert refused.json()["detail"]["code"] == "openrouter_retired"
+        assert (await client.get("/api/settings/screen-analysis")).json() == before
+
+        resp = await client.put(
+            "/api/settings/screen-analysis",
+            json={
+                "enabled": True,
+                "preserve_captures": True,
+                "archive_dir": str(archive),
+                "screenshot_folder": str(screenshot_root),
+            },
+        )
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["enabled"] is True
-        assert data["provider"] == "openrouter"
-        assert data["model"] == "openrouter/google/gemini-2.5-flash"
+        assert data["provider"] == ""
+        assert data["model"] == ""
         assert data["preserve_captures"] is True
         assert data["archive_dir"] == str(archive)
         assert data["screenshot_folder"] == str(screenshot_root)
@@ -1064,8 +1080,8 @@ async def test_screen_analysis_settings_persist_and_drive_artifact_storage(clien
 
         storage = (await client.get("/api/settings/artifact-storage")).json()
         assert storage["screen"]["analysis_enabled"] is True
-        assert storage["screen"]["provider"] == "openrouter"
-        assert storage["screen"]["model"] == "openrouter/google/gemini-2.5-flash"
+        assert storage["screen"]["provider"] == ""
+        assert storage["screen"]["model"] == ""
         assert "archive_dir" not in storage["screen"]
         assert "preservation_enabled" not in storage["screen"]
         assert storage["screenshot_folder"]["path"] == str(screenshot_root)
@@ -1316,3 +1332,52 @@ async def test_test_email_endpoint_returns_safe_status(client):
     assert data["status"] == "blocked"
     assert data["recipient_hash"] == "hash123"
     assert "user@example" not in str(data)
+
+
+@pytest.mark.asyncio
+async def test_background_inference_toggles_round_trip_through_settings(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+
+    initial = await client.get("/api/settings/background-inference")
+    assert initial.status_code == 200
+    jobs = {job["job_id"]: job for job in initial.json()["jobs"]}
+    assert jobs["strategist_tick"]["enabled"] is True
+    assert jobs["strategist_tick"]["approx_calls_per_day"] > 0
+
+    saved = await client.put("/api/settings/background-inference", json={"jobs": {"strategist_tick": False}})
+    assert saved.status_code == 200
+    jobs = {job["job_id"]: job for job in saved.json()["jobs"]}
+    assert jobs["strategist_tick"]["enabled"] is False
+    assert jobs["daily_briefing"]["enabled"] is True
+
+    rejected = await client.put("/api/settings/background-inference", json={"jobs": {"unknown_job": False}})
+    assert rejected.status_code == 422
+    not_bool = await client.put("/api/settings/background-inference", json={"jobs": {"daily_briefing": "no"}})
+    assert not_bool.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_unreadable_background_toggles_require_confirmed_full_replacement(client, tmp_path, monkeypatch):
+    from src.scheduler.background_inference import BACKGROUND_INFERENCE_JOBS, background_inference_settings_path
+
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    background_inference_settings_path().write_text("{broken", encoding="utf-8")
+    status = (await client.get("/api/settings/background-inference")).json()
+    assert status["error_code"] == "background_inference_settings_unreadable"
+    assert not any(job["enabled"] for job in status["jobs"])
+
+    # One toggle must not silently rebuild the other jobs from defaults.
+    partial = await client.put("/api/settings/background-inference", json={"jobs": {"strategist_tick": False}})
+    assert partial.status_code == 409
+    assert partial.json()["detail"]["code"] == "background_inference_settings_unreadable"
+    assert background_inference_settings_path().read_text(encoding="utf-8") == "{broken"
+    incomplete = await client.put("/api/settings/background-inference",
+        json={"jobs": {"strategist_tick": False}, "replace_unreadable": True})
+    assert incomplete.status_code == 422
+
+    choice = {job.job_id: job.job_id == "daily_briefing" for job in BACKGROUND_INFERENCE_JOBS}
+    replaced = await client.put("/api/settings/background-inference", json={"jobs": choice, "replace_unreadable": True})
+    assert replaced.status_code == 200
+    body = replaced.json()
+    assert body["error_code"] is None
+    assert {job["job_id"]: job["enabled"] for job in body["jobs"]} == choice

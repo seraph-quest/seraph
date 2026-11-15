@@ -11,9 +11,8 @@ Tier 2 (dynamic): one specialist per connected MCP server
 
 import re
 
-from smolagents import ToolCallingAgent
-
 from config.settings import settings
+from src.agent.tool_calling_agent import ToolCallingAgent
 from src.llm_runtime import FallbackLiteLLMModel as LiteLLMModel, build_model_kwargs
 from src.native_tools.loader import discover_tools
 from src.skills.manager import skill_manager
@@ -53,6 +52,25 @@ TOOL_DOMAINS: dict[str, str] = {
 DOMAIN_TOOLS: dict[str, list[str]] = {}
 for _tool, _domain in TOOL_DOMAINS.items():
     DOMAIN_TOOLS.setdefault(_domain, []).append(_tool)
+
+
+def durable_specialist_tools(role, descriptors, allowed_tool_ids):
+    """Intersect a fixed specialist role with the original registered grant.
+
+    This selects data contracts only. It does not construct smolagents models,
+    add tools, or confer permission to execute a selected descriptor.
+    """
+    from src.work_board.repository import BoardError
+    domains = {"research": {"web_search", "browse_webpage"},
+        "files": {"read_file", "write_file", "document_prepare"},
+        "engineering": {"read_file", "write_file"}}
+    selected = [item for item in descriptors if item.tool_id in allowed_tool_ids]
+    accepted = (all(item.tool_id.startswith("mcp:") for item in selected)
+        if role == "connected_work" else all(item.tool_id in domains.get(role, set()) for item in selected))
+    if (not accepted or len(selected) != len(allowed_tool_ids)
+        or any(item.tool_id == "delegate_task" for item in selected)):
+        raise BoardError("specialist_role_scope_denied", "Tools exceed the fixed specialist role", status_code=409)
+    return selected
 
 # --- Specialist configurations ---
 
@@ -212,7 +230,10 @@ def create_mcp_specialist(
     if not description:
         tool_names = [getattr(t, "name", str(t)) for t in tools]
         description = f"MCP server '{server_name}' with tools: {', '.join(tool_names)}"
-    return create_specialist(name, description, tools, temperature=0.3, max_steps=6)
+    agent = create_specialist(name, description, tools, temperature=0.3, max_steps=6)
+    # The exact server identity, for the Cordis rule preset (#1020): sanitized names can collide.
+    agent.seraph_mcp_server = server_name
+    return agent
 
 
 def list_specialist_descriptors(

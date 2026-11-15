@@ -5,6 +5,12 @@ import time
 
 import pytest
 
+# ADR-035 retired OpenRouter by policy. This module pins the historical
+# structural OpenRouter contract (still used to validate retained, readable
+# configuration) behind the explicit legacy fixture. Retirement-blocked
+# behavior is asserted in tests/test_openrouter_retirement.py.
+pytestmark = pytest.mark.openrouter_legacy
+
 from unittest.mock import AsyncMock, patch
 from config.settings import settings
 from src.model_fabric import (

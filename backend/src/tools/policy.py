@@ -274,3 +274,16 @@ def get_current_mcp_policy_mode() -> str:
         return normalize_mcp_policy_mode(context_manager.get_context().mcp_policy_mode)
     except Exception:
         return DEFAULT_MCP_POLICY_MODE
+
+
+def get_task_policy_snapshot() -> dict[str, object]:
+    """General-task snapshots must not turn missing policy into full access."""
+    context = context_manager.get_context()
+    tool_mode = context.tool_policy_mode
+    mcp_mode = context.mcp_policy_mode
+    if tool_mode not in TOOL_POLICY_MODES or mcp_mode not in MCP_POLICY_MODES:
+        raise PermissionError("task tool policy is unavailable")
+    from config.settings import settings
+    return {"tool_mode": tool_mode, "mcp_mode": mcp_mode,
+            "site_policy": {"allowlist": settings.browser_site_allowlist,
+                            "blocklist": settings.browser_site_blocklist}}

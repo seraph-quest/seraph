@@ -19,11 +19,55 @@ executes useful work, remembers outcomes, and explains what it is doing.
 Seraph is not itself an AGI project. It adapts its behavior and capabilities to
 the operator's goals, which may include ambitious research goals.
 
+The self-improving guardian vision means becoming more useful through explicit
+feedback, verified outcomes, and reviewed, reversible changes to memory,
+procedure preferences, and capability assets within their accepted contracts.
+It does not grant autonomous code rewriting, permission expansion, or learning
+from task success alone. Current bounded learning mechanics do not establish
+measured improvement or generalized autonomous learning; their shipped scope
+remains owned by Development Status. In particular, reviewed procedure
+preferences and opportunity feedback follow
+[ADR-015](./decisions/015-reviewed-procedure-preferences.md) and
+[ADR-023](./decisions/023-evidence-bound-guardian-opportunities.md).
+
 This constitution defines the target architecture. It does **not** claim that
 every target capability is shipped. The current implementation is recorded in
 [Development Status](./STATUS.md), while active work lives only in GitHub issues,
 pull requests, and the Seraph Execution project.
 This constitution is Seraph's sole product and accepted-target authority.
+
+## No Evals And Provider-Free Implementation
+
+Standing operator direction: do not propose, plan, create, or run evals unless
+the operator explicitly asks for evals. No money may be spent on evals. This
+includes unpaid or local campaigns, benchmarks, harness research, hidden quality
+corpora, model judges, synthetic replacements, and canaries used to measure
+quality or improvement. Do not turn any of these into a future capability,
+migration, activation, merge, or release gate.
+Capability work comes first. Any later eval requires the implemented capability
+and a new explicit operator request; it is not a planned milestone, reminder,
+or dependency. This direction stands until the operator changes it.
+
+Implementation and acceptance make no paid, live, free-tier, alternate-provider,
+or local-model inference calls. Ambient credentials and available credits are
+not authorization; disable or intercept external inference at the transport
+boundary. Ordinary isolated regression, integration, and security tests, actual
+local effects and readback, and independent review remain required. They prove
+the checked behavior, not model quality, learned improvement, or superiority.
+
+Self-improvement remains a main product feature: implement reviewed, reversible
+adaptation from ordinary task traces, explicit corrections, and skill or
+procedure changes under the existing learning authority. It does not depend on
+an eval campaign or the cancelled harness work in
+[#771](https://github.com/seraph-quest/seraph/issues/771), which is closed as not
+planned and excluded from completed
+[#736](https://github.com/seraph-quest/seraph/issues/736).
+
+This boundary governs development and acceptance; it does not disable ordinary
+operator-approved product inference under existing consent, grants, routing,
+and budgets. Historical receipts, capability-proof endpoints, and unverified
+quality labels authorize neither an eval nor implementation-time model calls.
+Preserve historical evidence without treating it as an active work requirement.
 
 ## Product Promise
 
@@ -61,13 +105,31 @@ Public entry points: [docs](https://docs.seraph.quest),
 | --- | --- | --- |
 | **Guardian kernel** | Goals, policy, planning, prioritization, intervention, memory coordination, audit, and operator-visible state | Provider-specific behavior or unbounded side effects |
 | **Capability runtime** | Typed capabilities, durable jobs, checkpoints, artifacts, approvals, sandbox/policy enforcement, and bounded remote-inference admission | Product goals or hidden provider fallback |
-| **Model fabric** | OpenRouter ordinary inference with explicit routing, consent, budgets and receipts; one dedicated optional NEAR HTTPS text capability under ADR-025 | Agent identity, durable state, shell orchestration, or product policy |
+| **Model fabric** | NEAR AI TEE-hosted inference (per NEAR catalog, not verified by Seraph) under ADR-035 with explicit routing, consent, budgets and receipts (ADR-025's NEAR text capability retained) | Agent identity, durable state, shell orchestration, or product policy |
 | **Interfaces and edges** | Browser cockpit, API, consented local or paired desktop context, voice, and paired messaging adapters | Canonical memory, authority, or an independent agent runtime |
 
 The guardian kernel decides **why and what**. The capability runtime controls
 **how work may execute**. The model fabric supplies bounded inference. Interfaces
 and edges provide **where the operator interacts and what consented context is
 available**.
+
+### All-plugin Cordis Composition
+
+[ADR-026](./decisions/026-all-plugin-cordis-architecture.md) defines the accepted
+composition target: the agent loop, goals/policy/authority services, capability
+execution and tools, model integration, persistence and memory, scheduling,
+audit, and interface/edge adapters are Cordis plugins. Only necessary
+bootstrap/composition machinery remains outside runtime plugins; shared types
+and pure libraries are not independent runtime components.
+
+The four layers describe logical responsibilities, not a non-plugin guardian
+kernel or a prescribed package tree. Mandatory trusted enforcement services must
+be ready before dependent work is admitted; plugin loading never grants authority
+and dependency injection is not sandboxing. Reviewed authored capability packs
+retain ADR-013/020 protections and are not trusted runtime plugins. All existing
+provider, canonical-state, admission, consent, audit, recovery and portability
+boundaries remain in force. Migration capabilities are **Planned**; the current
+Python/FastAPI runtime and React cockpit are not retroactively Cordis-based.
 
 ## Locked Decisions
 
@@ -78,7 +140,7 @@ The following architecture decisions are normative:
 3. [ADR-003: Canonical memory boundary](./decisions/003-canonical-memory-boundary.md)
 4. [ADR-004: GPU core and paired Mac edge](./decisions/004-gpu-core-mac-edge-topology.md) (fixed placement superseded by ADR-008)
 5. [ADR-005: Epic integration branch workflow](./decisions/005-epic-integration-branch-workflow.md)
-6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md)
+6. [ADR-006: OpenRouter-only inference phase](./decisions/006-openrouter-only-inference-phase.md) (provider choice superseded by ADR-035)
 7. [ADR-007: Bounded Node repair and Linux process supervision](./decisions/007-bounded-node-repair-supervision.md)
 8. [ADR-008: Portable core and consented context](./decisions/008-portable-core-and-consented-context.md)
 9. [ADR-009: Tested repository publication](./decisions/009-tested-repository-publication.md)
@@ -96,13 +158,34 @@ The following architecture decisions are normative:
 20. [ADR-020: Reviewed authored capability packages](./decisions/020-reviewed-authored-capability-packages.md)
 21. [ADR-021: Exact Forgejo issue title transaction](./decisions/021-exact-forgejo-issue-title.md)
 23. [ADR-023: Evidence-bound guardian opportunities](./decisions/023-evidence-bound-guardian-opportunities.md)
-24. [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md)
-25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md)
+24. [ADR-024: Purpose-specific OpenRouter routes](./decisions/024-purpose-specific-openrouter-routes.md) (OpenRouter slots superseded by ADR-035)
+25. [ADR-025: Optional NEAR HTTPS text inference](./decisions/025-near-https-text-inference.md) (absorbed by ADR-035)
+26. [ADR-026: All-plugin Cordis agent architecture](./decisions/026-all-plugin-cordis-architecture.md)
+27. [ADR-027: Finite standing public goal programmes](./decisions/027-standing-public-goal-programmes.md)
+28. [ADR-028: Reviewed typed task methods and reusable procedures](./decisions/028-reviewed-task-methods.md)
+29. [ADR-029: Profiled browser interactions](./decisions/029-profiled-browser-interactions.md)
+30. [ADR-030: Bounded iterative repository work and original-producer recovery](./decisions/030-bounded-iterative-repository-work.md)
+31. [ADR-031: Bounded general documents](./decisions/031-bounded-general-documents.md)
+32. [ADR-032: Repository crash recovery evidence](./decisions/032-repository-crash-recovery-evidence.md) (supersedes selected ADR-030 recovery clauses)
+33. [ADR-033: Optional governed OpenRouter audio transcription](./decisions/033-governed-optional-audio-route.md) (OpenRouter audio never activated under ADR-035)
+34. [ADR-034: Quarantined browser downloads and selected desktop draft actions](./decisions/034-selected-desktop-draft-actions.md)
+35. [ADR-035: NEAR TEE-hosted inference only](./decisions/035-near-tee-hosted-inference-only.md) (supersedes ADR-006's provider choice and ADR-024's OpenRouter slots)
+36. [ADR-036: DSH-style plugin structure, pinned trust bundle and profiles](./decisions/036-dsh-style-plugin-structure.md) (refines ADR-026)
 
-ADR-023 defines evidence-bound Guardian opportunities and ADR-024 defines
-purpose-specific OpenRouter routes. ADR-025 permits one separate optional NEAR
-HTTPS text capability with explicit provider plaintext access. These accepted
-decisions retain the existing authority, serial admission and accounting
+ADR-033 extends only the versioned setup.v3 target with one optional disabled
+audio route; under ADR-035 that OpenRouter route is never activated and a NEAR
+TEE audio slot needs a separate amendment. Existing setup.v1/v2 and text, vision and embedding contracts stay
+in force. Source-attested exact endpoint/codec and finite chat-audio pricing,
+original audio native ownership and a separately selected Goal/Task allowance
+are mandatory. Paired-channel Task capture is **Partial**; live audio stays
+disabled as an explicit "Voice route unavailable" state, and scripted mechanics do
+not establish operational voice readiness.
+
+ADR-023 defines evidence-bound Guardian opportunities. ADR-035 makes NEAR AI
+TEE-hosted models (per NEAR's dated catalog, not Seraph-verified, plaintext to
+the NEAR gateway) the only inference target, reusing ADR-024's slot mechanics,
+absorbing ADR-025's NEAR text capability and retiring OpenRouter by policy.
+These accepted decisions retain the existing authority, serial admission and accounting
 boundaries. [Development Status](./STATUS.md) owns the implemented capability
 scope and its limits; acceptance alone does not establish live provider quality
 or availability.
@@ -123,7 +206,7 @@ Use these terms consistently in APIs, UI copy, issues, and active docs:
 - **edge**: a paired, revocable source or interface outside the canonical core;
 - **provider**: an inference or advisory integration, never Seraph's authority;
 - **guardian cycle**: observe, assess, propose, approve when required, act,
-  evaluate, and remember.
+  read back and record the outcome, and remember.
 
 ## Capability Status Vocabulary
 
@@ -132,7 +215,7 @@ Capability inventory, APIs, and operator UI use this lifecycle vocabulary:
 - **Shipped**: present on `develop`, available to its declared audience, and
   supported by the named validation receipt.
 - **Partial**: usable behavior exists on `develop`, with named missing boundaries.
-- **Experimental**: runnable only as an opt-in canary; interfaces or persistence
+- **Experimental**: runnable only with explicit opt-in; interfaces or persistence
   may change and the UI must say so.
 - **Planned**: accepted tracked work without a shipped implementation.
 - **Deprecated**: still present for migration, with its replacement and removal
@@ -149,7 +232,7 @@ and Deprecated capabilities must remain visibly distinct from supported paths.
 Material documents and decisions may use these states:
 
 - **Target**: accepted architecture or product intent, not yet shipped.
-- **Research**: evidence or option under evaluation, not a committed product contract.
+- **Research**: evidence or an option under consideration, not a committed product contract.
 - **Archived**: historical context that may contradict the current contract.
 - **Blocked**: accepted work cannot proceed until a named condition changes.
 
@@ -159,9 +242,9 @@ Open branches describe intended post-merge truth and must be identified as such.
 
 - Model providers are inference-only. Seraph does not depend on Codex CLI,
   Claude Code, or another coding-agent runtime to operate.
-- Ordinary model inference uses the governed OpenRouter HTTPS route; ADR-025
-  permits only the separate fixed optional NEAR HTTPS text capability. Exact
-  model/modalities and upstream policy must be verified before dispatch;
+- Model inference targets NEAR AI TEE-hosted models from ADR-035's closed
+  allowlist; OpenRouter makes no new contact. Exact canonical model, catalog
+  receipt, modalities and policy must be checked before dispatch;
   unsupported capabilities remain blocked or degraded rather than falling back
   silently.
 - Remote inference uses one shared bounded admission contract with owner,
@@ -180,8 +263,8 @@ Open branches describe intended post-merge truth and must be identified as such.
   the canonical workspace host; `jupyter` is a historical deployment example.
   Consented context may originate locally or from a paired, revocable edge,
   without transferring authority. GPU hardware, local model
-  weights, and a VLM wrapper are not active product prerequisites during the
-  OpenRouter-only phase.
+  weights, and a VLM wrapper are not active product prerequisites under
+  remote inference (ADR-006, ADR-035).
 - Effective model, queue, edge, and degraded state must be operator-visible.
   Silent fallback that makes the UI lie is a contract violation.
 

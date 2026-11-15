@@ -7,7 +7,15 @@ import time
 from pydantic import BaseModel, ConfigDict, Field
 
 from config.settings import settings
-from src.auth.service import AuthFailure, auth_enabled, create_session, revoke_session, verify_secret
+from src.auth.service import (
+    AUTH_MODE_LOCAL_NO_LOGIN,
+    AuthFailure,
+    auth_enabled,
+    create_session,
+    local_no_login_active,
+    revoke_session,
+    verify_secret,
+)
 
 router = APIRouter()
 
@@ -53,8 +61,23 @@ def _consume_login_attempt(source: str) -> None:
 
 
 def _require_configured() -> None:
+    if local_no_login_active():
+        # Local single-operator mode has no credential to log in with, refresh
+        # or sign out of; the stable local root is the only operator.
+        raise HTTPException(status_code=409, detail={"code": "local_no_login_active"})
     if not auth_enabled():
         raise HTTPException(status_code=503, detail={"code": "auth_not_configured"})
+
+
+def _reject_local_no_login_credential_change() -> None:
+    """Ownership credentials protect password roots across logins.
+
+    The local root is already stable across restarts, so enrolling device
+    proofs, rotating recovery codes or revoking the identity from the
+    no-login cockpit is refused rather than leaving the mode without a root.
+    """
+    if local_no_login_active():
+        raise HTTPException(status_code=409, detail={"code": "local_no_login_active"})
 
 
 class LoginRequest(BaseModel):
@@ -139,6 +162,14 @@ async def login(payload: LoginRequest, response: Response, request: Request):
 
 @router.get("/session")
 async def session(request: Request):
+    if local_no_login_active():
+        # Additive fields only in this mode, so the password contract is
+        # unchanged.  The cockpit shows a "No login (local only)" badge.
+        return {
+            **_operator_payload(request.state.operator),
+            "auth_mode": AUTH_MODE_LOCAL_NO_LOGIN,
+            "local_no_login": True,
+        }
     _require_configured()
     operator = request.state.operator
     return _operator_payload(operator)
@@ -198,6 +229,7 @@ async def ownership_inventory(request: Request):
 
 @router.post("/ownership/enroll")
 async def ownership_enroll(request: Request, response: Response):
+    _reject_local_no_login_credential_change()
     from src.auth.ownership import enroll
     _consume_login_attempt("ownership:" + _login_source(request))
     try:
@@ -213,6 +245,7 @@ async def ownership_enroll(request: Request, response: Response):
 
 @router.post("/ownership/recovery-code")
 async def ownership_recovery_code(request: Request, response: Response):
+    _reject_local_no_login_credential_change()
     from src.auth.ownership import replace_recovery_code
     _consume_login_attempt("ownership:" + _login_source(request))
     try:
@@ -227,6 +260,7 @@ async def ownership_recovery_code(request: Request, response: Response):
 
 @router.post("/ownership/forget-device", status_code=204)
 async def ownership_forget_device(request: Request, response: Response):
+    _reject_local_no_login_credential_change()
     from src.auth.ownership import forget_device
     try:
         await forget_device(request.state.operator, request.cookies.get(_continuity_cookie_name()))
@@ -239,6 +273,7 @@ async def ownership_forget_device(request: Request, response: Response):
 
 @router.post("/ownership/revoke", status_code=204)
 async def ownership_revoke(request: Request, response: Response):
+    _reject_local_no_login_credential_change()
     from src.auth.ownership import revoke_identity
     try:
         await revoke_identity(request.state.operator)

@@ -300,3 +300,128 @@ def stable_candidate_key(
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return f"gcl:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:32]}"
+
+
+class GoalProgrammeBudget(BaseModel):
+    """Finite ceilings; accounting remains owned by the inference broker."""
+
+    model_config = ConfigDict(extra="forbid")
+    max_inference_microusd: int = Field(strict=True, ge=0)
+    max_outstanding_runs: Literal[1] = 1
+
+
+class GoalProgrammeNotifications(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    per_day: int = Field(default=0, strict=True, ge=0, le=2)
+
+
+class GoalProgrammeRequest(BaseModel):
+    """Operator-supplied public content, never derived from private goal text."""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_goal_revision: int = Field(strict=True, ge=1)
+    expected_grant_revision: int = Field(default=0, strict=True, ge=0)
+    public_brief: str = Field(min_length=1, max_length=2_000)
+    duration_days: int = Field(default=7, strict=True, ge=1, le=7)
+    budget: GoalProgrammeBudget
+    cadence: Literal["daily"] = "daily"
+    notification_limits: GoalProgrammeNotifications = Field(default_factory=GoalProgrammeNotifications)
+
+    @field_validator("public_brief")
+    @classmethod
+    def _public_brief(cls, value: str) -> str:
+        value = value.strip()
+        if not value or len(value.encode("utf-8")) > 8_000:
+            raise ValueError("bounded public brief required")
+        return value
+
+
+class GoalProgrammeAccept(GoalProgrammeRequest):
+    review_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    public_web_acknowledged: Literal[True]
+    local_artifacts_acknowledged: Literal[True]
+    inference_ceiling_acknowledged: Literal[True]
+
+    @field_validator("public_web_acknowledged", "local_artifacts_acknowledged", "inference_ceiling_acknowledged", mode="before")
+    @classmethod
+    def _literal_acknowledgment(cls, value: Any) -> bool:
+        if value is not True:
+            raise ValueError("explicit literal acknowledgment required")
+        return value
+
+
+class GoalProgrammeControl(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_grant_revision: int = Field(strict=True, ge=1)
+    recover_owner_acknowledged: bool = Field(default=False, strict=True)
+
+
+class GoalProgramme(BaseModel):
+    """Service authority generation; renewal never changes an old generation."""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["GoalProgramme.v1"] = "GoalProgramme.v1"
+    id: str
+    goal_id: str
+    goal_revision: int = Field(strict=True, ge=1)
+    public_brief: str
+    brief_digest: str
+    grant_revision: int = Field(strict=True, ge=1)
+    expires_at: datetime
+    confirmed_at: datetime
+    capability_ids: list[str]
+    budget: GoalProgrammeBudget
+    cadence: Literal["daily"] = "daily"
+    notification_limits: GoalProgrammeNotifications
+    state: Literal["active", "blocked", "paused", "revoked", "review_due"]
+    reason_code: str | None = None
+    artifact_prefix: str
+    owner_identity_id: str
+    issuer_root_id: str
+    issuer_principal_id: str
+    route_epoch: int = Field(strict=True, ge=1)
+    route_digest: str
+    review_digest: str
+
+    @model_validator(mode="after")
+    def _finite_binding(self) -> "GoalProgramme":
+        if self.confirmed_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("programme timestamps must be timezone-aware")
+        duration = (self.expires_at - self.confirmed_at).total_seconds()
+        if not 0 < duration <= 7 * 86400:
+            raise ValueError("programme grant must be finite and at most seven days")
+        if hashlib.sha256(self.public_brief.encode()).hexdigest() != self.brief_digest:
+            raise ValueError("programme public brief digest mismatch")
+        return self
+
+
+class GoalProgrammeAuthorityBinding(BaseModel):
+    """Immutable preflight facts, consumed inside native effect/adoption CAS.
+
+    Possession is not authority. The owner must validate the current canonical
+    generation in the same transaction as its original attempt transition.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    goal_id: str
+    goal_revision: int = Field(strict=True, ge=1)
+    programme_id: str
+    grant_revision: int = Field(strict=True, ge=1)
+    owner_identity_id: str
+    issuer_root_id: str
+    issuer_principal_id: str
+    brief_digest: str
+    capability_id: str
+    route_epoch: int = Field(strict=True, ge=1)
+    route_digest: str
+    expires_at: datetime
+    cost_ceiling_microusd: int = Field(strict=True, ge=0)
+
+    @classmethod
+    def from_programme(cls, programme: GoalProgramme, capability_id: str) -> "GoalProgrammeAuthorityBinding":
+        return cls(goal_id=programme.goal_id, goal_revision=programme.goal_revision,
+            programme_id=programme.id, grant_revision=programme.grant_revision,
+            owner_identity_id=programme.owner_identity_id, issuer_root_id=programme.issuer_root_id,
+            issuer_principal_id=programme.issuer_principal_id, brief_digest=programme.brief_digest,
+            capability_id=capability_id, route_epoch=programme.route_epoch, route_digest=programme.route_digest,
+            expires_at=programme.expires_at, cost_ceiling_microusd=programme.budget.max_inference_microusd)

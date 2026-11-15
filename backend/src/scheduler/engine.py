@@ -31,6 +31,8 @@ def _async_job_wrapper(
     coroutine lifetime without blocking the app loop.
     """
     async def _run_with_authority():
+        if allow_model_inference and await _skip_disabled_inference_job(job_id):
+            return
         execution_job_id = f"scheduler:{job_id}:{uuid4().hex}"
         principal = TrustPrincipal(
             principal_id=f"service:scheduler:{job_id}",
@@ -55,6 +57,59 @@ def _async_job_wrapper(
             logger.exception("Scheduled job %s failed", getattr(coro_func, "__name__", repr(coro_func)))
             raise
     return wrapper
+
+
+def _lifecycle_job(func, *, job_id: str):
+    """Gate one registered job by its lifecycle domain (#1025); retention jobs are exempt.
+
+    The timer keeps its phase: a tick whose domain is not active returns at
+    entry with a visible block instead of the instance being paused.
+    """
+    async def gated():
+        from src.runtime_plugins.lifecycle import runtime_lifecycle
+        return await runtime_lifecycle.run_gated(job_id, func)
+
+    gated.__name__ = f"lifecycle_{job_id}"
+    gated.__qualname__ = gated.__name__
+    return gated
+
+
+def _record_missed_fire(event) -> None:
+    """A fire dropped past its misfire grace stays visible (``skipped / missed_fire``)."""
+    try:
+        from src.scheduler.background_inference import record_scheduler_job_missed
+        record_scheduler_job_missed(str(event.job_id))
+    except Exception:
+        logger.warning("Could not record a missed fire of %s", getattr(event, "job_id", "?"), exc_info=True)
+
+
+async def _skip_disabled_inference_job(job_id: str) -> bool:
+    """Skip a whole governed job the operator switched off; no model call runs."""
+    from src.scheduler.background_inference import (
+        DISABLED_BY_OPERATOR,
+        SETTINGS_UNREADABLE,
+        background_inference_job_enabled,
+        is_whole_job_toggle,
+        read_background_inference_settings,
+        record_background_inference_run,
+        record_background_inference_skip,
+    )
+
+    if not is_whole_job_toggle(job_id):
+        return False
+    if background_inference_job_enabled(job_id):
+        record_background_inference_run(job_id)
+        return False
+    _enabled, error = read_background_inference_settings()
+    reason = SETTINGS_UNREADABLE if error else DISABLED_BY_OPERATOR
+    # Audited once per transition, then hourly (#1112): screenshot folder
+    # analysis polls every second.
+    if record_background_inference_skip(job_id, reason):
+        from src.audit.runtime import log_scheduler_job_event
+
+        await log_scheduler_job_event(job_name=job_id, outcome="skipped", details={"reason": reason})
+        logger.info("Scheduled job %s skipped: %s", job_id, reason)
+    return True
 
 
 def _validate_timezone(tz_name: str) -> str:
@@ -115,6 +170,8 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.strategist_tick import run_strategist_tick
     from src.work_board.dispatcher import run_work_board_dispatch
     from src.guardian.opportunity_runtime import run_opportunity_tick
+    from src.guardian.goal_discovery import run_goal_discovery_tick
+    from src.guardian.programme_digest import tick as run_programme_digest_tick
     from src.scheduler.jobs.daily_briefing import run_daily_briefing
     from src.scheduler.jobs.evening_review import run_evening_review
     from src.scheduler.jobs.activity_digest import run_activity_digest
@@ -124,9 +181,26 @@ def init_scheduler() -> AsyncIOScheduler | None:
     from src.scheduler.jobs.screenshot_observation_digest import run_screenshot_observation_digest
     from src.scheduler.jobs.weekly_activity_review import run_weekly_activity_review
     from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
-    from src.scheduler.jobs.audio_ingress_cleanup import run_audio_ingress_cleanup
+    from src.runtime_plugins.bound_adapters import run_cordis_mail_retention
+    from src.scheduler.jobs.inference_ledger_verification import run_inference_ledger_verification
 
     jobs = [
+        {
+            "func": _async_job_wrapper(run_programme_digest_tick, loop, job_id="programme_daily_digest"),
+            "trigger": IntervalTrigger(seconds=60),
+            "id": "programme_daily_digest",
+            "name": "Daily programme Inbox digest (08:00 local)",
+            "next_run_time": _startup_next_run(True, delay_seconds=10),
+            "misfire_grace_time": 60,
+        },
+        {
+            "func": _async_job_wrapper(run_goal_discovery_tick, loop, job_id="goal_public_discovery"),
+            "trigger": IntervalTrigger(seconds=60),
+            "id": "goal_public_discovery",
+            "name": "Finite public Goal discovery",
+            "next_run_time": _startup_next_run(True, delay_seconds=5),
+            "misfire_grace_time": 60,
+        },
         {
             "func": _async_job_wrapper(run_memory_consolidation, loop, job_id="memory_consolidation", allow_model_inference=True),
             "trigger": IntervalTrigger(minutes=settings.memory_consolidation_interval_min),
@@ -248,21 +322,39 @@ def init_scheduler() -> AsyncIOScheduler | None:
             "name": "Screen observation cleanup",
         },
         {
-            "func": _async_job_wrapper(run_audio_ingress_cleanup, loop, job_id="audio_ingress_cleanup"),
-            "trigger": IntervalTrigger(seconds=60),
-            "id": "audio_ingress_cleanup",
-            "name": "Audio ingress retention cleanup",
-            "next_run_time": _startup_next_run(True, delay_seconds=60),
-            "misfire_grace_time": 120,
+            # #1092: an idle server still deletes Cordis mail results past their retention.
+            "func": _async_job_wrapper(run_cordis_mail_retention, loop, job_id="cordis_mail_retention"),
+            "trigger": IntervalTrigger(minutes=15),
+            "id": "cordis_mail_retention",
+            "name": "Cordis mail result retention",
+            "next_run_time": _startup_next_run(True, delay_seconds=120),
+            "misfire_grace_time": 900,
+        },
+        {
+            # Bounds how long an edit to an untouched ledger row can go
+            # unnoticed; writers also verify in full when this is stale.
+            "func": _async_job_wrapper(run_inference_ledger_verification, loop, job_id="inference_ledger_verification"),
+            "trigger": IntervalTrigger(minutes=10),
+            "id": "inference_ledger_verification",
+            "name": "Inference cost ledger full verification",
+            "next_run_time": _startup_next_run(True, delay_seconds=120),
+            "misfire_grace_time": 300,
         },
     ]
 
+    from src.runtime_plugins.lifecycle import job_domain
+
     for job in jobs:
         try:
-            _scheduler.add_job(**job, replace_existing=True, coalesce=True, max_instances=1)
+            job_domain(job["id"])  # an unclassified system job is refused, never ungated
+            _scheduler.add_job(**{**job, "func": _lifecycle_job(job["func"], job_id=job["id"])},
+                               replace_existing=True, coalesce=True, max_instances=1)
         except Exception:
             logger.exception("Failed to register job: %s", job["id"])
 
+    from apscheduler.events import EVENT_JOB_MISSED
+
+    _scheduler.add_listener(_record_missed_fire, EVENT_JOB_MISSED)
     _scheduler.start()
     logger.info("Scheduler started with %d jobs", len(_scheduler.get_jobs()))
     return _scheduler
@@ -324,11 +416,11 @@ async def sync_scheduled_jobs() -> None:
                 await execute_scheduled_job(job_id, scheduled_slot_utc=slot_utc)
 
             _scheduler.add_job(
-                _async_job_wrapper(
+                _lifecycle_job(_async_job_wrapper(
                     _run_scheduled_job,
                     _scheduler_loop,
                     job_id=apscheduler_id,
-                ),
+                ), job_id=apscheduler_id),
                 trigger=build_cron_trigger(job),
                 id=apscheduler_id,
                 name=job["name"],

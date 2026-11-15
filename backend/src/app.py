@@ -1,5 +1,6 @@
 import os
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -10,7 +11,6 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config.settings import settings
-from src.db import init_db, close_db
 from src.extensions.registry import default_manifest_roots_for_workspace
 from src.llm_logger import init_llm_logging
 from src.llm_runtime import effective_runtime_model_id, provider_profile_statuses, provider_profiles, resolve_runtime_profile
@@ -29,10 +29,61 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.utils.background import drain_tracked_tasks
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
+from src.runtime_plugins.agent_turns import chat_runtime_status
+
+
+async def _provider_readiness(app) -> dict | None:
+    worker = getattr(app.state, "provider_worker", None)
+    return None if worker is None else await worker.readiness()
+
+
+async def _chat_runtime_or_unavailable() -> dict:
+    """Runtime status never fails because the composition inventory is unreadable."""
+    try:
+        return await chat_runtime_status(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Chat runtime status unavailable", exc_info=True)
+        return {"loop": "blocked", "route": "chat_agent", "owner_epoch": None, "owner_kind": None,
+                "reason": "chat_runtime_status_unavailable", "recovery": "Restart Seraph; the runtime inventory is unreadable."}
+from src.runtime_plugins.guardian_turns import guardian_runtime_status, runtime_domains_status
+
+
+async def _guardian_runtime_or_unavailable() -> dict:
+    """Runtime status never fails because guardian routing cannot read its owner rows (#1020)."""
+    try:
+        return await guardian_runtime_status(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Guardian runtime status unavailable", exc_info=True)
+        return {"loop": "blocked", "owner_epoch": None, "reason": "guardian_runtime_status_unavailable",
+                "recovery": "Restart Seraph; the runtime inventory is unreadable."}
+
+
+async def _runtime_domains_or_unavailable() -> list[dict]:
+    try:
+        return await runtime_domains_status(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Runtime domain status unavailable", exc_info=True)
+        from src.runtime_plugins.ownership import DOMAINS
+        return [{"domain": domain, "owner_kind": None, "epoch": None, "state": "unavailable",
+                 "reason": "runtime_domains_status_unavailable",
+                 "recovery": "Restart Seraph; the runtime inventory is unreadable."} for domain in DOMAINS]
+from src.runtime_plugins.bridge import cordis_host
+
+
+async def _lifecycle_runtime_or_unavailable(domain: str) -> dict:
+    """Scheduler/dispatch lifecycle owner and state (#1025); never fails the status read."""
+    try:
+        from src.runtime_plugins.lifecycle import lifecycle_runtime_status
+        return await lifecycle_runtime_status(domain)
+    except Exception:
+        logging.getLogger(__name__).warning("Lifecycle runtime status unavailable", exc_info=True)
+        return {"domain": domain, "state": "unavailable", "owner": None, "owner_epoch": None,
+                "reason": "lifecycle_runtime_status_unavailable",
+                "recovery": "Restart Seraph; the runtime inventory is unreadable."}
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import EgressClass
-from src.auth.middleware import OperatorAuthMiddleware
-from src.auth.service import validate_auth_configuration
+from src.auth.middleware import OperatorAuthMiddleware, auth_failure_handler
+from src.auth.service import AuthFailure, auth_mode_status, validate_auth_configuration
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
@@ -185,6 +236,9 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
             "backend_health_endpoint": str(vlm_status.get("backend_health_endpoint") or ""),
         }
 
+    near_tee_route = _near_tee_chat_route_status(vlm_status)
+    if near_tee_route is not None:
+        return near_tee_route
     provider_label = provider or "unknown"
     policy = effective_workload_policy("chat_agent")
     persisted = read_model_fabric_configuration()
@@ -231,6 +285,12 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         else str(getattr(settings, "openrouter_data_retention_policy", "deny") or "deny")
     )
     readiness_reasons: list[str] = []
+    from src.model_fabric.retirement import NO_ACTIVE_PROVIDER_REASON, OPENROUTER_RETIRED_REASON, openrouter_retired
+    retired = openrouter_retired()
+    if retired:
+        # ADR-035: OpenRouter is retired and NEAR TEE slots are not yet
+        # implemented, so no canonical route has an active provider.
+        readiness_reasons.extend((OPENROUTER_RETIRED_REASON, NO_ACTIVE_PROVIDER_REASON))
     if not provider_only:
         readiness_reasons.append("openrouter_only_mode_disabled")
     if provider != "openrouter":
@@ -270,12 +330,12 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
         "summary_label": f"{provider_label} · {model_label or model or 'unknown'}",
         "api_base": runtime.get("api_base", ""),
         "vlm_configured": bool(vlm_status.get("configured")),
-        "active_provider_policy": "openrouter_only",
+        "active_provider_policy": "none_openrouter_retired" if retired else "openrouter_only",
         "inference_ready": inference_ready,
         "inference_readiness": {
-            "status": "ready" if inference_ready else "configuration_required",
+            "status": "ready" if inference_ready else "blocked" if retired else "configuration_required",
             "reasons": readiness_reasons,
-            "provider": "openrouter",
+            "provider": None if retired else "openrouter",
             "active_only": provider_only,
             "cloud_egress": policy.egress_class.value,
             "cloud_consent": bool(policy.cloud_egress_acknowledged),
@@ -285,11 +345,99 @@ def _effective_runtime_route_status(runtime: dict[str, str], vlm_status: dict[st
     }
 
 
+def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, object] | None:
+    """ADR-035: the chat route when a NEAR TEE text slot is configured.
+
+    Reports the effective route only: the slot's canonical model and the
+    dated catalog hosting label when the slot is the active provider of
+    ``chat_agent``; otherwise the slot's local blocked reason with no
+    provider. Never a "verified" or "confidential" claim. Local only: no
+    catalog read or NEAR contact.
+    """
+    from src.model_fabric.configuration import near_tee_profile_for_slot, near_tee_slot, near_tee_slot_block_reason
+    from src.model_fabric.near_tee_catalog import catalog_receipt_block_reason, tee_hosting_label
+
+    configured = read_model_fabric_configuration()
+    if configured.status != "ready" or configured.near_tee is None:
+        return None
+    slot = near_tee_slot(configured, "text")
+    if slot is None:
+        return None
+    profile = near_tee_profile_for_slot("text", slot)
+    policy = effective_workload_policy("chat_agent")
+    active = tuple(policy.allowed_provider_kinds) == ("near_tee",) and policy.allowed_profile_ids == (profile.id,)
+    reasons: list[str] = []
+    if not active:
+        reasons.append(near_tee_slot_block_reason(configured, "text") or "near_tee_route_inactive")
+    if reason := catalog_receipt_block_reason("text", profile, revision=configured.egress_revision):
+        reasons.append(reason)
+    label = tee_hosting_label("text", profile, revision=configured.egress_revision) if not reasons else None
+    # Effective lightweight chat cap: the outer REST/WebSocket turn timeout,
+    # the turn's own deadline 2s inside it, and the stream window left after
+    # the 16s billing reserve. A slot timeout above the deadline is refused.
+    from src.agent.direct_chat import direct_chat_context_timeout, direct_chat_turn_timeout
+    from src.model_fabric.near_tee import NEAR_TEE_BILLING_RESERVE_SECONDS
+    turn_timeout = direct_chat_turn_timeout()
+    turn_deadline = max(turn_timeout - 2.0, 0.1)
+    chat_cap = {
+        "turn_timeout_seconds": turn_timeout,
+        "inference_deadline_seconds": direct_chat_context_timeout("chat_agent") if active else turn_deadline,
+        "stream_window_seconds": max(min(float(slot.timeout_seconds),
+            turn_deadline - NEAR_TEE_BILLING_RESERVE_SECONDS), 0.0),
+        "billing_reserve_seconds": NEAR_TEE_BILLING_RESERVE_SECONDS,
+    }
+    if float(slot.timeout_seconds) > turn_deadline:
+        reasons.append("near_tee_slot_timeout_exceeds_chat_turn")
+    elif chat_cap["stream_window_seconds"] < 1:
+        reasons.append("near_tee_chat_turn_window_insufficient")
+    if reasons:
+        label = None
+    model = profile.model
+    model_label = model.split("/")[-1]
+    provider = "near_tee" if active else "none"
+    route_label = "NEAR TEE text slot" if active else "blocked"
+    return {
+        "runtime_path": "chat_agent",
+        "active_profile": profile.id if active else "",
+        "configured_profile": profile.id,
+        "provider": provider,
+        "provider_label": provider,
+        "model": model if active else "",
+        "configured_model": model,
+        "model_label": model_label if active else "",
+        "mode": "remote_provider" if active else "blocked",
+        "route_label": route_label,
+        "summary_label": f"{route_label} · {model_label}" if active else "blocked · no active inference provider",
+        "api_base": "https://cloud-api.near.ai/v1" if active else "",
+        "vlm_configured": bool(vlm_status.get("configured")),
+        "active_provider_policy": "near_tee_only",
+        "chat_turn_cap": chat_cap,
+        # The only TEE statement: NEAR's dated catalog claim, never verified by Seraph.
+        "tee_hosting_label": label,
+        "tee_verified": False,
+        "e2ee": False,
+        "provider_receives_plaintext": True,
+        "inference_ready": not reasons,
+        "inference_readiness": {
+            "status": "ready" if not reasons else "blocked",
+            "reasons": reasons,
+            "provider": "near_tee" if active else None,
+            "active_only": True,
+            "cloud_egress": policy.egress_class.value,
+            "cloud_consent": bool(policy.cloud_egress_acknowledged),
+            "cost_ceiling_microusd": policy.max_cost_microusd,
+        },
+        "legacy_local_route_blocked": True,
+    }
+
+
 def _augment_inference_readiness(
     route_status: dict[str, object],
     fabric_status: dict[str, object],
 ) -> dict[str, object]:
     """Fold model-fabric profile/proof truth into the cheap runtime receipt."""
+    if route_status.get("active_provider_policy") == "near_tee_only":
+        return _augment_near_tee_readiness(route_status, fabric_status)
     if route_status.get("provider") != "openrouter":
         return route_status
     readiness = dict(route_status.get("inference_readiness") or {})
@@ -327,7 +475,8 @@ def _augment_inference_readiness(
     deduped_reasons = list(dict.fromkeys(reasons))
     readiness.update(
         {
-            "status": "ready" if not deduped_reasons else "configuration_required",
+            "status": "ready" if not deduped_reasons
+            else "blocked" if "openrouter_retired" in deduped_reasons else "configuration_required",
             "reasons": deduped_reasons,
             "profile_id": active_profile or None,
         }
@@ -337,162 +486,363 @@ def _augment_inference_readiness(
     route_status["inference_readiness"] = readiness
     return route_status
 
+def _augment_near_tee_readiness(route_status: dict[str, object], fabric_status: dict[str, object]) -> dict[str, object]:
+    """Fold the NEAR TEE slot's credential, accounting and proof truth in."""
+    near = fabric_status.get("near_tee") if isinstance(fabric_status, dict) else None
+    slot = ((near or {}).get("slots") or {}).get("text") if isinstance(near, dict) else None
+    readiness = dict(route_status.get("inference_readiness") or {})
+    reasons = list(readiness.get("reasons") or [])
+    capabilities: dict[str, object] = {}
+    if not isinstance(slot, dict):
+        reasons.append("near_tee_status_unavailable")
+    else:
+        if slot.get("status") != "ready":
+            reasons.append(str(slot.get("reason_code") or "near_tee_slot_not_ready"))
+        capabilities = dict(slot.get("chat_capabilities") or {})
+    reasons = list(dict.fromkeys(reasons))
+    route_status = dict(route_status)
+    readiness.update({"status": "ready" if not reasons else "blocked", "reasons": reasons,
+        "profile_id": route_status.get("configured_profile"),
+        # Streaming chat and agent tool turns each need their own fresh check.
+        "capabilities": capabilities})
+    route_status["inference_ready"] = not reasons
+    route_status["inference_readiness"] = readiness
+    if reasons:
+        route_status["tee_hosting_label"] = None
+    return route_status
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    workspace_owner = None
-    if settings.deployment_environment.strip().lower() in {"prod", "production"}:
-        # The container preflight proves the /app/data bind.  Hold the same
-        # lock inode for the whole backend lifetime so host backup/restore
-        # cannot observe or replace a live workspace generation.
-        from src.workspace.production import runtime_workspace_owner
+    # Python hosts the mandatory providers (#1024): the worker takes the
+    # workspace owner lease (production: the container preflight proves the
+    # /app/data bind, and the same lock inode is held for the whole backend
+    # lifetime so host backup/restore cannot observe or replace a live
+    # generation), then activates state, authority, audit and tasks or aborts.
+    from src.runtime_plugins.worker import ProviderWorker, attach
 
-        workspace_owner = runtime_workspace_owner(settings.workspace_dir)
-        workspace_owner.__enter__()
-    await init_db()
-    # Hydrate the trusted OpenRouter vault credential before any scheduler or
-    # canonical inference path resolves a provider profile.  Failure remains
-    # visible as configuration_required through the normal status surfaces;
-    # the exception is never allowed to trigger a provider call.
-    try:
-        from src.model_fabric.configuration import hydrate_openrouter_credential
-
-        await hydrate_openrouter_credential()
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "OpenRouter credential hydration failed; inference remains fail-closed",
-            exc_info=True,
-        )
-    # Recover expired durable invocation leases before scheduler jobs can
-    # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
-    # is fail-closed and operator-visible; a failed recovery is not hidden as
-    # a healthy startup.
-    try:
-        from src.workflows.job_runtime import durable_job_repository
-
-        recovered_jobs = await durable_job_repository.recover_stale_jobs()
-        if recovered_jobs:
-            logging.getLogger(__name__).warning(
-                "Recovered %d stale durable job(s) during startup",
-                len(recovered_jobs),
-            )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Durable job restart recovery failed; stale work remains operator-visible"
-        )
-    # Routine installs stage workflow/package bytes outside discoverable roots
-    # until their canonical selector transaction commits. Reconcile committed
-    # staging, and remove only proven uncommitted staging, before scheduler
-    # work can discover a partial procedure after a process crash.
-    try:
-        from src.workflows.routines import routine_service
-
-        recovered_installs = await routine_service.recover_pending_installs()
-        blocked_installs = sum(1 for item in recovered_installs if item.get("status") == "blocked")
-        if recovered_installs:
-            logging.getLogger(__name__).warning(
-                "Routine install restart recovery inspected %d staging tree(s); %d remain blocked",
-                len(recovered_installs),
-                blocked_installs,
-            )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Routine install restart recovery failed; partial staging remains non-discoverable"
-        )
-    # Audio quarantine files and unconfirmed transcript state are process-local
-    # and must never resume after a crash.  Run the durable cleanup before any
-    # scheduler work can admit a stale audio job.
-    try:
-        from src.guardian.audio_worker import cleanup_audio_ingress_jobs
-
-        cleaned_audio_jobs = await cleanup_audio_ingress_jobs()
-        if cleaned_audio_jobs:
-            logging.getLogger(__name__).warning(
-                "Cleaned %d stale audio ingress job(s) during startup",
-                cleaned_audio_jobs,
-            )
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "Audio ingress restart cleanup failed; stale work remains blocked and operator-visible"
-        )
-    ensure_soul_exists()
-    init_llm_logging()
-    # Load persisted settings before scheduler starts
-    try:
-        from src.api.profile import get_or_create_profile
-        from src.observer.manager import context_manager
-        profile = await get_or_create_profile()
-        if profile.interruption_mode:
-            context_manager.update_interruption_mode(profile.interruption_mode)
-        if profile.capture_mode:
-            context_manager.update_capture_mode(profile.capture_mode)
-        if profile.tool_policy_mode:
-            context_manager.update_tool_policy_mode(profile.tool_policy_mode)
-        if profile.mcp_policy_mode:
-            context_manager.update_mcp_policy_mode(profile.mcp_policy_mode)
-        if profile.approval_mode:
-            context_manager.update_approval_mode(profile.approval_mode)
-    except Exception:
-        logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
-    defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
-    mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
-    if not os.path.exists(mcp_config):
-        default_config = os.path.join(defaults_dir, "mcp-servers.default.json")
-        if os.path.isfile(default_config):
-            import shutil
-            os.makedirs(os.path.dirname(mcp_config), exist_ok=True)
-            shutil.copy2(default_config, mcp_config)
-    stdio_proxy_config = os.path.join(settings.workspace_dir, "stdio-proxies.json")
-    if not os.path.exists(stdio_proxy_config):
-        default_proxy_config = os.path.join(defaults_dir, "stdio-proxies.default.json")
-        if os.path.isfile(default_proxy_config):
-            import shutil
-            os.makedirs(os.path.dirname(stdio_proxy_config), exist_ok=True)
-            shutil.copy2(default_proxy_config, stdio_proxy_config)
-    mcp_manager.load_config(mcp_config)
-    extensions_dir = os.path.join(settings.workspace_dir, "extensions")
-    os.makedirs(extensions_dir, exist_ok=True)
-    manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
-    skills_dir = os.path.join(settings.workspace_dir, "skills")
-    os.makedirs(skills_dir, exist_ok=True)
-    skill_manager.init(skills_dir, manifest_roots=manifest_roots)
-    runbooks_dir = os.path.join(settings.workspace_dir, "runbooks")
-    os.makedirs(runbooks_dir, exist_ok=True)
-    runbook_manager.init(runbooks_dir, manifest_roots=manifest_roots)
-    workflows_dir = os.path.join(settings.workspace_dir, "workflows")
-    os.makedirs(workflows_dir, exist_ok=True)
-    workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
-    starter_pack_manager.init(
-        os.path.join(settings.workspace_dir, "starter-packs.json"),
-        manifest_roots=manifest_roots,
-    )
-    init_scheduler()
-    await sync_scheduled_jobs()
-    try:
-        from src.observer.manager import context_manager
-        await context_manager.refresh()
-    except Exception:
-        logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
-    yield
-    shutdown_scheduler()
-    mcp_manager.disconnect_all()
+    worker = attach(ProviderWorker(
+        hold_workspace_lock=settings.deployment_environment.strip().lower() in {"prod", "production"}))
+    app.state.provider_worker = worker
     shutdown_error: Exception | None = None
     try:
-        await drain_tracked_tasks(timeout_seconds=5.0)
-    except Exception as exc:
-        shutdown_error = exc
+        worker.acquire_workspace()
+    except BaseException:
+        worker.detach()
+        raise
+    # One outer try/finally from here: every failure point releases the lock,
+    # disposes the engine and disconnects MCP.
+    try:
+        await worker.activate()
+        async with _lifespan_services(app):
+            yield
     finally:
-        await close_db()
-    if workspace_owner is not None:
-        workspace_owner.__exit__(None, None, None)
+        try:
+            mcp_manager.disconnect_all()
+        finally:
+            try:
+                await drain_tracked_tasks(timeout_seconds=5.0)
+            except Exception as exc:
+                shutdown_error = exc
+            finally:
+                try:
+                    worker.close_gate()
+                finally:
+                    try:
+                        await worker.close_state()
+                    finally:
+                        try:
+                            worker.release_workspace()
+                        finally:
+                            worker.detach()
     if shutdown_error is not None:
         raise shutdown_error
+
+
+async def _reconcile_operator_auth_mode() -> None:
+    """Ensure or retire the local no-login root and audit the auth mode (#1161)."""
+    from src.auth.service import AUTH_MODE_LOCAL_NO_LOGIN, reconcile_local_operator_root
+
+    from src.audit.repository import audit_repository
+
+    status = await reconcile_local_operator_root()
+    if status.get("mode") != AUTH_MODE_LOCAL_NO_LOGIN and not status.get("local_root_retired"):
+        return
+    local = status.get("mode") == AUTH_MODE_LOCAL_NO_LOGIN
+    try:
+        await audit_repository.log_event(
+            event_type="operator_auth_mode",
+            actor="system",
+            tool_name="operator_auth",
+            risk_level="high" if local else "medium",
+            policy_mode="full",
+            summary=(
+                "Local single-operator mode without login is active (loopback only)"
+                if local
+                else "Local no-login operator root retired because the mode is off"
+            ),
+            details=status,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning("operator auth mode audit could not be recorded", exc_info=True)
+
+
+@asynccontextmanager
+async def _lifespan_services(app: FastAPI):
+    """Start and stop the services; their ``.stop()`` calls run with the gate open."""
+    # The provider worker's activation already ran init_db (#1024), so the
+    # #1161 auth-mode reconcile runs here, against the open state gate.
+    await _reconcile_operator_auth_mode()
+    from src.conversation.task_context import TaskContinuityService
+    from src.work_board.repository import WorkBoardRepository
+    from src.agent.session import session_manager
+    from src.work_board.general_task import current_task_service
+    from src.integrations.connection_sync import ConnectionSyncService
+    from src.work_board.dispatcher import _dispatcher
+    from src.guardian.goal_programmes import goal_programme_service
+    from src.memory.task_methods import current_method
+    continuity = None
+    connection_sync_runtime = None
+    try:
+        connection_sync_runtime = ConnectionSyncService()
+        await connection_sync_runtime.start()
+        app.state.connection_sync_runtime = connection_sync_runtime
+        _dispatcher.connection_sync_runtime = connection_sync_runtime
+        continuity = TaskContinuityService(WorkBoardRepository())
+        app.state.task_continuity = continuity
+        await continuity.start()
+        session_manager.bind_task_continuity(app.state.task_continuity)
+        # Hydrate the trusted OpenRouter vault credential before any scheduler or
+        # canonical inference path resolves a provider profile.  Failure remains
+        # visible as configuration_required through the normal status surfaces;
+        # the exception is never allowed to trigger a provider call.
+        try:
+            from src.model_fabric.configuration import hydrate_openrouter_credential
+
+            await hydrate_openrouter_credential()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "OpenRouter credential hydration failed; inference remains fail-closed",
+                exc_info=True,
+            )
+        # ADR-035: publish the route-scoped revoke of stored OpenRouter routes
+        # once, before any scheduler or inference path runs. Idempotent; a
+        # failure is logged and surfaced as degraded, never a startup crash.
+        from src.model_fabric.configuration import run_openrouter_route_revoke_at_boot
+
+        run_openrouter_route_revoke_at_boot()
+        # Recover expired durable invocation leases before scheduler jobs can
+        # observe an old ``running`` occurrence and incorrectly skip it.  Recovery
+        # is fail-closed and operator-visible; a failed recovery is not hidden as
+        # a healthy startup.
+        try:
+            # Retention for Cordis-originated Gmail reads (#1092): revoked, expired or
+            # TTL-elapsed encrypted owner artifacts are deleted at startup as well.
+            from src.runtime_plugins.bound_adapters import purge_cordis_mail_results
+
+            await purge_cordis_mail_results()
+        except Exception:
+            logging.getLogger(__name__).warning("Cordis mail result purge deferred at startup", exc_info=True)
+        try:
+            from src.workflows.job_runtime import durable_job_repository
+
+            recovered_jobs = await durable_job_repository.recover_stale_jobs()
+            if recovered_jobs:
+                logging.getLogger(__name__).warning(
+                    "Recovered %d stale durable job(s) during startup",
+                    len(recovered_jobs),
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Durable job restart recovery failed; stale work remains operator-visible"
+            )
+        # Routine installs stage workflow/package bytes outside discoverable roots
+        # until their canonical selector transaction commits. Reconcile committed
+        # staging, and remove only proven uncommitted staging, before scheduler
+        # work can discover a partial procedure after a process crash.
+        try:
+            from src.workflows.routines import routine_service
+
+            recovered_installs = await routine_service.recover_pending_installs()
+            blocked_installs = sum(1 for item in recovered_installs if item.get("status") == "blocked")
+            if recovered_installs:
+                logging.getLogger(__name__).warning(
+                    "Routine install restart recovery inspected %d staging tree(s); %d remain blocked",
+                    len(recovered_installs),
+                    blocked_installs,
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Routine install restart recovery failed; partial staging remains non-discoverable"
+            )
+        # #1179 retired voice input; the audio ingress worker and its restart
+        # cleanup are gone. A one-shot best-effort pass removes recordings the
+        # retired worker may have left in its fixed default quarantine root.
+        from src.guardian.retired_audio_quarantine import cleanup_retired_audio_quarantine_at_startup
+        cleanup_retired_audio_quarantine_at_startup()
+        # Settled audio documentation staging (a historical liability record,
+        # not voice input) is still reconciled here.
+        try:
+            from src.model_fabric.repository import ModelFabricRepository
+
+            documentary_cleanup = await ModelFabricRepository().cleanup_settled_audio_documentation()
+            if documentary_cleanup['inspected']:
+                logging.getLogger(__name__).warning(
+                    "Audio documentary cleanup inspected %d; deleted %d; unknown charged %d",
+                    documentary_cleanup['inspected'], documentary_cleanup['deleted'], documentary_cleanup['unknown'],
+                )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Audio documentary cleanup failed; private staging remains charged"
+            )
+        ensure_soul_exists()
+        init_llm_logging()
+        # Load persisted settings before scheduler starts
+        try:
+            from src.api.profile import get_or_create_profile
+            from src.observer.manager import context_manager
+            profile = await get_or_create_profile()
+            if profile.interruption_mode:
+                context_manager.update_interruption_mode(profile.interruption_mode)
+            if profile.capture_mode:
+                context_manager.update_capture_mode(profile.capture_mode)
+            if profile.tool_policy_mode:
+                context_manager.update_tool_policy_mode(profile.tool_policy_mode)
+            if profile.mcp_policy_mode:
+                context_manager.update_mcp_policy_mode(profile.mcp_policy_mode)
+            if profile.approval_mode:
+                context_manager.update_approval_mode(profile.approval_mode)
+        except Exception:
+            logging.getLogger(__name__).warning("Failed to load persisted settings", exc_info=True)
+        defaults_dir = os.path.join(os.path.dirname(__file__), "defaults")
+        mcp_config = os.path.join(settings.workspace_dir, "mcp-servers.json")
+        if not os.path.exists(mcp_config):
+            default_config = os.path.join(defaults_dir, "mcp-servers.default.json")
+            if os.path.isfile(default_config):
+                import shutil
+                os.makedirs(os.path.dirname(mcp_config), exist_ok=True)
+                shutil.copy2(default_config, mcp_config)
+        stdio_proxy_config = os.path.join(settings.workspace_dir, "stdio-proxies.json")
+        if not os.path.exists(stdio_proxy_config):
+            default_proxy_config = os.path.join(defaults_dir, "stdio-proxies.default.json")
+            if os.path.isfile(default_proxy_config):
+                import shutil
+                os.makedirs(os.path.dirname(stdio_proxy_config), exist_ok=True)
+                shutil.copy2(default_proxy_config, stdio_proxy_config)
+        mcp_manager.load_config(mcp_config)
+        extensions_dir = os.path.join(settings.workspace_dir, "extensions")
+        os.makedirs(extensions_dir, exist_ok=True)
+        manifest_roots = default_manifest_roots_for_workspace(settings.workspace_dir)
+        skills_dir = os.path.join(settings.workspace_dir, "skills")
+        os.makedirs(skills_dir, exist_ok=True)
+        skill_manager.init(skills_dir, manifest_roots=manifest_roots)
+        runbooks_dir = os.path.join(settings.workspace_dir, "runbooks")
+        os.makedirs(runbooks_dir, exist_ok=True)
+        runbook_manager.init(runbooks_dir, manifest_roots=manifest_roots)
+        workflows_dir = os.path.join(settings.workspace_dir, "workflows")
+        os.makedirs(workflows_dir, exist_ok=True)
+        workflow_manager.init(workflows_dir, manifest_roots=manifest_roots)
+        starter_pack_manager.init(
+            os.path.join(settings.workspace_dir, "starter-packs.json"),
+            manifest_roots=manifest_roots,
+        )
+        await goal_programme_service.start()
+        await current_method.start()
+        from src.work_board.historical_method import historical_method_service
+        await historical_method_service.start()
+        from src.operator.home_projection import home_projection
+        home_projection.start()
+        # ADR-035 amendment #1178: informational background catalog reads;
+        # never blocks startup or dispatch.
+        from src.model_fabric.near_tee_catalog import near_tee_catalog_refresher
+        near_tee_catalog_refresher.start()
+        with current_task_service():
+            from src.guardian.goal_discovery import current_goal_discovery
+            async with current_goal_discovery():
+                try:
+                    from src.observer.manager import context_manager
+                    await context_manager.refresh()
+                except Exception:
+                    logging.getLogger(__name__).warning("Initial context refresh failed", exc_info=True)
+                from src.browser.sessions import profiled_interaction_sessions
+                try:
+                    await profiled_interaction_sessions.start()
+                    # Optional native owners remain inside the current Python lifecycle.
+                    try:
+                        if settings.cordis_node_path and cordis_host.node_path is None:
+                            cordis_host.node_path = Path(settings.cordis_node_path)
+                        # Every (re)start reports what Python hosts to the facades (#1024).
+                        cordis_host.provider_reports_source = app.state.provider_worker.current_reports
+                        await cordis_host.start()
+                    except Exception:
+                        logging.getLogger(__name__).exception("Optional Cordis lifecycle host unavailable")
+                    try:
+                        # Default Cordis owner cutover (#1019): once per workspace and domain,
+                        # forward-only; a missing runtime leaves the domain blocked with its fix.
+                        from src.runtime_plugins.cutover import run_boot_cutover
+                        for receipt in await run_boot_cutover(cordis_host):
+                            logging.getLogger(__name__).warning("Cordis owner cutover: %s", receipt)
+                    except Exception:
+                        logging.getLogger(__name__).exception("Cordis owner cutover deferred")
+                    # #1025: the host started and the boot cutover ran first, so gated
+                    # timers start only under the post-cutover epoch. The one scheduler
+                    # instance runs retention jobs whatever the owner rows say; the
+                    # scheduler and dispatch domains activate only on a ready owner.
+                    init_scheduler()
+                    await sync_scheduled_jobs()
+                    from src.runtime_plugins.lifecycle import runtime_lifecycle
+                    for status in await runtime_lifecycle.start(cordis_host,
+                                                                scheduler_enabled=bool(settings.scheduler_enabled)):
+                        if status.get("state") != "active":
+                            logging.getLogger(__name__).warning("Runtime lifecycle %s: %s (%s)", status["domain"],
+                                                                status["state"], status.get("reason"))
+                    yield
+                finally:
+                    session_manager.bind_task_continuity(None)
+                    try:
+                        from src.runtime_plugins.lifecycle import runtime_lifecycle
+                        await runtime_lifecycle.stop()
+                    except Exception:
+                        logging.getLogger(__name__).exception("Runtime lifecycle shutdown failed")
+                    cordis_host.provider_reports_source = None
+                    try:
+                        await cordis_host.stop()
+                    finally:
+                        await profiled_interaction_sessions.stop()
+    finally:
+        from src.model_fabric.near_tee_catalog import near_tee_catalog_refresher
+        await near_tee_catalog_refresher.stop()
+        from src.operator.home_projection import home_projection
+        home_projection.stop()
+        from src.work_board.historical_method import historical_method_service
+        await historical_method_service.stop()
+        session_manager.bind_task_continuity(None)
+        try:
+            if continuity is not None:
+                await continuity.stop()
+        finally:
+            try:
+                try:
+                    await current_method.stop()
+                finally:
+                    await goal_programme_service.stop()
+            finally:
+                try:
+                    if connection_sync_runtime is not None:
+                        await connection_sync_runtime.stop()
+                finally:
+                    try:
+                        if connection_sync_runtime is not None and _dispatcher.connection_sync_runtime is connection_sync_runtime:
+                            _dispatcher.connection_sync_runtime = None
+                    finally:
+                        shutdown_scheduler()
 
 
 def create_app() -> FastAPI:
     validate_auth_configuration()
     app = FastAPI(
         title="Seraph AI Assistant",
-        version="2026.10.7",
+        version="2026.11.14",
         debug=settings.debug,
         lifespan=lifespan,
     )
@@ -511,6 +861,9 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=error.status, content={"detail": {
             "code": error.code, "automatic_retry": False, "recovery_action": "explicit_review_or_discard"}})
     app.add_exception_handler(SelectedContextError, selected_context_failure)
+    # A route or service that lets an AuthFailure escape answers its typed
+    # 4xx/503 with the reason code, never a bare 500 (#1175).
+    app.add_exception_handler(AuthFailure, auth_failure_handler)
 
     # Keep the authentication boundary outside API handlers so model and
     # capability authority cannot depend on model discretion. WebSocket
@@ -532,6 +885,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Continuation-Cursor"],
     )
 
     @app.get("/health")
@@ -583,12 +937,25 @@ def create_app() -> FastAPI:
             "provider_profiles": _sanitize_runtime_endpoints(provider_profile_statuses()),
             "vlm_runtime": vlm_status,
             "model_fabric": fabric_status,
+            "cordis_runtime": await cordis_host.refresh_status(),
+            # Python-hosted providers, rechecked now (#1024).
+            "providers": await _provider_readiness(app),
+            # Which agent loop chat runs on, from the agent-loop owner row (#1019).
+            "chat_runtime": await _chat_runtime_or_unavailable(),
+            # Scheduled guardian work and every runtime domain owner (#1020).
+            "guardian_runtime": await _guardian_runtime_or_unavailable(),
+            "runtime_domains": await _runtime_domains_or_unavailable(),
+            # Which owner runs scheduled work and WorkBoard dispatch, and why not (#1025).
+            "scheduler_runtime": await _lifecycle_runtime_or_unavailable("seraph.scheduler.v1"),
+            "dispatch_runtime": await _lifecycle_runtime_or_unavailable("seraph.dispatch.v1"),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,
             "remote_inference_admission": remote_inference_admission,
             "timezone": settings.user_timezone,
             "llm_logging_enabled": settings.llm_log_enabled,
+            # Which operator authentication mode is in effect (#1161).
+            "operator_auth": auth_mode_status(),
         }
 
     from src.api.router import api_router

@@ -195,6 +195,11 @@ def _journal_mac_secret() -> str:
         value = str(getattr(settings, name, "") or "").strip()
         if value:
             return value
+    from src.auth.local_keys import local_no_login_vault_secret
+
+    local_material = local_no_login_vault_secret(b"seraph.capability-journal.local-no-login.v1")
+    if local_material:
+        return local_material
     raise CapabilityJournalError("execution journal MAC key unavailable")
 
 

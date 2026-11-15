@@ -32,6 +32,20 @@ describe("CalendarConnectionPanel", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
+  it("inspects saved sync after explicit selection without replaying provider work", async () => {
+    fetchMock.mockResolvedValueOnce(response({ connections: [connection] })).mockResolvedValueOnce(response({
+      connection_id: connection.connection_id, state: "unknown_external_effect", active_job_id: "old-sync", active_job_revision: 7,
+      reservation_state: "held", external_effect_state: "unknown", unresolved_jobs: [{ job_id: "old-sync", revision: 7, status: "unknown_external_effect", external_effect_state: "unknown", failure_reason: null }],
+      cursor_revision: 1, scope_digest: "a".repeat(64), selection: null, items: [], coverage: {}, freshness: {}, recovery_action: "release_physical_slot",
+    }));
+    render(<CalendarConnectionPanel ownerPrincipalId="operator:one" ownerSessionId="auth-session-one" />);
+    await screen.findByText("Work calendar"); expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Inspect saved calendar sync" }));
+    await screen.findByText(/Existing sync old-sync/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
+    expect(screen.getByRole("button", { name: "Release physical sync slot" })).toBeDisabled();
+  });
 
   it("keeps credentials write-only and verifies only after an explicit action", async () => {
     fetchMock

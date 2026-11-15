@@ -222,7 +222,7 @@ legacy operator seams that no longer need to exist.
   - `cd frontend && npm test -- src/components/cockpit/CockpitView.test.tsx`
   - result: `47 passed`
 - backend full suite:
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+  - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
   - result: `1196 passed`, `4 warnings`
 - frontend full suite:
   - `cd frontend && npm test`

@@ -72,6 +72,7 @@ export interface ModelFabricRuntimeStatus {
 }
 
 export type OpenRouterPurpose = "text" | "vision" | "embedding";
+export type OpenRouterOptionalPurpose = OpenRouterPurpose | "audio";
 
 // Values accepted by PUT exclude the response's readiness and proof metadata.
 export interface OpenRouterRouteValue {
@@ -84,19 +85,23 @@ export interface OpenRouterRouteValue {
   timeout_seconds: number;
   zero_data_retention: boolean;
   request_cost_bound_microusd: number;
+  /** Prompt window, independent of max_output_tokens; null uses the backend default. */
+  context_window_tokens?: number | null;
 }
 
 export interface OpenRouterSlotStatus {
-  status: "configuration_required" | "blocked" | "ready";
+  status: "configuration_required" | "blocked" | "ready" | "retired";
   error_code: string | null;
   proof_expires_at: string | null;
+  /** First capability to (re-)prove, e.g. proof_expired:health. */
+  proof_reason?: string | null;
 }
 
 export interface OpenRouterRouteStatus extends OpenRouterRouteValue, OpenRouterSlotStatus {}
 
 export interface OpenRouterSetupValue {
-  schema_version: "seraph.openrouter.setup.v2";
-  routes: Record<OpenRouterPurpose, OpenRouterRouteValue | null>;
+  schema_version: "seraph.openrouter.setup.v2" | "seraph.openrouter.setup.v3";
+  routes: Record<OpenRouterPurpose, OpenRouterRouteValue | null> & { audio?: OpenRouterRouteValue | null };
   api_key?: string;
   egress_class: string;
   cloud_egress_acknowledged: true;
@@ -114,12 +119,12 @@ export interface OpenRouterSetupValue {
 }
 
 export interface OpenRouterSetupStatus {
-  schema_version: "seraph.openrouter.setup.v2";
+  schema_version: "seraph.openrouter.setup.v2" | "seraph.openrouter.setup.v3";
   profile_id: string;
   api_base: string;
   provider_kind: string;
-  routes: Record<OpenRouterPurpose, OpenRouterRouteStatus | null>;
-  slot_statuses: Record<OpenRouterPurpose, OpenRouterSlotStatus>;
+  routes: Record<OpenRouterPurpose, OpenRouterRouteStatus | null> & { audio?: OpenRouterRouteStatus | null };
+  slot_statuses: Record<OpenRouterPurpose, OpenRouterSlotStatus> & { audio?: OpenRouterSlotStatus };
   allow_fallbacks: boolean;
   require_parameters: boolean;
   data_collection: string;
@@ -137,6 +142,57 @@ export interface OpenRouterSetupStatus {
   status: string;
   error_code: string | null;
   provider_calls: string;
+  /** ADR-035: retired by policy; retained state is readable, never activatable. */
+  retired: boolean;
+  retirement_label: string | null;
+  settlement_available: boolean;
+}
+
+export const OPENROUTER_RETIRED_LABEL = "Retired (ADR-035) — no new requests; existing costs can still be settled";
+
+/** Provider-neutral shared-lane limits and deployment ceiling (ADR-035). */
+export interface InferenceLaneValue {
+  spend_ceiling_microusd: number;
+  max_queued: number;
+  max_inflight: 1;
+  max_outstanding_per_owner: number;
+  max_retries: number;
+  /** Optional explicit reserve review that reviews an unreviewed overrun up to this bound. */
+  request_reserve_review_microusd?: number | null;
+}
+
+export interface InferenceLaneStatus extends InferenceLaneValue {
+  schema_version: "seraph.inference.lane.v1";
+  /** False until the migrated lane has been published by an explicit save. */
+  published: boolean;
+  status: string;
+}
+
+export function normalizeInferenceLane(value: unknown): InferenceLaneStatus | null {
+  const record = recordOf(value);
+  if (!record || record.schema_version !== "seraph.inference.lane.v1") return null;
+  const integer = (field: string, min: number, max: number) => {
+    const item = record[field];
+    return typeof item === "number" && Number.isSafeInteger(item) && item >= min && item <= max ? item : null;
+  };
+  const ceiling = integer("spend_ceiling_microusd", 1, 1_000_000_000);
+  const queued = integer("max_queued", 1, 64);
+  const owner = integer("max_outstanding_per_owner", 1, 16);
+  const retries = integer("max_retries", 0, 2);
+  if (ceiling === null || queued === null || owner === null || retries === null || record.max_inflight !== 1) return null;
+  const review = record.request_reserve_review_microusd;
+  if (review != null && !(typeof review === "number" && Number.isSafeInteger(review) && review >= 1 && review <= ceiling)) return null;
+  return {
+    schema_version: "seraph.inference.lane.v1",
+    spend_ceiling_microusd: ceiling,
+    max_queued: queued,
+    max_inflight: 1,
+    max_outstanding_per_owner: owner,
+    max_retries: retries,
+    request_reserve_review_microusd: typeof review === "number" ? review : null,
+    published: record.published === true,
+    status: typeof record.status === "string" ? record.status : "unknown",
+  };
 }
 
 export const NEAR_TEXT_PROFILE = "near.text";
@@ -172,6 +228,160 @@ export interface NearTextSetupStatus extends Omit<NearTextSetupInput, "api_key" 
   provider_plaintext_disclosure: typeof NEAR_TEXT_DISCLOSURE;
 }
 
+export const NEAR_TEE_API_BASE = "https://cloud-api.near.ai/v1";
+/** ADR-035 closed text-slot allowlist (catalog read 2026-11-13). */
+export const NEAR_TEE_TEXT_MODELS = [
+  "z-ai/glm-5.3-flash",
+  "Qwen/Qwen3.8-27B",
+  "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+  "Qwen/Qwen3.6-35B-A3B-FP8",
+] as const;
+/** ADR-035 closed vision-slot allowlist (text+image input, catalog read 2026-11-13). */
+export const NEAR_TEE_VISION_MODELS = [
+  "z-ai/glm-5.3-flash",
+  "Qwen/Qwen3.8-27B",
+  "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+] as const;
+export const NEAR_TEE_SCREENSHOT_DISCLOSURE = "Screenshots are sent to the NEAR gateway in plaintext for analysis. TEE-hosted per NEAR catalog, not verified by Seraph; no end-to-end encryption.";
+/** ADR-035 closed embedding-slot allowlist (catalog list read 2026-11-13). */
+export const NEAR_TEE_EMBEDDING_MODELS = ["Qwen/Qwen3-Embedding-0.6B"] as const;
+export const NEAR_TEE_DISCLOSURE = "TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives requests in plaintext; no end-to-end encryption.";
+
+export interface NearTeeSlotInput {
+  model_id: string;
+  enabled: boolean;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  timeout_seconds: number;
+  temperature?: number | null;
+  request_cost_bound_microusd: number;
+  /** Background catalog refresh cadence hint in hours (#1178); not an expiry. */
+  catalog_ttl_hours: number;
+  /** Embedding slot only: inputs per request (1-64). */
+  max_batch_size?: number | null;
+  plaintext_provider_egress_acknowledged: boolean;
+  /** Vision slot only: the separate screenshot purpose consent. */
+  screenshot_plaintext_egress_acknowledged?: boolean;
+}
+
+export type NearTeeSlotName = "text" | "vision" | "embedding";
+
+export interface NearTeeSetupInput {
+  schema_version: "seraph.near.tee.setup.v1";
+  api_base: typeof NEAR_TEE_API_BASE;
+  /** An omitted slot keeps its stored value; null removes it. */
+  slots: { text?: NearTeeSlotInput | null; vision?: NearTeeSlotInput | null; embedding?: NearTeeSlotInput | null };
+  api_key?: string;
+}
+
+export interface NearTeeCatalogReceipt {
+  model_id: string | null;
+  checked_at_iso: string | null;
+  /** What produced the receipt: "setup_check" (the explicit catalog check). Never expires (#1178). */
+  basis?: string | null;
+  outcome: "passed" | "failed" | string;
+  reason_code: string | null;
+  required_cost_microusd: number | null;
+  /** NEAR's catalog feature only; not a capability (#1167). */
+  structured_outputs?: boolean;
+  /** NEAR's `isReady` flag: null when the catalog omits it. */
+  is_ready?: boolean | null;
+  /** "catalog_ready", "absent_flag_attested" (inferred, #1167) or null. */
+  readiness_basis?: string | null;
+  /** NEAR's catalog `supportedFeatures` (e.g. "reasoning"). */
+  features?: string[];
+  /** Catalog prices as decimal strings: USD per million tokens, USD per image. */
+  input_price_usd_per_million?: string | null;
+  output_price_usd_per_million?: string | null;
+  image_price_usd?: string | null;
+}
+
+export interface NearTeeCatalogWarning {
+  reason_code: string;
+  since: string;
+  message: string;
+}
+
+export interface NearTeeCatalogBackgroundRead {
+  last_attempt_at: string | null;
+  last_attempt_outcome: "read" | "read_failed" | string | null;
+  last_attempt_error: string | null;
+}
+
+export interface NearTeeSlotStatus extends Omit<NearTeeSlotInput, "plaintext_provider_egress_acknowledged" | "screenshot_plaintext_egress_acknowledged"> {
+  profile_id: string;
+  consent_current: boolean;
+  status: "disabled" | "configuration_required" | "blocked" | "ready";
+  reason_code: string | null;
+  catalog_receipt: NearTeeCatalogReceipt | null;
+  catalog_receipt_current: boolean;
+  /** Newest passing catalog read of this binding: the setup check or a background read (#1178). */
+  catalog_last_confirmed_at?: string | null;
+  catalog_last_confirmed_basis?: "setup_check" | "background_read" | null;
+  /** A background read reported a disqualifying change. Informational: never blocks (#1178). */
+  catalog_warning?: NearTeeCatalogWarning | null;
+  /** The latest background read attempt. */
+  catalog_background_read?: NearTeeCatalogBackgroundRead | null;
+  tee_hosted_per_catalog: boolean;
+  tee_hosting_label: string | null;
+  capability_check_timeout_seconds: number;
+  /** Mechanics checks the slot's capability check runs. */
+  check_capabilities?: string[];
+  /** Embedding slot: the ADR-035 source-evidence gate is still closed. */
+  evidence_required?: boolean;
+  /** Why structured output is available: "catalog" (vision), "capability_proof" or null (#1167). */
+  structured_output_basis?: string | null;
+  /** Text slot: "ready" or the reason response_format callers are blocked. */
+  structured_output_capability?: string | null;
+}
+
+export interface NearTeeEmbeddingReindexJob {
+  job_id: string;
+  status: string;
+  reason_code: string | null;
+  live: boolean;
+  planned_items: number | null;
+  indexed_items: number;
+  skipped_existing: number;
+  oversize_items: number;
+  batches: number;
+  spent_microusd: number;
+  budget_microusd: number | null;
+}
+
+export interface NearTeeEmbeddingIndexStatus {
+  slot_reason_code: string | null;
+  namespace: string | null;
+  model: string | null;
+  measured_dimension: number | null;
+  index_complete: boolean;
+  /** Why a once-complete or partial index is not usable (over cap, stale, missing vector). */
+  index_reason_code?: string | null;
+  recall_mode: "semantic" | "lexical";
+  notice: string | null;
+  max_items: number;
+  job: NearTeeEmbeddingReindexJob | null;
+}
+
+export interface NearTeeSetupStatus {
+  configured: boolean;
+  status: string;
+  reason_code: string | null;
+  key_present: boolean;
+  credential_fingerprint: string | null;
+  allowlist: Record<string, string[]>;
+  disclosure: string;
+  tee_verified: false;
+  e2ee: false;
+  /** Largest vision timeout the background analysis job can carry (job budget minus billing window and margin). */
+  vision_max_timeout_seconds?: number;
+  /** Suggested minimum maximum-output for reasoning models (#1167); guidance only. */
+  reasoning_recommended_max_output_tokens?: number;
+  slots: { text: NearTeeSlotStatus | null; vision?: NearTeeSlotStatus | null; embedding?: NearTeeSlotStatus | null };
+  embedding_index?: NearTeeEmbeddingIndexStatus | null;
+}
+
 export interface ModelFabricSettingsStatus {
   schema_version: string;
   status: string;
@@ -191,13 +401,28 @@ export interface ModelFabricSettingsStatus {
   }>;
   defaults: { egress_class: string; fallback_allowed: boolean };
   canary_endpoint: string;
+  /** Selectable canary proof lifetime; the backend rejects values above max_seconds. */
+  canary_proof_ttl: { default_seconds: number; max_seconds: number };
   openrouter_setup?: OpenRouterSetupStatus | null;
   near_text?: NearTextSetupStatus | null;
   /** Local metadata failure marker; unrelated settings remain usable. */
   near_text_metadata_unavailable?: boolean;
+  near_tee?: NearTeeSetupStatus | null;
+  near_tee_metadata_unavailable?: boolean;
+  active_inference_provider?: string | null;
   inference_accounting?: InferenceAccountingStatus | null;
   egress_revision?: number;
   egress_revoked?: boolean;
+  /** Provider-neutral lane; null when no governed provider was ever configured. */
+  inference_lane?: InferenceLaneStatus | null;
+  /** Reason the backend could not project a lane (e.g. inference_lane_unreadable). */
+  inference_lane_reason?: string | null;
+  /** NEAR text readiness, independent of the blocked canonical routes. */
+  near_text_ready?: boolean;
+  /** ADR-035: true unless the backend reports OpenRouter as active. */
+  openrouter_retired?: boolean;
+  /** Why inference routes are blocked, e.g. openrouter_retired / no_active_provider. */
+  inference_block_reason?: string | null;
 }
 
 export interface InferenceAccountingStatus {
@@ -217,6 +442,12 @@ export interface InferenceAccountingStatus {
   remaining_microusd?: number | null;
   operations_truncated?: boolean;
   operation_count?: number;
+  /** Largest unreviewed settled charge; a saved request bound must cover it. */
+  overrun_max_cost_microusd?: number;
+  unreviewed_overruns?: Array<{
+    operation_id: string; job_id: string; runtime_path: string; period_id: string;
+    bound_microusd: number; actual_cost_microusd: number;
+  }>;
   operations: Array<{
     operation_id: string; job_id: string; owner_id: string; runtime_path: string;
     state: string; revision: number; bound_microusd: number; period_id: string;
@@ -252,6 +483,16 @@ export function normalizeInferenceAccounting(value: unknown): InferenceAccountin
     remaining_microusd: typeof record.remaining_microusd === "number" ? record.remaining_microusd : null,
     operations_truncated: record.operations_truncated === true,
     operation_count: typeof record.operation_count === "number" ? record.operation_count : undefined,
+    overrun_max_cost_microusd: typeof record.overrun_max_cost_microusd === "number" && Number.isSafeInteger(record.overrun_max_cost_microusd)
+      && record.overrun_max_cost_microusd >= 0 ? record.overrun_max_cost_microusd : undefined,
+    unreviewed_overruns: Array.isArray(record.unreviewed_overruns) ? record.unreviewed_overruns.slice(0, 16).flatMap((item) => {
+      const row = recordOf(item);
+      if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string"
+        || !Number.isSafeInteger(row.bound_microusd) || !Number.isSafeInteger(row.actual_cost_microusd)) return [];
+      return [{ operation_id: row.operation_id, job_id: row.job_id, runtime_path: String(row.runtime_path ?? ""),
+        period_id: String(row.period_id ?? ""), bound_microusd: row.bound_microusd as number,
+        actual_cost_microusd: row.actual_cost_microusd as number }];
+    }) : [],
     operations: operations.flatMap((item) => {
       const row = recordOf(item);
       if (!row || typeof row.operation_id !== "string" || typeof row.job_id !== "string" || typeof row.revision !== "number" || typeof row.bound_microusd !== "number") return [];
@@ -356,16 +597,132 @@ export function normalizeNearTextSetup(value: unknown): NearTextSetupStatus | nu
   };
 }
 
+function decimalText(value: unknown): string | null {
+  return typeof value === "string" && /^\d{1,20}(?:\.\d{1,40})?$/.test(value) ? value : null;
+}
+
+function normalizeNearTeeSlot(value: unknown, slotName: NearTeeSlotName = "text"): NearTeeSlotStatus | null {
+  const row = recordOf(value);
+  const integer = (field: string, min: number, max: number) => typeof row?.[field] === "number"
+    && Number.isSafeInteger(row[field]) && (row[field] as number) >= min && (row[field] as number) <= max;
+  if (!row || typeof row.model_id !== "string" || typeof row.enabled !== "boolean"
+    || !integer("max_input_tokens", 1, 1_048_576) || !integer("max_output_tokens", 1, 65_536)
+    || typeof row.timeout_seconds !== "number" || !integer("request_cost_bound_microusd", 1, 1_000_000_000)
+    || !integer("catalog_ttl_hours", 1, 24) || typeof row.consent_current !== "boolean"
+    || !["disabled", "configuration_required", "blocked", "ready"].includes(String(row.status))) return null;
+  const receipt = recordOf(row.catalog_receipt);
+  const text = (field: unknown) => (typeof field === "string" ? field : null);
+  return {
+    model_id: row.model_id, enabled: row.enabled, max_input_tokens: row.max_input_tokens as number,
+    max_output_tokens: row.max_output_tokens as number, timeout_seconds: row.timeout_seconds,
+    temperature: typeof row.temperature === "number" ? row.temperature : null,
+    request_cost_bound_microusd: row.request_cost_bound_microusd as number,
+    catalog_ttl_hours: row.catalog_ttl_hours as number, profile_id: "near_tee." + slotName,
+    consent_current: row.consent_current, status: row.status as NearTeeSlotStatus["status"],
+    reason_code: text(row.reason_code),
+    catalog_receipt: receipt ? { model_id: text(receipt.model_id), checked_at_iso: text(receipt.checked_at_iso),
+      basis: text(receipt.basis), outcome: String(receipt.outcome ?? "unknown"),
+      reason_code: text(receipt.reason_code),
+      required_cost_microusd: typeof receipt.required_cost_microusd === "number" ? receipt.required_cost_microusd : null,
+      structured_outputs: receipt.structured_outputs === true,
+      is_ready: typeof receipt.is_ready === "boolean" ? receipt.is_ready : null,
+      readiness_basis: receipt.readiness_basis === "catalog_ready" || receipt.readiness_basis === "absent_flag_attested"
+        ? receipt.readiness_basis : null,
+      features: stringArray(receipt.features),
+      input_price_usd_per_million: decimalText(receipt.input_price_usd_per_million),
+      output_price_usd_per_million: decimalText(receipt.output_price_usd_per_million),
+      image_price_usd: decimalText(receipt.image_price_usd) } : null,
+    catalog_receipt_current: row.catalog_receipt_current === true,
+    catalog_last_confirmed_at: text(row.catalog_last_confirmed_at),
+    catalog_last_confirmed_basis: row.catalog_last_confirmed_basis === "setup_check"
+      || row.catalog_last_confirmed_basis === "background_read" ? row.catalog_last_confirmed_basis : null,
+    catalog_warning: (() => {
+      const warning = recordOf(row.catalog_warning);
+      return warning && typeof warning.reason_code === "string" && typeof warning.since === "string"
+        && typeof warning.message === "string"
+        ? { reason_code: warning.reason_code, since: warning.since, message: warning.message } : null;
+    })(),
+    catalog_background_read: (() => {
+      const read = recordOf(row.catalog_background_read);
+      return read ? { last_attempt_at: text(read.last_attempt_at), last_attempt_outcome: text(read.last_attempt_outcome),
+        last_attempt_error: text(read.last_attempt_error) } : null;
+    })(),
+    tee_hosted_per_catalog: row.tee_hosted_per_catalog === true,
+    tee_hosting_label: text(row.tee_hosting_label),
+    capability_check_timeout_seconds: integer("capability_check_timeout_seconds", 1, 180)
+      ? row.capability_check_timeout_seconds as number : 46,
+    max_batch_size: integer("max_batch_size", 1, 64) ? row.max_batch_size as number : null,
+    check_capabilities: stringArray(row.check_capabilities).filter(item => ["text", "vision", "structured_output", "embedding", "health", "latency_ms"].includes(item)),
+    evidence_required: row.evidence_required === true,
+    structured_output_basis: row.structured_output_basis === "catalog" || row.structured_output_basis === "capability_proof"
+      ? row.structured_output_basis : null,
+    structured_output_capability: text(row.structured_output_capability),
+  };
+}
+
+function normalizeEmbeddingIndex(value: unknown): NearTeeEmbeddingIndexStatus | null {
+  const row = recordOf(value);
+  if (!row) return null;
+  const text = (field: unknown) => (typeof field === "string" ? field : null);
+  const count = (field: unknown) => (typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : 0);
+  const job = recordOf(row.job);
+  return {
+    slot_reason_code: text(row.slot_reason_code), namespace: text(row.namespace), model: text(row.model),
+    measured_dimension: typeof row.measured_dimension === "number" ? row.measured_dimension : null,
+    index_complete: row.index_complete === true, index_reason_code: text(row.index_reason_code),
+    // Anything but an explicit, complete semantic projection is lexical.
+    recall_mode: row.recall_mode === "semantic" && row.index_complete === true ? "semantic" : "lexical",
+    notice: text(row.notice), max_items: count(row.max_items) || 10_000,
+    job: job && typeof job.job_id === "string" ? {
+      job_id: job.job_id, status: String(job.status ?? "unknown"), reason_code: text(job.reason_code),
+      live: job.live === true, planned_items: typeof job.planned_items === "number" ? job.planned_items : null,
+      indexed_items: count(job.indexed_items), skipped_existing: count(job.skipped_existing),
+      oversize_items: count(job.oversize_items), batches: count(job.batches), spent_microusd: count(job.spent_microusd),
+      budget_microusd: typeof job.budget_microusd === "number" ? job.budget_microusd : null,
+    } : null,
+  };
+}
+
+export function normalizeNearTeeSetup(value: unknown): NearTeeSetupStatus | null {
+  const row = recordOf(value);
+  if (!row || row.tee_verified !== false || row.e2ee !== false || typeof row.key_present !== "boolean"
+    || typeof row.status !== "string") return null;
+  const slots = recordOf(row.slots);
+  const allowlist = recordOf(row.allowlist);
+  // Whitelist read-only metadata; credential values never enter the cache.
+  return {
+    configured: row.configured === true, status: row.status,
+    reason_code: typeof row.reason_code === "string" ? row.reason_code : null,
+    key_present: row.key_present,
+    credential_fingerprint: typeof row.credential_fingerprint === "string" ? row.credential_fingerprint : null,
+    allowlist: { text: stringArray(allowlist?.text).filter(model => (NEAR_TEE_TEXT_MODELS as readonly string[]).includes(model)),
+      vision: stringArray(allowlist?.vision).filter(model => (NEAR_TEE_VISION_MODELS as readonly string[]).includes(model)),
+      embedding: stringArray(allowlist?.embedding).filter(model => (NEAR_TEE_EMBEDDING_MODELS as readonly string[]).includes(model)) },
+    disclosure: NEAR_TEE_DISCLOSURE, tee_verified: false, e2ee: false,
+    vision_max_timeout_seconds: typeof row.vision_max_timeout_seconds === "number" && Number.isFinite(row.vision_max_timeout_seconds)
+      && row.vision_max_timeout_seconds >= 1 && row.vision_max_timeout_seconds <= 120 ? row.vision_max_timeout_seconds : undefined,
+    reasoning_recommended_max_output_tokens: typeof row.reasoning_recommended_max_output_tokens === "number"
+      && Number.isSafeInteger(row.reasoning_recommended_max_output_tokens)
+      && row.reasoning_recommended_max_output_tokens >= 1 && row.reasoning_recommended_max_output_tokens <= 65_536
+      ? row.reasoning_recommended_max_output_tokens : undefined,
+    slots: { text: slots?.text == null ? null : normalizeNearTeeSlot(slots.text, "text"),
+      vision: slots?.vision == null ? null : normalizeNearTeeSlot(slots.vision, "vision"),
+      embedding: slots?.embedding == null ? null : normalizeNearTeeSlot(slots.embedding, "embedding") },
+    embedding_index: normalizeEmbeddingIndex(row.embedding_index),
+  };
+}
+
 function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null {
   const record = recordOf(value);
   // Legacy migration and purpose consent belong to the backend. Never infer a
   // new purpose from cached v1 metadata or a partially returned route.
   const rawRoutes = recordOf(record?.routes);
-  if (!record || record.schema_version !== "seraph.openrouter.setup.v2" || !rawRoutes) return null;
+  if (!record || !["seraph.openrouter.setup.v2", "seraph.openrouter.setup.v3"].includes(String(record.schema_version)) || !rawRoutes) return null;
   const rawStatuses = recordOf(record.slot_statuses);
   const routes = {} as OpenRouterSetupStatus["routes"];
   const slot_statuses = {} as OpenRouterSetupStatus["slot_statuses"];
-  for (const slot of ["text", "vision", "embedding"] as const) {
+  const slots: OpenRouterOptionalPurpose[] = record.schema_version === "seraph.openrouter.setup.v3" ? ["text", "vision", "embedding", "audio"] : ["text", "vision", "embedding"];
+  for (const slot of slots) {
     const route = recordOf(rawRoutes[slot]);
     if (rawRoutes[slot] != null && (!route || typeof route.model_id !== "string"
       || typeof route.enabled !== "boolean" || !Array.isArray(route.capabilities)
@@ -375,9 +732,10 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
       ) || typeof route.zero_data_retention !== "boolean")) return null;
     const rawState = recordOf(rawStatuses?.[slot]) ?? route;
     const state: OpenRouterSlotStatus = {
-      status: rawState?.status === "ready" || rawState?.status === "configuration_required" ? rawState.status : "blocked",
+      status: rawState?.status === "ready" || rawState?.status === "configuration_required" || rawState?.status === "retired" ? rawState.status : "blocked",
       error_code: typeof rawState?.error_code === "string" ? rawState.error_code : rawState ? null : "slot_metadata_unavailable",
       proof_expires_at: typeof rawState?.proof_expires_at === "string" ? rawState.proof_expires_at : null,
+      proof_reason: typeof rawState?.proof_reason === "string" ? rawState.proof_reason : null,
     };
     slot_statuses[slot] = state;
     routes[slot] = route ? {
@@ -390,11 +748,14 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
       timeout_seconds: route.timeout_seconds as number,
       zero_data_retention: route.zero_data_retention as boolean,
       request_cost_bound_microusd: route.request_cost_bound_microusd as number,
+      context_window_tokens: typeof route.context_window_tokens === "number" && Number.isSafeInteger(route.context_window_tokens)
+        ? route.context_window_tokens
+        : null,
       ...state,
     } : null;
   }
   return {
-    schema_version: "seraph.openrouter.setup.v2",
+    schema_version: record.schema_version as OpenRouterSetupStatus["schema_version"],
     profile_id: typeof record.profile_id === "string" ? record.profile_id : "openrouter",
     api_base: typeof record.api_base === "string" ? record.api_base : "",
     provider_kind: typeof record.provider_kind === "string" ? record.provider_kind : "openrouter",
@@ -423,6 +784,9 @@ function normalizeOpenRouterSetup(value: unknown): OpenRouterSetupStatus | null 
     status: typeof record.status === "string" ? record.status : "configuration_required",
     error_code: typeof record.error_code === "string" ? record.error_code : null,
     provider_calls: typeof record.provider_calls === "string" ? record.provider_calls : "manual_canary_only",
+    retired: record.retired === true || record.status === "retired",
+    retirement_label: typeof record.retirement_label === "string" ? record.retirement_label : null,
+    settlement_available: record.settlement_available !== false,
   };
 }
 
@@ -553,6 +917,7 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
   const defaults = recordOf(record.defaults);
   const policies = Array.isArray(record.workload_policies) ? record.workload_policies : [];
   const nearText = normalizeNearTextSetup(record.near_text);
+  const nearTee = normalizeNearTeeSetup(record.near_tee);
   return {
     schema_version: record.schema_version,
     status: record.status,
@@ -585,13 +950,81 @@ export function normalizeModelFabricSettings(value: unknown): ModelFabricSetting
     canary_endpoint: typeof record.canary_endpoint === "string"
       ? record.canary_endpoint
       : "/api/settings/model-fabric/canary",
+    canary_proof_ttl: normalizeProofTtl(record.canary_proof_ttl),
     openrouter_setup: normalizeOpenRouterSetup(record.openrouter_setup),
     near_text: nearText,
     near_text_metadata_unavailable: record.near_text_metadata_unavailable === true || (record.near_text != null && !nearText),
+    near_tee: nearTee,
+    near_tee_metadata_unavailable: record.near_tee != null && !nearTee,
+    active_inference_provider: typeof record.active_inference_provider === "string" ? record.active_inference_provider : null,
     inference_accounting: normalizeInferenceAccounting(record.inference_accounting),
     egress_revision: typeof record.egress_revision === "number" ? record.egress_revision : undefined,
     egress_revoked: record.egress_revoked === true,
+    inference_lane: normalizeInferenceLane(record.inference_lane),
+    inference_lane_reason: (() => {
+      const raw = recordOf(record.inference_lane);
+      if (!raw) return null;
+      if (typeof raw.reason_code === "string") return raw.reason_code;
+      return normalizeInferenceLane(raw) ? null : "inference_lane_unreadable";
+    })(),
+    near_text_ready: record.near_text_ready === true,
+    // Fail closed: only an explicit "active" report un-retires the UI.
+    openrouter_retired: recordOf(recordOf(record.provider_retirement)?.openrouter)?.state !== "active",
+    inference_block_reason: typeof record.inference_block_reason === "string" ? record.inference_block_reason : null,
   };
+}
+
+/**
+ * Compact chat-route proof posture for the composer meta line, e.g.
+ * "PROOFS 5H LEFT", "PROOF EXPIRED: HEALTH" or "PROOF FAILED: TOOL USE". Null when no text-route proof
+ * metadata exists (legacy or unconfigured deployments).
+ */
+export function textRouteProofLabel(runtime: ModelFabricRuntimeStatus | null | undefined, now = Date.now()): string | null {
+  const proofs = runtime?.proofs.filter((proof) => proof.profile_id === "openrouter.text") ?? [];
+  if (!proofs.length) return null;
+  const capability = (value: string) => value.replace(/_/g, " ").toUpperCase();
+  // A failed canary needs a different fix than a missing one (check the
+  // model, upstream or timeout before proving again), so name it.
+  const failed = proofs.find((proof) => proof.status === "failed");
+  if (failed) return "PROOF FAILED: " + capability(failed.capability);
+  const expired = proofs.find((proof) => proof.status === "stale");
+  if (expired) return "PROOF EXPIRED: " + capability(expired.capability);
+  const missing = proofs.find((proof) => proof.status !== "fresh");
+  if (missing) return "PROOF MISSING: " + capability(missing.capability);
+  const expiries = proofs.map((proof) => (proof.expires_at ? Date.parse(proof.expires_at) : Number.NaN)).filter(Number.isFinite);
+  if (!expiries.length) return null;
+  const remainingMs = Math.min(...expiries) - now;
+  if (remainingMs <= 0) return "PROOF EXPIRED";
+  const minutes = Math.floor(remainingMs / 60_000);
+  return "PROOFS " + (minutes >= 60 ? Math.floor(minutes / 60) + "H" : Math.max(minutes, 1) + "M") + " LEFT";
+}
+
+export const DEFAULT_PROOF_TTL_SECONDS = 3600;
+export const MAX_PROOF_TTL_SECONDS = 86_400;
+
+function normalizeProofTtl(value: unknown): { default_seconds: number; max_seconds: number } {
+  const record = recordOf(value);
+  const max = typeof record?.max_seconds === "number" && Number.isSafeInteger(record.max_seconds)
+    && record.max_seconds >= 60 && record.max_seconds <= MAX_PROOF_TTL_SECONDS ? record.max_seconds : DEFAULT_PROOF_TTL_SECONDS;
+  const fallback = Math.min(DEFAULT_PROOF_TTL_SECONDS, max);
+  const preferred = typeof record?.default_seconds === "number" && Number.isSafeInteger(record.default_seconds)
+    && record.default_seconds >= 60 && record.default_seconds <= max ? record.default_seconds : fallback;
+  return { default_seconds: preferred, max_seconds: max };
+}
+
+/** Whole-dollar or cent input to integer micro-USD; null when invalid. */
+export function dollarsToMicrousd(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(trimmed)) return null;
+  const [whole, fraction = ""] = trimmed.split(".");
+  const micro = Number(whole) * 1_000_000 + Number(fraction.padEnd(6, "0"));
+  return Number.isSafeInteger(micro) ? micro : null;
+}
+
+export function microusdToDollars(value: number): string {
+  const whole = Math.trunc(value / 1_000_000);
+  const fraction = String(value % 1_000_000).padStart(6, "0").replace(/0+$/, "");
+  return fraction ? whole + "." + fraction : String(whole);
 }
 
 export function normalizeModelFabricCanary(value: unknown): ModelFabricCanaryResult | null {
@@ -638,4 +1071,18 @@ export function retainModelFabricSettings(value: ModelFabricSettingsStatus): voi
   } catch {
     // Retention is best effort; the live settings endpoint remains authoritative.
   }
+}
+
+/** Basis and last confirmation of a passing NEAR TEE setup receipt (#1178): no expiry. */
+export function catalogBasisText(slot: NearTeeSlotStatus | null | undefined): string {
+  const readable = (value: string) => value.replace(/_/g, " ");
+  const receipt = slot?.catalog_receipt;
+  const setup = `Catalog basis: setup check at ${receipt?.checked_at_iso ?? "unknown time"}`;
+  const confirmed = slot?.catalog_last_confirmed_at
+    ? ` · last confirmed ${slot.catalog_last_confirmed_at}${slot.catalog_last_confirmed_basis === "background_read" ? " (background read)" : ""}`
+    : "";
+  const read = slot?.catalog_background_read?.last_attempt_outcome === "read_failed"
+    ? ` · latest background read failed (${readable(slot.catalog_background_read.last_attempt_error ?? "unknown")}); the last confirmation stays in force`
+    : "";
+  return setup + confirmed + read + ". Stays valid until the model or slot settings change.";
 }

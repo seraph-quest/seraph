@@ -13,6 +13,9 @@ from src.model_fabric.remote_inference_admission import RemoteInferenceAdmission
 from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
 from src.workflows.job_runtime import DurableJobRepository
 
+# ADR-035: pins the bounded research HTTP envelope over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 class ResponseStream(httpx.AsyncByteStream):
     def __init__(self, content, *, delay=0, drop=False):
@@ -51,7 +54,8 @@ def intercept(monkeypatch, stream, *, status=200, headers=None):
 
 def arguments(*, seconds=1):
     return dict(decision=SimpleNamespace(allowed=True, selected=SimpleNamespace(
-        adapter="openai_compatible_chat", endpoint="https://openrouter.ai/api/v1/chat/completions")),
+        adapter="openai_compatible_chat", endpoint="https://openrouter.ai/api/v1/chat/completions",
+        profile=SimpleNamespace(provider_kind="openrouter"))),
         context=SimpleNamespace(deadline_at=time.time()+seconds, fallback_allowed=False),
         body={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "quoted evidence"}], "max_tokens": 1024},
         api_key="intercepted-test-key")
@@ -81,13 +85,18 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
     elif kind == "truncated":
         headers = {"content-length": "100"}
     elif kind == "trickle":
-        stream = ResponseStream(b"x" * (12 * 1024), delay=0.08)
+        # Three 4 KiB chunks 0.6 s apart (1.8 s) against a 1.5 s deadline: the
+        # body keeps arriving and the absolute deadline still cuts it mid-body.
+        stream = ResponseStream(b"x" * (12 * 1024), delay=0.6)
     elif kind == "drop":
         stream = ResponseStream(b"", drop=True)
     elif kind == "5xx":
         status = 503
     calls = intercept(monkeypatch, stream, status=status, headers=headers)
-    kwargs = arguments(seconds=0.12 if kind == "trickle" else 2)
+    # The deadline is absolute from here and admission spends part of it
+    # before the POST: 0.12s let a slow runner expire it precontact (no POST,
+    # the [trickle] flake, #1180). 1.5s reaches the POST and some body bytes.
+    kwargs = arguments(seconds=1.5 if kind == "trickle" else 2)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     started = time.monotonic()
     with pytest.raises(GpuAdmissionUncertainError):
@@ -97,6 +106,9 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
     assert stream.yielded <= 64 * 1024 + 8192
     if kind == "compressed":
         assert stream.yielded == 0
+    if kind == "trickle":
+        # Data was flowing when the deadline cut it, and it was cut early.
+        assert 0 < stream.yielded < 12 * 1024
     snapshot = await repository.inference_accounting_snapshot()
     assert snapshot["accounting_continuity_verified"] is True
     assert snapshot["unknown_microusd"] == 100

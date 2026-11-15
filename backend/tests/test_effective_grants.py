@@ -138,43 +138,23 @@ async def test_connected_credential_does_not_grant_model_transfer_private_scopes
     assert next(x for x in entries if x['kind']=='calendar_connection')['limits']['credential_is_grant'] is False
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('during_transport',[False,True])
-async def test_inventory_revoke_real_audio_queued_and_late_result_fenced(client,async_db,tmp_path,monkeypatch,during_transport):
-    from dataclasses import replace
-    from src.api import audio
-    from src.auth.service import authenticate_token
-    from config.settings import settings
-    from src.agent.session import session_manager
-    from src.guardian.audio_worker import AudioIngressWorker,InterceptedAudioTransport
-    from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
-    from tests.test_audio_worker import _request,CAPTURE_REF,MODEL_REF
-    first=await login(client)
-    operator=await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name))
-    session=await session_manager.get_or_create('audio-current-conversation',owner_principal_id=first['principal_id'])
+async def test_retired_audio_consent_rows_are_not_effective_grants(client,async_db):
+    """#1179: voice input is retired. Historical consent rows stay stored but
+    are neither listed as an effective grant nor revocable through it."""
+    owner=await login(client)
+    ref='audio-consent:cloud_upload:'+'a'*32
     async with async_db() as db:
-        for ref,boundary in ((CAPTURE_REF,'capture'),(MODEL_REF,'cloud_upload')):
-            db.add(AudioConsentGrant(reference=ref,owner_principal_id=first['principal_id'],operator_session_id=first['session_id'],boundary=boundary,granted_at=datetime.now(timezone.utc)-timedelta(seconds=1),expires_at=datetime.now(timezone.utc)+timedelta(minutes=15)))
-    calls=[]
-    async def intercepted(**kwargs):
-        calls.append(kwargs['request_id'])
-        if during_transport:
-            result=await client.post('/api/extensions/effective-grants/revoke',headers=HEADERS,json={'grant_id':'audio:'+MODEL_REF,'expected_revision':1,'idempotency_key':'audio-real-revoke'})
-            assert result.status_code==200,result.text
-        return {'transcript':'late private response must never be adopted'}
-    worker=AudioIngressWorker(transport=InterceptedAudioTransport(intercepted),admission_broker=RemoteInferenceAdmissionBroker(),quarantine_root=tmp_path/'audio')
-    monkeypatch.setattr(audio,'default_audio_worker',worker)
-    upload=replace(_request(session.id,request_id='audio-grant-journey'),owner_principal_id=first['principal_id'],operator_session_id=first['session_id'])
-    queued=await worker.submit(upload,process=False,authority_principal=operator.principal)
-    view=(await client.get('/api/extensions/effective-grants')).json()
-    grant=next(g for g in view['grants'] if g['grant_id']=='audio:'+MODEL_REF)
-    assert grant['affected_jobs'][0]['job_id']==queued.request_id
-    if not during_transport:
-        result=await client.post('/api/extensions/effective-grants/revoke',headers=HEADERS,json={'grant_id':grant['grant_id'],'expected_revision':1,'idempotency_key':'audio-real-revoke'})
-        assert result.status_code==200,result.text
-    final=await worker.process(queued.request_id,owner_principal_id=first['principal_id'],operator_session_id=first['session_id'],authority_principal=operator.principal)
-    assert final.status not in {'transcript_ready','confirmed'}
-    assert worker.review_transcript(queued.request_id,owner_principal_id=first['principal_id'],operator_session_id=first['session_id']) is None
-    assert len(calls)==int(during_transport)
+        db.add(AudioConsentGrant(reference=ref,owner_principal_id=owner['principal_id'],operator_session_id=owner['session_id'],boundary='cloud_upload',granted_at=datetime.now(timezone.utc)-timedelta(seconds=1),expires_at=datetime.now(timezone.utc)+timedelta(minutes=15)))
+    view=await client.get('/api/extensions/effective-grants')
+    assert view.status_code==200,view.text
+    grants=view.json()['grants']
+    assert not any(g['kind']=='audio' or g['capability_id']=='audio.push_to_talk.v1' for g in grants)
+    revoke=await client.post('/api/extensions/effective-grants/revoke',headers=HEADERS,json={'grant_id':'audio:'+ref,'expected_revision':1,'idempotency_key':'retired-audio-revoke'})
+    assert revoke.status_code==404
+    from sqlalchemy import select
+    async with async_db() as db:
+        kept=(await db.execute(select(AudioConsentGrant).where(AudioConsentGrant.reference==ref))).scalars().one()
+        assert kept.state=='active' and kept.revoked_at is None
 
 @pytest.mark.asyncio
 async def test_connection_cleanup_failure_locally_fences_and_exact_retry_recovers(client,async_db,monkeypatch):

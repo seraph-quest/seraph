@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from src.security.trust_contract import TrustRequest
 
+from .contracts import provider_uncertain_on_error
 from .contracts import (
     InferenceRequestContext,
     InferenceRequirements,
@@ -131,7 +132,7 @@ async def run_capability_probe(
     admission_request = RemoteInferenceAdmissionRequest.from_inference_context(
         context,
         operation_id=f"{context.request_id}:capability_probe:{candidate.profile.id}",
-        uncertain_on_error=(candidate.profile.provider_kind == "openrouter"),
+        uncertain_on_error=provider_uncertain_on_error(candidate.profile.provider_kind),
     )
 
     async def admitted_transport() -> CapabilityProbeObservation:

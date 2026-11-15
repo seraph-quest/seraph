@@ -1,10 +1,14 @@
 import json
+import logging
 import os
+import sys
+import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from typing import AsyncGenerator, Callable, Iterable, Iterator
 
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
@@ -26,15 +30,124 @@ engine = create_async_engine(
 )
 
 
+_SQLITE_BUSY_TIMEOUT_MS = 5000
+_BOUNDED_LOCK_WAIT_MARKER = "seraph_bounded_lock_wait"
+
+
 def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     cursor.close()
 
 
+def _restore_sqlite_busy_timeout(dbapi_connection, connection_record, _connection_proxy) -> None:
+    # A best-effort writer shortened this pooled connection's lock wait; give
+    # the standard wait back before any other caller can use the connection.
+    if connection_record.info.pop(_BOUNDED_LOCK_WAIT_MARKER, False):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.close()
+
+
 event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+event.listen(engine.sync_engine, "checkout", _restore_sqlite_busy_timeout)
+
+logger = logging.getLogger(__name__)
+
+# Writer-lock hold diagnostics (#1074): time each write transaction from its
+# first lock-taking statement to commit/rollback, and name the call site only
+# when it held SQLite's writer lock long enough to stall other requests.
+_WRITE_HOLD_WARN_SECONDS = 1.0
+_WRITE_STARTED_AT = "seraph_write_started_at"
+_WRITE_STATEMENTS = ("BEGIN IMMEDIATE", "INSERT", "UPDATE", "DELETE", "REPLACE")
+_CODE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + os.sep
+
+
+def _note_write_start(conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+    if _WRITE_STARTED_AT not in conn.info and statement.lstrip()[:15].upper().startswith(_WRITE_STATEMENTS):
+        conn.info[_WRITE_STARTED_AT] = time.monotonic()
+
+
+def _write_call_site() -> str:
+    # Async callers run SQLAlchemy inside a greenlet; their frames live on the
+    # parent greenlet's stack, so walk the whole chain.
+    import greenlet
+
+    frames = []
+    current = greenlet.getcurrent()
+    while current is not None:
+        frame = sys._getframe() if current is greenlet.getcurrent() else current.gr_frame
+        while frame is not None:
+            name = frame.f_code.co_filename
+            if name.startswith(_CODE_ROOT) and "site-packages" not in name and name != __file__:
+                frames.append(f"{name[len(_CODE_ROOT):]}:{frame.f_lineno}:{frame.f_code.co_name}")
+            frame = frame.f_back
+        current = current.parent
+    return " <- ".join(frames[:4]) or "unknown"
+
+
+def _report_write_hold(conn) -> None:
+    started = conn.info.pop(_WRITE_STARTED_AT, None)
+    if started is None:
+        return
+    held = time.monotonic() - started
+    if held >= _WRITE_HOLD_WARN_SECONDS:
+        logger.warning("SQLite writer lock held %.2fs by %s", held, _write_call_site())
+
+
+def _forget_write_start(_dbapi_connection, connection_record) -> None:
+    connection_record.info.pop(_WRITE_STARTED_AT, None)
+
+
+event.listen(engine.sync_engine, "before_cursor_execute", _note_write_start)
+event.listen(engine.sync_engine, "commit", _report_write_hold)
+event.listen(engine.sync_engine, "rollback", _report_write_hold)
+event.listen(engine.sync_engine, "checkin", _forget_write_start)
+
+
+async def bound_lock_wait(session: AsyncSession, milliseconds: int) -> None:
+    """Shorten SQLite's lock wait for the rest of this session's work.
+
+    Only for best-effort writes on read paths (#702): a foreign writer then
+    costs the request ``milliseconds`` instead of the standard busy timeout,
+    and the caller degrades instead of queueing every request behind it. The
+    pool restores the standard wait when the connection is next checked out.
+    """
+    connection = await session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    sync_engine = connection.engine.sync_engine
+    if not event.contains(sync_engine, "checkout", _restore_sqlite_busy_timeout):
+        event.listen(sync_engine, "checkout", _restore_sqlite_busy_timeout)
+    connection.info[_BOUNDED_LOCK_WAIT_MARKER] = True
+    await connection.exec_driver_sql(f"PRAGMA busy_timeout={int(milliseconds)}")
+
+
+def is_database_locked(exc: BaseException) -> bool:
+    """Whether ``exc`` is SQLite lock contention rather than a real fault."""
+    message = str(getattr(exc, "orig", None) or exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+async def commit_or_defer(session: AsyncSession, milliseconds: int) -> bool:
+    """Commit housekeeping done on a read path, or drop it under contention.
+
+    Returns False (after rolling back) when another writer holds SQLite's lock
+    for longer than ``milliseconds``; the caller must already present the
+    outcome to its reader without relying on the write (#1074).
+    """
+    await bound_lock_wait(session, milliseconds)
+    try:
+        await session.commit()
+    except OperationalError as exc:
+        if not is_database_locked(exc):
+            raise
+        await session.rollback()
+        return False
+    return True
+
 
 async_session_factory = sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
@@ -43,6 +156,39 @@ async_session_factory = sessionmaker(
 _session_factory_override: ContextVar[Callable[[], AsyncSession] | None] = ContextVar(
     "seraph_session_factory_override", default=None
 )
+
+
+class StateProviderUnavailable(RuntimeError):
+    """The canonical state provider is failed or shutting down (#1024)."""
+
+    def __init__(self, reason_code: str = "state_provider_unavailable"):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+# Tri-state ``get_session`` gate owned by the provider worker (#1024).
+# ``None``: no worker is attached (tests, host CLIs, migrations, any process
+# that never constructs the worker) and the gate is open, as before. While a
+# worker is attached it is open in ``activating`` (init_db and the activation
+# predicates need sessions) and ``active``; ``failed`` and ``deactivating``
+# refuse typed before a session is yielded.
+_STATE_GATE: list[str | None] = [None, None]
+
+
+def set_state_gate(state: str | None, reason_code: str | None = None) -> None:
+    if state not in {None, "activating", "active", "failed", "deactivating"}:
+        raise ValueError("unknown state gate")
+    _STATE_GATE[:] = [state, reason_code]
+
+
+def state_gate() -> tuple[str | None, str | None]:
+    return _STATE_GATE[0], _STATE_GATE[1]
+
+
+def _require_state_gate_open() -> None:
+    state, reason = _STATE_GATE
+    if state in {"failed", "deactivating"}:
+        raise StateProviderUnavailable(reason or f"state_provider_{state}")
 
 
 @contextmanager
@@ -65,6 +211,10 @@ def override_session_factory(
 
 
 OPERATOR_REQUIRED_TABLES = (
+    "programme_digest_receipts",
+    "programme_follow_through",
+    "programme_finding_actions",
+    "programme_notification_preferences",
     "sessions",
     "messages",
     "approval_requests",
@@ -94,6 +244,8 @@ OPERATOR_REQUIRED_TABLES = (
     "memory_tombstones",
     "audio_ingress_jobs",
     "audio_consent_grants",
+    "model_audio_documentation_attestations",
+    "model_audio_documentation_sources",
     "work_board_tasks",
     "work_board_input_artifacts",
     "work_board_attempts",
@@ -148,6 +300,54 @@ def _map_legacy_workflow_status(status: str | None) -> tuple[str, str | None]:
     if original_status not in _LEGACY_WORKFLOW_STATUS_MAP:
         return "blocked", "legacy_status_unmapped"
     return _LEGACY_WORKFLOW_STATUS_MAP[original_status], None
+
+
+async def _ensure_inference_group_lookup(conn) -> None:
+    """Add and classify the private hint without rewriting financial evidence."""
+    columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_cost_reservations)")).fetchall()}
+    if not columns:
+        return
+    if "group_lookup_key" not in columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_cost_reservations ADD COLUMN group_lookup_key VARCHAR")
+    from types import SimpleNamespace
+    from src.workflows.inference_group_lookup import classify_group_lookup, INDEX_NAME
+    cursor = None
+    while True:
+        query = "SELECT * FROM inference_cost_reservations WHERE group_lookup_key IS NULL"
+        parameters = {}
+        if cursor is not None:
+            query += " AND operation_id > :cursor"
+            parameters["cursor"] = cursor
+        result = await conn.execute(text(query + " ORDER BY operation_id LIMIT 128"), parameters)
+        batch = result.mappings().all()
+        if not batch:
+            break
+        for row in batch:
+            await conn.execute(text("UPDATE inference_cost_reservations SET group_lookup_key = :key "
+                "WHERE operation_id = :operation AND group_lookup_key IS NULL"),
+                {"key": classify_group_lookup(SimpleNamespace(**row)), "operation": row["operation_id"]})
+        cursor = batch[-1]["operation_id"]
+    await conn.exec_driver_sql(f"CREATE INDEX IF NOT EXISTS {INDEX_NAME} "
+        "ON inference_cost_reservations (owner_id, group_lookup_key)")
+
+
+async def _ensure_inference_ledger_v2_columns(conn) -> None:
+    """Add the #1086 derived row digest and running totals (filled by the ledger writer)."""
+    reservation_columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_cost_reservations)")).fetchall()}
+    if reservation_columns and "ledger_row_digest" not in reservation_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_cost_reservations ADD COLUMN ledger_row_digest VARCHAR")
+    if reservation_columns:
+        await conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_inference_cost_reservations_row_digest "
+            "ON inference_cost_reservations (operation_id, ledger_row_digest)")
+    owner_columns = {row[1] for row in (await conn.exec_driver_sql(
+        "PRAGMA table_info(inference_accounting_owners)")).fetchall()}
+    if owner_columns and "ledger_totals_json" not in owner_columns:
+        await conn.exec_driver_sql(
+            "ALTER TABLE inference_accounting_owners ADD COLUMN ledger_totals_json VARCHAR NOT NULL DEFAULT ''")
 
 
 async def _ensure_legacy_columns(conn) -> None:
@@ -362,6 +562,7 @@ async def _ensure_legacy_columns(conn) -> None:
     )
     await _add_missing_columns("goals", {
         "guardian_policy_json": "VARCHAR", "guardian_policy_revision": "INTEGER NOT NULL DEFAULT 0",
+        "goal_programmes_json": "VARCHAR",
     })
     await _add_missing_columns("guardian_interventions", {
         "owner_principal_id": "VARCHAR", "original_root_id": "VARCHAR", "goal_id": "VARCHAR",
@@ -391,8 +592,12 @@ async def _ensure_legacy_columns(conn) -> None:
 
     session_columns = await _add_missing_columns(
         "sessions",
-        {"owner_principal_id": "VARCHAR"},
+        {"owner_principal_id": "VARCHAR", "continuity_task_id": "VARCHAR REFERENCES work_board_tasks(task_id)"},
     )
+    if "continuity_task_id" in session_columns:
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_continuity_task_id ON sessions (continuity_task_id)"
+        )
     if "owner_principal_id" in session_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_sessions_owner_principal_id "
@@ -567,8 +772,27 @@ async def _ensure_legacy_columns(conn) -> None:
             "transport_status": "VARCHAR DEFAULT 'unknown'",
             "transport_lease_id": "VARCHAR",
             "cleanup_status": "VARCHAR DEFAULT 'complete'",
+            "workflow_job_id": "VARCHAR REFERENCES workflow_run_states(run_identity)",
+            "execution_binding_digest": "VARCHAR",
+            "revision": "INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)",
         },
     )
+    audio_grant_columns = await _add_missing_columns("audio_consent_grants", {"audio_execution_binding_json": "VARCHAR"})
+    # Preserve exact original authority even when a legacy database cannot
+    # acquire new table constraints through additive ALTER TABLE.
+    if "workflow_job_id" in audio_ingress_columns:
+        await conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ux_audio_ingress_jobs_workflow_job_id ON audio_ingress_jobs (workflow_job_id)")
+        await conn.exec_driver_sql("""CREATE TRIGGER IF NOT EXISTS audio_binding_immutable
+        BEFORE UPDATE OF workflow_job_id, execution_binding_digest ON audio_ingress_jobs
+        WHEN OLD.workflow_job_id IS NOT NULL AND
+        (NEW.workflow_job_id IS NOT OLD.workflow_job_id OR NEW.execution_binding_digest IS NOT OLD.execution_binding_digest)
+        BEGIN SELECT RAISE(ABORT, 'audio binding is immutable'); END""")
+    if "audio_execution_binding_json" in audio_grant_columns:
+        await conn.exec_driver_sql("""CREATE TRIGGER IF NOT EXISTS audio_grant_binding_immutable
+        BEFORE UPDATE OF audio_execution_binding_json ON audio_consent_grants
+        WHEN OLD.audio_execution_binding_json IS NOT NULL AND
+        NEW.audio_execution_binding_json IS NOT OLD.audio_execution_binding_json
+        BEGIN SELECT RAISE(ABORT, 'audio grant binding is immutable'); END""")
     if "requested_capability" in audio_ingress_columns:
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_audio_ingress_jobs_requested_capability "
@@ -648,6 +872,7 @@ async def _ensure_legacy_columns(conn) -> None:
             "plan_revision": "INTEGER",
             "candidate_id": "VARCHAR",
             "source_task_id": "VARCHAR",
+            "composition_binding_json": "VARCHAR",
             "selected_context_reserved_bytes": "INTEGER",
             "capability_version": "VARCHAR DEFAULT 'workflow-v1'",
             "input_digest": "VARCHAR",
@@ -950,6 +1175,7 @@ async def _ensure_telegram_transport_columns(conn) -> None:
         "telegram_transport_states": {
             "last_update_at": "DATETIME",
             "last_error": "VARCHAR",
+            "capture_binding_json": "VARCHAR",
         },
         "telegram_transport_outbox": {
             "task_control_markup_json": "VARCHAR",
@@ -1121,6 +1347,15 @@ async def _ensure_repo_repair_columns(conn) -> None:
             "effective_upstream": "VARCHAR DEFAULT ''",
             "maximum_input_bytes": "INTEGER DEFAULT 65536",
             "maximum_output_tokens": "INTEGER DEFAULT 4096",
+            "iteration_id": "VARCHAR",
+            "egress_envelope_schema": "VARCHAR",
+            "egress_envelope_artifact_ref": "VARCHAR",
+            "egress_envelope_sha256": "VARCHAR",
+            "diagnostics_sha256": "VARCHAR",
+            "redaction_version": "VARCHAR",
+            "serialized_request_sha256": "VARCHAR",
+            "combined_input_bytes": "INTEGER",
+            "diagnostics_acknowledged": "BOOLEAN DEFAULT 0",
             "expires_at": "DATETIME",
             "state": "VARCHAR DEFAULT 'active'",
             "revision": "INTEGER DEFAULT 1",
@@ -1222,6 +1457,29 @@ async def _ensure_calendar_columns(conn) -> None:
             "CREATE INDEX IF NOT EXISTS ix_google_service_connections_verified_setup_job_id "
             "ON google_service_connections (verified_setup_job_id)"
         )
+
+
+async def _ensure_connection_sync_columns(conn) -> None:
+    """Rerunnable additive metadata on existing connection and grant owners."""
+    definitions = {
+        "google_service_connections": {
+            "sync_active_job_id": "VARCHAR",
+            "sync_scope_digest": "VARCHAR NOT NULL DEFAULT ''",
+            "sync_cursor_job_id": "VARCHAR",
+            "sync_cursor_page": "INTEGER NOT NULL DEFAULT 0",
+            "sync_cursor_revision": "INTEGER NOT NULL DEFAULT 0",
+        },
+        "mail_read_consents": {"sync_metadata_limit": "INTEGER NOT NULL DEFAULT 0"},
+        "calendar_read_consents": {"sync_metadata_limit": "INTEGER NOT NULL DEFAULT 0"},
+    }
+    for table, definitions_for_table in definitions.items():
+        result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+        columns = {row[1] for row in result.fetchall()}
+        if not columns:
+            continue
+        for column, sql_type in definitions_for_table.items():
+            if column not in columns:
+                await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
 
 
 async def _ensure_mail_columns(conn) -> None:
@@ -1595,6 +1853,7 @@ async def _ensure_work_board_columns(conn) -> None:
     result = await conn.exec_driver_sql("PRAGMA table_info(work_board_attempts)")
     columns = {row[1] for row in result.fetchall()}
     attempt_additions = {
+        "admitted_method_json": "VARCHAR",
         "cancel_requested_at": "DATETIME",
         "parent_handoff_context_json": "VARCHAR DEFAULT '[]'",
         "parent_handoff_digest": "VARCHAR",
@@ -1607,7 +1866,10 @@ async def _ensure_work_board_columns(conn) -> None:
     task_result = await conn.exec_driver_sql("PRAGMA table_info(work_board_tasks)")
     task_columns = {row[1] for row in task_result.fetchall()}
     task_additions = {
+        "priority_explicit": "BOOLEAN NOT NULL DEFAULT 0",
+        "admitted_method_json": "VARCHAR",
         "input_artifact_id": "VARCHAR",
+        "channel_capture_origin_json": "VARCHAR",
         "pipeline_operation_id": "VARCHAR",
         "pipeline_slot": "VARCHAR",
         "review_expires_at": "DATETIME",
@@ -1830,6 +2092,22 @@ async def _ensure_procedure_v2_binding(conn) -> None:
         )
 
 
+async def _ensure_forgejo_form_profiles(conn) -> None:
+    """Preserve existing title/consent rows; defaults confer no form authority."""
+    result = await conn.exec_driver_sql("PRAGMA table_info(forgejo_connections)")
+    existing = {row[1] for row in result.fetchall()}
+    if not existing:
+        return
+    from src.browser.forgejo_forms import EMPTY_FORM_PROFILES
+    additions = {
+        "reviewed_form_profiles_json": "VARCHAR DEFAULT '" + EMPTY_FORM_PROFILES + "'",
+        "form_profiles_revision": "INTEGER DEFAULT 0",
+    }
+    for column, sql_type in additions.items():
+        if column not in existing:
+            await conn.exec_driver_sql(f"ALTER TABLE forgejo_connections ADD COLUMN {column} {sql_type}")
+
+
 async def init_db() -> None:
     """Create all tables on startup."""
     # Keep SQLite bound to the same canonical workspace registry used by
@@ -1850,6 +2128,8 @@ async def init_db() -> None:
         # make duplicate legacy bindings abort startup before the migration can
         # preserve and block those rows for operator reconciliation.
         await _ensure_legacy_columns(conn)
+        await _ensure_inference_group_lookup(conn)
+        await _ensure_inference_ledger_v2_columns(conn)
         await _ensure_operator_session_columns(conn)
         await _ensure_vault_owner(conn)
         await _ensure_operator_principals(conn)
@@ -1864,6 +2144,8 @@ async def init_db() -> None:
         await _ensure_calendar_columns(conn)
         await _ensure_repo_repair_columns(conn)
         await _ensure_mail_columns(conn)
+        await _ensure_connection_sync_columns(conn)
+        await _ensure_forgejo_form_profiles(conn)
         await conn.run_sync(SQLModel.metadata.create_all)
         await _ensure_operator_principals(conn)
         await _ensure_guardian_inbox_columns(conn)
@@ -1880,6 +2162,21 @@ async def init_db() -> None:
         )
         await _ensure_memory_indexes(conn)
         await _ensure_search_indexes(conn)
+        # Seed the fixed Cordis composition inventory only into an empty table
+        # (fresh or pre-feature workspace). A partial inventory stays partial
+        # so missing mandatory owners keep denying service invocations.
+        from src.runtime_plugins.ownership import (introduce_dispatch_domain_sync, introduce_domains_sync,
+                                                   introduce_state_domain_sync, seed_legacy_inventory_sync)
+        await conn.run_sync(seed_legacy_inventory_sync)
+        # Domains introduced after an inventory existed (#1020) are added once
+        # as their legacy owner; nothing else in a partial inventory changes.
+        await conn.run_sync(introduce_domains_sync)
+        # Then the Python-hosted state domain (#1024), only onto the exact
+        # pre-#1024 inventory: a chained exact-prefix step, never insert-if-missing.
+        await conn.run_sync(introduce_state_domain_sync)
+        # Then the dispatcher lifecycle domain (#1025), only onto the exact
+        # post-#1024 inventory: the next chained exact-prefix step.
+        await conn.run_sync(introduce_dispatch_domain_sync)
 
     # Reconcile legacy Done-parent links once the additive board schema exists.
     # The helper only materializes proof-backed handoffs; rows without an
@@ -1908,8 +2205,16 @@ async def close_db() -> None:
 
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Yield an async DB session."""
-    factory = _session_factory_override.get() or async_session_factory
+    """Yield an async DB session.
+
+    The default factory passes the state provider gate first; an explicit
+    ``override_session_factory`` scope (isolated evaluation databases) is a
+    named bypass.
+    """
+    factory = _session_factory_override.get()
+    if factory is None:
+        _require_state_gate_open()
+        factory = async_session_factory
     async with factory() as session:
         try:
             yield session

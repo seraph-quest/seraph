@@ -31,9 +31,19 @@ from seraph_daemon import format_active_window, get_frontmost_app_name, poll_loo
 class _NoopScreenRuntime:
     provider = type("Provider", (), {"name": "test-provider"})()
     blocklist: set[str] = set()
+    uploader = None
 
     async def refresh(self, *args, **kwargs):
         return None
+
+    def budget_skip_reason(self, *, now):
+        return None
+
+    def record_capture(self, *, now):
+        return None
+
+    def budget_status(self):
+        return {}
 
 
 class TestFormatActiveWindow:

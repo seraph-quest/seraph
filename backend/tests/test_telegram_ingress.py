@@ -27,7 +27,7 @@ from src.extensions.telegram_ingress import (
     serialize_telegram_receipt,
     validate_telegram_update,
 )
-from src.guardian.audio_ingress import AudioProviderStatus
+from src.extensions.telegram_ingress import AudioProviderStatus
 
 
 # Keep consent and pairing fixtures current so receipt serialization exercises

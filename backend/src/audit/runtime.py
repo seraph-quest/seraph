@@ -6,13 +6,26 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator
+
+from sqlalchemy.exc import OperationalError
 
 from src.audit.repository import audit_repository
+from src.db.engine import is_database_locked
 from src.utils.background import track_task
 
 logger = logging.getLogger(__name__)
 _SYNC_AUDIT_WAIT_SECONDS = 5.0
+# Diagnostic audits emitted by read and poll paths wait at most this long for
+# SQLite's writer lock; under contention they are retried in the background at
+# the normal wait instead of stalling the reader (#1074). Write-path and
+# policy-refusal audits never pass this bound.
+READ_PATH_AUDIT_WAIT_MS = 250
+_DEFERRED_AUDIT_LOG_INTERVAL_SECONDS = 60.0
+_READ_PATH_AUDITS: ContextVar[bool] = ContextVar("seraph_read_path_audits", default=False)
+_deferred_audit_logged_at: dict[tuple[str, str, str], float] = {}
 _INTEGRATION_TIMEOUT_RATE_LIMIT_SECONDS = 300.0
 _integration_timeout_lock = threading.Lock()
 _integration_timeout_state: dict[str, dict[str, float]] = {}
@@ -60,7 +73,39 @@ def reset_integration_timeout_rate_limit_state() -> None:
         _integration_timeout_state.clear()
 
 
-def _run_coro_on_dedicated_loop(coro, *, label: str) -> None:
+@contextmanager
+def read_path_audits() -> Iterator[None]:
+    """Mark enclosed work (including ``asyncio.to_thread`` workers) as a read path."""
+    token = _READ_PATH_AUDITS.set(True)
+    try:
+        yield
+    finally:
+        _READ_PATH_AUDITS.reset(token)
+
+
+def read_path_audit_wait_ms() -> int | None:
+    """The bounded audit wait inside ``read_path_audits``, else the normal wait."""
+    return READ_PATH_AUDIT_WAIT_MS if _READ_PATH_AUDITS.get() else None
+
+
+def _note_deferred_audit(kind: str, integration_type: str, name: str, level: int) -> None:
+    key = (kind, integration_type, name)
+    now = time.monotonic()
+    with _integration_timeout_lock:
+        last = _deferred_audit_logged_at.get(key)
+        if last is not None and now - last < _DEFERRED_AUDIT_LOG_INTERVAL_SECONDS:
+            return
+        _deferred_audit_logged_at[key] = now
+    logger.log(level, "Runtime audit %s %s:%s (database busy)", kind, integration_type, name)
+
+
+def _run_coro_on_dedicated_loop(
+    coro,
+    *,
+    label: str,
+    wait_seconds: float = _SYNC_AUDIT_WAIT_SECONDS,
+    settled: threading.Event | None = None,
+) -> None:
     error: Exception | None = None
 
     def _runner() -> None:
@@ -72,12 +117,17 @@ def _run_coro_on_dedicated_loop(coro, *, label: str) -> None:
 
     worker = threading.Thread(target=_runner, name=label, daemon=True)
     worker.start()
-    worker.join(timeout=_SYNC_AUDIT_WAIT_SECONDS)
+    if settled is not None:
+        # The caller needs only the bounded attempt; a deferred retry keeps
+        # running on the worker thread.
+        settled.wait(timeout=wait_seconds)
+        return
+    worker.join(timeout=wait_seconds)
     if worker.is_alive():
         logger.debug(
             "Timed out waiting for sync runtime audit %s after %.1fs",
             label,
-            _SYNC_AUDIT_WAIT_SECONDS,
+            wait_seconds,
         )
         return
     if error is not None:
@@ -171,12 +221,19 @@ async def log_integration_event(
     actor: str = "system",
     policy_mode: str = "full",
     principal_id: str | None = None,
+    lock_wait_ms: int | None = None,
+    _retry_inline: bool = False,
+    _attempted: threading.Event | None = None,
 ) -> bool:
     """Record an integration lifecycle event and report persistence state.
 
     Existing callers retain the fail-open behavior when they ignore the return
     value. Governed operator routes may supply authenticated lineage and fail
     closed or return an explicit degraded receipt when persistence fails.
+
+    ``lock_wait_ms`` is for read and poll paths only: a busy database defers
+    the event to one retry at the normal wait (``False`` is returned), so it
+    is delayed rather than dropped.
     """
     summary = f"{integration_type.replace('_', ' ').capitalize()} {name} {outcome.replace('_', ' ')}"
     try:
@@ -204,11 +261,36 @@ async def log_integration_event(
             policy_mode=policy_mode,
             summary=summary,
             details=event_details,
+            lock_wait_ms=lock_wait_ms,
         )
         return True
+    except OperationalError as exc:
+        if lock_wait_ms is None or not is_database_locked(exc):
+            logger.debug("Failed to record integration runtime audit event", exc_info=True)
+            return False
+        if _attempted is not None:
+            _attempted.set()
+        _note_deferred_audit("deferred", integration_type, name, logging.INFO)
+        retry = _retry_deferred_integration_event(
+            integration_type=integration_type, name=name, outcome=outcome, details=details,
+            session_id=session_id, actor=actor, policy_mode=policy_mode, principal_id=principal_id,
+        )
+        if _retry_inline:
+            await retry
+        else:
+            track_task(retry, name=f"runtime_audit:deferred:{integration_type}:{name}")
+        return False
     except Exception:
         logger.debug("Failed to record integration runtime audit event", exc_info=True)
         return False
+    finally:
+        if _attempted is not None:
+            _attempted.set()
+
+
+async def _retry_deferred_integration_event(*, integration_type: str, name: str, **kwargs: Any) -> None:
+    if not await log_integration_event(integration_type=integration_type, name=name, **kwargs):
+        _note_deferred_audit("dropped", integration_type, name, logging.WARNING)
 
 
 async def log_observer_delivery_event(
@@ -249,19 +331,31 @@ def log_integration_event_sync(
     name: str,
     outcome: str,
     details: dict[str, Any] | None = None,
+    lock_wait_ms: int | None = None,
 ) -> None:
     """Sync wrapper for integration runtime events used by non-async callers."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
+        # A bounded read-path audit retries a busy write on its own thread,
+        # so the caller waits only for the bounded attempt.
+        attempted = threading.Event() if lock_wait_ms is not None else None
         _run_coro_on_dedicated_loop(
             log_integration_event(
                 integration_type=integration_type,
                 name=name,
                 outcome=outcome,
                 details=details,
+                lock_wait_ms=lock_wait_ms,
+                _retry_inline=True,
+                _attempted=attempted,
             ),
             label=f"runtime_audit:integration:{integration_type}:{name}",
+            wait_seconds=(
+                _SYNC_AUDIT_WAIT_SECONDS if lock_wait_ms is None
+                else min(_SYNC_AUDIT_WAIT_SECONDS, lock_wait_ms / 1000 + 0.5)
+            ),
+            settled=attempted,
         )
         return
 
@@ -272,6 +366,7 @@ def log_integration_event_sync(
                 name=name,
                 outcome=outcome,
                 details=details,
+                lock_wait_ms=lock_wait_ms,
             ),
             name=f"runtime_audit:integration:{integration_type}:{name}",
         )

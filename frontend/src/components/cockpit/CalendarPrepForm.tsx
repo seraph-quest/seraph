@@ -1,4 +1,8 @@
+import type { CommunicationRescheduleInput } from "../../lib/communications";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ConnectionSyncPanel } from "./ConnectionSyncPanel";
+import { connectedTaskInput } from "../../lib/connectionSync";
+import type { RelatedSelection } from "../../lib/connectionSync";
 import { CalendarReschedulePanel } from "./CalendarReschedulePanel";
 
 import {
@@ -140,6 +144,8 @@ export interface PendingCalendarSubmission {
 }
 
 export interface CalendarPrepFormProps {
+  onPrepareCommunication?: (input: CreateCalendarPrepRequest["input"]) => void;
+  onPrepareReschedule?: (input: CommunicationRescheduleInput) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
   goals: GoalInfo[];
@@ -150,7 +156,7 @@ export interface CalendarPrepFormProps {
   onPendingChange?: (pending: PendingCalendarSubmission | null) => void;
 }
 
-export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, initialPending, onPendingChange, ownerPrincipalId, ownerSessionId }: CalendarPrepFormProps) {
+export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, initialPending, onPendingChange, ownerPrincipalId, ownerSessionId, onPrepareCommunication, onPrepareReschedule }: CalendarPrepFormProps) {
   const mountedRef = useRef(true);
   const [connections, setConnections] = useState<CalendarConnectionMetadata[]>([]);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -164,6 +170,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
   const [goalId, setGoalId] = useState(goals.find((goal) => goalRevision(goal))?.id ?? "");
   const [allowedFields, setAllowedFields] = useState<CalendarAllowedField[]>(["summary", "start", "end", "location"]);
   const [windowMinutes, setWindowMinutes] = useState("1440");
+  const [syncAcknowledged, setSyncAcknowledged] = useState(false);
   const [maxEvents, setMaxEvents] = useState("20");
   const [allowRemoteModel, setAllowRemoteModel] = useState(false);
   const [expiresAt, setExpiresAt] = useState(() => localDateTime(new Date(Date.now() + 24 * 60 * 60 * 1000)));
@@ -173,6 +180,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [title, setTitle] = useState("Prepare for meeting");
+  const [relatedSelection, setRelatedSelection] = useState<RelatedSelection | null>(null);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [cadenceKind, setCadenceKind] = useState<"5min" | "hourly" | "6h" | "daily">("daily");
   const [timezone, setTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
@@ -252,7 +260,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     setCalendarListRevision("");
     setSelectedCalendarId("");
     consentRef.current = null;
-    setConsent(null);
+    setConsent(null); setRelatedSelection(null);
     setEventResponse(null);
     setSelectedEventId("");
     setCalendarError(null);
@@ -299,7 +307,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     if (!selectedGoal || revision === null) return setError("Choose an owned goal with a current revision.");
     if (!hasRequiredAllowedFields) return setError("Summary, start, and end are required consent fields.");
     if (!expiry || new Date(expiry).getTime() <= Date.now() || new Date(expiry).getTime() > Date.now() + 7 * 24 * 60 * 60 * 1000) return setError("Consent expiry must be in the future and within seven days.");
-    if (!Number.isInteger(window) || window < 5 || window > 1440) return setError("The consent window must be between 5 and 1440 minutes.");
+    if (!Number.isInteger(window) || window < 5 || window > (syncAcknowledged ? 10080 : 1440)) return setError("The consent window must be between 5 and 1440 minutes, or up to 10080 with explicit metadata sync consent.");
     if (!Number.isInteger(events) || events < 1 || events > 50) return setError("Maximum events must be between 1 and 50.");
     const request: CreateCalendarReadConsentRequest = {
       schema_version: 1,
@@ -309,6 +317,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
       goal_revision: revision,
       allowed_fields: allowedFields,
       window_minutes: window,
+      acknowledge_sync_metadata: syncAcknowledged,
       max_events: events,
       allow_remote_model: allowRemoteModel,
       expires_at: expiry,
@@ -323,6 +332,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     try {
       const result = await boundedRequest((signal) => createReadConsent(intent.request, signal));
       if (!mountedRef.current) return;
+      if ((result.sync_metadata_limit ?? 0) !== (intent.request.acknowledge_sync_metadata ? 50 : 0)) throw new CalendarApiError(200, "consent_sync_grant_mismatch", "The metadata sync grant is unconfirmed. Refresh original consent before synchronizing.");
       consentRef.current = result;
       setConsent(result);
       setPending(null);
@@ -383,6 +393,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     return {
       schema_version: 1,
       input: {
+        ...connectedTaskInput(relatedSelection),
         schema_version: 1,
         consent_id: currentConsent.consent_id,
         event_binding_id: selectedEvent.event_binding_id,
@@ -436,7 +447,9 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
 
   const submitPrep = async () => {
     setError(null);
-    const request = buildPrepRequest();
+    let request: CreateCalendarPrepRequest | null;
+    try { request = buildPrepRequest(); }
+    catch (reason) { setError((reason as Error).message); return; }
     if (!request) {
       setError("Choose a current goal, active consent, returned event, and bounded title before preparing.");
       return;
@@ -520,7 +533,7 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
     setPending(null);
     setConfirmedPrep(null);
     setSchedule(null);
-    setConsent(null);
+    setConsent(null); setRelatedSelection(null);
     consentRef.current = null;
     setEventResponse(null);
     setSelectedEventId("");
@@ -574,21 +587,25 @@ export function CalendarPrepForm({ goals, onCreated, onClose, onOpenSettings, in
           {calendarError && <div className="sm:col-span-2 text-xs text-amber-200" role="alert">{calendarError}</div>}
           <label>Verified calendar<select className="cockpit-input mt-1 w-full" value={selectedCalendarId} onChange={(event) => setSelectedCalendarId(event.currentTarget.value)} disabled={!calendars.length || Boolean(pending)}><option value="">Choose one returned calendar</option>{calendars.map((calendar) => <option key={calendar.calendar_id} value={calendar.calendar_id}>{calendar.summary}</option>)}</select></label>
           <div className="text-xs opacity-70 sm:self-end">{calendars.length ? `${calendars.length} calendars returned · list revision ${calendarListRevision.slice(0, 18)}…` : "Verify the connection to load a bounded list."}</div>
-          <fieldset className="sm:col-span-2 rounded border border-white/10 p-2" disabled={Boolean(pending)}><legend className="px-1 text-xs font-semibold">Finite read consent</legend><div className="grid gap-2 sm:grid-cols-2"><label>Window minutes<input className="cockpit-input mt-1 w-full" type="number" min={5} max={1440} value={windowMinutes} onChange={(event) => setWindowMinutes(event.currentTarget.value)} /></label><label>Maximum events<input className="cockpit-input mt-1 w-full" type="number" min={1} max={50} value={maxEvents} onChange={(event) => setMaxEvents(event.currentTarget.value)} /></label><label>Expires at (UTC)<input className="cockpit-input mt-1 w-full" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.currentTarget.value)} /></label><label className="flex items-center gap-2 self-end"><input type="checkbox" checked={allowRemoteModel} onChange={(event) => setAllowRemoteModel(event.currentTarget.checked)} />Allow the governed OpenRouter model</label></div><div className="mt-2 flex flex-wrap gap-3 text-xs">{(["summary", "start", "end", "location", "description", "attendees"] as CalendarAllowedField[]).map((field) => <label key={field} className="flex items-center gap-1"><input type="checkbox" checked={allowedFields.includes(field)} disabled={REQUIRED_ALLOWED_FIELDS.includes(field)} onChange={(event) => toggleField(field, event.currentTarget.checked)} />{field}{REQUIRED_ALLOWED_FIELDS.includes(field) ? " (required)" : ""}</label>)}</div><button type="button" className="cockpit-feedback-button mt-2" onClick={() => void createConsent()} disabled={Boolean(busy) || Boolean(pending) || !hasRequiredAllowedFields || !selectedCalendarIsCurrent}>Create finite consent and read events</button></fieldset>
+          <fieldset className="sm:col-span-2 rounded border border-white/10 p-2" disabled={Boolean(pending)}><legend className="px-1 text-xs font-semibold">Finite read consent</legend><div className="grid gap-2 sm:grid-cols-2"><label>Window minutes<input className="cockpit-input mt-1 w-full" type="number" min={5} max={syncAcknowledged ? 10080 : 1440} value={windowMinutes} onChange={(event) => setWindowMinutes(event.currentTarget.value)} /></label><label>Maximum events<input className="cockpit-input mt-1 w-full" type="number" min={1} max={50} value={maxEvents} onChange={(event) => setMaxEvents(event.currentTarget.value)} /></label><label>Expires at (UTC)<input className="cockpit-input mt-1 w-full" type="datetime-local" value={expiresAt} onChange={(event) => setExpiresAt(event.currentTarget.value)} /></label><label className="flex items-center gap-2 self-end"><input type="checkbox" checked={allowRemoteModel} onChange={(event) => setAllowRemoteModel(event.currentTarget.checked)} />Allow the governed OpenRouter model</label></div><div className="mt-2 flex flex-wrap gap-3 text-xs">{(["summary", "start", "end", "location", "description", "attendees"] as CalendarAllowedField[]).map((field) => <label key={field} className="flex items-center gap-1"><input type="checkbox" checked={allowedFields.includes(field)} disabled={REQUIRED_ALLOWED_FIELDS.includes(field)} onChange={(event) => toggleField(field, event.currentTarget.checked)} />{field}{REQUIRED_ALLOWED_FIELDS.includes(field) ? " (required)" : ""}</label>)}</div><label className="mt-2 flex gap-2 text-xs"><input type="checkbox" checked={syncAcknowledged} onChange={e => setSyncAcknowledged(e.target.checked)} />Also grant bounded metadata sync: up to 50 items per run and an explicitly selected window up to seven days. Private fields stay within this finite consent; no model egress is granted.</label><button type="button" className="cockpit-feedback-button mt-2" onClick={() => void createConsent()} disabled={Boolean(busy) || Boolean(pending) || !hasRequiredAllowedFields || !selectedCalendarIsCurrent}>Create finite consent and read events</button></fieldset>
           {consent && <div className={`sm:col-span-2 rounded border p-2 text-xs ${consent.state === "active" ? "border-emerald-500/30" : "border-amber-500/40"}`} role="status">Consent {consent.consent_id} · {consent.state} · revision {consent.revision} · digest {consent.consent_digest} · expires {new Date(consent.expires_at).toLocaleString()}{consent.state !== "active" ? " · refresh consent before continuing" : ""}</div>}
+          {consent && Boolean(consent.sync_metadata_limit) && selectedConnection && <div className="sm:col-span-2"><ConnectionSyncPanel relatedGoal={selectedGoal && goalRevision(selectedGoal) ? { id: selectedGoal.id, revision: goalRevision(selectedGoal)! } : null} onRelatedChange={setRelatedSelection} provider="calendar" ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} connectionId={selectedConnection.connection_id} connectionRevision={selectedConnection.revision} connectionState={selectedConnection.state} consent={{ id: consent.consent_id, revision: consent.revision, goalId: consent.goal_id, goalRevision: consent.goal_revision, state: consent.state, expiresAt: consent.expires_at, metadataLimit: consent.sync_metadata_limit ?? 0, privateLimit: Math.min(10, consent.max_events) }} initialWindow={{ start: consent.created_at, end: new Date(Math.min(Date.parse(consent.created_at) + consent.window_minutes * 60000, Date.parse(consent.expires_at))).toISOString() }} /></div>}
           {eventsError && <div className="sm:col-span-2 text-xs text-amber-200" role="alert">{eventsError}<button type="button" className="ml-2 underline" onClick={() => consent && void loadEvents(consent.connection_id, consent)}>Refresh events</button></div>}
           {eventsLoading && <div className="sm:col-span-2 text-xs opacity-70" role="status">Loading redacted event bindings…</div>}
           {eventResponse && <label className="sm:col-span-2">Event<select aria-label="Event binding" className="cockpit-input mt-1 w-full" value={selectedEventId} onChange={(event) => setSelectedEventId(event.currentTarget.value)} disabled={Boolean(pending)}><option value="">Choose a returned event</option>{eventResponse.events.map((event: CalendarEventOption) => <option key={event.event_binding_id} value={event.event_binding_id}>{event.summary} · {displayEventTime(event.start)} · binding {event.event_binding_id}</option>)}</select><span className="mt-1 block text-[10px] opacity-60">{eventResponse.events.length} events · pages {eventResponse.pages_read} · {eventResponse.truncated ? "more omitted by server" : "bounded list complete"} · returned list revision {eventResponse.calendar_list_revision}{selectedEvent ? ` · selected event revision ${selectedEvent.calendar_list_revision}` : ""}</span></label>}
           <label className="sm:col-span-2">Preparation title<input className="cockpit-input mt-1 w-full" maxLength={MAX_TITLE} value={title} onChange={(event) => setTitle(event.currentTarget.value)} disabled={Boolean(pending)} /></label>
           <fieldset className="sm:col-span-2 rounded border border-white/10 p-2" disabled={Boolean(pending) || Boolean(confirmedPrep)}><legend className="px-1 text-xs font-semibold">Optional governed observation</legend><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => setScheduleEnabled(event.currentTarget.checked)} />Observe this calendar on a finite schedule after preparation</label>{scheduleEnabled && <div className="mt-2 grid gap-2 sm:grid-cols-2"><label>Cadence<select className="cockpit-input mt-1 w-full" value={cadenceKind} onChange={(event) => setCadenceKind(event.currentTarget.value as typeof cadenceKind)}><option value="5min">Every 5 minutes</option><option value="hourly">Hourly</option><option value="6h">Every 6 hours</option><option value="daily">Daily</option></select></label><label>Timezone<input className="cockpit-input mt-1 w-full" maxLength={128} value={timezone} onChange={(event) => setTimezone(event.currentTarget.value)} /></label>{cadenceKind === "daily" && <><label>Daily hour<input className="cockpit-input mt-1 w-full" type="number" min={0} max={23} value={dailyHour} onChange={(event) => setDailyHour(event.currentTarget.value)} /></label><label>Daily minute<input className="cockpit-input mt-1 w-full" type="number" min={0} max={59} value={dailyMinute} onChange={(event) => setDailyMinute(event.currentTarget.value)} /></label></>}<label>Schedule expires at<input className="cockpit-input mt-1 w-full" type="datetime-local" max={scheduleExpiryMax} aria-describedby="calendar-schedule-expiry-limit" value={scheduleExpiresAt} onChange={(event) => setScheduleExpiresAt(event.currentTarget.value)} /><span id="calendar-schedule-expiry-limit" className="mt-1 block text-[10px] opacity-70">Schedule limit: up to 24 hours, and no later than the current consent or preparation artifact expiry ({new Date(scheduleExpiryLimit).toLocaleString()}).</span></label></div>}</fieldset>
         </div>
-        {selectedEvent && selectedGoal && goalRevision(selectedGoal) && <CalendarReschedulePanel
+        {selectedEvent && selectedGoal && goalRevision(selectedGoal) && <CalendarReschedulePanel onPrepareCommunication={onPrepareReschedule}
           ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
           eventBindingId={selectedEvent.event_binding_id} eventBindingRevision={selectedEvent.event_binding_revision}
           goalId={selectedGoal.id} goalRevision={goalRevision(selectedGoal)!} goals={goals}
         />}
         {confirmedPrep && <div className="mt-3 rounded border border-emerald-500/30 p-2 text-xs" role="status">Preparation created: task {confirmedPrep.task.task_id} · artifact {confirmedPrep.input_artifact.artifact_id} · digest {confirmedPrep.input_artifact.typed_input_digest}{confirmedPrep.idempotent_replay ? " · exact replay" : ""}{schedule ? ` · schedule ${schedule.binding_id} ${schedule.state}` : scheduleEnabled ? " · schedule not confirmed" : ""}<div className="mt-2 flex gap-2"><button type="button" className="cockpit-feedback-button" onClick={() => void continueWithPrep(confirmedPrep)} disabled={Boolean(pending)}>Open task without schedule</button>{pending?.intent.kind === "schedule" && <button type="button" className="cockpit-feedback-button" onClick={() => void retryPending()} disabled={Boolean(busy)}>Retry schedule</button>}</div></div>}
-        <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={requestClose} disabled={Boolean(busy) || Boolean(pending)}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={Boolean(busy) || Boolean(pending) || !consentIsActiveAndFuture || !selectedCalendarIsCurrent || !selectedEventId || !allowRemoteModel || !hasRequiredAllowedFields}>{busy === "prep" ? "Preparing…" : "Prepare meeting"}</button></div>
+        <div className="mt-3 flex flex-wrap justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={requestClose} disabled={Boolean(busy) || Boolean(pending)}>Cancel</button>{onPrepareCommunication && <button type="button" className="cockpit-feedback-button" disabled={Boolean(busy) || Boolean(pending) || !consentIsActiveAndFuture || !selectedEvent || !selectedCalendarIsCurrent || !allowRemoteModel || !hasRequiredAllowedFields} onClick={() => {
+          try { const request = buildPrepRequest(); if (!request || !consent || Date.parse(consent.expires_at) <= Date.now()) throw Error("Review current meeting source and Goal before adding it."); onPrepareCommunication(request.input); }
+          catch (reason) { setError((reason as Error).message); }
+        }}>Add this reviewed meeting source to communication preparation</button>}<button type="submit" className="cockpit-feedback-button" disabled={Boolean(busy) || Boolean(pending) || !consentIsActiveAndFuture || !selectedCalendarIsCurrent || !selectedEventId || !allowRemoteModel || !hasRequiredAllowedFields}>{busy === "prep" ? "Preparing…" : "Prepare meeting"}</button></div>
       </form>
     </div>
   );

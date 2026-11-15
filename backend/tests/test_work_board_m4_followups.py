@@ -52,15 +52,22 @@ from src.workflows.job_runtime import (
 
 OWNER = WorkBoardOwner(principal_id="operator:followup", session_id="session:followup")
 
+from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401,E402
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def test_proposal_route_binding_uses_canonical_seraph_route():
+def test_proposal_route_binding_uses_canonical_seraph_route(model_fabric_workspace):
+    # ADR-035 #1159: the NEAR TEE text slot serves proposals; its slot profile
+    # contract is the durable capability version.
+    from src.model_fabric.near_tee_vertical import near_tee_vertical_route
+    from tests.near_tee_support import write_near_tee_text_configuration
+    write_near_tee_text_configuration()
     route_id, contract_hash = triage_service._route_binding()
     assert route_id == "strategist_agent"
     assert len(contract_hash) == 64
+    assert contract_hash == near_tee_vertical_route("strategist_agent").profile_contract_hash
 
 
 def test_exhausted_pre_contact_proposal_is_reconciliation_only():

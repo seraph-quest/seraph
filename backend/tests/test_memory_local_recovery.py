@@ -47,6 +47,7 @@ from src.db.models import (
     WorkBoardDecisionReceipt,
     WorkBoardDecisionReceiptStage,
     WorkBoardDecisionStatus,
+    WorkBoardTask,
 )
 from src.extensions.capability_execution import CapabilityJournalError
 from src.memory.repository import (
@@ -153,6 +154,8 @@ def local_memory_db(tmp_path, monkeypatch):
             MemorySnapshot.__table__,
             AuditEvent.__table__,
             SessionModel.__table__,
+            # Required by Session.continuity_task_id even for null inserts.
+            WorkBoardTask.__table__,
         ],
     )
 

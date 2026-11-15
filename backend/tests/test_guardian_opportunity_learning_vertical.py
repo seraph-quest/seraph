@@ -8,6 +8,7 @@ import json
 from uuid import uuid4
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
 
@@ -19,6 +20,9 @@ from src.workflows.job_runtime import durable_job_repository
 from tests.test_guardian_opportunity_plan_vertical import _actual_plan_journey, PlanHttpBoundary
 from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth
+
+# ADR-035: pins the guardian learning vertical whose setup saves the historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
 
 
 async def test_one_actual_verified_report_helpful_cpu_abstains_without_memory_adoption(

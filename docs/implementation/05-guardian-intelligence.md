@@ -771,7 +771,7 @@ This section records the landed Batch B slices and their validation and review r
   - `backend/.venv/bin/python -m pytest backend/tests/test_db_engine.py backend/tests/test_session.py backend/tests/test_session_search_tool.py backend/tests/test_memory_episodes.py backend/tests/test_observer_manager.py backend/tests/test_hybrid_memory_retrieval.py backend/tests/test_guardian_state.py backend/tests/test_memory_repository.py -q`
   - `cd docs && npm run build`
 - broader validation boundary:
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -v`
+  - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -v`
   - result: `1209 passed, 35 failed`
   - the failures cluster in approval wrapping, runtime audit or session-context propagation, eval harness, goal-tree orphan handling, scheduled-job runtime context, and tool-audit paths; the Batch B memory suite above remained green
   - the already observed strategist audit-context failure remains part of that broader unrelated failure set rather than a new retrieval-planner regression
@@ -1061,11 +1061,11 @@ This section records the landed Batch C slices and their validation and review r
     - targeted subset:
       - result: `11 passed, 24 warnings`
       - command:
-        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_background.py tests/test_eval_harness.py -q`
+        - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_background.py tests/test_eval_harness.py -q`
     - full backend suite:
       - result: `1301 passed, 27 warnings`
       - command:
-        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+        - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
 - CI follow-up after GitHub Actions run `23608084293`:
   - root cause:
     - the remaining failure in `tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details` came from deterministic harness drift, not a live memory regression
@@ -1082,11 +1082,11 @@ This section records the landed Batch C slices and their validation and review r
     - targeted subset:
       - result: `3 passed`
       - command:
-        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_eval_harness.py::test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
+        - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_eval_harness.py::test_guardian_state_synthesis_is_stable_after_vector_store_runtime_audit tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios -q`
     - full backend suite:
       - result: `1302 passed, 3 warnings`
       - command:
-        - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+        - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
 
 ### `procedural-memory-policy-routing-v1`
 
@@ -1139,7 +1139,7 @@ This section records the landed Batch C slices and their validation and review r
     - `backend/tests/test_memory_repository.py` now also covers invalid JSON metadata payloads, not just non-dict decoded payloads, on the scoped-read path
   - validation:
     - `python3 -m py_compile backend/src/memory/repository.py backend/src/observer/delivery.py backend/src/evals/harness.py backend/tests/test_memory_repository.py backend/tests/test_delivery.py backend/tests/test_eval_harness.py`
-    - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
+    - `cd backend && OPENROUTER_API_KEY=test-key uv run pytest tests/test_memory_repository.py tests/test_delivery.py tests/test_eval_harness.py::test_run_runtime_evals_passes_all_scenarios tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q`
       - result: `58 passed`
   - review:
     - GitHub review comment on PR `#232` correctly identified the policy-time Python scan in scoped procedural-memory reads
@@ -1310,7 +1310,7 @@ This section records the landed Batch C slices and their validation and review r
     - result: `28 passed`
   - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_main_lists_available_scenarios -q`
     - result: `1 passed`
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+  - `cd backend && OPENROUTER_API_KEY=test-key uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
     - result: `passed`, with `includes_supporting_context_mismatch=true`, `includes_execution_context_mismatch=true`, and `decision_reason=low_guardian_confidence`
 
 ## Batch Q Branch Review Log
@@ -1333,7 +1333,7 @@ This section records the landed Batch C slices and their validation and review r
   - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
   - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
     - result: `30 passed`
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_world_model_behavior --indent 0`
+  - `cd backend && OPENROUTER_API_KEY=test-key uv run python -m src.evals.harness --scenario guardian_world_model_behavior --indent 0`
     - result: `passed`, with `continuity_thread_matches_live_project=true` and `includes_follow_through_risk=true`
   - added `guardian_judgment_behavior` to `backend/src/evals/harness.py` plus targeted regressions in `backend/tests/test_guardian_state.py`, `backend/tests/test_eval_harness.py`, and `backend/tests/test_strategist_tick.py` proving the new focus provenance, contradiction-aware confidence downgrade, and medium-urgency defer path
 - validation:
@@ -1374,7 +1374,7 @@ This section records the landed Batch C slices and their validation and review r
   - `python3 -m py_compile backend/src/guardian/world_model.py backend/src/evals/harness.py backend/tests/test_guardian_state.py backend/tests/test_eval_harness.py`
   - `cd backend && .venv/bin/python -m pytest tests/test_guardian_state.py -q -x`
     - result: `32 passed`
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+  - `cd backend && OPENROUTER_API_KEY=test-key uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
     - result: `passed`, with `dominant_thread_prefers_hermes=true`, `project_state_includes_hermes_execution=true`, and `includes_project_anchor_drift=true`
   - validation intentionally not claimed:
     - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py::test_runtime_eval_scenarios_expose_expected_details -q -x`
@@ -1486,9 +1486,9 @@ This section records the landed Batch C slices and their validation and review r
     - result: `4 passed`
   - `cd backend && .venv/bin/python -m pytest tests/test_eval_harness.py -q -k "test_main_lists_available_scenarios or test_run_runtime_evals_passes_group_1"`
     - result: `2 passed`
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
+  - `cd backend && OPENROUTER_API_KEY=test-key uv run python -m src.evals.harness --scenario guardian_judgment_behavior --indent 0`
     - result: passed
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test uv run python -m src.evals.harness --scenario guardian_long_horizon_learning_behavior --indent 0`
+  - `cd backend && OPENROUTER_API_KEY=test-key uv run python -m src.evals.harness --scenario guardian_long_horizon_learning_behavior --indent 0`
     - result: passed
   - broad `tests/test_eval_harness.py` runtime-detail selection and broader guardian subsets still stalled in this environment, so they are intentionally not claimed here
 - subagent review:

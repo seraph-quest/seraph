@@ -76,6 +76,27 @@ def test_production_core_requires_exactly_one_server_side_auth_credential(tmp_pa
     assert auth_check["detail"] == "operator PBKDF2 hash has invalid shape"
 
 
+def test_stock_hash_only_production_env_resolves_the_channel_signing_key(tmp_path):
+    def channel_check(env):
+        report = build_preflight_report(env)
+        return report, next(check for check in report["core"]["checks"] if check["name"] == "channel_signing_key")
+    stock = _production_env(tmp_path)
+    stock["OPERATOR_AUTH_SECRET"] = ""
+    stock["OPERATOR_AUTH_SECRET_HASH"] = "pbkdf2_sha256$600000$" + "A" * 22 + "==$" + "B" * 43 + "="
+    report, check = channel_check(stock)
+    assert report["core"]["status"] == "ready", report["core"]
+    assert check == {"name": "channel_signing_key", "status": "ready",
+                     "detail": "derived from the workspace vault key, generated on first use"}
+    (tmp_path / ".vault-key").write_text("vault\n", encoding="utf-8")
+    assert channel_check(stock)[1]["detail"] == "derived from the workspace vault key"
+    (tmp_path / ".vault-key").unlink()
+    (tmp_path / ".vault-key").mkdir()
+    report, check = channel_check(stock)
+    assert check["status"] == "invalid" and report["core"]["status"] == "invalid"
+    stock["CAPABILITY_JOURNAL_SECRET"] = "dedicated-server-secret"
+    assert channel_check(stock)[1]["detail"] == "explicit server secret signs channel origins and links"
+
+
 def test_complete_openrouter_config_remains_unverified_without_live_probe(tmp_path):
     env = _production_env(tmp_path)
     env.update(
@@ -166,6 +187,32 @@ def test_production_mount_preflight_fails_closed_without_mountinfo(tmp_path):
     assert mount_check["status"] == "invalid"
 
 
+def test_frontend_dev_server_binds_loopback_unless_docker_dev_opts_in():
+    import re
+
+    vite_config = (ROOT / "frontend" / "vite.config.ts").read_text()
+    compose = (ROOT / "docker-compose.dev.yaml").read_text()
+
+    # server.host is either a loopback literal or a variable whose fallback is
+    # loopback and whose override is a non-VITE_ (server-only) env name.
+    host = re.search(r"\bserver\s*:\s*\{[^}]*?\bhost\s*:\s*([^,\n]+)", vite_config, re.S)
+    assert host is not None
+    expression = host.group(1).strip()
+    if not re.fullmatch(r"[\"'](?:127\.0\.0\.1|localhost)[\"']", expression):
+        binding = re.search(rf"\b{re.escape(expression)}\s*=\s*([^;\n]+)", vite_config)
+        assert binding is not None, expression
+        env_names = re.findall(r"process\.env\.([A-Z0-9_]+)", binding.group(1))
+        assert env_names and not any(name.startswith("VITE_") for name in env_names)
+        assert re.search(r"(?:\|\||\?\?)\s*[\"'](?:127\.0\.0\.1|localhost)[\"']\s*$", binding.group(1).strip())
+    assert not re.search(r"\bhost\s*:\s*[\"']0\.0\.0\.0[\"']", vite_config)
+
+    frontend = compose[compose.index("frontend-dev:"):]
+    assert re.search(r"\bSERAPH_DEV_SERVER_HOST\s*:\s*[\"']?0\.0\.0\.0", frontend)
+    published = re.findall(r"^\s*-\s*[\"']?([0-9.:]+)[\"']?\s*(?:#.*)?$", compose, re.M)
+    port_mappings = [item for item in published if item.count(":") >= 1]
+    assert port_mappings and all(item.startswith("127.0.0.1:") for item in port_mappings)
+
+
 def test_managed_local_ports_bind_loopback_and_production_env_uses_prod_paths():
     manage = (ROOT / "manage.sh").read_text()
     env = (ROOT / "env.prod.example").read_text()
@@ -215,6 +262,32 @@ def test_prod_local_up_rejects_plain_http_before_start(tmp_path):
     assert not started.exists()
 
 
+def test_local_tmp_defaults_resolve_symlinked_temp_base(tmp_path):
+    real_tmp = tmp_path / "private" / "tmp dir"
+    real_tmp.mkdir(parents=True)
+    linked_tmp = tmp_path / "tmp"
+    linked_tmp.symlink_to(real_tmp, target_is_directory=True)
+    script = "\n".join(
+        (
+            "set -u",
+            "export SERAPH_MANAGE_SOURCE_ONLY=true",
+            f"source {shlex.quote(str(ROOT / 'manage.sh'))}",
+            f"default_tmp_root {shlex.quote(str(linked_tmp))}",
+            f"default_tmp_root {shlex.quote(str(tmp_path / 'missing'))}",
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [os.path.realpath(real_tmp), str(tmp_path / "missing")]
+
+    manage = (ROOT / "manage.sh").read_text()
+    assert 'SERAPH_DEFAULT_TMP_ROOT="$(default_tmp_root /tmp)"' in manage
+    assert 'LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}"' in manage
+    assert 'LOCAL_LLM_LOG_DIR="${LOCAL_LLM_LOG_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-logs}"' in manage
+    assert ":-/tmp/seraph-dev" not in manage
+
+
 def test_preflight_script_is_dependency_free_and_does_not_open_provider_sockets():
     source = (BACKEND / "production_preflight.py").read_text()
     assert "urllib.request" not in source
@@ -233,3 +306,14 @@ def test_preflight_script_is_dependency_free_and_does_not_open_provider_sockets(
     )
     assert result.returncode == 0
     assert '"probe_performed": false' in result.stdout
+
+
+def test_keyless_cordis_cli_uses_the_backend_interpreter_not_a_bare_python3():
+    """#1168: under env -i a version-manager python3 shim fails without $HOME."""
+    import re
+
+    manage = (ROOT / "manage.sh").read_text()
+    assert "function cordis_cli_python()" in manage
+    assert '"$SCRIPT_DIR/backend/.venv/bin/python"' in manage
+    assert not re.search(r"^\s*python3 (-B )?-m src\.runtime_plugins\.cli", manage, re.M)
+    assert manage.count('"$(cordis_cli_python)"') == 2

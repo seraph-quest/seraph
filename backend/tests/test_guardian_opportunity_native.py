@@ -11,6 +11,15 @@ from src.guardian.opportunity_runtime import admit_assessment, _authority, RUNNE
 from src.workflows.job_runtime import (
     durable_job_repository, DurableJobAdmissionDenied, DurableJobLeaseError, DurableJobTransitionError,
 )
+from tests.near_tee_support import assume_assessment_route_available
+
+
+@pytest.fixture(autouse=True)
+def assessment_route_available(monkeypatch):
+    # These pin tick/recovery mechanics given a usable assessment route; the
+    # retired-world queued hold is covered in test_vertical_no_provider_journeys.
+    assume_assessment_route_available(monkeypatch)
+
 
 
 async def test_new_packet_coalesces_existing_uncontacted_native_queue(isolated_runtime):

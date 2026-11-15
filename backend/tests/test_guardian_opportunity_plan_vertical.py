@@ -24,6 +24,9 @@ from tests.test_guardian_opportunity_vertical import OpportunityHttpBoundary
 from tests.test_inference_accounting import accounting_db, setup_configuration
 from tests.test_research_native_vertical import real_auth, ResponseBytes
 
+# ADR-035: pins the guardian opportunity plan vertical whose setup saves the historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 class PlanHttpBoundary(OpportunityHttpBoundary):
     async def handle_async_request(self, request):

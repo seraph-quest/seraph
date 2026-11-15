@@ -1050,7 +1050,11 @@ def test_provider_scoped_credential_reference_contract(provider_kind, secret_env
         ("local", "https://evil.example/v1", "LOCAL_LLM_API_KEY", "credential_destination_mismatch"),
         ("openai_compatible", "https://evil.example/v1", "SERAPH_VLM_API_KEY", "credential_destination_mismatch"),
         ("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", None),
-        ("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", None),
+        # ADR-035: historical credential binding is pinned behind the explicit
+        # legacy fixture; by default the retired provider is denied first.
+        pytest.param("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", None,
+            marks=pytest.mark.openrouter_legacy),
+        ("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "openrouter_retired"),
         ("openai_compatible", "https://models.example/v1", "LLM_API_KEY", None),
         ("local", "http://127.0.0.1:8000/v1", "LOCAL_LLM_API_KEY", None),
         ("openai_compatible", "http://192.168.1.26:8001/v1", "SERAPH_VLM_API_KEY", None),
@@ -1083,7 +1087,8 @@ def test_credentials_are_bound_to_provider_and_destination(
 
 
 @pytest.mark.asyncio
-async def test_legacy_openrouter_profile_with_openai_credential_is_zero_transport(monkeypatch):
+@pytest.mark.parametrize("legacy", [pytest.param(True, marks=pytest.mark.openrouter_legacy), False])
+async def test_legacy_openrouter_profile_with_openai_credential_is_zero_transport(monkeypatch, legacy):
     monkeypatch.setenv("OPENAI_API_KEY", "wrong-provider-secret")
     profile = _profile(
         remote=True,
@@ -1108,7 +1113,7 @@ async def test_legacy_openrouter_profile_with_openai_credential_is_zero_transpor
         await adapter(decision.selected, False)
 
     assert transported is False
-    assert decision.rejections[0].reason_code == "credential_ref_not_allowed"
+    assert decision.rejections[0].reason_code == ("credential_ref_not_allowed" if legacy else "openrouter_retired")
 
 
 @pytest.mark.parametrize(

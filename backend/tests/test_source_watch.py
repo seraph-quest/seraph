@@ -1264,3 +1264,46 @@ def test_failed_recovery_projection_preserves_uncertain_durable_status():
     cancelled = _failed_recovery_projection("cancelled")
     assert cancelled["status"] == "cancelled"
     assert cancelled["watch_status"] == "cancelled"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["mcp-servers.json", "stdio-proxies.json", "seraph.db", "seraph.db-wal", ".VAULT-KEY", "artifacts/mail/private/m.json"],
+)
+def test_workspace_sources_refuse_registry_owned_state(target):
+    with pytest.raises(SourceWatchError) as error:
+        parse_sources([{"source_key": "runtime", "kind": "workspace_text", "target": target}])
+
+    assert error.value.code == "workspace_secret_path_blocked"
+
+
+@pytest.mark.parametrize("target", ["mcp-servers.json", "stdio-proxies.json", "seraph.db"])
+def test_workspace_source_read_refuses_registry_owned_state_from_stored_specs(tmp_path, monkeypatch, target):
+    # A watch persisted before this check must not read the file either.
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    (tmp_path / target).write_text('{"headers": {"Authorization": "Bearer raw-inline"}}\n', encoding="utf-8")
+    source = SourceSpec(
+        source_key="runtime",
+        kind="workspace_text",
+        target=target,
+        label="runtime",
+        priority=3,
+        identity_digest="0" * 64,
+    )
+
+    with pytest.raises(SourceWatchError) as error:
+        asyncio.run(source_watch_module._read_source(source))
+
+    assert error.value.code == "workspace_source_blocked"
+    assert "raw-inline" not in str(error.value)
+
+
+def test_workspace_source_still_reads_operator_notes(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "status.txt").write_text("all good\n", encoding="utf-8")
+    source = parse_sources([{"source_key": "notes", "kind": "workspace_text", "target": "notes/status.txt"}])[0]
+
+    content, _metadata = asyncio.run(source_watch_module._read_source(source))
+
+    assert content == "all good\n"

@@ -98,3 +98,85 @@ async def assert_research_parent_current(db, run):
     append_research_parent_gate(conditions, run, now=datetime.now(timezone.utc))
     if await db.scalar(select(WorkflowRunState.id).where(*conditions)) is None:
         raise DurableJobLeaseError("canonical research parent creation/current phase is unavailable")
+
+
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+
+_programme_policy = ContextVar("native_goal_discovery_policy", default=None)
+
+
+def current_discovery_witness():
+    import asyncio
+    held = _programme_policy.get()
+    if held is None or held[0] is not asyncio.current_task() or held[2] is None:
+        from src.workflows.job_runtime import DurableJobTransitionError
+        raise DurableJobTransitionError("programme physical witness unavailable")
+    return held[2]
+
+
+@asynccontextmanager
+async def discovery_writer_scope(*, witness=None):
+    """Current configuration owner fences only the short native writer.
+
+    Release before any physical HTTP or artifact work. Possession of a staged
+    policy never authenticates an issuer or grants a new generation.
+    """
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    from src.guardian.goal_programmes import stage_programme_policy
+    import asyncio
+    held = _programme_policy.get()
+    if held is not None and held[0] is asyncio.current_task():
+        if witness is not None and held[2] is not witness:
+            token = _programme_policy.set((held[0], held[1], witness))
+            try:
+                yield held[1]
+            finally:
+                _programme_policy.reset(token)
+            return
+        yield held[1]
+        return
+    async with configuration_mutation_lock:
+        policy = stage_programme_policy()
+        token = _programme_policy.set((asyncio.current_task(), policy, witness))
+        try:
+            yield policy
+        finally:
+            _programme_policy.reset(token)
+
+
+async def assert_discovery_authority(db, value, *, run=None):
+    """DB-only programme validation in the existing original job writer."""
+    from src.work_board.research_parent import discovery_authority, DISCOVERY_KIND, DISCOVERY_SERVICE
+    from src.guardian.goal_programmes import goal_programme_service
+    from src.workflows.job_runtime import DurableJobTransitionError
+    authority = discovery_authority(value)
+    import asyncio
+    held = _programme_policy.get()
+    if held is None or held[0] is not asyncio.current_task():
+        raise DurableJobTransitionError("programme transition requires its native configuration writer scope")
+    policy = held[1]
+    binding = authority.programme_binding
+    if run is None:
+        run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == authority.original_job_id))
+    if run is not None and (run.job_kind != DISCOVERY_KIND or run.owner_kind != "service"
+            or run.service_id != DISCOVERY_SERVICE or run.owner_principal_id != DISCOVERY_SERVICE
+            or run.session_id is not None or run.operator_session_id is not None
+            or run.run_identity != authority.original_job_id or run.parent_job_id
+            or run.branch_depth != 0 or run.goal_id != binding.goal_id
+            or run.goal_revision != binding.goal_revision):
+        raise DurableJobTransitionError("programme original native lineage changed")
+    if run is not None:
+        from src.workflows.research_sources import DiscoveryInputWitness
+        from src.workflows.job_runtime import _digest
+        witness = held[2]
+        if (not isinstance(witness, DiscoveryInputWitness) or witness.job_id != run.run_identity
+                or witness.input_digest != run.input_digest or witness.authority_digest != run.authority_digest
+                or witness.checkpoint_digest != _digest(json.loads(run.checkpoint_receipts_json))
+                or witness.artifact_digest != _digest(json.loads(run.artifact_receipts_json))):
+            raise DurableJobTransitionError("programme physical readback is not current at this writer")
+    programme = await goal_programme_service.validate_current_binding(db=db, binding=binding, policy=policy)
+    from src.guardian.research_plan_contracts import STAGES
+    if not {capability for _, capability, _ in STAGES} <= set(programme.capability_ids):
+        raise DurableJobTransitionError("programme fixed stage capability grant changed")
+    return programme

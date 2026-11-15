@@ -1,0 +1,391 @@
+{
+ "schema1": {
+  "agent-loop.cancelTurn": [
+   "seraph.agent-loop.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "agent-loop.inspectTurn": [
+   "seraph.agent-loop.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "agent-loop.startTurn": [
+   "seraph.agent-loop.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "artifacts.adopt": [
+   "seraph.artifacts.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "artifacts.read": [
+   "seraph.artifacts.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "artifacts.stage": [
+   "seraph.artifacts.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "audit.append": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "authority.resolve": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "board-workers.startTurn": [
+   "seraph.authority.v1",
+   "seraph.board-workers.v1",
+   "seraph.tasks.v1"
+  ],
+  "capabilities.describe": [
+   "seraph.authority.v1",
+   "seraph.capabilities.v1",
+   "seraph.tasks.v1"
+  ],
+  "capabilities.invoke": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.capabilities.v1",
+   "seraph.tasks.v1"
+  ],
+  "capabilities.list": [
+   "seraph.authority.v1",
+   "seraph.capabilities.v1",
+   "seraph.tasks.v1"
+  ],
+  "connections.inspect": [
+   "seraph.authority.v1",
+   "seraph.connections.v1",
+   "seraph.tasks.v1"
+  ],
+  "connections.invokeBoundAdapter": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.connections.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.accept": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.append": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.cancel": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.read": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "delegation.startChild": [
+   "seraph.agent-loop.v1",
+   "seraph.agent-presets.v1",
+   "seraph.authority.v1",
+   "seraph.delegation.v1",
+   "seraph.tasks.v1"
+  ],
+  "goals.read": [
+   "seraph.authority.v1",
+   "seraph.goals.v1",
+   "seraph.tasks.v1"
+  ],
+  "guardian.startTurn": [
+   "seraph.authority.v1",
+   "seraph.guardian.v1",
+   "seraph.tasks.v1"
+  ],
+  "inference.request": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.inference.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.applyReviewed": [
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.forget": [
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.propose": [
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.retrieve": [
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "research.buildPlan": [
+   "seraph.authority.v1",
+   "seraph.research.v1",
+   "seraph.tasks.v1"
+  ],
+  "research.executeAccepted": [
+   "seraph.authority.v1",
+   "seraph.research.v1",
+   "seraph.source-extraction.v1",
+   "seraph.tasks.v1"
+  ],
+  "scheduler.disable": [
+   "seraph.authority.v1",
+   "seraph.scheduler.v1",
+   "seraph.tasks.v1"
+  ],
+  "scheduler.dispatchDue": [
+   "seraph.authority.v1",
+   "seraph.scheduler.v1",
+   "seraph.tasks.v1"
+  ],
+  "scheduler.register": [
+   "seraph.authority.v1",
+   "seraph.scheduler.v1",
+   "seraph.tasks.v1"
+  ],
+  "source-extraction.extract": [
+   "seraph.authority.v1",
+   "seraph.source-extraction.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.admit": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.cancel": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.checkpoint": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.inspect": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.settle": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ]
+ },
+ "schema2": {
+  "agent-loop.cancelTurn": [
+   "seraph.agent-loop.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "agent-loop.inspectTurn": [
+   "seraph.agent-loop.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "agent-loop.startTurn": [
+   "seraph.agent-loop.v1",
+   "seraph.agent-presets.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "artifacts.adopt": [
+   "seraph.artifacts.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "artifacts.read": [
+   "seraph.artifacts.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "artifacts.stage": [
+   "seraph.artifacts.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "audit.append": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "authority.resolve": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "board-workers.startTurn": [
+   "seraph.agent-presets.v1",
+   "seraph.authority.v1",
+   "seraph.board-workers.v1",
+   "seraph.tasks.v1"
+  ],
+  "capabilities.describe": [
+   "seraph.authority.v1",
+   "seraph.capabilities.v1",
+   "seraph.tasks.v1"
+  ],
+  "capabilities.invoke": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.capabilities.v1",
+   "seraph.tasks.v1"
+  ],
+  "capabilities.list": [
+   "seraph.authority.v1",
+   "seraph.capabilities.v1",
+   "seraph.tasks.v1"
+  ],
+  "connections.inspect": [
+   "seraph.authority.v1",
+   "seraph.connections.v1",
+   "seraph.tasks.v1"
+  ],
+  "connections.invokeBoundAdapter": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.connections.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.accept": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.append": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.cancel": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "conversation.read": [
+   "seraph.authority.v1",
+   "seraph.conversation.v1",
+   "seraph.tasks.v1"
+  ],
+  "delegation.startChild": [
+   "seraph.agent-loop.v1",
+   "seraph.agent-presets.v1",
+   "seraph.authority.v1",
+   "seraph.delegation.v1",
+   "seraph.tasks.v1"
+  ],
+  "goals.read": [
+   "seraph.authority.v1",
+   "seraph.goals.v1",
+   "seraph.tasks.v1"
+  ],
+  "guardian.startTurn": [
+   "seraph.agent-presets.v1",
+   "seraph.authority.v1",
+   "seraph.guardian.v1",
+   "seraph.tasks.v1"
+  ],
+  "inference.request": [
+   "seraph.artifacts.v1",
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.inference.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.applyReviewed": [
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.forget": [
+   "seraph.audit.v1",
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.propose": [
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "memory.retrieve": [
+   "seraph.authority.v1",
+   "seraph.memory.v1",
+   "seraph.tasks.v1"
+  ],
+  "research.buildPlan": [
+   "seraph.authority.v1",
+   "seraph.research.v1",
+   "seraph.tasks.v1"
+  ],
+  "research.executeAccepted": [
+   "seraph.authority.v1",
+   "seraph.research.v1",
+   "seraph.source-extraction.v1",
+   "seraph.tasks.v1"
+  ],
+  "scheduler.disable": [
+   "seraph.authority.v1",
+   "seraph.scheduler.v1",
+   "seraph.tasks.v1"
+  ],
+  "scheduler.dispatchDue": [
+   "seraph.authority.v1",
+   "seraph.scheduler.v1",
+   "seraph.tasks.v1"
+  ],
+  "scheduler.register": [
+   "seraph.authority.v1",
+   "seraph.scheduler.v1",
+   "seraph.tasks.v1"
+  ],
+  "source-extraction.extract": [
+   "seraph.authority.v1",
+   "seraph.source-extraction.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.admit": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.cancel": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.checkpoint": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.inspect": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ],
+  "tasks.settle": [
+   "seraph.authority.v1",
+   "seraph.tasks.v1"
+  ]
+ }
+}

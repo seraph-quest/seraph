@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import type { GoalInfo } from "../../types";
+import { ForgejoFormsPanel, type ForgejoFormConnection } from "./ForgejoFormsPanel";
 
 type Target = { owner: string; repository: string; repository_id: number; issue_id: number;
   issue_index: number; old_title: string; new_title: string; updated_at: string; timeline_digest: string };
-type Connection = { configured: boolean; connection_id: string | null; revision: number; state: string;
+type Connection = ForgejoFormConnection & { configured: boolean; connection_id: string | null; revision: number; state: string;
   provider_user_id: number | null; provider_login: string; read_consent_revision: number;
   read_consent_expires_at: string | null; available: boolean; no_learning: true };
 type Job = { job_id: string; revision: number; status: string; deadline_at: string; goal_id: string;
@@ -94,15 +95,30 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
   const [repository, setRepository] = useState("");
   const [issueIndex, setIssueIndex] = useState("1");
   const [title, setTitle] = useState("");
-  const [readAck, setReadAck] = useState(false);
-  const [exactAck, setExactAck] = useState(false);
-  const [recoveryAck, setRecoveryAck] = useState(false);
+  // Each acknowledgment records the exact authority it was given against and
+  // is cleared in the same render that authority changes, so it never comes
+  // back when the authority later returns to an earlier value. A reset effect
+  // ran after the commit and could erase a click made against the new state.
+  const [readAckFor, setReadAckFor] = useState<string | null>(null);
+  const [exactAckFor, setExactAckFor] = useState<string | null>(null);
+  const [recoveryAckFor, setRecoveryAckFor] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [output, setOutput] = useState<Output | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedGoal = goals.find(value => value.id === goalId);
+  const ackBinding = JSON.stringify([scope, connection?.revision, connection?.read_consent_revision, goalId,
+    selectedGoal?.revision, job?.job_id, job?.revision]);
+  const [ackBindingSeen, setAckBindingSeen] = useState(ackBinding);
+  if (ackBindingSeen !== ackBinding) {
+    setAckBindingSeen(ackBinding);
+    setReadAckFor(null); setExactAckFor(null); setRecoveryAckFor(null);
+  }
+  const readAck = readAckFor === ackBinding, exactAck = exactAckFor === ackBinding, recoveryAck = recoveryAckFor === ackBinding;
+  const setReadAck = (value: boolean) => setReadAckFor(value ? ackBinding : null);
+  const setExactAck = (value: boolean) => setExactAckFor(value ? ackBinding : null);
+  const setRecoveryAck = (value: boolean) => setRecoveryAckFor(value ? ackBinding : null);
 
   function acceptJob(value: Job, current: number) {
     if (current !== generation.current || !scope) return;
@@ -144,8 +160,6 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     return () => { ++generation.current; abort.abort(); window.clearTimeout(timer); };
   }, [scope]);
 
-  useEffect(() => { setReadAck(false); setExactAck(false); setRecoveryAck(false); },
-    [scope, connection?.revision, connection?.read_consent_revision, goalId, selectedGoal?.revision, job?.job_id, job?.revision]);
 
   async function act(next?: Pending) {
     if (!scope || loadedScope !== scope || busy) return;
@@ -248,6 +262,9 @@ export function ForgejoTitlePanel({ ownerPrincipalId, ownerSessionId }: {
     {output?.readback_title && <p>Verified readback title: {output.readback_title} · no_learning</p>}
     {output?.observation_only && <p>GET-only observed title: {output.observed_current_title}. Original write remains Unknown; attribution is uncertain and original capacity is retained.</p>}
     {pending && <div aria-label="Unconfirmed exact Forgejo request"><p>The exact request is retained. Reload performs reads only; no automatic POST or Save replay.</p><button disabled={busy} onClick={() => void act()}>Retry exact retained request</button></div>}
+    <ForgejoFormsPanel connection={connection} goalId={goalId} goalRevision={selectedGoal?.revision}
+      ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId}
+      onConnection={value => setConnection(value as Connection)} />
     <button disabled={!connection?.configured || busy || !!pending} onClick={() => void act({ method: "POST", path: "/connection/revoke", body: { expected_revision: connection?.revision } })}>Revoke backend session</button>
   </section>;
 }

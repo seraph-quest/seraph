@@ -18,6 +18,9 @@ EVIDENCE_LIMIT = 16384
 SERVICE_ID = "guardian-opportunity"
 SERVICE_PRINCIPAL = "service:guardian-opportunity"
 RUNNER = "scheduler:guardian-opportunity"
+# Reason codes recording an operator cancel. No tick may overwrite them, or a
+# later execution would no longer see the cancel.
+OPERATOR_CANCEL_REASONS = frozenset({"cancel_requested", "assessment_cancel_requested", "operator_cancelled"})
 _executions: dict[str, asyncio.Task] = {}
 
 
@@ -142,7 +145,7 @@ async def _authority(db, opportunity_id, *, evidence=None, execution=False):
     row = await db.get(GuardianOpportunity, opportunity_id)
     if row is None or row.status not in {"queued", "assessing"}:
         raise OpportunityError("opportunity_not_pending")
-    if row.reason_code == "cancel_requested":
+    if row.reason_code in OPERATOR_CANCEL_REASONS:
         raise OpportunityError("assessment_cancel_requested")
     if execution and utc(row.assessment_deadline_at) <= now():
         raise OpportunityError("assessment_deadline_expired")
@@ -517,6 +520,16 @@ def assessment_context(row, goal, evidence):
     return messages, context
 
 
+def assessment_route_block():
+    """Why the assessment model step has no usable route, or None (#1159).
+
+    None when the NEAR TEE text slot serves ``strategist_agent`` (or in the
+    explicit legacy test mode); otherwise the shared inference-block reason.
+    """
+    from src.model_fabric.near_tee_vertical import vertical_route_block
+    return vertical_route_block("strategist_agent")
+
+
 async def _completion(row, goal, evidence, *, fence):
     """Exactly one governed preflight, broker, reservation and HTTP attempt."""
     from src import llm_runtime
@@ -527,8 +540,49 @@ async def _completion(row, goal, evidence, *, fence):
     from src.model_fabric.gpu_admission import GpuPriority
     from src.model_fabric.remote_inference_admission import bind_remote_inference_receipt
     from src.workflows.job_runtime import durable_job_repository
+    if route_block := assessment_route_block():
+        # ADR-035: defense in depth for an already claimed job (the route went
+        # away after admission); a precontact block with the stable cause.
+        raise OpportunityError(route_block)
     messages, context = assessment_context(row, goal, evidence)
     await assert_known_vault_values_absent(json.loads(messages[1]["content"]))
+
+    async def fresh_authority():
+        # Broker queue waiting grants no fresh source/Root/policy lifetime.
+        fresh_evidence = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
+        async with db_engine.get_session() as db:
+            current, (_, _, _, policy, _) = await _authority(db, row.id,
+                evidence=fresh_evidence, execution=True)
+            await _contact_limits(db, current, policy)
+        current_job = await durable_job_repository.get_job(row.job_id)
+        if (current_job is None or current_job["status"] != "running"
+                or current_job["lease"]["owner"] != RUNNER
+                or current_job["lease"]["fencing_token"] != fence):
+            raise OpportunityError("assessment_execution_fence_stale")
+
+    from src.model_fabric.near_tee_vertical import is_near_tee_context
+    if is_near_tee_context(context):
+        # #1159: the NEAR TEE text slot. Every precontact gate (structured
+        # output proof for the JSON response format included) runs before
+        # admission; the transport runs in the job-bound broker lease and
+        # NEAR billing settles the assessment reservation. No fallback.
+        from src.model_fabric.near_tee import NearTeeDenied, NearTeeError
+        from src.model_fabric.near_tee_vertical import prepare_near_tee_vertical_call, run_near_tee_vertical_call
+        try:
+            call = await prepare_near_tee_vertical_call(context, messages=messages, temperature=0,
+                max_tokens=1024, response_format={"type": "json_object"})
+        except NearTeeDenied as denied:
+            raise OpportunityError(denied.code) from denied
+        with bind_remote_inference_receipt(repository=durable_job_repository, job_id=row.job_id,
+                owner=RUNNER, fencing_token=fence):
+            try:
+                return await run_near_tee_vertical_call(call, priority=GpuPriority.REPORTS_RESEARCH_MEMORY,
+                    before_contact=fresh_authority)
+            except NearTeeError as exc:
+                if exc.code == "near_tee_cost_liability":
+                    raise
+                # Contact happened and NEAR billing settled it; nothing adopted.
+                raise OpportunityError(exc.code) from exc
     profile_id = llm_runtime.resolve_runtime_profile(runtime_path="strategist_agent", profile=None)
     profile = llm_runtime._provider_profile(profile_id)
     if profile is None:
@@ -549,17 +603,7 @@ async def _completion(row, goal, evidence, *, fence):
     hooks = PersistedRouteReceiptHooks(capability_proof_hashes=proofs)
 
     async def adapter(candidate, retry):
-        # Broker queue waiting grants no fresh source/Root/policy lifetime.
-        fresh_evidence = read_snapshot(json.loads(row.source_token_json)["artifact_id"], row.source_digest)
-        async with db_engine.get_session() as db:
-            current, (_, _, _, policy, _) = await _authority(db, row.id,
-                evidence=fresh_evidence, execution=True)
-            await _contact_limits(db, current, policy)
-        current_job = await durable_job_repository.get_job(row.job_id)
-        if (current_job is None or current_job["status"] != "running"
-                or current_job["lease"]["owner"] != RUNNER
-                or current_job["lease"]["fencing_token"] != fence):
-            raise OpportunityError("assessment_execution_fence_stale")
+        await fresh_authority()
         result, _ = await llm_runtime._governed_research_chat_completion(
             decision=decision, context=context, body=body, api_key=api_key)
         return result.choices[0].message.content
@@ -613,6 +657,19 @@ async def request_optional_notification(opportunity_id):
             db.add(intervention)
 
 
+async def hold_queued_for_route(opportunity_id, reason):
+    """Keep a queued candidate queued with a route-block reason, never a job."""
+    from sqlalchemy import or_, text, update
+    from src.db import engine as db_engine
+    from src.db.models import GuardianOpportunity
+    async with db_engine.get_session() as db:
+        await db.execute(text("BEGIN IMMEDIATE"))
+        await db.execute(update(GuardianOpportunity).where(GuardianOpportunity.id == opportunity_id,
+            GuardianOpportunity.status == "queued", GuardianOpportunity.job_id.is_(None),
+            or_(GuardianOpportunity.reason_code.is_(None), GuardianOpportunity.reason_code != reason))
+            .values(reason_code=reason, revision=GuardianOpportunity.revision + 1))
+
+
 async def execute_assessment(opportunity_id):
     """Native lease owns execution; terminal adoption shares its SQL fence."""
     from sqlalchemy import select, update, text
@@ -622,6 +679,12 @@ async def execute_assessment(opportunity_id):
     from src.guardian.opportunity_contracts import validate_assessment
     from src.work_board.input_artifacts import _write_payload, _safe_file_bytes
     from src.workflows.job_runtime import durable_job_repository
+    if route_block := assessment_route_block():
+        # ADR-035 (#1156): no durable job without a usable model route. The
+        # candidate stays queued with the visible reason (recoverable once a
+        # route exists); its deadline still closes it.
+        await hold_queued_for_route(opportunity_id, route_block)
+        return
     admitted = await admit_assessment(opportunity_id)
     if admitted["status"] != "queued":
         return
@@ -714,6 +777,19 @@ async def run_opportunity_tick():
     from src.db import engine as db_engine
     from src.db.models import GuardianOpportunity, InferenceCostReservation
     from src.guardian.opportunities import now, utc
+    from src.scheduler.background_inference import background_inference_skip_reason, record_background_inference_skip
+    # The #1112 toggle stops only new assessment model calls. Deadline expiry,
+    # adoption of already-contacted results and Unknown handling still run, and
+    # a queued candidate stays visible with the skip reason until its deadline.
+    paused = background_inference_skip_reason("guardian_opportunity_assessment")
+    if paused:
+        record_background_inference_skip("guardian_opportunity_assessment", paused)
+    else:
+        # ADR-035 (#1156): with no usable route for the assessment model step,
+        # hold queued candidates exactly like the toggle above (visible reason,
+        # no job, blocked only at their deadline), so they resume once a route
+        # exists instead of ending as a terminal block.
+        paused = assessment_route_block()
     cursor = None
     started = 0
     examined = 0
@@ -740,6 +816,8 @@ async def run_opportunity_tick():
                     try:
                         await assert_coalesced_predecessor_closed(db, row)
                     except OpportunityError as exc:
+                        if row.reason_code in OPERATOR_CANCEL_REASONS:
+                            continue  # Keep the cancel visible to the next execution check.
                         await db.execute(text("BEGIN IMMEDIATE"))
                         expired = utc(row.assessment_deadline_at) <= now()
                         reason = "assessment_deadline_expired" if expired else exc.code
@@ -792,6 +870,8 @@ async def run_opportunity_tick():
                     recovered = native  # Startup already advanced its fence.
                 if recovered["status"] != "blocked" or recovered["effects"]:
                     continue
+                if paused:
+                    continue  # A second attempt is a new model call; it waits for the toggle.
                 # Physical proof is staged outside the native queue writer.
                 try:
                     try:
@@ -822,6 +902,22 @@ async def run_opportunity_tick():
                             status="blocked", reason_code=exc.code,
                             revision=GuardianOpportunity.revision + 1))
                     continue
+            if paused and row.status == "queued" and row.reason_code not in OPERATOR_CANCEL_REASONS:
+                async with db_engine.get_session() as db:
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                    expired = utc(row.assessment_deadline_at) <= now()
+                    reason = "assessment_deadline_expired" if expired else paused
+                    # The revision fence also loses to a cancel committed after
+                    # this page was read; the next enabled tick closes it in _authority.
+                    await db.execute(update(GuardianOpportunity).where(
+                        GuardianOpportunity.id == row.id, GuardianOpportunity.revision == row.revision,
+                        GuardianOpportunity.status == "queued",
+                        or_(GuardianOpportunity.reason_code.is_(None), GuardianOpportunity.reason_code != reason)).values(
+                        status="blocked" if expired else "queued",
+                        reason_code=reason, revision=GuardianOpportunity.revision + 1))
+                continue
+            if paused:
+                continue
             if len(_executions) >= 16:
                 return {"started": started}
 

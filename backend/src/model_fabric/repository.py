@@ -50,6 +50,12 @@ class ModelFabricRepository:
     def _session(self) -> AbstractAsyncContextManager[AsyncSession]:
         return (self._session_provider or get_session)()
 
+    async def cleanup_settled_audio_documentation(self):
+        # #1179 retired voice input and its documentation endpoints; startup
+        # still reconciles any historical private staging liability.
+        from .audio_documentation import cleanup_settled
+        return await cleanup_settled(self)
+
     async def persist_capability_proof(
         self,
         proof: ModelRouteProof,
@@ -104,8 +110,13 @@ class ModelFabricRepository:
         adapter: str,
         capability: str,
     ) -> ModelRouteProof | None:
-        """Return the newest valid proof for one exact binding, including expired proofs."""
+        """Return the newest valid proof for one exact binding, including expired proofs.
+
+        A NEAR TEE slot proof checked before the current credential was bound
+        is not returned (#1178).
+        """
         endpoint_hash = endpoint_digest(endpoint)
+        cutoff = _near_tee_credential_cutoff((profile_id,))
         async with self._session() as db:
             stmt = (
                 select(ModelCapabilityProofRecord)
@@ -129,13 +140,68 @@ class ModelFabricRepository:
                     validate_model_route_proof(proof)
                 except ValueError:
                     continue
-                if proof.outcome != "passed":
+                if proof.outcome != "passed" or not _bound_to_current_credential(proof, cutoff):
                     continue
                 receipt_result = await db.execute(
                     select(ModelRouteReceiptRecord).where(
                         ModelRouteReceiptRecord.receipt_id == proof.probe_receipt_id,
                         ModelRouteReceiptRecord.receipt_hash == proof.probe_receipt_hash,
                         ModelRouteReceiptRecord.outcome == "succeeded",
+                    )
+                )
+                if receipt_result.scalar_one_or_none() is not None:
+                    return proof
+        return None
+
+    async def latest_failed_capability_proof(
+        self,
+        *,
+        profile_schema_version: str,
+        profile_contract_hash: str,
+        profile_id: str,
+        model: str,
+        endpoint: str,
+        endpoint_class: EndpointClass,
+        adapter: str,
+        capability: str,
+    ) -> ModelRouteProof | None:
+        """Return the newest valid failed proof for one exact binding (#1167).
+
+        Never authorizes anything: callers use it only to withdraw a capability
+        a newer failed check contradicts. The failed proof must be bound to a
+        persisted failed probe receipt.
+        """
+        endpoint_hash = endpoint_digest(endpoint)
+        cutoff = _near_tee_credential_cutoff((profile_id,))
+        async with self._session() as db:
+            stmt = (
+                select(ModelCapabilityProofRecord)
+                .where(
+                    ModelCapabilityProofRecord.profile_schema_version == profile_schema_version,
+                    ModelCapabilityProofRecord.profile_contract_hash == profile_contract_hash,
+                    ModelCapabilityProofRecord.profile_id == profile_id,
+                    ModelCapabilityProofRecord.model == model,
+                    ModelCapabilityProofRecord.endpoint_digest == endpoint_hash,
+                    ModelCapabilityProofRecord.endpoint_class == endpoint_class.value,
+                    ModelCapabilityProofRecord.adapter == adapter,
+                    ModelCapabilityProofRecord.capability == capability,
+                    ModelCapabilityProofRecord.outcome != "passed",
+                )
+                .order_by(col(ModelCapabilityProofRecord.checked_at).desc())
+            )
+            result = await db.execute(stmt)
+            for record in result.scalars().all():
+                proof = _proof_from_record(record)
+                try:
+                    validate_model_route_proof(proof)
+                except ValueError:
+                    continue
+                if not _bound_to_current_credential(proof, cutoff):
+                    continue
+                receipt_result = await db.execute(
+                    select(ModelRouteReceiptRecord).where(
+                        ModelRouteReceiptRecord.receipt_id == proof.probe_receipt_id,
+                        ModelRouteReceiptRecord.receipt_hash == proof.probe_receipt_hash,
                     )
                 )
                 if receipt_result.scalar_one_or_none() is not None:
@@ -171,11 +237,14 @@ class ModelFabricRepository:
                     for receipt in receipt_result.scalars().all()
                 }
         latest: dict[tuple[str, str, str, str, str, str], ModelRouteProof] = {}
+        cutoff = _near_tee_credential_cutoff(normalized)
         for record in records:
             proof = _proof_from_record(record)
             try:
                 validate_model_route_proof(proof)
             except ValueError:
+                continue
+            if not _bound_to_current_credential(proof, cutoff):
                 continue
             receipt_outcome = linked_receipts.get(
                 (proof.probe_receipt_id, proof.probe_receipt_hash)
@@ -396,6 +465,23 @@ def _attempt_record(receipt_id: str, attempt: RouteAttemptReceipt) -> ModelRoute
         finished_at=attempt.finished_at,
         latency_ms=attempt.latency_ms,
     )
+
+
+def _near_tee_credential_cutoff(profile_ids) -> float | None:
+    """``checked_at`` floor for NEAR TEE slot proofs after a credential change (#1178)."""
+    if not any(str(item).startswith("near_tee.") for item in profile_ids):
+        return None
+    try:
+        from .configuration import near_tee_credential_bound_since
+        return near_tee_credential_bound_since()
+    except Exception:
+        # Fail open: a wrong key is caught per request by NEAR's own auth
+        # refusal; the binding only tracks deliberate key changes.
+        return None
+
+
+def _bound_to_current_credential(proof: ModelRouteProof, cutoff: float | None) -> bool:
+    return cutoff is None or not proof.profile_id.startswith("near_tee.") or proof.checked_at >= cutoff
 
 
 def _proof_from_record(record: ModelCapabilityProofRecord) -> ModelRouteProof:

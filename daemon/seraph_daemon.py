@@ -4,13 +4,15 @@ Polls the frontmost application name and window title, posting changes to the
 Seraph backend's /api/observer/context endpoint.  Runs natively on macOS
 (outside Docker) and requires only the Accessibility permission for window titles.
 
-With --ocr, captures and analyzes the screen on context switch using a vision model.
-Blocked apps (password managers, banking, etc.) are never screenshotted.
+With --ocr, captures the screen on context switch, runs on-device Apple Vision
+OCR, and uploads allowed captures to the local backend over the authenticated
+capture endpoint (ADR-035). The daemon makes no cloud model call; the backend
+runs governed vision analysis. Blocked apps (password managers, banking, etc.)
+are never screenshotted.
 
 Usage:
     python seraph_daemon.py [--url URL] [--interval SECS] [--idle-timeout SECS] [--verbose]
-    python seraph_daemon.py --ocr [--ocr-provider apple-vision] [--verbose]
-    python seraph_daemon.py --ocr --ocr-provider openrouter [--blocklist-file PATH] [--verbose]
+    python seraph_daemon.py --ocr [--ocr-provider apple-vision] [--blocklist-file PATH] [--verbose]
 """
 
 import argparse
@@ -31,6 +33,11 @@ import time
 from uuid import uuid4
 
 import httpx
+
+try:
+    from capture_upload import CaptureUploadResult, LocalCaptureUploader
+except ImportError:  # pragma: no cover - package import fallback
+    from .capture_upload import CaptureUploadResult, LocalCaptureUploader
 
 # The paired edge transport is provider-free and can be used by the native
 # capture loop when a node is provisioned.  Keep the import compatible with
@@ -119,7 +126,7 @@ def _analysis_usage(provider_name: str, *, duration_ms: int | None, success: boo
         "provider": provider_name,
         "duration_ms": duration_ms,
         "success": success,
-        "cost_posture": "local_no_api_price" if provider_name == "codex-local" else "provider_api_usage",
+        "cost_posture": "local_on_device",
     }
 
 
@@ -433,8 +440,8 @@ class ScreenAnalysisRuntime:
         model: str | None,
         preserve_captures: bool,
         archive_dir: str,
-        openrouter_api_key: str | None,
         blocklist_file: str | None,
+        uploader: LocalCaptureUploader | None = None,
     ) -> None:
         self._fallback = {
             "enabled": enabled,
@@ -443,8 +450,8 @@ class ScreenAnalysisRuntime:
             "preserve_captures": preserve_captures,
             "archive_dir": archive_dir,
         }
-        self._openrouter_api_key = openrouter_api_key
         self._blocklist_file = blocklist_file
+        self.uploader = uploader
         self._signature: tuple[object, ...] | None = None
         self._last_refresh = 0.0
         self.provider = None
@@ -468,8 +475,17 @@ class ScreenAnalysisRuntime:
         payload = await fetch_screen_analysis_settings(client, url) or self._fallback
         enabled = bool(payload.get("enabled", self._fallback["enabled"]))
         provider_name = str(payload.get("provider") or self._fallback["provider"])
-        if provider_name not in {"apple-vision", "openrouter", "codex-local"}:
-            provider_name = str(self._fallback["provider"])
+        # ADR-035: the backend's provider names its governed vision route, not
+        # a daemon OCR provider. Only on-device Apple Vision is selectable
+        # here; any other value (a remote route such as "openrouter", or the
+        # removed "codex-local") falls back to apple-vision, never a cloud call.
+        if provider_name != "apple-vision":
+            if provider_name != str(self._fallback["provider"]):
+                logger.info(
+                    "Screen analysis provider %r is not a daemon OCR provider; using apple-vision",
+                    provider_name,
+                )
+            provider_name = "apple-vision"
         model = str(payload.get("model") or self._fallback["model"] or "")
         preserve = bool(payload.get("preserve_captures", self._fallback["preserve_captures"]))
         archive_dir = str(payload.get("archive_dir") or self._fallback["archive_dir"])
@@ -516,12 +532,9 @@ class ScreenAnalysisRuntime:
         from ocr import create_provider
 
         provider_model = model or None
-        if provider_model is None and provider_name == "openrouter":
-            provider_model = "google/gemini-2.5-flash-lite"
         try:
             provider = create_provider(
                 name=provider_name,
-                api_key=self._openrouter_api_key,
                 model=provider_model,
                 preserve_captures=preserve,
                 archive_dir=archive_dir,
@@ -644,6 +657,83 @@ class ScreenAnalysisRuntime:
     async def close(self) -> None:
         if self.provider is not None and hasattr(self.provider, "close"):
             await self.provider.close()
+
+
+async def upload_capture(
+    client: httpx.AsyncClient,
+    screen_runtime: ScreenAnalysisRuntime,
+    png_bytes: bytes,
+    *,
+    app_name: str,
+    window_title: str,
+    local_analysis: dict | None,
+    observation: dict,
+) -> CaptureUploadResult | None:
+    """Hand an allowed capture to the local backend (ADR-035); never the cloud.
+
+    Returns ``None`` when upload is not configured. Failures are recorded on
+    the observation and daemon status; the context post still happens.
+    """
+    uploader = getattr(screen_runtime, "uploader", None)
+    if uploader is None or not png_bytes:
+        return None
+    try:
+        result = await uploader.upload(
+            client,
+            png_bytes,
+            app_name=app_name,
+            window_title=window_title,
+            blocklist=screen_runtime.blocklist,
+            local_analysis=local_analysis,
+        )
+    except Exception:
+        logger.debug("Capture upload error", exc_info=True)
+        result = CaptureUploadResult(status="failed", reason="upload_exception")
+    observation["capture_upload"] = {
+        "status": result.status,
+        "reason": result.reason,
+        "capture_id": result.capture_id or None,
+    }
+    _write_daemon_status(capture_upload=uploader.status())
+    if result.reason == "origin_forbidden":
+        # Older backends require Origin on every POST; say exactly what to fix.
+        logger.warning(
+            "Capture upload refused (origin_forbidden): the backend at %s does not accept "
+            "Origin-less native capture uploads or its host is not in OPERATOR_AUTH_ALLOWED_HOSTS.",
+            uploader.origin,
+        )
+    elif result.status == "failed" and result.http_status in {401, 403}:
+        logger.warning("Capture upload refused: %s (check the paired edge credential)", result.reason)
+    elif not result.stored:
+        logger.debug("Capture upload not stored: %s (%s)", result.status, result.reason)
+    return result
+
+
+def _local_analysis_payload(provider_name: str, result) -> dict | None:
+    """Carry the local provider's result (Apple Vision text) with the upload,
+    so storing the capture never discards it."""
+    if result is None or not getattr(result, "success", False):
+        return None
+    data = result.data if isinstance(getattr(result, "data", None), dict) else {}
+    return {
+        "provider": provider_name,
+        "activity": data.get("activity"),
+        "project": data.get("project"),
+        "summary": data.get("summary"),
+        "details": data.get("details") if isinstance(data.get("details"), list) else [],
+        "text": getattr(result, "text", None),
+    }
+
+
+def _context_observation_payload(observation: dict | None, upload: CaptureUploadResult | None) -> dict | None:
+    """Drop the JSON observation when the backend already stored the capture.
+
+    The uploaded capture becomes its own ScreenObservation with real metadata,
+    so posting the same moment again would duplicate it.
+    """
+    if observation is None or (upload is not None and upload.stored):
+        return None
+    return {key: value for key, value in observation.items() if key != "capture_upload"}
 
 
 # ─── Main loop ────────────────────────────────────────────
@@ -789,6 +879,7 @@ async def poll_loop(
 
                 # Build observation payload on context switch
                 observation = None
+                upload_result: CaptureUploadResult | None = None
                 if screen_runtime is not None and screen_runtime.provider is not None and app_name:
                     observation = {
                         "app": app_name,
@@ -847,6 +938,15 @@ async def poll_loop(
                                     )
                                 if png_bytes:
                                     result = await screen_runtime.provider.analyze_screen(png_bytes, app_name)
+                                    upload_result = await upload_capture(
+                                        client,
+                                        screen_runtime,
+                                        png_bytes,
+                                        app_name=app_name,
+                                        window_title=window_title or "",
+                                        local_analysis=_local_analysis_payload(screen_runtime.provider.name, result),
+                                        observation=observation,
+                                    )
                                     if result.success:
                                         screen_runtime.record_capture(now=time.time())
                                         analysis = {
@@ -922,8 +1022,9 @@ async def poll_loop(
                     payload: dict = {
                         "active_window": active_window,
                     }
-                    if observation is not None:
-                        payload["observation"] = observation
+                    context_observation = _context_observation_payload(observation, upload_result)
+                    if context_observation is not None:
+                        payload["observation"] = context_observation
                         payload["switch_timestamp"] = time.time()
 
                     await client.post(
@@ -1093,6 +1194,7 @@ async def periodic_capture_loop(
                     await asyncio.sleep(check_interval)
                     continue
 
+                upload_result: CaptureUploadResult | None = None
                 try:
                     from ocr.screenshot import capture_screen_png
 
@@ -1113,6 +1215,15 @@ async def periodic_capture_loop(
                         )
                     if png_bytes:
                         result = await screen_runtime.provider.analyze_screen(png_bytes, app_name)
+                        upload_result = await upload_capture(
+                            client,
+                            screen_runtime,
+                            png_bytes,
+                            app_name=app_name,
+                            window_title=window_title,
+                            local_analysis=_local_analysis_payload(screen_runtime.provider.name, result),
+                            observation=observation,
+                        )
                         if result.success:
                             screen_runtime.record_capture(now=now)
                             analysis = {
@@ -1186,9 +1297,11 @@ async def periodic_capture_loop(
                 try:
                     payload: dict = {
                         "active_window": active_window,
-                        "observation": observation,
                         "switch_timestamp": now,
                     }
+                    context_observation = _context_observation_payload(observation, upload_result)
+                    if context_observation is not None:
+                        payload["observation"] = context_observation
                     await client.post(f"{url}/api/observer/context", json=payload)
                     if verbose:
                         ts = time.strftime("%H:%M:%S")
@@ -1251,9 +1364,11 @@ async def main() -> None:
     )
     parser.add_argument(
         "--ocr-provider",
-        choices=["apple-vision", "openrouter", "codex-local"],
+        # ADR-035: codex-local was removed by operator decision (2026-11-13);
+        # argparse refuses any other value.
+        choices=["apple-vision"],
         default="apple-vision",
-        help="OCR provider (default: apple-vision)",
+        help="Local OCR provider (default: apple-vision, on-device)",
     )
     parser.add_argument(
         "--ocr-interval",
@@ -1264,14 +1379,14 @@ async def main() -> None:
     parser.add_argument(
         "--ocr-model",
         default=None,
-        help="Model for OCR provider (OpenRouter default: google/gemini-2.5-flash-lite; codex-local default: gpt-5.5)",
+        help="Deprecated — apple-vision takes no model. This flag is ignored.",
     )
     parser.add_argument(
         "--preserve-captures",
         action="store_true",
         default=os.environ.get("SERAPH_PRESERVE_SCREEN_CAPTURES", "").strip().lower()
         in {"1", "true", "yes", "on"},
-        help="Preserve allowed screenshots, local Codex output, and normalized analysis artifacts",
+        help="Preserve allowed screenshots, provider output, and normalized analysis artifacts",
     )
     parser.add_argument(
         "--capture-archive-dir",
@@ -1281,9 +1396,19 @@ async def main() -> None:
         help="Directory for preserved capture artifacts (default: ~/Library/Application Support/Seraph/artifacts/screen-captures)",
     )
     parser.add_argument(
-        "--openrouter-api-key",
-        default=os.environ.get("OPENROUTER_API_KEY"),
-        help="OpenRouter API key (or set OPENROUTER_API_KEY env var)",
+        "--edge-device-id",
+        default=None,
+        help="Paired edge device id for capture upload (or SERAPH_EDGE_DEVICE_ID)",
+    )
+    parser.add_argument(
+        "--edge-pairing-id",
+        default=None,
+        help="Paired edge pairing id for capture upload (or SERAPH_EDGE_PAIRING_ID)",
+    )
+    parser.add_argument(
+        "--edge-credential-file",
+        default=None,
+        help="Private file holding the paired edge credential (or SERAPH_EDGE_CREDENTIAL[_FILE]); never pass it on the command line",
     )
     parser.add_argument(
         "--blocklist-file",
@@ -1321,14 +1446,25 @@ async def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _shutdown, sig)
 
+    uploader: LocalCaptureUploader | None = None
+    try:
+        uploader = LocalCaptureUploader.from_environment(backend_url=args.url, args=args)
+    except ValueError as exc:
+        logger.error("Capture upload disabled: %s", exc)
+    if args.ocr and uploader is None:
+        logger.warning(
+            "Capture upload is not configured (pair this Mac and set SERAPH_EDGE_DEVICE_ID, "
+            "SERAPH_EDGE_PAIRING_ID and SERAPH_EDGE_CREDENTIAL_FILE); captures stay local."
+        )
+
     screen_runtime = ScreenAnalysisRuntime(
         enabled=args.ocr,
         provider=args.ocr_provider,
-        model=args.ocr_model,
+        model=None,
         preserve_captures=args.preserve_captures,
         archive_dir=args.capture_archive_dir,
-        openrouter_api_key=args.openrouter_api_key,
         blocklist_file=args.blocklist_file,
+        uploader=uploader,
     )
 
     logger.info(

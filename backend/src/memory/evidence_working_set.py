@@ -84,6 +84,7 @@ class EvidenceClaim(EvidenceCitation):
     updated_at: str
     memory_id: str | None
     model_context_allowed: bool
+    private_source: bool = False
     page: int | None = None
     row: int | None = None
     ownership_access: str = "current"
@@ -244,20 +245,7 @@ async def _latest(db, task: WorkBoardTask) -> dict[str, Any] | None:
 
 
 async def _read_task(db, owner: WorkBoardOwner, task_id: str, operator=None):
-    if operator is None:
-        return await _task(db, owner, task_id), owner
-    row = (await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))).scalar_one_or_none()
-    if row is None or row.owner_session_id == owner.session_id:
-        return await _task(db, owner, task_id), owner
-    try:
-        from src.auth.ownership import selected_read_scopes
-    except ImportError:
-        return await _task(db, owner, task_id), owner
-    selected_tasks = await selected_read_scopes(operator, "task", db=db)
-    selected_goals = await selected_read_scopes(operator, "goal", db=db)
-    if selected_tasks.get(task_id) != row.owner_session_id or selected_goals.get(row.goal_id) != row.owner_session_id:
-        return await _task(db, owner, task_id), owner
-    return row, WorkBoardOwner(principal_id=row.owner_principal_id, session_id=row.owner_session_id)
+    return await WorkBoardRepository().read_context_task(db, owner, task_id, operator=operator)
 
 
 def _source(kind: str, identifier: str, text: str, *, digest: str, version: str,
@@ -268,7 +256,7 @@ def _source(kind: str, identifier: str, text: str, *, digest: str, version: str,
             "version": version, "owner_session_id": owner.session_id,
             "owner_principal_id": owner.principal_id, "confidence": confidence,
             "updated_at": _utc(updated_at).isoformat(), "memory_id": memory_id,
-            "model_context_allowed": not private}
+            "model_context_allowed": not private, "private_source": private}
 
 
 async def _memory_sources(db, owner: WorkBoardOwner, task: WorkBoardTask,
@@ -598,7 +586,7 @@ async def _render(db, owner, task, packet, operator=None):
             "owner_session_id": source["owner_session_id"], "owner_principal_id": source["owner_principal_id"],
             "confidence": source["confidence"], "freshness": "recent" if age_days <= 7 else "stale",
             "updated_at": source["updated_at"], "memory_id": source["memory_id"],
-            "model_context_allowed": source["model_context_allowed"], "page": None, "row": None})
+            "model_context_allowed": source["model_context_allowed"], "private_source": source["private_source"], "page": None, "row": None})
         claims[-1]["ownership_access"] = source.get("ownership_access", "current")
     return {"revision": packet["revision"], "digest": packet["digest"], "task_id": task.task_id,
             "goal_id": task.goal_id, "query": packet["query"], "claims": claims,

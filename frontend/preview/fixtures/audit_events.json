@@ -1,0 +1,255 @@
+[
+ {
+  "id": "4595028455b640b0a6468fa11e99878f",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 1,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:54:06.402668"
+ },
+ {
+  "id": "d6ca7b7fbd19494c8b711e50b3f3de3d",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 3,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:54:01.408305"
+ },
+ {
+  "id": "8c17f71aab6f4078b30ed64cfa02d6cf",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "integration_succeeded",
+  "tool_name": "vault:secrets",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Vault secrets succeeded",
+  "details": {
+   "integration_type": "vault",
+   "name": "secrets",
+   "operation": "get",
+   "found": true
+  },
+  "created_at": "2026-11-14T15:54:00.559990"
+ },
+ {
+  "id": "a7e0cf427434485c80dc198dcf551b57",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 1,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:56.406122"
+ },
+ {
+  "id": "32cf5d68c0fe46458647d5cded79ef0b",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 14,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:51.447644"
+ },
+ {
+  "id": "8c88f105b22a457d90cbbba21964a62a",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 3,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:46.406343"
+ },
+ {
+  "id": "39d5989460f442bd88898e416522c626",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 1,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:41.403103"
+ },
+ {
+  "id": "0a60a8b8e54d481f8dc38a77f180e358",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 3,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:36.412640"
+ },
+ {
+  "id": "6d66b12d4af04c438718ab932ae92a92",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 3,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:31.409605"
+ },
+ {
+  "id": "a81a013ec3ab4b7392dd3118a5f9684a",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_ingest",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_ingest skipped",
+  "details": {
+   "duration_ms": 0,
+   "reason": "screenshot_folder_missing",
+   "screenshot_folder": "/private/tmp/seraph-dev-data/artifacts/screenshot-folder"
+  },
+  "created_at": "2026-11-14T15:53:31.405752"
+ },
+ {
+  "id": "598242effe1c47ceb9bbeacc7da7804d",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 3,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:26.412655"
+ },
+ {
+  "id": "18ef2b78580b42e68bac8cc8194a037f",
+  "session_id": null,
+  "actor": "system",
+  "event_type": "scheduler_job_skipped",
+  "tool_name": "screenshot_folder_analysis",
+  "risk_level": "low",
+  "policy_mode": "full",
+  "summary": "Scheduled job screenshot_folder_analysis skipped",
+  "details": {
+   "duration_ms": 2,
+   "scanned": 0,
+   "analyzed": 0,
+   "failed": 0,
+   "skipped": 0,
+   "concurrency": 2,
+   "batch_limit": 0,
+   "feeder_iterations": 0,
+   "stopped_reason": "remote_inference_no_background_capacity"
+  },
+  "created_at": "2026-11-14T15:53:21.408564"
+ }
+]

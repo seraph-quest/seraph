@@ -190,7 +190,10 @@ describe("ArtifactStoragePanel", () => {
     });
     render(<ArtifactStoragePanel />);
     await screen.findByRole("region", { name: "NEAR text settings" });
-    for (const slot of ["text", "vision", "embedding"]) expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toBeEnabled();
+    // ADR-035: OpenRouter is retired; its controls are present but cannot activate it.
+    for (const slot of ["text", "vision", "embedding"]) expect(screen.getByLabelText("OpenRouter " + slot + " model ID")).toBeDisabled();
+    expect(screen.getByTestId("openrouter-retired-banner")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Shared inference lane" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Canary profile").querySelectorAll("option")).toHaveLength(1));
     expect(screen.getByRole("button", { name: "Run canary" })).toBeDisabled();
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
@@ -259,6 +262,7 @@ describe("ArtifactStoragePanel", () => {
       if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({
         provider: "local",
         model: "gemma-text",
+        cordis_runtime: { state: "blocked", reason: "node_unsupported", profile_id: "core.cpu", cordis_version: "4.0.0-rc.10", node_version: "22.11.0", composition_digest: null, package_digest: null, plugins: [], cleanup: { state: "not_started", process_reaped: false, resources_remaining: null, cordis_disposal: "not_started" } },
         model_fabric: {
           status: "ready",
           configuration_status: "ready",
@@ -280,6 +284,8 @@ describe("ArtifactStoragePanel", () => {
     render(<ArtifactStoragePanel />);
 
     expect(await screen.findByText("Model fabric")).toBeInTheDocument();
+    expect(await screen.findByText("blocked · node_unsupported")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh Cordis host" })).toBeEnabled();
     expect(await screen.findByText("text: interactive, background, report · VLM: vision")).toBeInTheDocument();
     expect(screen.getByText(/local-text\/gemma-text:routable/)).toBeInTheDocument();
     const textRoute = screen.getByText(/selected local-text · attempted local-text:succeeded · actual local-text\/gemma-text/);
@@ -352,6 +358,62 @@ describe("ArtifactStoragePanel", () => {
     });
   });
 
+  it("proves every required route capability in order with the selected proof lifetime and stops on failure", async () => {
+    const artifactStorage = settingsFromScreenAnalysisFixture({
+      enabled: false, provider: "openrouter", model: "", preserve_captures: true,
+      archive_dir: "/tmp/seraph-fixture/artifacts", capture_mode: "on_switch", cadence_seconds: null,
+      daemon_connected: false, artifact_count: 0, last_artifact_at: null,
+    });
+    const profile = {
+      id: "openrouter.text", provider_kind: "openrouter", model: "fixture/text", api_base: "https://openrouter.ai/api/v1",
+      enabled: true, secret_configured: true, missing_secret: false, capabilities: ["text", "streaming", "tool_use"],
+      transport_adapter: "openai_compatible_chat", model_fabric_eligible: true, model_fabric_exclusion_reason: null,
+      routable: true, non_routable_reasons: [], canary_timeout_seconds: 30,
+    };
+    const settingsPayload = {
+      schema_version: "seraph.model-fabric.settings.v1", status: "ready", error_code: null, updated_at: null,
+      profiles: [profile], persisted_profile_ids: ["openrouter.text"], workload_policies: [],
+      defaults: { egress_class: "local_only", fallback_allowed: false }, canary_endpoint: "/api/settings/model-fabric/canary",
+      canary_proof_ttl: { default_seconds: 3600, max_seconds: 86400 },
+    };
+    // Synthetic canary responses; the provider is never contacted.
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/settings/artifact-storage")) return Promise.resolve(mockResponse(artifactStorage));
+      if (url.includes("/api/settings/model-fabric/canary") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        const passed = body.capability !== "streaming";
+        return Promise.resolve(mockResponse({
+          profile_id: "openrouter.text", capability: body.capability, outcome: passed ? "passed" : "failed",
+          error_code: passed ? null : "canary_shape_invalid",
+          proof: passed ? { proof_hash: "f".repeat(64), profile_id: "openrouter.text", model: "fixture/text", adapter: "openai_compatible_chat", capability: body.capability, outcome: "passed", checked_at: "2026-10-15T12:00:00Z", expires_at: "2026-10-16T12:00:00Z", proven_value: "supported" } : null,
+          receipt_persistence: "persisted", proof_persistence: passed ? "persisted" : "not_created",
+        }));
+      }
+      if (url.includes("/api/settings/model-fabric")) return Promise.resolve(mockResponse(settingsPayload));
+      if (url.includes("/api/runtime/status")) return Promise.resolve(mockResponse({ provider: "openrouter", model: "fixture/text", model_fabric: { status: "ready", configuration_status: "ready", configuration_error: null, configured_chat_profile: "openrouter.text", profiles: [profile], topology: { text: ["interactive"], vlm: [] }, workloads: {} } }));
+      return Promise.reject(new Error(`unexpected ${url}`));
+    });
+
+    render(<ArtifactStoragePanel />);
+    const prove = await screen.findByRole("button", { name: "Prove route" });
+    expect(screen.getByText(/Each canary is one real, billed OpenRouter call/)).toBeInTheDocument();
+    await waitFor(() => expect(prove).toBeEnabled());
+    expect(screen.getByRole("option", { name: "24 hours" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Proof lifetime"), { target: { value: "86400" } });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/canary"))).toBe(false);
+    fireEvent.click(prove);
+
+    expect(await screen.findByText(/Prove route stopped at streaming: canary_shape_invalid/)).toBeInTheDocument();
+    const bodies = fetchMock.mock.calls
+      .filter(([input]) => String(input).includes("/canary"))
+      .map(([, init]) => JSON.parse(String(init?.body)));
+    // Capabilities run in order (text, streaming, tool_use, health, latency_ms) and stop at the first failure.
+    expect(bodies.map((body) => body.capability)).toEqual(["text", "streaming"]);
+    expect(bodies.every((body) => body.proof_ttl_seconds === 86400 && body.profile_id === "openrouter.text")).toBe(true);
+    expect(screen.getByTestId("prove-route-results")).toHaveTextContent("text · passed · expires 2026-10-16T12:00:00Z");
+  });
+
   it.each([
     "egress_revision_conflict",
     { code: "egress_revision_conflict", message: "Review the current policy revision." },
@@ -389,6 +451,9 @@ describe("ArtifactStoragePanel", () => {
       defaults: { egress_class: "cloud_allowed_full", fallback_allowed: false },
       canary_endpoint: "/api/settings/model-fabric/canary", egress_revision: 7, egress_revoked: false,
       openrouter_setup: setup,
+      // Pins the historical (pre-ADR-035) save journey with an explicit
+      // "active" report; the default retired state is asserted separately.
+      provider_retirement: { openrouter: { state: "active" } },
     };
     let currentSettings = settingsPayload;
     let rejectSave = true;

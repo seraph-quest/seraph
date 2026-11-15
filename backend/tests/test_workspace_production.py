@@ -653,6 +653,72 @@ def test_managed_restore_blocks_when_a_stored_derived_index_needs_rebuild(tmp_pa
     assert (root / "lance" / "index.bin").read_bytes() == b"derived-index"
 
 
+
+def test_managed_restore_succeeds_with_the_background_inference_status_file(tmp_path):
+    """#1020: the runtime-written status file (and a stray .tmp) never blocks a restore."""
+    root = _workspace(tmp_path)
+    (root / "background-inference-status.json").write_text('{"schema_version": 1, "jobs": {}}')
+    (root / "background-inference-status.tmp").write_text("{")
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "status.zip"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert backup.returncode == 0, backup.stderr
+    archive = json.loads(backup.stdout)["archive_path"]
+    restore = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
+        env=environment,
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert restore.returncode == 0, restore.stdout + restore.stderr
+    assert json.loads(restore.stdout)["stage_receipt"]["restore_reconciliation"]["status"] == "ready"
+
+def test_managed_backup_and_restore_accept_the_near_tee_state_files(tmp_path):
+    """#1180: the NEAR TEE catalog stores are cache, the credential binding canonical.
+
+    Undeclared, any workspace that had run a catalog check failed every backup
+    with unknown_workspace_path. As cache it is never archived, so a restored
+    workspace holds no receipt and the slot fails closed until re-checked.
+    """
+    root = _workspace(tmp_path)
+    (root / "near-tee-catalog-receipts.json").write_text('{"schema_version": "x", "receipts": {}}')
+    (root / "near-tee-catalog-observations.json").write_text('{"schema_version": "x", "observations": {}}')
+    binding = '{"bound_since": 1.0, "fingerprint": "0123456789ab", "schema_version": "x"}'
+    (root / "near-tee-credential-binding.json").write_text(binding)
+    environment = os.environ.copy()
+    environment.update(_env(root))
+    environment["PYTHONPATH"] = str(ROOT / "backend")
+    backup = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "backup", "--archive", "near-catalog.zip"],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert backup.returncode == 0, backup.stdout + backup.stderr
+    archive = json.loads(backup.stdout)["archive_path"]
+    import zipfile
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+        assert not any(name.endswith(("near-tee-catalog-receipts.json", "near-tee-catalog-observations.json"))
+                       for name in names)
+        # The credential binding pairs with the archived proofs in seraph.db.
+        assert any(name.endswith("near-tee-credential-binding.json") for name in names)
+    restore = subprocess.run(
+        [sys.executable, str(CLI), "--base-dir", str(tmp_path), "restore", "--archive", archive, "--confirm"],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert restore.returncode == 0, restore.stdout + restore.stderr
+    assert (root / "near-tee-credential-binding.json").read_text() == binding
+
+
 def test_manage_prod_commands_use_host_bind_and_never_start_compose(tmp_path):
     root = _workspace(tmp_path)
     env_file = ROOT / ".env.prod"
@@ -992,3 +1058,118 @@ def test_isolated_backup_restore_restart_and_rollback_drill_preserves_state(tmp_
 
 def workspace_backup_dir_for(root: Path) -> Path:
     return root.parent / f"{root.name}.backups"
+
+
+def _cli(tmp_path, environment, *arguments):
+    completed = subprocess.run([sys.executable, str(CLI), "--base-dir", str(tmp_path), *arguments],
+        env=environment, cwd=ROOT, capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_background_inference_toggles_survive_backup_and_restore(tmp_path, monkeypatch):
+    from config.settings import settings
+    from src.scheduler import background_inference
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+
+    # An archive taken before any toggle exists still restores, with defaults.
+    before = _cli(tmp_path, environment, "backup", "--archive", "before-toggles.zip")
+    background_inference.write_background_inference_settings({"strategist_tick": False})
+    archive = _cli(tmp_path, environment, "backup", "--archive", "with-toggles.zip")
+    entries = {entry["logical_path"]: entry for entry in canonical_workspace_registry(root).build_manifest()["entries"]}
+    assert entries["background-inference-settings.json"]["state_class"] == "canonical"
+
+    background_inference.write_background_inference_settings({"strategist_tick": True, "daily_briefing": False})
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    restored, error = background_inference.read_background_inference_settings()
+    assert error is None
+    assert restored["strategist_tick"] is False and restored["daily_briefing"] is True
+
+    _cli(tmp_path, environment, "restore", "--archive", before["archive_path"], "--confirm")
+    assert not background_inference.background_inference_settings_path().exists()
+    defaults, error = background_inference.read_background_inference_settings()
+    assert error is None and all(defaults.values())
+
+
+@pytest.mark.parametrize("writer", ["extension-lock", "evolution-state", "near-catalog-receipts",
+                                    "near-catalog-observations", "near-credential-binding"])
+def test_runtime_workspace_writers_never_block_backup_or_restore(tmp_path, monkeypatch, writer):
+    from config.settings import settings
+    from src.workspace.state_registry import production_workspace_inventory
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+    if writer == "extension-lock":
+        from src.api.extensions import _extension_effect_guard
+        with _extension_effect_guard():
+            pass
+        assert (root / ".seraph-extension-lifecycle.lock").exists()
+    elif writer.startswith("near-"):
+        # The real NEAR TEE writers (#1178/#1180), through their own staging.
+        from src.model_fabric import near_tee_catalog
+        from src.model_fabric.configuration import record_near_tee_credential_binding
+        if writer == "near-catalog-receipts":
+            near_tee_catalog.write_catalog_receipts({})
+            assert (root / "near-tee-catalog-receipts.json").exists()
+        elif writer == "near-catalog-observations":
+            near_tee_catalog.write_catalog_observations({})
+            assert (root / "near-tee-catalog-observations.json").exists()
+        else:
+            record_near_tee_credential_binding("0123456789ab", now=1.0)
+            assert (root / "near-tee-credential-binding.json").exists()
+        assert not list(root.glob(".near-tee-*.tmp"))  # staging never survives a write
+    else:
+        from src.evolution.runtime import EvolutionRuntime
+        runtime = EvolutionRuntime(EvolutionRuntime.default_path(root))
+        with runtime._locked():
+            runtime.state_path.write_text('{"schema_version": 1, "proposals": {}}\n', encoding="utf-8")
+        assert (root / "evolution" / "runtime-state.json").exists()
+    assert production_workspace_inventory(root)["status"] != "blocked"
+    archive = _cli(tmp_path, environment, "backup", "--archive", f"{writer}.zip")
+    if writer == "evolution-state":
+        (root / "evolution" / "runtime-state.json").write_text("changed\n", encoding="utf-8")
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    if writer == "evolution-state":
+        # Operator evolution state is canonical and round-trips.
+        assert (root / "evolution" / "runtime-state.json").read_text(encoding="utf-8").startswith('{"schema_version"')
+    _cli(tmp_path, environment, "backup", "--archive", f"{writer}-after.zip")
+
+
+@pytest.mark.parametrize("with_object", [False, True], ids=["empty", "with-object"])
+def test_audio_documentation_objects_never_block_backup_restore_or_inventory(tmp_path, monkeypatch, with_object):
+    import hashlib
+    from types import SimpleNamespace
+    from config.settings import settings
+    from src.model_fabric import audio_documentation as documentation
+    from src.workspace.state_registry import production_workspace_inventory
+    root = _workspace(tmp_path)
+    monkeypatch.setattr(settings, "workspace_dir", str(root))
+    environment = {**os.environ, **_env(root), "PYTHONPATH": str(ROOT / "backend")}
+    os.close(documentation.object_directory())  # <workspace>/.model-fabric/audio-documentation/objects
+    raw = b"bounded official documentation bytes"
+    source = SimpleNamespace(object_id="a" * 32 + ".source", size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+    if with_object:
+        documentation.private_write(source.object_id, raw)
+        assert documentation.private_read(source) == raw
+
+    inventory = production_workspace_inventory(root)
+    assert inventory["status"] != "blocked", inventory
+    entries = {entry["logical_path"]: entry for entry in canonical_workspace_registry(root).build_manifest()["entries"]}
+    assert entries[".model-fabric"]["state_class"] == "cache"
+    archive = _cli(tmp_path, environment, "backup", "--archive", "audio-docs.zip")
+    import zipfile
+    with zipfile.ZipFile(archive["archive_path"]) as bundle:
+        # Rebuildable objects are never archived.
+        assert not any(".model-fabric" in name and name.endswith(".source") for name in bundle.namelist())
+    _cli(tmp_path, environment, "restore", "--archive", archive["archive_path"], "--confirm")
+    assert production_workspace_inventory(root)["status"] != "blocked"
+    _cli(tmp_path, environment, "backup", "--archive", "after-restore.zip")
+    # The canonical attestation row survives in seraph.db while its object is
+    # rebuildable: a missing object fails closed with a typed reason.
+    object_path = root / ".model-fabric" / "audio-documentation" / "objects" / source.object_id
+    object_path.unlink(missing_ok=True)
+    with pytest.raises(documentation.DocumentationError) as missing:
+        documentation.private_read(source)
+    assert missing.value.code == "audio_documentation_source_missing"

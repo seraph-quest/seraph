@@ -619,6 +619,8 @@ async def reserve_occurrence(
     if not binding_id:
         raise ValueError("governed schedule binding is unavailable")
     await _begin_serialized(db)
+    from src.runtime_plugins.lifecycle import assert_tick_fence
+    await assert_tick_fence(db)  # #1025: stale scheduler epochs reserve nothing
     # SQLite DateTime binds are timezone-naive. Store one canonical UTC wall
     # value there; _utc restores its semantic timezone at comparison/receipt
     # boundaries.
@@ -771,6 +773,8 @@ async def claim_occurrence(
     fence = int(occurrence.fencing_token if fencing_token is None else fencing_token)
     if not token or occurrence.state != "reserved":
         raise ValueError("governed occurrence is not claimable")
+    from src.runtime_plugins.lifecycle import assert_tick_fence
+    await assert_tick_fence(db)  # #1025: stale scheduler epochs claim nothing
     result = await db.execute(
         update(GovernedScheduleOccurrence)
         .where(

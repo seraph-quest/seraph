@@ -72,7 +72,7 @@ export function validSetupSource(source: string): boolean {
 export function setupRecovery(reason: string): string {
   if (/source|https|policy|permission/.test(reason)) return "Use an accessible public HTTPS text page and review its source permission in Connections. Your draft is retained.";
   if (/budget|grant|consent|proactive|expired/.test(reason)) return "Open Goals to review this goal’s finite consent and budget, then refresh the task. Your draft is retained.";
-  if (/provider|model|openrouter/.test(reason)) return "Open Settings → OpenRouter setup for any model-dependent work. Both starter paths use no model; inspect the task’s effective route before retrying.";
+  if (/provider|model|openrouter/.test(reason)) return "Open Settings → Models & OpenRouter for any model-dependent work. Both starter paths use no model; inspect the task’s effective route before retrying.";
   if (/unknown|reconcil|cost_liability/.test(reason)) return "Open Work and reconcile this exact attempt. Do not replay an uncertain outcome.";
   return "Refresh this task or open Work to inspect its recovery step. Your draft and existing workspace are retained.";
 }

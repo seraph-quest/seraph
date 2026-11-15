@@ -1100,17 +1100,26 @@ async def test_http_block_rejects_stale_source_status(client, async_db):
 
 
 @pytest.mark.asyncio
-async def test_http_cancel_action_returns_authoritative_event_receipt(client, monkeypatch):
-    task = WorkBoardTask(
-        task_id="api-cancel-task",
-        owner_principal_id="operator:test-bypass",
-        owner_session_id="test-auth-bypass",
-        goal_id="goal-api-cancel",
-        title="Cancel receipt",
-        idempotency_key="api-cancel-task",
-        status=WorkBoardStatus.running,
-        task_revision=5,
-    )
+async def test_http_cancel_action_returns_authoritative_event_receipt(client, async_db, monkeypatch):
+    goal_id = await _create_goal(client)
+    created = await client.post("/api/work-board/tasks", json={
+        **_task_payload(key="api-cancel-task"), "goal_id": goal_id, "title": "Cancel receipt",
+    })
+    assert created.status_code == 200
+    task_id = created.json()["task"]["task_id"]
+    async with async_db() as db:
+        stored = await WorkBoardRepository().get_task(db, WorkBoardOwner(
+            principal_id="operator:test-bypass", session_id="test-auth-bypass"), task_id)
+        assert stored.owner_principal_id == "operator:test-bypass"
+        assert stored.owner_session_id == stored.origin_session_id == "test-auth-bypass"
+        assert stored.goal_id == goal_id and stored.goal_revision == 1
+        stored.status = WorkBoardStatus.running
+        stored.task_revision = 4
+        db.add(stored)
+        await db.commit()
+        # The mocked cancellation owns only the post-action receipt. The
+        # route must first find the actual current-owner pre-action task.
+        task = WorkBoardTask.model_validate({**stored.model_dump(), "task_revision": 5})
     attempt = WorkBoardAttempt(
         task_id=task.task_id,
         attempt_id="api-cancel-attempt",
@@ -1130,11 +1139,13 @@ async def test_http_cancel_action_returns_authoritative_event_receipt(client, mo
         kind="attempt.cancel_requested",
     )
 
+    cancel_calls = []
     async def fake_cancel(owner, task_id, *, expected_revision):
         assert owner.principal_id == task.owner_principal_id
         assert owner.session_id == task.owner_session_id
         assert task_id == task.task_id
         assert expected_revision == 4
+        cancel_calls.append(task_id)
         return SimpleNamespace(task=task, attempt=attempt, event=event)
 
     monkeypatch.setattr("src.api.work_board.dispatcher.cancel_task", fake_cancel)
@@ -1144,6 +1155,7 @@ async def test_http_cancel_action_returns_authoritative_event_receipt(client, mo
     )
 
     assert response.status_code == 200
+    assert cancel_calls == [task.task_id]
     body = response.json()
     assert {
         "task_id",

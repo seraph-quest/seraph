@@ -431,6 +431,7 @@ class WorkBoardWorkerTools:
                 owner,
                 request.task_id,
                 WorkBoardCommentCreate(expected_revision=request.expected_task_revision, body=request.body),
+                provenance="worker",
             )
             return {
                 "status": "commented",
@@ -546,6 +547,7 @@ class WorkBoardWorkerTools:
                 owner,
                 request.task_id,
                 WorkBoardCommentCreate(expected_revision=request.expected_task_revision, body=body),
+                provenance="worker",
             )
             return {
                 "status": kind,

@@ -38,6 +38,9 @@ class RepoSandboxSettings(BaseModel):
     max_cpu_seconds: int = 120
     max_memory_bytes: int = 512 * 1024 * 1024
     max_pids: int = 64
+    # Refuse to run repository commands when the OS sandbox (#1065) is not
+    # available. When false, the posture and approval say "NOT ISOLATED".
+    require_isolation: bool = False
 
     model_config = {"extra": "forbid"}
 
@@ -111,6 +114,17 @@ class Settings(BaseSettings):
     operator_auth_allow_unauthenticated_tests: bool = False
     operator_auth_backend_workers: int = 1
     operator_auth_revocation_poll_seconds: float = 2.0
+    # Opt-in local single-operator mode without a password (#1161). Startup
+    # refuses it unless DEPLOYMENT_ENVIRONMENT=development, no operator
+    # secret/hash is configured, and the backend binds loopback only. Every
+    # request is still checked for a loopback peer plus allowed Host/Origin.
+    # Any local process or page that passes those checks has operator
+    # authority; never enable it on a shared or remotely reachable host.
+    operator_auth_local_no_login: bool = False
+    # The host the backend listener binds. The managed local launcher exports
+    # it beside its ``--host`` argument; local no-login mode refuses to start
+    # unless it names a loopback address.
+    backend_bind_host: str = ""
 
     # Phase 1 — Soul & Memory
     soul_file: str = "soul.md"
@@ -130,6 +144,8 @@ class Settings(BaseSettings):
     repo_sandbox: RepoSandboxSettings = Field(default_factory=RepoSandboxSettings)
     browser_timeout: int = 30
     browser_site_allowlist: str = ""  # comma-separated hostname patterns allowed for browse/search
+    # Reviewed Node 22.12+/24 for the Cordis host (goal research); empty uses `node` on PATH.
+    cordis_node_path: str = ""
     browser_site_blocklist: str = ""  # comma-separated hostname patterns blocked for browse/search
 
     # Phase 3.5 — Timeouts
@@ -147,6 +163,9 @@ class Settings(BaseSettings):
 
     # Phase 3 — Scheduler & Proactivity
     scheduler_enabled: bool = True
+    # ADR-035 amendment #1178: background, informational re-read of NEAR's
+    # public catalog for enabled NEAR TEE slots (never blocks dispatch).
+    near_tee_catalog_refresh_enabled: bool = True
     proactivity_level: int = 3  # 1-5 scale
     morning_briefing_hour: int = 8
     evening_review_hour: int = 21

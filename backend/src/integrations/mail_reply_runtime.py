@@ -644,7 +644,9 @@ async def decide(operator, ident, *, decision, expected_digest):
     return await snapshot(operator, ident)
 
 
-async def execute(operator, ident, **boundary):
+async def execute(operator, ident, *, report=None, **boundary):
+    """``report`` (optional) learns whether THIS call claimed the send-once intent and under
+    which fence, so a caller never mistakes another caller's send for its own (#1092)."""
     original = await get_run(operator, ident)
     if original.status != "paused" or state(original).get("intent"):
         return await snapshot(operator, ident)  # Receipt-first replay, never another POST.
@@ -684,7 +686,9 @@ async def execute(operator, ident, **boundary):
                 "account_digest": digest(account), "preview_artifact": ref}
             async with writer() as db:
                 run = await get_run(operator, ident, db=db)
-                await claim_intent(db, operator, run, lease=lease, intent=intent, approval_id=intent["approval_id"])
+                claimed = await claim_intent(db, operator, run, lease=lease, intent=intent, approval_id=intent["approval_id"])
+            if report is not None and claimed:
+                report.update(intent_claimed=True, fencing_token=lease.fencing_token, intent_digest=digest(intent))
             # Fresh pure canonical authority is checked in Contacts.before,
             # after strict resource recomputation and immediately before POST.
             response = await contacts.request(send, "send", resource=validate_resource(private["frozen"]))

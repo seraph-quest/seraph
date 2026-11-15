@@ -1,0 +1,170 @@
+{
+  "protocol": 1,
+  "profile_id": "seraph-cordis-bootstrap-v1",
+  "plugins": [
+    {
+      "id": "seraph.host-lifecycle@1.0.0",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.state.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.authority.v1",
+      "required": true,
+      "dependencies": [
+        "seraph.state.v1"
+      ],
+      "config": {}
+    },
+    {
+      "id": "seraph.goals.v1",
+      "required": true,
+      "dependencies": [
+        "seraph.state.v1",
+        "seraph.authority.v1"
+      ],
+      "config": {}
+    },
+    {
+      "id": "seraph.tasks.v1",
+      "required": true,
+      "dependencies": [
+        "seraph.state.v1",
+        "seraph.authority.v1"
+      ],
+      "config": {}
+    },
+    {
+      "id": "seraph.capabilities.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.inference.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.memory.v1",
+      "required": true,
+      "dependencies": [
+        "seraph.state.v1",
+        "seraph.authority.v1",
+        "seraph.audit.v1"
+      ],
+      "config": {}
+    },
+    {
+      "id": "seraph.artifacts.v1",
+      "required": true,
+      "dependencies": [
+        "seraph.state.v1",
+        "seraph.authority.v1"
+      ],
+      "config": {}
+    },
+    {
+      "id": "seraph.audit.v1",
+      "required": true,
+      "dependencies": [
+        "seraph.state.v1"
+      ],
+      "config": {}
+    },
+    {
+      "id": "seraph.research.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.conversation.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.scheduler.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.dispatch.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.connections.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.agent-presets.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.agent-loop.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.guardian.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.delegation.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.board-workers.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.source-extraction.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {
+        "formats": {
+          "text/plain": "plain-text",
+          "text/html": "html-text",
+          "application/rss+xml": "rss-atom",
+          "application/atom+xml": "rss-atom",
+          "application/xml": "rss-atom",
+          "text/xml": "rss-atom"
+        }
+      }
+    },
+    {
+      "id": "seraph.goal-plan.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    },
+    {
+      "id": "seraph.guardian-research.v1",
+      "required": true,
+      "dependencies": [],
+      "config": {}
+    }
+  ]
+}

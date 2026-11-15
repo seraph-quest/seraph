@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ConnectionSyncPanel } from "../cockpit/ConnectionSyncPanel";
 
 import {
   CalendarApiError,
@@ -169,6 +170,7 @@ export function clearCalendarControlRecovery(ownerPrincipalId?: string | null, o
 export function CalendarConnectionPanel({ service = SERVICE, ownerPrincipalId, ownerSessionId }: CalendarConnectionPanelProps) {
   const mountedRef = useRef(true);
   const controlScope = calendarControlScope(ownerPrincipalId, ownerSessionId);
+  const [syncConnectionId, setSyncConnectionId] = useState<string | null>(null);
   const recoveryAtMount = controlScope ? pendingCalendarControls.get(controlScope) : null;
   const [connections, setConnections] = useState<CalendarConnectionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
@@ -611,6 +613,8 @@ export function CalendarConnectionPanel({ service = SERVICE, ownerPrincipalId, o
                   {result && <button type="button" className="cockpit-feedback-button" onClick={() => void refreshCalendars(connection)} disabled={connectionBusy}>Refresh list</button>}
                   <button type="button" className="cockpit-feedback-button" onClick={() => void revoke(connection)} disabled={connectionBusy || connection.state === "revoked"}>{revokeBusy === connection.connection_id ? "Revoking…" : controlPending[revokePendingKey] ? "Retry exact revoke" : "Revoke"}</button>
                 </div>
+                <button type="button" className="cockpit-feedback-button mt-2" onClick={() => setSyncConnectionId(syncConnectionId === connection.connection_id ? null : connection.connection_id)}>Inspect saved calendar sync</button>
+                {syncConnectionId === connection.connection_id && <ConnectionSyncPanel inspectionOnly provider="calendar" ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} connectionId={connection.connection_id} connectionRevision={connection.revision} connectionState={connection.state} consent={{ id: "inspection", revision: 1, goalId: "unavailable", goalRevision: 1, state: "unavailable", expiresAt: "unavailable", metadataLimit: 0, privateLimit: 0 }} />}
                 {verifyMessage && <div className="mt-2 text-amber-300" role="alert">{verifyMessage}{reconciledControls[verifyPendingKey] && verifyErrorCode[connection.connection_id] && STALE_RECONCILIATION_CODES.has(verifyErrorCode[connection.connection_id]!) && <button type="button" className="ml-2 underline" onClick={() => startFreshControlAttempt(verifyPendingKey)}>Start new verify attempt</button>}</div>}
                 {revokeError[connection.connection_id] && <div className="mt-2 text-amber-300" role="alert">{revokeError[connection.connection_id]}{reconciledControls[revokePendingKey] && revokeErrorCode[connection.connection_id] && STALE_RECONCILIATION_CODES.has(revokeErrorCode[connection.connection_id]!) && <button type="button" className="ml-2 underline" onClick={() => startFreshControlAttempt(revokePendingKey)}>Start new revoke attempt</button>}</div>}
                 {result && <div className="mt-2 rounded border border-emerald-500/30 p-2" aria-label="Verified calendars"><div>Verified revision {result.connection.revision} · {result.calendars.length} shown · {result.truncated ? "more calendars omitted by the server" : "bounded list complete"}</div><div className="mt-1 grid gap-1">{result.calendars.map((calendar: CalendarOption) => <div key={calendar.calendar_id} className="flex justify-between gap-2"><span>{calendar.summary}</span><span className="font-mono opacity-60">{calendar.calendar_id}</span></div>)}</div></div>}

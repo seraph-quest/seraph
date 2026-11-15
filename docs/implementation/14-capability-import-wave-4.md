@@ -381,7 +381,7 @@ ideas through Seraph's extension platform and guardian trust boundaries.
   - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_extensions_api.py tests/test_workflow_runtimes_api.py tests/test_workflows.py tests/test_extension_registry.py -q`
   - result: `125 passed`
 - backend full suite:
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+  - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
   - result: `1192 passed, 4 warnings`
 - frontend full suite:
   - `cd frontend && npm test`

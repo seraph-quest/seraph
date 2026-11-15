@@ -14,6 +14,15 @@ function reviewedDestination(value: unknown): string[] {
     lines.push(`GitHub ${target.repository} · ${String(scope.action)}${Number.isSafeInteger(target.issue_number) ? ` · issue ${String(target.issue_number)}` : ""}`);
     for (const key of ["title_sha256", "body_sha256"]) if (typeof payload?.[key] === "string" && /^[a-f0-9]{64}$/.test(payload[key] as string)) lines.push(`${key}: ${payload[key] as string}`);
   }
+  if (["forgejo.issue-create.v1", "forgejo.issue-comment.v1"].includes(String(target?.profile))) {
+    lines.push(`Forgejo ${String(target?.owner)}/${String(target?.repository)} · ${String(target?.profile)}`);
+    lines.push(`Repository ID ${String(target?.repository_id)} · actor ID ${String(target?.provider_user_id)}`);
+    if (Number.isSafeInteger(target?.issue_id)) lines.push(`Issue ID ${String(target?.issue_id)} · issue ${String(target?.issue_index)}`);
+    lines.push("Read the protected literal field preview in Forgejo settings and explicitly acknowledge its one native POST. Ordinary notifications and history may be created.");
+    for (const key of ["page_digest", "encoded_body_digest"]) {
+      if (typeof target?.[key] === "string" && /^[a-f0-9]{64}$/.test(target[key] as string)) lines.push(`${key}: ${target[key] as string}`);
+    }
+  }
   return lines;
 }
 
@@ -31,6 +40,7 @@ export function TaskApprovalReview({ task, owner, approvalId, metadataConfirmed,
   const [message, setMessage] = useState<string | null>(null);
   const generation = useRef(0);
   const controller = useRef<AbortController | null>(null);
+  const formReview = approval?.tool_name === "browser.forgejo-forms.v1";
   const refresh = async () => {
     const version = ++generation.current;
     controller.current?.abort();
@@ -55,7 +65,7 @@ export function TaskApprovalReview({ task, owner, approvalId, metadataConfirmed,
   }, [owner.principalId, owner.sessionId, task.task_id, task.task_revision, task.latest_attempt?.attempt_id, task.latest_attempt?.workflow_run_id, approvalId, metadataConfirmed]);
 
   const decide = async (action: "approve" | "deny") => {
-    if (!approval || !metadataConfirmed || busy) return;
+    if (!approval || !metadataConfirmed || busy || (action === "approve" && formReview)) return;
     const version = generation.current;
     setBusy(true); setApproval(null); setMessage(null);
     try {
@@ -81,7 +91,7 @@ export function TaskApprovalReview({ task, owner, approvalId, metadataConfirmed,
       {message && <p role="status" className="mt-2 text-xs">{message}</p>}
       <div className="mt-2 flex flex-wrap gap-2">
         <button type="button" className="cockpit-feedback-button" disabled={busy || !metadataConfirmed || task.ownership_access === "recovered_read_only"} onClick={() => void refresh()}>Refresh exact approval</button>
-        <button type="button" className="cockpit-feedback-button" disabled={busy || !approval || !metadataConfirmed} onClick={() => void decide("approve")}>Approve exact action</button>
+        <button type="button" className="cockpit-feedback-button" disabled={busy || !approval || !metadataConfirmed || formReview} onClick={() => void decide("approve")}>Approve exact action</button>
         <button type="button" className="cockpit-feedback-button" disabled={busy || !approval || !metadataConfirmed} onClick={() => void decide("deny")}>Deny exact action</button>
       </div>
     </section>

@@ -20,6 +20,7 @@ class AnalysisResult:
     data: dict  # {activity, project, summary, details}
     duration_ms: int
     error: str | None = None
+    text: str | None = None  # full on-device OCR text when the provider has it
 
 
 class OCRProvider(abc.ABC):
@@ -56,4 +57,5 @@ class OCRProvider(abc.ABC):
             },
             duration_ms=result.duration_ms,
             error=result.error,
+            text=result.text if result.success else None,
         )

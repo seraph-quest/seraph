@@ -10,13 +10,661 @@ Seraph is an AI guardian that remembers, watches, and acts. This page is the fas
 **Document class:** Shipped and Partial implementation inventory.
 **Target authority:** [Project Constitution](./00-project-constitution.md).
 
-The detailed inventory below records the large existing baseline. Some shipped runtime contracts and implementations remain transitional;
-Epic #736 tracks their migration while macOS and Linux remain peer core-host targets. New target capabilities remain **Planned** until
+The detailed inventory below records the existing baseline after the completed
+Epic #736 foundation. Some implementations remain transitional while macOS and
+Linux remain peer core-host targets. New capabilities remain **Planned** until
 merged to `develop` with the required validation receipts.
+
+**Cordis runtime migration: Partial.**
+[ADR-026](./decisions/026-all-plugin-cordis-architecture.md) records the accepted
+all-plugin composition target. Parts of it run on `develop` (each entry below
+states its own proof limits): an optional reviewed Cordis child process
+(`runtime/cordis`) hosting typed service facades over Python owners (#1007,
+#1018), guardian research (#1008), the chat agent loop (#1019), and presets,
+guardian, delegation and Board worker turns (#1020). Each runtime domain
+changes owner only through its fenced `RuntimeCompositionState` epoch. The
+Python/FastAPI backend remains the parent process and the owner of canonical
+state, authority, audit, scheduling and interfaces; A3 ownership of state,
+scheduling and interfaces (#1024–#1026) is not complete (#1025 moves the
+scheduler and dispatcher lifecycle decision to the owner rows, Partial). Without Node or a
+built package only Cordis-dependent work blocks. Existing extension and
+capability-pack support is separate from this migration.
+
+**Bounded iterative repository work: Partial; original-producer crash recovery: Planned.**
+[ADR-030](./decisions/030-bounded-iterative-repository-work.md) (#1009) ships one
+`repository_work` Task per bug or change request, whether the operator supplies the
+plan or accepts a reviewed planner proposal. After selected-source consent, up to
+three manually approved patch iterations run under the original deadline, cost and
+iteration limits with Python pytest or Node 24 npm test/build checks. Each run
+records a local patch artifact and the actual requested command output. A requested
+check that exits non-zero continues into the next bounded iteration without renewing
+those limits. Base drift or a dirty live tree blocks before execution; the live tree
+is never overwritten.
+
+One original holds the workspace's single repository lane, so a second repository
+Task is refused with `repository_execution_busy` until the first closes. A
+timed-out, output-truncated or Stop-interrupted check is recorded as a partial with
+its logs, never as a check result. Operator Stop then closes it and releases the
+lane. After its original cutoff, the original closes by its own deadline cause: on
+operator Stop, on the next repository admission, or on the dispatcher tick, with
+no live operator session required. Only an unproven process closure stays held:
+a lost or still-running original producer, or an Unknown result or cost.
+Crash/restart recovery for those cases is the tracked follow-up
+[#1063](https://github.com/seraph-quest/seraph/issues/1063). The public Source
+recovery action stays fail-closed (HTTP 503). New admissions record the
+[ADR-032](./decisions/032-repository-crash-recovery-evidence.md) v4 evidence,
+but that evidence authorizes no recovery yet.
+
+Repository command isolation ([#1065](https://github.com/seraph-quest/seraph/issues/1065))
+is **Partial**: on hosts where bubblewrap user namespaces work (verified on Ubuntu
+26.04 x86_64), repository git/test/build commands run in an OS sandbox with no
+network, only the job's stage visible among the operator's files (system files
+such as `/etc` and the runtime stay readable, read-only) and per-process
+CPU/address-space/file-size/process-count limits (not total memory or disk),
+recorded as `isolation_claim=bwrap_userns`. Otherwise the posture says
+`isolation_variant=not_isolated` with a reason, the approval begins "NOT
+ISOLATED (&lt;reason&gt;):" and the previous limitation applies: the repository's
+tests run as the Seraph user, can use the network and read local files
+including `~/.ssh` and Seraph's database and vault, and a same-user process that
+detaches (for example via `systemd-run --user` or `at`) can outlive "cleanup
+proven". `require_isolation` refuses instead. macOS has no sandbox path yet.
+Diagnostics redaction is pattern-based, not complete. Approved patches are limited to text
+sections on allowed paths: binary, rename, copy, mode, symlink and header-less
+sections are rejected by the parent, the worker and git's own numstat and summary.
+Publication of an iterative result must equal the base plus the approved input
+patch. Each exported diff must name exactly the paths that differ between the
+server-captured base and the tested tree. It must also reproduce the tested bytes
+when applied to a fresh base copy outside the workspace, so a test that commits or
+configures Git textconv cannot misreport its change.
+
+**Project issues and pull requests to goal tasks: Partial (#1017).** An explicit
+sync reads only the connected repository's issues and pull requests: at most 50
+items over 3 pages, newest updates first, with no webhooks, comments, reviews or
+diffs. Every task, publication and comment reference keeps the exact item
+revision and digest. A finding becomes an inert Triage task. The item text is
+quoted as untrusted data, and the task gets no execution authority until the
+operator accepts it. An accepted change runs as ordinary `repository_work`, and
+its tested patch publishes through the existing exact PR publication. One
+lineage links the source revision, the task, the repository root, each
+iteration's patch digest, the publication and the verified PR.
+
+The publication approval binds the accepted source revision. The item is read
+again at prepare, when the approval resumes, and immediately before the first
+GitHub write. A changed title, body, state or labels, a closed item, another
+repository, a moved base or a changed patch stops the publication before any
+GitHub write. Comment activity alone, including Seraph's own prepared comment,
+does not. Completed local work is kept. A changed revision needs an explicit
+operator acceptance and a fresh approval. Synced items can also be written as
+workspace text that an ordinary source watch reads. That watch's verified
+packet, bound to the exact snapshot it observed, then prepares a blocker or
+review comment through the existing exact GitHub follow-through. The comment
+awaits its own approval and is not posted.
+Lost connection, repository or credential access blocks new reads and keeps
+local artifacts. The status endpoint lists the connection's actual
+limitations. Verified with offline local GitHub fixtures and zero
+inference/provider spend. Live GitHub usefulness remains
+**external-unverified**.
+
+**Cockpit end-of-day report reader: Partial.** The cockpit **Reports**
+section and `GET /api/reports/end-of-day[/{episode_id}]` read stored
+end-of-day goal reports only; they cannot generate a report and make no model
+or external call. A report whose `analysis_provider` is `blocked:<reason>` is
+shown as blocked, not as a report. The mix breakdown is shown only when the
+report's archive verifies by path and SHA-256. Missing boundaries: no
+cockpit generation, no pagination past 100 reports, and the blocked-run
+scheduler receipt remains [#1140](https://github.com/seraph-quest/seraph/issues/1140).
+Verified with offline backend route tests and frontend component tests.
+
+**Cordis presets and unattended guardian turns: Partial (#1020, part 1).**
+- **Presets:** chat turns name a reviewed preset that both Python and the Cordis
+  sequencer check.
+- **Guardian turns:** when the guardian owner is cut over, the strategist
+  decision, the six scheduled reports and memory consolidation run as
+  unattended guardian turns. Each makes today's exact call and settles once
+  through the Cordis sequencer, with no tools and no approvals. Its output is
+  used only while the turn, its scheduler parent and the epoch are current.
+- **Blocked guardian loop:** work stops visibly in Settings, Activity and the
+  cockpit, with no fallback.
+- **Delegation (#1020, part 2):** with `use_delegation`, each specialist runs as
+  a durable child turn of the chat turn. It has the same Root, its own reviewed
+  preset, depth 1, at most 4 children per turn and the parent's deadline less
+  its settlement window. Its receipts are derived into the parent's, and
+  cancellation cascades to it.
+- **Board worker drafts (part 3):** with the board-workers owner cut over, the
+  Mail reply draft and meeting brief run as worker turns admitted before the
+  first source read; a runtime refusal is retry-safe and a refused settlement
+  adopts nothing (`board_worker_runtime_unavailable`,
+  `board_worker_settlement_refused`).
+- **Memory flushes:** a flush inside an operator's turn is admitted under that
+  operator's Root.
+- **Default cutover:** the boot cutover moves the presets owner first, then
+  agent-loop and guardian, then delegation, which needs agent-loop on Cordis,
+  then board-workers.
+- **Verification:** offline, with scripted completions and denied sockets. The
+  strategist call also runs through the real broker and ledger behind an
+  intercepted provider boundary.
+
+**Profiled browser interaction: Partial, bounded public-form preparation.**
+[ADR-029](./decisions/029-profiled-browser-interactions.md) adds the separate
+`browser.interact.v2` HTTPBin public form preparation profile to the current
+Python lifecycle. Its bounded offline fill/select/check/radio-click and private
+literal preview reuse native jobs, current Root/Goal authority and the existing
+browser lane. Source or DOM drift, unknown effects and unverified cleanup block;
+submission, imported sessions and arbitrary-site writes remain excluded.
+[ADR-034](./decisions/034-selected-desktop-draft-actions.md) (#1014) adds at most
+two quarantined public downloads (10 MiB each; PDF, DOCX, XLSX, CSV, text)
+verified from their bytes, stored read-only with source metadata and never
+executed; uploads are refused before any contact. Selected local desktop text
+replacement runs only in the daemon after an exact preview with readback, and
+stops on any focus or selection change. Linux AT-SPI reports its actual
+readiness; macOS Accessibility and authenticated downloads remain Planned.
+Private values are encrypted; redacted action history survives reload without
+reopening old work. Linux local Chromium/TCP/SQLite checks prove the named
+mechanics with zero inference/provider spend. Business-form usefulness, production
+HTTPBin availability and macOS execution remain unverified. The owning
+[operator flow](./12-current-app-guide.md#profiled-public-form-preparation-1012)
+records bounds, changed-native-boot cleanup after an operator-managed reboot,
+and the same-boot lost-owner recovery limit. Physical cleanup preserves the
+original unresolved job and effects; it cannot adopt output or retry old work.
+
+The separately implemented **optional Cordis lifecycle host** in
+[#1006](https://github.com/seraph-quest/seraph/issues/1006) requires its reviewed
+implementation merge before availability is claimed on `develop`. Its
+[runtime contract](./12-current-app-guide.md#reviewed-optional-cordis-lifecycle-host)
+pins stock Cordis 4.0.0-rc.10, npm 11.8.0 and Node 22.x >=22.12.0 or 24.x, with a
+fixed literal profile and restart-only anonymous-pipe process boundary. The
+Python backend remains parent and sole existing authority/state/admission owner;
+this host supplies lifecycle readiness, not a migrated agent loop or research
+capability. Missing Node/build and failed children block only dependent host work;
+runtime and settings expose actual plugin/recovery and independent cleanup state.
+Explicit status refresh verifies current required-service readiness within four
+seconds; cached or failed refreshes show unknown/blocked with historical details
+and a last-verified timestamp, never cached Ready.
+Focused parser/security/resource and real start/stop/reap checks use no providers
+or operator workspace. A managed keyless Linux x64 probe with denied IPv4/IPv6
+socket creation establishes only that platform's owned-child lifecycle; native
+macOS and later typed-service/research migration are not proven by it.
+
+The **Cordis typed service bridge core** from
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) is **Partial**: the
+fourteen typed services and 34-method closed inventory exist as forwarding-only
+providers, with per-domain `RuntimeCompositionState` ownership epochs fencing
+Cordis-bound jobs. Fourteen methods have native Python owners (authority, goal
+read, task admission/inspection/checkpoint/cancel, the four metadata reads and
+the read-artifact-audit journey with explicit `no_learning`); the other twenty,
+including inference, Memory mutations, research, conversation/agent-loop,
+scheduler and bound adapters, return typed `blocked` results. Memory
+composition-snapshot accounting is not shipped. See the
+[guide section](./12-current-app-guide.md#cordis-typed-service-bridge-1007).
+
+**Cordis governed capabilities and inference** from
+[#1018](https://github.com/seraph-quest/seraph/issues/1018) is **Partial**:
+`capabilities.invoke` (adopted read-only native capabilities through
+`CapabilityExecutionHost`) and `inference.request` (two canonical Cordis routes
+through the shared broker and ledger) have Python owners with sealed results,
+bounded Vault-redacted output and job-bound accounting;
+`connections.invokeBoundAdapter` validates the current connection reference and
+a closed operation table, then fails closed (no adapter is composed yet). See the
+[guide section](./12-current-app-guide.md#cordis-governed-capabilities-and-inference-1018).
+
+**Python-hosted mandatory providers** from
+[#1024](https://github.com/seraph-quest/seraph/issues/1024) (A3.1) is
+**Partial**: the backend
+activates the state, authority, audit and tasks providers before anything else
+and aborts startup on any failure; goals, memory and artifacts may degrade to
+typed blocks. `get_session` refuses typed once state failed or shutdown began,
+and every startup failure releases the workspace lease, engine and MCP. The
+`seraph.state.v1` domain joins the composition inventory (one audited row added
+only to the exact pre-#1024 18-domain inventory, forward-only: take a host-CLI
+backup before upgrading), new bindings are schema 3 under manifest v2 while
+schema 1 and 2 bindings decode byte-identically, and state, authority and audit
+never move to Cordis. The Cordis state, authority and audit facades are mandatory with fixed
+dependencies and only record closed host-to-child provider reports. Verified
+locally with temporary state and the real reviewed child; external network and
+inference denied. Partial because the Cordis facades only report readiness
+and own no activation of the Python-hosted providers (operator decision on
+#1024), and backup/restore stay with the host CLI with no in-process
+maintenance handoff. See the
+[guide section](./12-current-app-guide.md#python-hosted-mandatory-providers-1024).
+
+**Scheduler and dispatcher lifecycle** from
+[#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is
+**Partial**: the one Python scheduler and the WorkBoard dispatcher run only
+while their owner rows (`seraph.scheduler.v1`, new `seraph.dispatch.v1`) are
+ready at an epoch and, once cut over to Cordis (at boot only on the running
+reviewed child's proof; otherwise they stay on the identical legacy owner),
+while that child proves the domain's plugin. Retention and cleanup jobs are exempt. Timers keep
+their phase and a non-active domain refuses ticks at entry with a visible
+block; stale epochs are fenced inside the run, occurrence and board
+transactions; deactivation drains within the original bounds, then stops
+leftover attempts through their own cleanup and `cancel_job_tree`, and never
+flips the owner while cleanup is unproven; live operator transitions drain at
+E before the flip; shutdown is bounded and closes admission first. `seraph.dispatch.v1` is
+added once to the exact post-#1024 inventory, forward-only. Verified with
+temporary state and the real reviewed child; external transport and inference
+denied. Partial because per-job blocks still use the background-inference JSON
+status record (the D2 status table is not built), Settings and the cockpit
+banner do not yet render the domain statuses (they are in
+`/api/runtime/status`), and governed-occurrence/board-claim race tests on a
+real board are pending. See the
+[guide section](./12-current-app-guide.md#scheduler-and-dispatcher-lifecycle-1025).
+
+**Cordis guardian research** from
+[#1008](https://github.com/seraph-quest/seraph/issues/1008) is **Partial**: goal
+discovery planning and public source extraction run only through the composed
+Cordis research service, goal-plan provider, guardian consumer and
+HTML/text/RSS/Atom format providers, with Python-side plan validation,
+pinned provider/config digests (`stale_output` on mismatch), visible blocks
+for missing providers and no Python fallback. Discovery now requires the Cordis
+host: the managed local run builds the reviewed package with the configured or
+PATH Node once its locked dependencies are installed (it never installs them),
+and otherwise reports the block with its exact fix in runtime status and the
+discovery panel; sources up to 256 KiB cross in bounded chunks; the backend
+image builds the package in a pinned Node stage (not yet built in CI or here). CI builds the package for its real-child acceptance and discovery
+verticals. See the
+[guide section](./12-current-app-guide.md#cordis-guardian-research-1008).
 
 For a shorter reader-facing overview of the current app, start with
 [Current App Guide](./12-current-app-guide.md). This status page remains the
 dense shipped-state record.
+
+**Bounded general documents: Partial.**
+The following correction describes intended post-merge behavior on an open
+implementation branch; installed availability requires its independently reviewed
+merge. Invoice comparison process identity uses its fixed native publication owner
+after actual supervisor readiness and before private source delivery. Current
+owner/Root/Goal/task/attempt/input, original durable lease/fence/deadline and exact
+capacity are rechecked before bounded history adoption; generic document process
+checkpoint writes remain denied. Unknown cleanup retains capacity. This baseline
+correction adds no provider, managed TCP, browser or native macOS availability claim.
+Availability follows the independently reviewed installed revision containing
+the [ADR-031](./decisions/031-bounded-general-documents.md) milestone. The separate
+owner-selected local PDF/DOCX/XLSX/CSV read profile preserves invoice comparison,
+returns exact citations and immutable original digests, and retains encrypted
+private source/evidence readback. Bounded isolated parsing and a local
+acknowledged preparation through a persisted reviewed Work
+task share the current owners. The static one-step native adapter uses zero
+inference, produces a verified reference-only artifact, and exposes at most 16
+selected leaf citations in a complete authenticated private view capped at 16 KiB.
+Reload uses explicit private readback from the existing task card; late authority
+or fence changes cannot adopt a successful preparation. These local mechanics
+remain Partial: general question answering and model synthesis are outside this
+local-only profile.
+Selected-file cockpit intake, bounded isolated
+parsing, unsupported reasons and positive original-reader cleanup share current
+canonical ownership and quota. Local extraction does not authorize model egress
+or learning. A bounded per-start local cross-process lock proof gates new general
+uploads on the actual filesystem; missing/stale proof blocks admission without
+requiring a new invoice lifecycle service. Interrupted uploads reconcile only
+their exact positively closed private lease, never partial-byte adoption or
+clock-based release. Known prelaunch filesystem failure cannot retain a parser
+slot; late Root/Goal changes or cancellation permit positive cleanup only and
+do not adopt evidence. Unknown private output absence stays charged and visible.
+Ordinary and array-anchor formula expressions remain inert literals;
+data-table formulas and objects without literal expression text are unsupported.
+OCR, protected/macro/external-linked sources and general question
+answering are outside this profile; Linux mechanics do not establish native
+macOS execution or model quality.
+
+**Document generation #1011: Planned target, feature-branch implementation.**
+[ADR-031](./decisions/031-bounded-general-documents.md#explicit-operator-authored-generation)
+also accepts explicit report/brief/workbook authoring, signed private review and
+the same original C1 native ToolStep producing editable DOCX/XLSX and direct PDF.
+The generation family reserves its own 24 MiB, preserves source32/pair16 MiB
+charges, shares durable process exclusion/queued priority with comparison, and
+retains output quota until explicit positively verified retirement. The target
+separates successful/degraded output retirement from protected fully-cancelled
+outputless retirement: blocked Task, ended cancelled Attempt, cancelled parent
+and complete settled original child/effect/cost set. Zero launch still requires
+the same full stop before Goal deletion/cutoff; later current authenticated
+cleanup only reduces capacity. Actual original stdin/EOF/supervisor wait issues
+the private persisted supervision proof; a parser witness alone or missing outer
+receipt after restart holds Unknown and charge. Capacity release never settles
+Task, effect or cost state.
+
+Source-private pending reservation and physical output readback precede final
+native writer adoption; its exact identity-sealed proof and current CAS are
+required without full output-file reads in that writer. Later output/download
+and retirement still perform physical validation because same-user post-read
+replacement remains a local race. Fixed cleanup tombstones before exact
+unlink/fsync/final CAS; partial or foreign inventory holds charge. Metadata
+headroom preserves the 24 MiB reservation within 8,192 bytes (1,781-byte fixed
+private supervision codec). A fresh bounded 4 KiB cleanup-witness read inside
+its writer still has filesystem-stall risk. The shared 4,096-row historical
+inventory ceiling fails closed; the sequential journey reaching a 4,097th
+historical row remains unexecuted and no eviction/recovery bypass is claimed. Actual CPU/Linux receipts
+do not claim shipped generation, native macOS proof, model composition or
+automatic iterative repair. Availability still requires independent full-journey
+review and the reviewed implementation merge; the owning issue/PR carries proof.
+
+## Task conversation continuity
+
+**Shipped** within the bounded
+[#1021](https://github.com/seraph-quest/seraph/issues/1021) milestone contract;
+availability requires installation of the reviewed milestone merge:
+same-task continuation into a new owned chat, bounded current task intent and
+factual references, selected read-only historical recovery, locally readable
+authenticated operator corrections with opaque ID/time-only assistant handoff,
+separate next actions/questions
+and Unknown state. Existing chat paths consume the same bounded current-owner
+factual/reference handoff; selected recovered history stays blocked for assistant
+egress. Guardian transcript context requires the live current chat principal and
+model grant; unscoped service/report callers receive no transcript context.
+Worker/review notes are not operator corrections; correction body hashes stay
+local. No task ownership, execution authority or model egress is renewed.
+The [operator contract](./12-current-app-guide.md#task-conversation-continuity)
+names the isolated authenticated SQLite/local artifact and mocked UI checks.
+
+## Typed general-task contract
+
+**Shipped** on `develop` revisions containing the independently reviewed
+[#997](https://github.com/seraph-quest/seraph/issues/997) implementation merge: an
+ordinary intent-to-reviewed-plan path in the existing Work panel and API.
+Before that merge, this describes the intended post-merge source scope. The
+[owning operator guide](./12-current-app-guide.md#typed-general-tasks-997)
+describes exact revision acceptance, editable invalid proposals, visible blocked
+reasons, current typed capabilities and owner-scoped idempotency.
+
+One `WorkBoardTask` and existing `WorkflowRunState` remain the canonical task
+and execution owners. Planning uses the governed interactive text consumer
+`general_task_planner`, explicit egress acknowledgment and cost limits; execution
+retains current tool permissions, approvals, descriptor revisions, durable
+effects and private artifact readback. Output contracts are checked before
+effects; mediated approval waits require explicit exact continuation of the
+same attempt and original deadline, with generic resume blocked.
+The approval wait commits its exact binding, no-contact proof and task/Root
+pause together; a fast approval preserves the same continuation. MCP task
+response bytes and parsed output are bounded before result adoption; oversized
+contacted responses retain visible unresolved liability.
+Oversized outgoing POSTs fail before contact while a task guard is active on
+that connection, including oversized concurrent interactive POSTs whose binding
+cannot be decoded within the bound. Bounded calls and other connections remain usable.
+Provider-free isolated integration receipts prove the current native file-read journey,
+mediated MCP approval continuation and replay boundaries, not
+model quality or improved outcomes. Tasks explicitly record no learning.
+**Bounded native interpreter (#998): intended Shipped scope after reviewed
+merge.** Availability requires the installed `develop` revision containing the
+independently reviewed [#998](https://github.com/seraph-quest/seraph/issues/998)
+implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-native-task-interpreter-998)
+extends accepted plans into actual native tool children, dependency readback and
+private final artifacts under the same Root, Goal, original attempt, deadline
+and accepted inference group. Bounded acknowledged continuation shares the
+original call/cost limits; manual zero-cost plans make no model contact.
+Safe pause and same-attempt resume preserve original authority. Paused edits
+replace the full Plan while freezing admitted, started and completed rows,
+without granting a lease or renewing execution. MCP typed discovery binds the
+stock client's exact advertised input schema and bounded output contract to
+current policy and connection identity.
+
+Cancellation fences late adoption immediately, but unresolved original callbacks
+remain `pending`; actual closure with uncertain effects becomes
+`callback_closed_outcome_debt`. Only positive closure without debt establishes
+`fully_cancelled`. After the original Future physically returned and output was
+verified, cleanup can settle debt from the same source-retained original root,
+exact original intent, canonical call and artifact readbacks, and literal private
+output bytes, without parent output adoption or new execution. Workspace settings
+may have moved; that read still requires the original source witness and root
+identity. Missing, foreign or tampered evidence, a changed original-root inode,
+or uncertain callback closure retains debt and cannot authorize replay.
+Fixed protected-history capacity is reserved before contact;
+capacity exhaustion rejects admission early. Isolated Linux API/file/stock-MCP
+and UI receipts cover private physical readback, approval of the same child,
+restart boundaries, full-capacity cancellation and `no_learning`; macOS execution
+and live external/provider usefulness remain unverified. The current Python
+managed lifecycle remains the execution owner before the separately owned
+[#1007](https://github.com/seraph-quest/seraph/issues/1007) bridge migration.
+**Bounded specialist delegation (#999): intended Shipped scope after reviewed
+merge.** Availability requires the installed `develop` revision containing the
+independently reviewed [#999](https://github.com/seraph-quest/seraph/issues/999)
+implementation merge. Its [operator contract](./12-current-app-guide.md#bounded-specialist-delegation-999)
+extends an accepted native task with actual specialist Work cards, private
+copied handoffs, durable wait and physically verified child outputs. The original
+group admits at most two active and four retained specialist children, depth
+one, and shares its twelve-call ceiling, explicit cost allowance and original
+deadline. Parent/child navigation is informational; reserved identities do not
+mean that a child has been claimed or executed. Completion remains no-learning.
+
+An authenticated private child reservation preserves and revalidates the
+parent's original immutable reviewed-method authority while executing only its
+narrower reserved plan. Ordinary public admission still selects the current
+method and enforces its complete sequence. Lesson projection matches each
+callback to its verified admitted continuation revision and unchanged frozen
+step; method acceptance rechecks compatibility against the actual started
+registry when available. Descriptor projection grants no authority. The genuine
+reviewed-method journey completes the original source and operator review, then
+brings both next-task children to Done and their parent to Review, awaiting its
+separate operator completion.
+
+The four proposal and specialist accounting readers use private indexed
+owner/classification checks and at most thirteen group rows, preserving all original liabilities and
+detecting overflow beyond twelve. Startup strictly classifies legacy rows in
+batches of at most 128. Historical financial seals retain their original typed
+defaults and field presence without resealing. The private hint grants no
+authority and is not a direct-database-tamper integrity seal. Stopped stdlib
+workspace backup/restore accepts the sole added hint column; restored NULL hints
+require canonical startup migration before accounting readiness. Since #1086
+the hot accounting writers and status reads no longer load the deployment
+ledger: they verify the witness, the root of stored row digests and the rows
+they touch, and admit against digest-sealed running totals; full verification
+(every row) runs per process on first write, when over 20 minutes stale, on
+rare writers, at startup and every 10 minutes in the background. The rare
+writers still load the whole ledger.
+
+Private handoff publication derives at most twelve specialist callback identities
+from validated original-group reservations and uses exact unique run-identity
+lookups with the original owner, Root, reservation and current-delegation gates.
+The existing full Vault fingerprint still scales with secret rows and bytes;
+the entire publication path is not claimed independent of global workspace size.
+
+Original-root cancel and held pause fence further work while retaining Unknown
+callbacks, effects and contacted cost liabilities. A failed sibling does not
+discard an already verified output. The current authenticated owner can inspect
+eligible physical child outputs and explicitly accept an immutable partial
+review, including after the execution cutoff. This preserves the original
+Task, Attempt and stop state; it cannot complete the task, settle liabilities
+or resume work. Current unresolved job/effect/cost counts remain separate from
+the accepted decision's historical debt. Exact action replay requires current
+paired-owner authorization; recovered read-only access cannot issue or replay
+the decision. Isolated Linux native/API/stock-MCP, accounting and UI receipts
+cover copied-evidence boundaries, durable waits, failed-sibling retention,
+stop races, physical selection and authenticated restart replay. They establish
+neither model quality nor general callback recovery; native macOS execution and
+live external/provider usefulness remain unverified.
+
+**Communication preparation (#1016): intended Partial scope after independently
+reviewed merge.** This is source-branch behavior until the installed `develop`
+revision contains that merge. One accepted original task composes actual native
+Mail reply drafts and Calendar meeting preparations from explicitly selected,
+currently granted sources under the same original inference group and cutoff.
+The private encrypted five-field plan retains exact source provenance and
+affected-only blockers. Each selected send or owned-event reschedule uses its
+own fresh exact preview, immutable approval, existing native action and
+independent provider readback; validating a subset performs no effects.
+Unknown contacts/costs retain their original liabilities and never trigger
+automatic replay. Read-only RecoveryGoal observation cannot renew an old write.
+Recovered selection grants no private-body access; generic Calendar readers
+remain root-only. Stored configuration alone establishes no readiness.
+
+Deliberate exact-task cleanup reports verified aggregate absence or unresolved
+cleanup. Access expiry does not delete bytes, and aggregate cleanup leaves
+original Mail drafts, plaintext Calendar briefs and approval/effect history with
+their existing owners. Isolated authenticated native/API and UI receipts prove
+these bounded mechanics and explicit `no_learning`, not live-provider usefulness,
+model quality or native macOS execution. Unresolved native process exits 139/245
+remain a validation limitation; a single debugger run passing 24 tests does not
+erase those failures or establish runtime readiness. Only positive cleanup has
+captured authenticated API wire evidence; unresolved cleanup has service/UI
+coverage. See the [operator contract](./12-current-app-guide.md#communication-preparation-1016).
+
+**Task lesson drafts (#1000): intended Shipped scope after merge — supported
+proposal-only lessons.** This capability provides private,
+owner/source-bound inert `TaskMethod.v1` drafts from recorded ordinary native
+tool steps or the exact registered formatter contract and explicit corrections,
+truthful failed-task provenance (including the host-blocked actual formatter),
+authoritative source discovery and separately opted-in automatic proposals
+limited to two durable starts per owner/UTC day. Unsupported corrections produce explicit
+no-change. Automatic outcomes have content-free task receipts; exact replay
+repairs a missing evolution receipt off-loop without duplicate proposals.
+Policy mutations require an exact revision. A degraded or oversized advisory
+evolution mirror preserves existing bytes and does not hide the canonical draft.
+Automatic completion avoids evolution-file writes, retains one off-loop private
+staging worker until positive completion, and exposes exact-attempt timeout and
+restart recovery outcomes without allowing a cancelled callback to progress
+into proposal commit. Native process witnesses support Linux and the fixed
+macOS ABI; unknown restart proof visibly retains capacity while same-process
+workers and manual review remain usable. macOS native execution is unverified
+on the Linux validation host. It makes no
+inference call, grants no trace-egress permission and
+does not infer a positive preference from success. The named #1000 proof is an actual
+authenticated failed formatter journey with terminal failure, proven process
+cleanup, private inspectable candidate and no output adoption, plus isolated
+M5/evolution/dispatcher regressions. Successful formatter execution is not
+claimed: this host denies bubblewrap loopback setup. See the
+[operator contract](./12-current-app-guide.md#task-lesson-drafts-proposal-only).
+
+**Reusable general procedures (#1002): Shipped in `develop` through #1053.**
+The independently reviewed milestone adds source inspection, server-offered ordinary scalar parameter naming,
+immutable inert saving and separate signed M5 review in the existing Task
+Inspector. The exact seven-field `ProcedurePlan.v3` preserves every original
+registered typed step, fixed input, symbolic dependency, output contract and
+producer/version pin. Unsupported or forbidden leaves block the whole save;
+legacy receipts without original producer pins require a fresh eligible source
+(`source_contract_review_required`) while ordinary legacy continuation remains
+unchanged. This extends the current Python lifecycle; it does not introduce a
+Cordis bridge, authored executable pack, tool registry, queue or authority owner.
+
+The exact current signed method/version/digest/pointer revision can construct a
+new triage Task with strict fresh inputs. Explicit promotion uses existing
+durable native execution, fresh jobs/Attempts/deadlines/cost limits and current
+effect approvals. Full independent plan comparison and same-writer pin/body/
+original-event checks fence publication and exact-key replay; a changed method
+or body cannot create another Task under the original key. Family disable selects
+signed baseline, activation requires exact reviewed prior selection, rollback
+restores only the exact eligible previous signed pointer, and explicit canonical
+deletion writes a tombstone and hides candidate content. Existing admitted pins
+retain their identity under current authority/source/expiry and tombstone checks.
+Generic recall/indexing remains excluded; each exact scope retains the
+16-version bound. Typed artifacts have a 64KiB bound and full Vault/secret checks,
+without changing the 2,000-scalar generic M5 prose limit.
+
+Named provider-free Linux receipts cover the actual mixed research/file/
+registered-MCP source, save/adopt, fresh invocation with changed ordinary values,
+distinct native approvals and literal physical readback, same-key A-to-B denial,
+exact prior rollback, restart and disable/activate/tombstone readback. The
+focused source/producer/native run passed 36 checks, the consumer regression run
+66 and the UI run 64; these separate proof runs retain their own source epochs.
+Scripted final service transports and actual local SQLite/private-file effects
+prove mechanics, not provider quality, learned improvement, general usefulness
+or native macOS execution. Whole cumulative independent review passed before
+the milestone merged through #1053. See the
+[operator flow](./12-current-app-guide.md#reusable-general-procedures-1002)
+and [accepted contract](./decisions/028-reviewed-task-methods.md).
+
+**Reviewed task methods (#1001): Shipped on `develop` revisions containing the
+independently reviewed milestone merge.** Earlier revisions require that merge;
+branch-local receipts do not establish availability. Explicit review accepts
+immutable closed `TaskMethod.v1` or `ResearchStrategy.v1` data into signed
+canonical M5 patterns and an atomic signed Goal-revision/family selection, with
+at most 16 accepted versions per scope. Generic recall and M5 selection exclude
+these methods. New general tasks apply supported registered tool sequences and
+finite guards through existing PlanSpec/native execution; public discovery
+applies approved research fields within its original finite programme grant.
+Structured research proposals require exact completed research-dossier sources
+and verified native output. The existing Inspector exposes bounded structured
+research fields only for that verified source, shows original Task/Attempt/Goal
+revision/references/observed receipts in private and canonical inspection, and
+requires explicit acknowledgment before adoption. Candidate preparation remains
+inert; known-candidate recovery reads the same draft and uncertain preparation
+requires explicit same-request reconciliation. Dossier execution itself remains
+explicit baseline.
+Unsupported formatter capability steps cannot activate a general-task method.
+Rollback selects baseline for future work while an admitted original immutable
+pin may continue under current source and authority; tombstones and revocation
+still deny it. Missing, invalid, changed or revoked state blocks rather than
+silently downgrading; only demonstrably never-selected scopes preserve ordinary
+baseline. Selected recovered logins are read-only.
+
+Named provider-free Linux proofs exercise an authenticated completed native
+general task, operator completion, exact source discovery, review and subsequent
+native physical output with the selected method; a completed research dossier,
+structured proposal, signed adoption and subsequent real public discovery; and
+rollback, original-pin continuation, explicit future baseline, recovery,
+signature/source/selection tamper and pre-contact revocation. Independent review
+is required for the milestone merge. These receipts establish bounded mechanics,
+not learned quality, live-provider usefulness or native macOS execution. See the
+[operator contract](./12-current-app-guide.md#reviewed-task-methods).
+
+**Finite public goal programme authority: Shipped** on `develop` revisions
+containing the independently reviewed
+[#1003](https://github.com/seraph-quest/seraph/issues/1003) implementation merge.
+This is the intended post-merge scope; before that merge, it describes only the
+source branch. Supported controls include operator-supplied public-brief review,
+finite stable-owner authority, pause/revoke and passive correction/expiry
+recovery under [ADR-027](./decisions/027-standing-public-goal-programmes.md).
+Discovery and digest execution are not supplied by this authority milestone.
+Canonical Goal storage and native job/artifact/accounting responsibilities remain
+with their existing owners. The isolated Linux SQLite/ASGI receipt covers
+configuration/control, original finite logout/restart clocks, strict review,
+owner recovery, native-writer binding validation and fail-closed corrections;
+external sockets and inference are denied, with zero reservation/spend.
+Executor contact/adoption CAS integration is still required before executor
+activation. macOS execution, provider availability and model usefulness are not
+established by these mechanical checks.
+
+**Finite public Goal discovery: Partial.** The current Python executor for
+[#1004](https://github.com/seraph-quest/seraph/issues/1004) extends the existing
+programme, native job/artifact/accounting and scheduler owners. Its bounded
+operator journey includes fixed search, exact manifest selection, cited local
+brief/readback, first findings and later quiet outcomes, inert checklist proposals
+and explicit `no_learning`. Original deadlines and cumulative programme ceilings
+remain binding across daily/accounting periods.
+Accepted narrower limits and exact whole-output stage references are enforced;
+manifest derivation binds original physical HTTP response readbacks separately
+from artifact digests. Finite search-block causes survive authenticated history
+recovery without query/HTML exposure or provider replay. Untouched invalid queued work can
+close only through the existing canonical deny-only cancellation writer; claimed
+or uncertain effects and any cost-bearing work remain held. Explicit operator
+inspection/readback is available in the Goal panel. See the
+[operator contract](./12-current-app-guide.md#finite-public-goal-programmes).
+Isolated Auth/SQLite, owned local HTTP and scripted inference receipts establish
+mechanical contracts and failure boundaries. Whole cumulative independent review
+and merge are still required; real provider/model quality, native macOS execution
+and digest delivery were not established by the #1004 receipts; #1005's bounded
+delivery mechanics have their separate receipts below.
+
+**Daily programme digest and follow-through: on `develop` revisions containing
+the #1005 milestone merge, Shipped.** The validated feature-branch implementation
+awaits independent review and merge on earlier revisions.
+The [#1005](https://github.com/seraph-quest/seraph/issues/1005) slice implements
+the current Python scheduler's local 08:00 stable-owner/day Inbox receipt,
+bounded same-receipt pending/finalization, passive blocked recovery, persistent
+finding defer/dismiss and a same-card inert C1 task proposal. Existing native
+task acceptance/execution and verified physical checklist readback link completed
+output to the original finding. Original Goal/generation/Root/source freshness
+and canonical publication fences remain binding; recovered Goal reads grant no
+task creation authority. This adds no model calls or alternative execution/cost
+owners and leaves discovery's UTC occurrence and original clocks unchanged.
+Optional native delivery uses the existing outbox, recipient-bound opt-in,
+owner-wide one-digest/one-cited-deadline slots and canonical quiet/claim fences;
+ambiguous display consumes the slot without automatic retry. Home distinguishes
+actual run/source/output evidence from the next digest timer and source
+eligibility under the existing UTC cadence, scheduler, finite allowance and
+native holds. Unavailable or blocked eligibility has an explicit reason; it
+does not promise execution. Source freshness is rechecked in the final C1
+publication writer, so expiry after staging cannot publish a Task or bind its
+proposal artifact. Existing private unbound staging retains its size bound/expiry
+cleanup. Missing, unreadable or altered physical sources finalize the original
+pending receipt with passive blocked recovery and bounded digest/status reads;
+cited source reads require review. An opted-in deadline failure retains a bounded
+negative memo without repeated unchanged-tick file reads, a notice slot or task
+creation. Actual source-file unlink, tamper and truncation journeys verify these
+failure paths. See the
+[operator contract](./12-current-app-guide.md#daily-programme-digest-and-follow-through).
+Focused isolated Linux SQLite/concurrency checks and a literal HTTP/native C1
+file journey and two-programme cited-deadline/native-slot readbacks prove these
+mechanics with inference intercepted at its owned transport. Provider/model
+quality, actual external spending and macOS native display are not
+established by these receipts.
 
 ## Bounded operator workflows (program #899)
 
@@ -42,9 +690,43 @@ the Constitution and ADRs remain the target authority.
 
 Readiness remains specific to the selected profile. The CPU core, canonical
 workspace and operator controls work without a local model, GPU, VLM service or
-optional companion. Ordinary remote inference uses the governed OpenRouter route and
-stays configuration-required without explicit credentials, upstream policy,
-consent, verified capability and budget. Linux optional isolation proof does not
+optional companion. OpenRouter is retired by policy (ADR-035, #1147 PR3a): no
+route makes new OpenRouter contact. Text routes (report, memory and agent
+reasoning synthesis, streaming chat, chat-agent tool turns and Cordis
+`inference.request`) resolve to the NEAR TEE text slot when the operator
+configures it (#1147 PR3b/PR3c, **Partial**); screenshot vision resolves to the
+NEAR TEE vision slot (#1147 PR4, **Partial**); every other route (embeddings),
+and every route without a ready slot, reports blocked
+(`no_active_provider` or the slot's reason). Work verticals move to the NEAR
+TEE text slot through one shared vertical helper (#1159, **Partial**): each
+keeps its durable job, reservation and adoption contract, runs every NEAR TEE
+precontact gate (sealed denials, catalog receipt, proofs, `x-no-aliasing`),
+and settles from NEAR billing inside its broker lease, with no fallback. On
+NEAR TEE now: general-task and specialist planning, Work Board card
+proposals, guardian opportunity assessment and plan generation, research
+dossiers (child synthesis and programme discovery requests), Mail reply
+drafts, Calendar meeting prep and communication preparation. Repository work
+stays blocked on NEAR TEE: its repair iteration model step
+(`repo_repair_source`, whose consented exact request body and code-egress
+consent are bound to the retired OpenRouter target) has no NEAR TEE adapter,
+so the `repository_work` tool is never offered. A frozen tool set or explicit
+plan naming it, and an admitted repository child (including on resume), is
+refused with `near_tee_route_unsupported` before any planning, reservation or
+contact. A repository-worded intent submitted without that tool is ordinary
+NEAR planning (charged) and cannot produce a repository step. A NEAR TEE answer that is not adopted (for
+example `near_tee_output_truncated` for a JSON draft cut at the slot's output
+bound) settles its NEAR cost and blocks the Mail or Calendar card with that
+code. Every vertical blocks
+before any job, reservation or contact with the same precedence as Settings'
+`inference_block_reason`: `provider_policy_revoked`, then the NEAR TEE slot's
+own reason (for example `near_tee_credential_required`), then
+`openrouter_retired` (retained OpenRouter configuration) or
+`no_active_provider`; the Work Board explains each code. A guardian plan
+route denial before admission blocks with its stable reason instead of
+`outcome_unknown`. Guardian opportunity candidates stay queued with that
+reason, without a durable job, until a NEAR TEE route exists (they then
+resume) or their deadline closes them. The optional NEAR text Work
+capability (ADR-025) is unchanged apart from the shared NEAR client. Linux optional isolation proof does not
 establish macOS execution: macOS remains a peer core-host target with unexecuted
 native/companion boundaries named by each adapter. No paid model, real Google
 account or Mac host is a prerequisite for local implementation acceptance.
@@ -60,7 +742,17 @@ The [Forgejo title profile](https://github.com/seraph-quest/seraph/issues/925)
 uses a local pinned-service proof profile; production Codeberg remains blocked pending
 separate account/site/version acceptance. Local revoke invalidates Seraph's
 authority and credentials; it does not prove provider logout or undo history or
-notifications. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
+notifications. The [exact Forgejo issue and comment forms](https://github.com/seraph-quest/seraph/issues/1013)
+(`forgejo.issue-create.v1`, `forgejo.issue-comment.v1`) are **Partial**: under
+[ADR-029](./decisions/029-profiled-browser-interactions.md) a reviewed form is
+prepared with scripts disabled, exact-approved once, submitted by one native POST
+and read back through the numeric API; site, account, profile or value drift
+invalidates the approval, and a lost response stays Unknown with no replay.
+Local acceptance uses a disposable signed Forgejo 15.0.9 and Chromium with its
+own sandbox; production Codeberg stays blocked. The paused native POST carries no
+`Sec-Fetch-Site`, so Forgejo's cross-origin check is not an independent control;
+backend-only cookies and the exact validated single POST are. Requiring a genuine
+`Sec-Fetch-Site` at handoff is a follow-up. The [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 permits ordinary top-frame Chromium text with local preview and deletion-only
 redaction, exact Task/Goal approval and encrypted D1 attachment. It excludes
 screenshots, clipboard and background capture, records no learning or analysis,
@@ -92,8 +784,267 @@ Private output requires current authority and settled-cost readback. The task
 requires human Review; successful execution supplies no automatic approval.
 Unknown cost discards the withheld answer, and debt reconciliation cannot recover
 it or resend inference. Every outcome records `no_learning`.
+Since #1147 PR3b (ADR-035) the route uses the shared NEAR client: every NEAR
+text request, inference and billing readback, also sends
+`x-no-aliasing: true`; the response model echo check is unchanged. The ADR-035
+catalog-receipt gate for `near.text` is not implemented yet.
+
+## NEAR TEE text slot (ADR-035, #1147 PR3b/PR3c)
+
+**Partial** until live operator use. The `near_tee` provider adapter serves the
+text slot of the model fabric, non-streaming, disabled by default. The operator
+picks one canonical model from the closed ADR-035 text allowlist, stores a
+separate write-only `vault:near_api_key` (fingerprint readback only), sets
+input/output/timeout limits and a per-request reserve within the shared
+`inference_lane` ceiling, and grants a revision-bound purpose consent with an
+explicit plaintext-to-NEAR acknowledgement. Saves use the witnessed revoke→
+accounting→activate publication with revision CAS; global revoke blocks the
+slot and no save resurrects revoked consent.
+
+An explicit, authenticated **catalog check** reads only NEAR's
+`/v1/model/{id}` record (no inference, no operator content, no credential) and
+stores a content-safe receipt bound to the slot's complete profile hash and the
+current configuration revision; any later settings save requires a new
+check. Since the ADR-035 amendment 2026-11-14 ([#1178](https://github.com/seraph-quest/seraph/issues/1178))
+the receipt and the capability checks are a one-time setup gate that never
+expires by age: a receipt stays in force while model, profile hash and
+revision match, and a NEAR TEE proof while its profile hash and the NEAR
+credential match (a new key needs the checks again; `proof_ttl_seconds` is
+advisory for these slots). Seraph re-reads NEAR's public catalog in the
+background (keyless, no consent, no broker lease) at startup and every
+`min(catalog_ttl_hours, 6)` hours; those reads only update "last confirmed"
+and raise a non-blocking Settings warning when NEAR reports a disqualifying
+change (a failed read keeps the last confirmation); they never block
+dispatch, which the model echo and request errors still police. It parses NEAR's catalog record shape
+(`metadata.architecture` modalities, `maxOutputLength`; an absent output limit
+allows at most 8192 output tokens). Readiness (#1167, ADR-035 amendment
+2026-11-14): `isReady: true` passes, an explicit `isReady: false` fails
+`near_tee_catalog_not_ready`, and an **absent** (or JSON `null`) `isReady`
+passes only on an
+otherwise eligible record (`vllm`, attestation supported, verifiable); the
+receipt records `is_ready: null` and `readiness_basis: absent_flag_attested`
+and Settings says readiness was inferred (this is how
+`deepseek-ai/DeepSeek-V4.1-Flash-1017` passes). Dispatch re-validates the receipt locally and never
+refreshes it; a missing, failed or rebound receipt blocks the slot (age
+never does). Dispatch also needs current capability-check proofs (operator-triggered,
+cost-bounded mechanics only, through the broker and ledger). Structured
+callers (`general_task_planner`, `strategist_agent`, `session_consolidation`)
+need a current `structured_output` proof whatever NEAR's catalog lists; the
+catalog's `structured_outputs` feature is recorded as a fact, not a
+capability, and Settings shows the text slot's structured-output state
+(`structured_output_capability`) with a **Run structured output check**
+button. Capability checks send 64 output tokens, or up to 1024 (never above the
+slot's maximum output) when the receipt lists `reasoning`, because reasoning
+tokens count against `max_tokens`. An answer ended by the output bound with no
+content, or a JSON (`response_format`, vision) answer ended by it, fails as
+`near_tee_output_truncated` after its cost settles. For reasoning models
+Settings recommends a maximum output of at least 4096 (guidance only; the
+reserve must still cover it).
+
+Text routes (`completion_with_fallback`, guardian/report synthesis such as
+`end_of_day_goal_report`, `screenshot_observation_digest`, `daily_briefing`)
+reach the NEAR transport through the one shared broker, with chat priority,
+the serial bound of one and durable reservations. Requests carry the canonical
+id with `x-no-aliasing: true`; a different response model fails the call
+after its cost settles; reasoning fields are never answer text. NEAR
+`/v1/billing/costs` readback runs inside the lease; a missing cost becomes an
+Unknown liability and keeps the lane blocked until fenced manual settlement,
+which also releases the lane (tested, including after the slot is disabled).
+Checks that must hold when bytes would leave (the `x-no-aliasing` header,
+current policy, and a deadline that still leaves the billing window) run under
+the contact writer: a lease granted too late is a durable never-contacted
+denial, not an Unknown.
+Streaming chat and tools (#1147 PR3c, **Partial**): streaming text routes
+(WebSocket direct chat, Cordis `inference.request` interactive and background
+purposes) stream through the same broker lease. Server-sent events are read
+with byte and line caps, identity encoding, no redirects and strict JSON; the
+model echo is checked on the first chunk carrying `model` (a mismatch stops the
+stream); reasoning deltas are never emitted. The stream is ended no later than
+16s before the original deadline and billing is read back after it in the same
+lease; deltas already delivered are never retracted, and a known-cost failure
+(echo mismatch, deadline cut, protocol error) settles and fails the turn. A
+caller that stops reading or is cancelled once NEAR has answered (closed
+stream, WebSocket timeout, Cordis output cap) closes the provider stream, still
+reads billing back and settles with `near_tee_stream_cancelled`; the lane is
+released (tested). A missing cost is an Unknown liability that keeps the lane
+blocked. Lightweight REST/WebSocket chat turns on the slot set their inference
+deadline 2s inside the 60s (or lower) outer turn timeout, so the stream and
+its billing finish before the outer cut; `/api/runtime/status` reports this as
+`chat_turn_cap`, and a slot timeout above the turn deadline is reported and
+refused. Chat-agent
+tool turns send OpenAI-compatible `tools` with the existing forced
+`tool_choice: "required"`, non-streaming; only a model whose catalog receipt
+lists `tools` may serve them (`near_tee_model_tools_unsupported` otherwise),
+tool arguments are parsed as strict JSON objects (duplicate keys and invalid
+JSON rejected) and calls to tools that were not offered fail closed. Streaming
+and tool turns each need their own fresh `streaming` / `tool_use` capability
+check. `/api/runtime/status` `chat_agent` reports the NEAR TEE route, model and
+dated catalog label when the slot is the active provider, otherwise the slot's
+blocked reason with no provider. Chat-turn result adoption authenticates the
+operator root session captured at admission behind a conversation-scoped chat
+principal (a revoked root or a different owner is not adopted; the cost still
+settles). Cordis requests above the slot's output limit are refused with
+`inference_max_tokens_exceeds_route`. PR3c adds `streaming` and `tool_use` to
+the slot profile, which changes its hash: after upgrading, re-run the catalog
+check and every capability check. Vision is the separate slot below
+(PR4); embeddings: see below.
+Labels say "TEE-hosted per NEAR catalog as of &lt;time&gt;; NEAR gateway receives
+plaintext; attestation not verified by Seraph; no end-to-end encryption".
+Evidence is intercepted-transport tests only: no live NEAR call, provider
+availability, price or model quality is established.
+
+## NEAR TEE vision slot and screen pipeline (ADR-035, #1147 PR4)
+
+**Partial** until live operator use. The vision slot of the same `near_tee`
+adapter analyses screenshots, disabled by default. The operator picks one
+model from the closed ADR-035 vision allowlist (`z-ai/glm-5.3-flash`,
+`Qwen/Qwen3.8-27B`, `Qwen/Qwen3-VL-30B-A3B-Instruct`,
+`deepseek-ai/DeepSeek-V4.1-Flash-1017`; DeepSeek's absent readiness is
+inferred from its attested, verifiable vllm record since #1167), sets limits and a per-request reserve, and grants a
+**separate screenshot purpose consent**: enabling or changing the slot needs
+both the plaintext-to-NEAR acknowledgement and an explicit acknowledgement
+that screenshots reach the NEAR gateway in plaintext; the text slot's consent
+never implies it, and an explicit `screenshot_plaintext_egress_acknowledged:
+false` withdraws it (the slot stays saved and blocked). Saves use the same
+witnessed CAS publication; a save that omits a slot keeps it. Only enabled
+slots with current consent lift a revocation or count toward reserve review.
+
+The catalog check requires the image input modality for the vision slot,
+records NEAR's `structured_outputs` feature and adds a listed per-image price
+to the cost bound. Capability checks for the slot are `vision`,
+`structured_output`, `health` and `latency_ms` (mechanics only). The
+`structured_output` check sends an image in the runtime's effective request
+mode (strict json_schema or prompt-JSON) and its proof records that mode;
+dispatch with a current proof of another mode is blocked
+(`near_tee_vision_structured_proof_mode_mismatch`). The effective mode is
+json_schema when the receipt lists `structured_outputs` or, when NEAR's catalog
+omits it (#1167), when a current passing json_schema proof exists that no
+newer failed json_schema check contradicts (a failed check records its mode;
+the slot then needs a prompt-JSON check): the check
+endpoint accepts `structured_mode: "json_schema"` for that (Settings: **Run
+JSON-schema structured output check**; `prompt_json` is refused with
+`near_tee_vision_structured_mode_conflict` while the catalog lists the
+feature). Without either the slot uses prompt-JSON (fail closed); the proof
+does not expire by age (#1178), and a profile or credential change returns the
+slot to prompt-JSON until a new check. Settings
+reports `structured_output_basis` (`catalog`, `capability_proof` or none). Each
+screenshot is one request of at most 8 MiB: the canonical id with
+`x-no-aliasing: true`, the image as a base64 data URL `image_url` part, and
+`response_format` json_schema when the current receipt lists
+`structured_outputs`, otherwise the prompt's strict-JSON instruction; both are
+parsed by the strict `seraph.screenshot_analysis.v1` contract, and reasoning
+fields are never parsed as the answer; parsing runs inside the lease so the
+route receipt records an invalid answer as failed. An image larger than 2048 px
+on its long side or 4 MiB is re-encoded for NEAR as metadata-free JPEG
+(quality 85, long side 2048); the stored capture is unchanged and the status
+records original and sent dimensions only. Input is estimated conservatively
+on the sent image (one token per 28×28 pixel patch plus the prompt) and a
+request over `max_input_tokens` is blocked before contact, as is a slot
+timeout above the background job budget minus the billing window and a 10 s
+margin (94 s by default). It runs on the
+shared broker at screenshot-background priority (below chat, serial bound one)
+with NEAR billing inside the lease; a missing cost is an Unknown liability that
+blocks the lane until fenced settlement. Invalid output, an echo mismatch or an
+empty answer settle the cost and record a failed analysis; policy, consent,
+receipt, size and proof denials record a blocked analysis with no contact.
+
+Uploaded daemon captures and screenshot-folder images share the path: pending
+→ NEAR vision analysis by the existing background job → digest record →
+end-of-day report, whose model label comes from the effective route and catalog
+receipt. Background analysis starts only when the operator chooses provider
+`near_tee` in the screen-analysis settings (`""` keeps it off while the slot
+stays configured; `near_tee_vision_available` says whether it can be chosen).
+Screen-analysis settings then report `provider: near_tee` with the slot
+model, `daemon_cloud_provider: null` and `daemon_capture_handoff:
+local_upload`; the daemon makes no cloud call. The cloud-backed `codex-local`
+daemon OCR provider is removed (operator acknowledged on 2026-11-13, ADR-035):
+Apple Vision is the daemon's only OCR provider, a `codex-local` setting falls
+back to it, the CLI refuses the value and uploads reject it as
+`local_analysis.provider` (422). Evidence is intercepted-transport tests only: no live NEAR call,
+provider availability, price or analysis quality is established.
+
+## NEAR TEE embedding slot and memory re-index (ADR-035, #1147 PR3d)
+
+**Partial, blocked by default.** The `embedding` slot is implemented but
+**fails closed** with `near_tee_embedding_evidence_required`: ADR-035 requires
+source evidence that NEAR's `/v1/embeddings` endpoint and `/v1/billing/costs`
+honour `x-no-aliasing` before the slot may dispatch, and the repository holds
+none (the 2026-10-05 trust-boundary research and ADR-025's billing sources
+cover chat completions only). The gate is a code constant that only a reviewed
+ADR-035 amendment with dated source evidence may set; no setting, catalog
+receipt or capability check clears it. NEAR's specialized-endpoints guide
+(read by the lead 2026-11-13) documents OpenAI-format `/v1/embeddings` for this
+model but says nothing about aliasing or embedding billing. Until then memory
+recall stays lexical and NEAR receives no memory text.
+
+The real catalog record for `Qwen/Qwen3-Embedding-0.6B` (lead's read
+2026-11-13) has no `isReady` field and no dimension field. Since #1167 the
+catalog check infers readiness for it as for the other slots (vllm, attested,
+verifiable; basis `absent_flag_attested`, fixture-tested); the evidence gate
+above still blocks dispatch.
+
+Implemented mechanics (proven with intercepted transport and the gate lifted
+in tests only): the slot takes `Qwen/Qwen3-Embedding-0.6B` from the closed
+allowlist, a per-request input-token bound (conservatively one token per UTF-8
+byte plus overhead) and batch size (1–64), a per-request reserve, and its own
+purpose consent acknowledging that memory text reaches NEAR in plaintext. The
+catalog check requires vllm, attested, verifiable, ready, text input and an
+embedding output modality, enough context and a reserve covering maximum input
+x input price plus the one-token output bound x output price (the catalog lists
+an output price; how NEAR bills embedding output, per vector or per dimension,
+is unsourced); a stated dimension is recorded. The
+`embedding` capability check measures the vector dimension. Dispatch posts
+`/v1/embeddings` with the canonical id and `x-no-aliasing: true` on the
+`memory_embedding` route (background priority below chat) through the one
+broker with billing readback inside the lease; a response model or dimension
+that differs from the proof is settled and not adopted; a missing cost, or a
+response without a billing identity, is an Unknown liability that blocks the
+lane until fenced settlement.
+
+Vectors live in a namespace keyed by provider `near_tee`, model, measured
+dimension and schema, never mixed with older OpenRouter vectors. Recall uses it
+only with current proofs and a completed index; otherwise search returns the
+labelled lexical/degraded result without contact and new memories are not
+embedded. After indexing, new memories and recall queries are sent to NEAR.
+Completeness decays at write time: a failed NEAR-mode memory write, or a
+committed canonical memory inserted without a vector, whose summary/content
+is set, or that is reactivated, marks the namespace incomplete and recall
+returns to lexical without anyone opening settings. Unit-of-work writes and
+ORM `update(Memory)`/`insert(Memory)` statements are both observed (session
+hooks, applied after commit; a rolled-back write never decays); SQL executed
+directly on a connection is not. A Core update that sets `summary` decays even
+if the value is unchanged (the prior value is not visible), so merges return
+recall to lexical until the next re-index. A run that started before such a change never marks the namespace
+complete (`near_tee_index_changed_during_run`). The index state file is
+updated under a process lock and an exclusive file lock; the status
+projection only reads it. A vector written for a new memory counts under its
+`embedding_id`. Re-indexing is never automatic: an authenticated settings action with
+a per-run consent and spend cap starts one durable job (existing workflow job
+ledger) that embeds canonical memory in bounded batches, checkpoints each
+batch, stops at the budget, can be cancelled, resumes idempotently from the
+namespace contents, removes rows of memories that are no longer active, and
+records a verified local readback before success. More than 10,000 canonical
+memories leaves the index incomplete (`near_tee_reindex_over_cap`); it never
+completes. A new Unknown accounting operation during a run ends it as a cost
+liability. No live NEAR call, price,
+availability or embedding quality is established.
 
 ## Epic #736/#775 OpenRouter inference phase
+
+**Retired (ADR-035, #1147 PR3a).** OpenRouter is retired by policy: selector,
+caller context, effective policy, admission, contact-time accounting, the
+governed transports, embeddings, screenshot vision, the capability-check
+endpoint and screen-analysis provider selection deny new OpenRouter contact with
+`openrouter_retired` and no fallback. Retained configuration, credential,
+receipts, ledger rows, billing readback and manual settlement stay readable so
+contacted liabilities reconcile. Lane limits and the deployment ceiling moved to
+a provider-neutral, versioned `inference_lane` (pure migration of retained
+values; explicit witnessed publication that preserves the ledger and publishes a
+route-scoped revoke of stored OpenRouter routes). Routes without a ready NEAR
+TEE slot are blocked and say so in runtime status and Settings.
+Provider-intercepted tests assert zero OpenRouter contact on representative
+routes; this is **Partial** pending the NEAR slices. The text below records the
+historical phase.
 
 This section records the accepted ordinary OpenRouter inference phase and its
 provider-free implementation contract. The ordinary route is the governed
@@ -117,10 +1068,34 @@ screenshot, and vector execution with one active transport and retained charge
 readback; actual provider availability, model quality, costs, and embedding
 usefulness remain externally unverified. See the [setup guide](./12-current-app-guide.md#configure-the-openrouter-route-epic-736775).
 
+Daily-use readiness ([#1068](https://github.com/seraph-quest/seraph/issues/1068))
+is **Partial** on this branch: Settings → Models & OpenRouter proposes chat-ready
+text capabilities (`streaming`, `tool_use`), an explicit context window
+decoupled from the output cap, dollar-denominated ceiling/request bound, a
+selectable proof lifetime up to 24h, and one Prove route action whose canaries
+are labelled as billed calls. Chat names the specific blocked reason (for
+example `proof_expired:health` → Prove route) and the composer shows proof
+expiry. Scheduled jobs that may call the text route stay ON by default with
+per-job toggles and call estimates; a disabled job makes no model call and
+reports `disabled_by_operator`. The request bound defaults to $0.50 with a
+worst-case-per-call preview, because a charge above it latches every further
+OpenRouter call until the overrun is reviewed; chat names that latch and
+distinguishes a mid-turn agent block (earlier calls reached the provider) from
+a preflight block. Settings → Telegram pairs and grants transit
+consent over the existing API. Offline tests intercept all inference; a real
+OpenRouter session remains externally unverified. See the
+[current app guide](./12-current-app-guide.md#daily-use-readiness-1068).
+
 Deployment inference accounting remains **Partial**. The canonical durable job
 repository owns finite reservations, immutable UTC-month attribution, account
 usage settlement, and unknown liabilities that carry across rollover and
 restore. The existing remote broker remains the sole serial executor. Paid
+execution on revisions containing the reviewed
+[#1031](https://github.com/seraph-quest/seraph/issues/1031) repair includes durable
+settlement and canonical readback before that serial lease can release; failure
+retains its existing reconciliation hold. Scripted local receipts establish the
+async/sync/stream ordering and preserve original debt, deadline and denied-contact
+proof, without external inference or provider-availability claims. Paid
 egress requires a retained lifecycle witness outside root snapshots; stale or
 missing continuity blocks inference while deterministic CPU features remain
 usable. Settings exposes exact-operation manual reconciliation, explicitly
@@ -132,6 +1107,14 @@ archived egress reactivation. Overruns require explicit adequate reserve review
 bound to already-settled operation sequence/revision. Live
 provider charges and managed Docker mount operation remain unverified until
 separate operator-authorised operational receipts exist.
+
+The Constitution's standing
+[no-evals and provider-free implementation boundary](./00-project-constitution.md#no-evals-and-provider-free-implementation)
+applies to all development and acceptance, including Cordis and self-improvement.
+No eval or inference call is authorized by an unverified quality label or a
+historical receipt; ordinary isolated regression/security tests and local
+effect/readback remain required. Ordinary approved product tasks retain their
+existing inference permissions.
 
 The implementation merge gate is local provider-free validation: deterministic
 tests, intercepted transport tests, static/configuration checks, and negative
@@ -161,8 +1144,10 @@ mechanics receipts are not candidate-quality evaluation or harness-improvement
 proof. External usefulness remains unverified; ordinary regression and security
 checks remain required.
 Required child criteria map #750 conversation identity/outbox, #748 native
-software, #749 paired edge, #751 audio capture/decode/persistence, #752
-Telegram transport, and #755 capability-pack lifecycle. Static source checks
+software, #749 paired edge, #752 Telegram transport, and #755
+capability-pack lifecycle; #751 audio capture/decode/persistence and the
+optional voice readiness check are explicit exclusions since voice input was
+retired (#1179). Static source checks
 are informational; each behavioral gate requires one current schema-v1,
 ownership- and revision-bound child receipt under the server-resolved,
 server-owned `operator-receipts/epic-736-child-evidence` directory. Receipt
@@ -195,6 +1180,22 @@ revision. Live Telegram remains unverified; see
 
 ## Legend
 
+Paired-channel Task capture ([#1022](https://github.com/seraph-quest/seraph/issues/1022))
+is **Partial**. A paired Telegram `/task` message creates one review-only Task
+that can be inspected, paused, resumed or cancelled from Telegram and continued in
+the cockpit; unpaired senders and replayed provider events create nothing. Voice input
+(push-to-talk, the audio ingress API and worker, and the audio route) was
+removed by operator decision on 2026-11-14
+([#1179](https://github.com/seraph-quest/seraph/issues/1179));
+[ADR-033](./decisions/033-governed-optional-audio-route.md) is retired. Existing
+audio DB rows are kept unused; no audio capture, transcription or audio-sourced
+Task can be created. Channel origins
+and output links are signed with a key derived from the workspace vault key
+(explicit `CAPABILITY_JOURNAL_SECRET`/`OPERATOR_AUTH_SECRET` overrides), so stock
+deployments need no new setting. Live Telegram,
+provider and native capture operation remain unverified. See the
+[current app guide](./12-current-app-guide.md#local-cockpit-interaction-boundaries).
+
 - `[x]` shipped on `develop`
 - `[ ]` not fully shipped on `develop`
 - in-flight branch work should be tracked in open PRs, not in this file
@@ -204,6 +1205,28 @@ When this file is updated on an open feature branch, it reflects the intended po
 High-risk strategic wording in this status page remains governed by [19. Strategy Claim Ledger](/research/strategy-claim-ledger).
 
 ## Current Snapshot
+
+Scoped connected-source synchronization is **Partial**: bounded Python source
+synchronization and related-source Mail/Calendar preparation are implemented;
+real-account operation and native macOS execution remain unverified. It requires existing operator
+ownership enrollment and uses explicit metadata grants,
+one fixed scope and canonical root reservation per connection, encrypted page
+cursors with complete-page adoption/readback, fifty metadata items/three pages,
+ten separately selected private reads, and original-grant recovery/revocation.
+Physical-only cleanup preserves OAuth-bearing effect uncertainty and exposes
+old unresolved roots separately from connection capacity. Linux and Darwin
+lifetime witnesses use a closed native ABI contract; Darwin fixtures do not
+establish native macOS execution. Fresh acknowledged scope generations can
+rebind current versioned items without renewing old jobs or citations. Existing
+native Mail reply and Calendar preparation tasks accept explicit related-source
+selection/use acknowledgment (three connections, ten unique citations), require
+the same original Goal, and revalidate source authority before primary contact
+and final adoption. Related private bytes/references stay out of model requests;
+local results contain only classified refs, coverage/freshness and `no_learning`.
+Disposable SQLite,
+local HTTP and separate-process checks establish mechanics;
+they do not establish real-account or production usefulness. See the
+[owning contract](./12-current-app-guide.md#scoped-connected-source-synchronization).
 
 - [ ] #914 reviewed public evidence pipelines remain **Partial**: one fixed
   native public browser → deterministic CPU dossier → local plain-text report
@@ -269,7 +1292,7 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [ ] Bounded calendar meeting preparation adds write-only encrypted setup, verified calendar selection, finite event/model consent, a goal-linked Todo task, governed brief synthesis with two fresh event reads, and verified plaintext artifact inspection. Finite observation schedules propose deduplicated tasks for review without calling a model. This remains **Partial**; live Google/model usefulness remains external-unverified without an authorized canary. See [Current App Guide](./12-current-app-guide.md#bounded-calendar-meeting-preparation).
 - [ ] M7 #890 adds a bounded Gmail readonly path: encrypted owner/session-bound setup, explicit source and model consent, opaque message bindings, governed hourly or six-hour metadata watches, finite Goal quiet-hours and period-wide notification caps with visible coverage-blocked recovery, and private reply drafts with two source reads, one governed OpenRouter admission, encrypted artifact/readback, exact-key recovery, and `no_learning`. The bounded reply intent remains a local 0600 plaintext typed-input residual; source bodies and drafts stay encrypted and private, with no provider draft or send operation. This remains **Partial**. Focused SQLite and intercepted-transport receipts cover the mechanics; CPU-only/keyless OpenRouter operation, real Google-account usefulness, and paid-model canaries remain external-unverified. See [Current App Guide](./12-current-app-guide.md#bounded-gmail-source-watch-and-reply-drafting-m7-890-branch-local-target).
 - [ ] Bounded public browser tasks add typed input creation, finite HTTPS navigation/extraction, a single browser-task context lane, durable action and readback receipts, and explicit no-learning outcomes through Work. Current goal budgets narrow the fixed request, action, output, and runtime limits. This remains **Partial**; local browser mechanics and production transport have separate validation receipts; authenticated browsing and general computer use remain excluded from this capability. See [Current App Guide](./12-current-app-guide.md#bounded-public-browser-tasks).
-- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
+- [ ] Calm cockpit sections and the canonical-memory inspector provide bounded Home, Inbox, Work, Goals, Library, and Connections navigation. Home adds one authenticated six-section metadata snapshot with 20 items per page, original-cutoff pagination, explicit degraded/Unknown states and exact owning-inspector navigation. Historical method metadata and passive programme digest timing establish no execution readiness; full private-source checks remain in the owning inspector. Focused component and retained authenticated API-consumer receipts verify local bindings, without claiming a new browser journey or live external usefulness. Owner-session-scoped literal memory reads expose redacted provenance and explicit history; canonical controls retain the distinction between ordinary correction, reviewed task learning, archive/redact, and acknowledged deletion. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-navigation-and-canonical-inspector).
 - [ ] Reviewed source-change follow-up is a bounded local capability: the goal budget and source-watch cadence feed an owner-scoped Guardian inbox; verified material packets can become one Triage Work Board task through an explicit, idempotent decision. General autonomous operation and live external/provider usefulness remain Partial; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-goals-and-the-source-change-inbox).
 - [ ] Reviewed public opportunity judgments extend that Inbox with finite Goal policy, immutable public excerpts, one governed native strategist request and exact SHA256 citations. Fixed read-only browser/report plans add bounded generation, separately acknowledged automatic Triage staging, exact Work preview and explicit acceptance through existing native execution. Managed receipts cover browser readback, automatic CPU reports, silent staging, verified cancellation and same-workspace Unknown recovery with unchanged liability. Accepted review corrections preserve current authority, original output integrity and cleanup receipts. Judgment, planning and these executions retain `no_learning`; general proactive learning and live external/provider usefulness remain **Partial**. See [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-read-only-opportunity-plans).
 - [ ] Reviewed opportunity feedback and reversible preferences add explicit append-only judgments, one bounded provider-free CPU recommendation, separate literal memory adoption and rollback. Two current verified Helpful outcomes can order eligible blueprint offers for display; two exact-watch Not helpful judgments can suppress optional candidates while source reads continue. Delivery, acknowledgment, unjudged work and task success supply no inferred vote. Current source/outcome/population checks and private-memory retrieval isolation constrain every adopted effect. Generalized learning, measured usefulness and live external/provider usefulness remain **Partial**; see [Guardian Intelligence](./05-guardian-intelligence.md#reviewed-opportunity-feedback-and-reversible-preferences).
@@ -277,6 +1300,8 @@ High-risk strategic wording in this status page remains governed by [19. Strateg
 - [ ] Unified attention and recovery is **Partial**, available with the installed reviewed program revision: bounded Home attention opens exact task approvals and owning unknown-effect readback in the existing Work inspector, with owner-root-scoped return context and read-only recovered history. Rendered Warsaw approval, denial, cancellation and expiry exercise actual ASGI/SQLite records; same-database app recreation and GET-only readback converge the same original attempt without replay. API timestamps carry UTC offsets. Expiry, revocation and changed goals block task adoption without losing settled-effect truth. These intercepted mechanical receipts use explicit test-only external permission and do not establish production GitHub write-consent creation, managed-host API restart, or live external usefulness; see [Attention and Recovery](./attention-recovery.md).
 - [ ] Stable operator ownership and exact read-only recovery remain **Partial**, available with the installed reviewed program revision: private device continuity can link explicitly selected records across new execution roots, while prior grants, effects and ambiguous legacy ownership remain blocked. Actual authenticated local snapshot execution, selection, fresh empty intent and evidence recall are covered by integrated tests and a managed browser/API/file receipt; prior authority is never restored by availability. See [Operator ownership and recovery](./19-operator-ownership-and-recovery.md).
 - [ ] Local task evidence working sets remain **Partial**, available with the installed reviewed program revision: canonical citation references, verified output lineage, exclusion and exact rendered-packet adoption use owner/task/goal/revision checks. Recovered history is read only; private and historic source egress stays blocked for generic strategist use. Focused API, SQLite, artifact and inspector checks establish local mechanics, not live provider usefulness. See [Task Evidence Working Sets](./task-evidence-working-sets.md).
+- [ ] Cockpit shell layout (#1172): an always-visible conversation dock, a "Needs you" rail, one status popover whose non-ready items say why and link to the fix, and a More menu for rarely used controls. Fixes the empty Goals canvas, the stale chat model and version labels (now from `effective_runtime` and a live `build_id`), and shows expected configuration (daemon off, an operator scope the observer has not refreshed yet) as not-a-fault, while `/api/observer/state.data_quality_reason` lets observer source errors raise a warning. Focused component tests cover the fixes; visual checks used an offline fixture preview only. This remains **Partial**; see [Current App Guide](./12-current-app-guide.md#cockpit-shell-layout-1172).
+- [x] Voice input removed (#1179, operator decision 2026-11-14): the push-to-talk control and the dock's "Voice input" section, `/api/audio/*`, the audio ingress worker, the `audio_ingress_cleanup` job, the audio documentation settings endpoints and UI and the audio effective grants are gone; [ADR-033](./decisions/033-governed-optional-audio-route.md) is retired. The audio tables and their rows are kept unused, with no destructive migration. Startup removes any recordings left in the fixed default quarantine directory `realpath($TMPDIR)/seraph-audio` once, best effort, refusing symlinks. See [Current App Guide](./12-current-app-guide.md#local-cockpit-interaction-boundaries).
 - [x] Seraph is usable today as a real guardian workspace with a browser cockpit, memory, screen awareness, proactive behavior, and a real action layer.
 - [x] Public docs target the `v2026.6.30` app era; the published GitHub Pages site updates only after a `main` push touches `docs/**` and the Pages workflow succeeds.
 - [x] The live truth surface is now `docs/research/` plus `docs/implementation/`, while the GitHub Project, issues, and PRs carry active execution state.

@@ -155,6 +155,16 @@ class RouteReceiptSession:
         )
         self._active = None
 
+    @property
+    def attempt_active(self) -> bool:
+        """True while a started attempt has not been finished."""
+        return self._active is not None
+
+    @property
+    def has_completed_attempts(self) -> bool:
+        """True once at least one attempt finished (a final receipt is due)."""
+        return bool(self._completed)
+
     async def finalize(
         self,
         *,

@@ -79,7 +79,7 @@ async def pause_parent(jobs, *, parent_id, owner, job_fence, board_fence, board_
 async def resume_parent(jobs, *, parent_id, owner, phase, expected_binding=None):
     """Fresh leases on the original attempt; neither deadline nor count renews."""
     from src.workflows.job_runtime import DurableJobLeaseError
-    from src.model_fabric.effective_policy import current_inference_policy
+    from src.model_fabric.near_tee_vertical import vertical_inference_policy
     from src.work_board.pipelines import root_binding
     from src.work_board.pipeline_contracts import digest
     if phase not in {"research_funding","research_assembly"}:
@@ -96,7 +96,7 @@ async def resume_parent(jobs, *, parent_id, owner, phase, expected_binding=None)
             or task.block_reason != reason or parent.lease_owner or parent.lease_expires_at
             or attempt.lease_owner or attempt.lease_expires_at or parent.deadline_at.replace(tzinfo=timezone.utc) <= now
             or authority.get("live_root_digest") != digest(root_binding())
-            or authority.get("model_policy_digest") != current_inference_policy()[1]
+            or authority.get("model_policy_digest") != vertical_inference_policy("readonly_research_child")[1]
             or payload_checkpoint(parent,"research:phase").get("phase") != reason):
             raise DurableJobLeaseError("research original wait authority changed")
         children=list((await db.scalars(select(WorkflowRunState).where(WorkflowRunState.parent_job_id == parent_id))).all())

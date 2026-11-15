@@ -12,6 +12,9 @@ from src.workflows.inference_accounting import InferenceAccountingError, Inferen
 from src.workflows.job_runtime import DurableJobRepository
 from src.workspace.production import ProductionWorkspace, read_accounting_checkpoint
 
+# ADR-035: pins historical OpenRouter broker, ledger and settlement mechanics that still settle retained liabilities
+pytestmark = pytest.mark.openrouter_legacy
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["policy", "period"])

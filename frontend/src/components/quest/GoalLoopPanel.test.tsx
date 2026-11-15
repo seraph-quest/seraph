@@ -207,7 +207,9 @@ describe("GoalLoopPanel", () => {
   });
 
   it("shows the four outcome axes and uses only the bounded snapshot endpoint", async () => {
-    const runGoalSnapshot = vi.fn().mockResolvedValue({ status: "blocked" });
+    // Settle on a later macrotask, as a loaded runner can, so the recovered
+    // state is asserted only once the snapshot has actually resolved.
+    const runGoalSnapshot = vi.fn().mockImplementation(() => new Promise((resolve) => { setTimeout(() => resolve({ status: "blocked" }), 30); }));
     setupStore({ runGoalSnapshot });
     render(<GoalLoopPanel goal={goal} />);
 
@@ -222,7 +224,9 @@ describe("GoalLoopPanel", () => {
       expected_revision: 4,
       evidence_refs: ["artifact:guardian"],
     })));
-    expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "recovered");
+    // The call starts on click; "recovered" is set only after it resolves,
+    // which can be a later turn than the waitFor above observing the call.
+    await waitFor(() => expect(screen.getByTestId("goal-loop-panel")).toHaveAttribute("data-state", "recovered"));
   });
 
   it("exposes separate candidate and outcome contracts through a keyboard disclosure", async () => {

@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+from threading import RLock
 from urllib.parse import urlsplit
 
 from config.settings import settings
@@ -27,12 +28,15 @@ from .contracts import (
     transport_model_for_provider,
 )
 from .receipts import safe_code
-from .selector import active_provider_exclusion_reason, classify_endpoint, profile_exclusion_reason
+from .retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+from .selector import classify_endpoint, openrouter_contract_exclusion_reason, profile_exclusion_reason
 
 
 CONFIG_SCHEMA_VERSION = "seraph.model-fabric.settings.v1"
 OPENROUTER_SETUP_SCHEMA_VERSION = "seraph.openrouter.setup.v1"
 OPENROUTER_SETUP_V2_SCHEMA_VERSION = "seraph.openrouter.setup.v2"
+OPENROUTER_SETUP_V3_SCHEMA_VERSION = "seraph.openrouter.setup.v3"
+OPENROUTER_V3_ROUTE_SLOTS = ("text", "vision", "embedding", "audio")
 OPENROUTER_ROUTE_SLOTS = ("text", "vision", "embedding")
 OPENROUTER_VAULT_CREDENTIAL_REF = "vault:openrouter_api_key"
 OPENROUTER_ENV_CREDENTIAL_REF = "env:OPENROUTER_API_KEY"
@@ -41,17 +45,91 @@ NEAR_TEXT_PROFILE_ID = "near.text"
 NEAR_TEXT_MODEL_ID = "z-ai/glm-5.3-flash"
 NEAR_TEXT_API_BASE = "https://cloud-api.near.ai/v1"
 NEAR_TEXT_CREDENTIAL_REF = "vault:near_text_api_key"
+INFERENCE_LANE_SCHEMA_VERSION = "seraph.inference.lane.v1"
+NEAR_TEE_SCHEMA_VERSION = "seraph.near.tee.setup.v1"
+NEAR_TEE_PROVIDER_KIND = "near_tee"
+NEAR_TEE_API_BASE = "https://cloud-api.near.ai/v1"
+NEAR_TEE_CREDENTIAL_REF = "vault:near_api_key"
+NEAR_TEE_VAULT_KEY = "near_api_key"
+NEAR_TEE_SECRET_REF = "NEAR_API_KEY"
+# Typed room for the ADR-035 slots; ``text`` (PR3b), ``embedding`` (PR3d) and
+# ``vision`` (PR4) are implemented.
+NEAR_TEE_SLOTS = ("text", "vision", "embedding")
+NEAR_TEE_IMPLEMENTED_SLOTS = ("text", "vision", "embedding")
+# ADR-035 closed allowlist (catalog read 2026-11-13): canonical id ->
+# design-basis context window. The catalog check decides dispatch.
+NEAR_TEE_TEXT_ALLOWLIST: dict[str, int] = {
+    "z-ai/glm-5.3-flash": 1_048_576,
+    "Qwen/Qwen3.8-27B": 262_144,
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": 1_048_576,
+    "Qwen/Qwen3.6-35B-A3B-FP8": 262_144,
+}
+# ADR-035 vision rows (text+image input per the 2026-11-13 catalog read).
+# DeepSeek-V4.1-Flash-1017's catalog record lacks ``isReady`` and lists no
+# ``structured_outputs``. Since #1167 (ADR-035 amendment 2026-11-14) the
+# catalog check infers readiness for an absent flag on a vllm, attested and
+# verifiable record (basis ``absent_flag_attested``; an explicit false still
+# fails), and structured output needs a current capability proof: the vision
+# slot uses prompt-JSON unless a json_schema proof establishes it.
+NEAR_TEE_VISION_ALLOWLIST: dict[str, int] = {
+    "z-ai/glm-5.3-flash": 1_048_576,
+    "Qwen/Qwen3.8-27B": 262_144,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 16_384,
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": 1_048_576,
+}
+# ADR-035 embedding row (catalog list read 2026-11-13): canonical id -> design-
+# basis input window per request. Per-model fields are re-read by the catalog
+# check, which decides dispatch.
+NEAR_TEE_EMBEDDING_ALLOWLIST: dict[str, int] = {
+    "Qwen/Qwen3-Embedding-0.6B": 32_768,
+}
+NEAR_TEE_SLOT_ALLOWLISTS: dict[str, dict[str, int]] = {
+    "text": NEAR_TEE_TEXT_ALLOWLIST,
+    "vision": NEAR_TEE_VISION_ALLOWLIST,
+    "embedding": NEAR_TEE_EMBEDDING_ALLOWLIST,
+}
+# Capabilities each implemented slot profile declares; the canonical caller
+# still needs a fresh capability proof for each one it requires.
+NEAR_TEE_SLOT_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "text": ("text", "structured_output", "streaming", "tool_use"),
+    "vision": ("vision", "structured_output"),
+    "embedding": ("embedding",),
+}
+# One screenshot per vision request; the image counts against the input and
+# cost bounds (ADR-035 "images counted per the provider's pricing").
+NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST = 1
+# ADR-035 gate for the embedding slot: before it may dispatch, source
+# evidence must show that NEAR's ``/v1/embeddings`` endpoint and
+# ``/v1/billing/costs`` honour ``x-no-aliasing``. The repository holds no such
+# evidence (docs/research/near-ai-trust-boundary-2026-10-05.md and ADR-025's
+# billing sources cover chat completions only), so this stays ``None`` and
+# the slot fails closed with ``near_tee_embedding_evidence_required``. Only a
+# reviewed ADR-035 amendment citing dated source evidence may set it; no
+# setting, catalog receipt or capability check can clear it.
+NEAR_TEE_EMBEDDING_ALIASING_EVIDENCE: str | None = None
+NEAR_TEE_EMBEDDING_EVIDENCE_REQUIRED = "near_tee_embedding_evidence_required"
+# The embedding endpoint returns vectors, not generated tokens: the slot's
+# output bound is the fixed accounting floor of one token.
+NEAR_TEE_EMBEDDING_OUTPUT_TOKENS = 1
+NEAR_TEE_EMBEDDING_MAX_BATCH = 64
+_MAX_NEAR_TEE_OUTPUT_TOKENS = 65_536
+_MAX_NEAR_TEE_TIMEOUT_SECONDS = 120.0
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_UPSTREAM = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_OPENROUTER_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
 _MAX_OPENROUTER_MODELS = 8
 _MAX_OPENROUTER_OUTPUT_TOKENS = 131_072
+# The prompt window is independent of the output cap. Routes saved before the
+# explicit field existed use this default the next time their profile is built.
+DEFAULT_OPENROUTER_CONTEXT_WINDOW_TOKENS = 65_536
+_MIN_OPENROUTER_CONTEXT_WINDOW_TOKENS = 1_024
+_MAX_OPENROUTER_CONTEXT_WINDOW_TOKENS = 2_097_152
 _MAX_OPENROUTER_TIMEOUT_SECONDS = 120.0
 _MAX_OPENROUTER_QUEUE = 64
 _MAX_OPENROUTER_OWNER_OUTSTANDING = 16
 _MAX_OPENROUTER_RETRIES = 2
 OPENROUTER_RUNTIME_CONTROLS_KEY = "_seraph_openrouter"
-_OPENROUTER_CAPABILITIES = frozenset(item.value for item in ModelCapability)
+_OPENROUTER_CAPABILITIES = frozenset({"text", "embedding", "vision", "tool_use", "structured_output", "streaming"})
 SUPPORTED_TRANSPORT_ADAPTERS = frozenset(
     {
         "openai_compatible_chat",
@@ -59,6 +137,7 @@ SUPPORTED_TRANSPORT_ADAPTERS = frozenset(
         "vlm_analyze_file",
     }
 )
+_policy_publication_lock = RLock()
 
 
 @dataclass(frozen=True)
@@ -83,6 +162,10 @@ class OpenRouterRoute:
     timeout_seconds: float
     zero_data_retention: bool
     request_cost_bound_microusd: int
+    context_window_tokens: int | None = None
+
+
+_OPENROUTER_ROUTE_OPTIONAL_FIELDS = frozenset({"context_window_tokens"})
 
 
 @dataclass(frozen=True)
@@ -119,6 +202,7 @@ class OpenRouterSetup:
     schema_version: str = OPENROUTER_SETUP_SCHEMA_VERSION
     routes: dict[str, OpenRouterRoute | None] | None = None
     purpose_consents: dict[str, int] | None = None
+    context_window_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +219,449 @@ class NearTextSetup:
     credential_ref: str = NEAR_TEXT_CREDENTIAL_REF
     credential_fingerprint: str | None = None
     plaintext_egress_consent_revision: int | None = None
+
+
+@dataclass(frozen=True)
+class InferenceLaneConfig:
+    """Provider-neutral limits of the one shared remote-inference lane (ADR-035).
+
+    The lane owns the deployment spend ceiling and the broker bounds. It binds
+    the same deployment ledger and witness as before; provider setups mirror
+    the ceiling and never fund their own.
+    """
+
+    spend_ceiling_microusd: int
+    max_queued: int = _MAX_OPENROUTER_QUEUE
+    max_inflight: int = 1
+    max_outstanding_per_owner: int = _MAX_OPENROUTER_OWNER_OUTSTANDING
+    max_retries: int = _MAX_OPENROUTER_RETRIES
+    # Explicit operator reserve review (ADR-035 "reserve review"): reviews an
+    # unreviewed overrun up to this bound when the lane is published, even when
+    # no provider route is enabled (for example an OpenRouter-only install).
+    request_reserve_review_microusd: int | None = None
+    schema_version: str = INFERENCE_LANE_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class NearTeeSlot:
+    """One operator-chosen NEAR TEE-hosted model slot (ADR-035).
+
+    ``temperature`` None keeps the caller's sampling temperature (Cordis
+    presets stay unchanged). ``purpose_consent_revision`` is the revision-bound
+    purpose consent, granted only with an explicit plaintext-to-NEAR
+    acknowledgement.
+    """
+
+    model_id: str
+    max_input_tokens: int
+    max_output_tokens: int
+    request_cost_bound_microusd: int
+    enabled: bool = False
+    timeout_seconds: float = 30.0
+    temperature: float | None = None
+    catalog_ttl_hours: int = 24
+    purpose_consent_revision: int | None = None
+    # Embedding slot only: inputs per request (1-64). ``max_input_tokens`` is
+    # then the conservative token bound of the whole batch.
+    max_batch_size: int | None = None
+
+
+@dataclass(frozen=True)
+class NearTeeSetup:
+    """Closed, versioned NEAR TEE configuration. Disabled with no slot by default.
+
+    The credential itself is absent: ``credential_ref`` names the write-only
+    vault entry and ``credential_fingerprint`` is a short comparison value.
+    The lane ceiling is the provider-neutral ``inference_lane``; NEAR TEE never
+    funds its own.
+    """
+
+    schema_version: str = NEAR_TEE_SCHEMA_VERSION
+    api_base: str = NEAR_TEE_API_BASE
+    credential_ref: str = NEAR_TEE_CREDENTIAL_REF
+    credential_fingerprint: str | None = None
+    slots: dict[str, NearTeeSlot | None] | None = None
+
+
+def near_tee_profile_id(slot: str) -> str:
+    return f"near_tee.{slot}"
+
+
+def near_tee_slot_for_profile(profile_id: object) -> str | None:
+    if not isinstance(profile_id, str) or not profile_id.startswith("near_tee."):
+        return None
+    slot = profile_id.removeprefix("near_tee.")
+    return slot if slot in NEAR_TEE_IMPLEMENTED_SLOTS else None
+
+
+def validate_near_tee_slot(slot_name: str, slot: NearTeeSlot) -> None:
+    if slot_name not in NEAR_TEE_IMPLEMENTED_SLOTS:
+        raise ValueError("near_tee_slot_not_implemented")
+    if not isinstance(slot, NearTeeSlot):
+        raise ValueError("invalid NEAR TEE slot")
+    allowlist = NEAR_TEE_SLOT_ALLOWLISTS[slot_name]
+    if not isinstance(slot.model_id, str) or slot.model_id not in allowlist:
+        raise ValueError("near_tee_model_not_allowlisted")
+    if type(slot.enabled) is not bool:
+        raise ValueError("invalid NEAR TEE enabled")
+    for field, upper in (("max_input_tokens", allowlist[slot.model_id]),
+            ("max_output_tokens", _MAX_NEAR_TEE_OUTPUT_TOKENS),
+            ("request_cost_bound_microusd", 1_000_000_000), ("catalog_ttl_hours", 24)):
+        value = getattr(slot, field)
+        if type(value) is not int or not 1 <= value <= upper:
+            raise ValueError(f"invalid NEAR TEE {field}")
+    timeout = slot.timeout_seconds
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= _MAX_NEAR_TEE_TIMEOUT_SECONDS:
+        raise ValueError("invalid NEAR TEE timeout_seconds")
+    temperature = slot.temperature
+    if temperature is not None and (type(temperature) not in (int, float) or not math.isfinite(temperature) or not 0 <= temperature <= 2):
+        raise ValueError("invalid NEAR TEE temperature")
+    revision = slot.purpose_consent_revision
+    if revision is not None and (type(revision) is not int or revision < 1):
+        raise ValueError("invalid NEAR TEE consent revision")
+    if not slot.enabled and revision is not None:
+        raise ValueError("disabled NEAR TEE slot has consent")
+    batch = slot.max_batch_size
+    if slot_name == "embedding":
+        if type(batch) is not int or not 1 <= batch <= NEAR_TEE_EMBEDDING_MAX_BATCH:
+            raise ValueError("invalid NEAR TEE max_batch_size")
+        if slot.max_output_tokens != NEAR_TEE_EMBEDDING_OUTPUT_TOKENS:
+            raise ValueError("invalid NEAR TEE embedding max_output_tokens")
+        if temperature is not None:
+            raise ValueError("NEAR TEE embedding slot has no temperature")
+    elif batch is not None:
+        raise ValueError("max_batch_size is embedding-only")
+
+
+def validate_near_tee_setup(setup: NearTeeSetup) -> None:
+    if not isinstance(setup, NearTeeSetup):
+        raise ValueError("invalid NEAR TEE setup")
+    for field, expected in (("schema_version", NEAR_TEE_SCHEMA_VERSION),
+            ("api_base", NEAR_TEE_API_BASE), ("credential_ref", NEAR_TEE_CREDENTIAL_REF)):
+        if getattr(setup, field) != expected:
+            raise ValueError(f"invalid NEAR TEE {field}")
+    if setup.credential_fingerprint is not None and (not isinstance(setup.credential_fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{12}", setup.credential_fingerprint) is None):
+        raise ValueError("invalid NEAR TEE credential fingerprint")
+    slots = setup.slots or {}
+    if not isinstance(slots, dict) or set(slots) - set(NEAR_TEE_SLOTS):
+        raise ValueError("unsupported NEAR TEE slot")
+    for name, slot in slots.items():
+        if slot is not None:
+            validate_near_tee_slot(name, slot)
+
+
+def near_tee_slot(configuration: "ModelFabricConfiguration", slot: str) -> NearTeeSlot | None:
+    setup = configuration.near_tee
+    return None if setup is None else (setup.slots or {}).get(slot)
+
+
+def near_tee_profile_for_slot(slot_name: str, slot: NearTeeSlot) -> ProviderProfile:
+    """Deterministic profile; its contract hash binds proofs and catalog receipts."""
+    validate_near_tee_slot(slot_name, slot)
+    tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis",
+        "vision_analysis", "memory_embedding") if route_slot_for_task_class(task) == slot_name)
+    controls = {"temperature": slot.temperature, "output_limit": slot.max_output_tokens,
+        "timeout_seconds": float(slot.timeout_seconds), "input_limit": slot.max_input_tokens,
+        "request_cost_bound_microusd": slot.request_cost_bound_microusd,
+        "catalog_ttl_hours": slot.catalog_ttl_hours}
+    embedding = slot_name == "embedding"
+    if embedding:
+        controls["max_batch_size"] = slot.max_batch_size
+    if slot_name == "vision":
+        controls["max_images_per_request"] = NEAR_TEE_VISION_MAX_IMAGES_PER_REQUEST
+    return ProviderProfile(id=near_tee_profile_id(slot_name), provider_kind=NEAR_TEE_PROVIDER_KIND,
+        model=slot.model_id, routing_model=slot.model_id, api_base=NEAR_TEE_API_BASE,
+        secret_env=NEAR_TEE_SECRET_REF, options={"_seraph_near_tee": controls},
+        # Callers needing structured output, streaming, tool use or vision
+        # still need that capability's fresh proof on this exact profile
+        # (ADR-035); tool use also needs ``tools`` in the slot's current
+        # catalog receipt. The vision slot declares no streaming/tool use.
+        capabilities=NEAR_TEE_SLOT_CAPABILITIES[slot_name],
+        task_class=tasks[0], task_classes=tasks, budget_class="medium",
+        enabled=slot.enabled, keyless=False,
+        transport_adapter="openai_compatible_embeddings" if embedding else "openai_compatible_chat",
+        context_window_tokens=slot.max_input_tokens, max_output_tokens=slot.max_output_tokens,
+        cost_microusd=slot.request_cost_bound_microusd, cost_source="near_tee_catalog_receipt",
+        # Prices come from the catalog setup receipt, re-validated at dispatch by
+        # binding (model, profile hash, revision), never by age (#1178).
+        cost_source_updated_at=0.0, max_latency_ms=int(slot.timeout_seconds * 1000),
+        safety_notes=("TEE-hosted per NEAR catalog, not verified by Seraph; NEAR receives "
+            "requests in plaintext; no end-to-end encryption."))
+
+
+def near_tee_profiles(configuration: "ModelFabricConfiguration") -> tuple[ProviderProfile, ...]:
+    setup = configuration.near_tee
+    if setup is None:
+        return ()
+    return tuple(near_tee_profile_for_slot(name, slot) for name, slot in sorted((setup.slots or {}).items())
+        if slot is not None and name in NEAR_TEE_IMPLEMENTED_SLOTS)
+
+
+def near_tee_slot_block_reason(configuration: "ModelFabricConfiguration", slot_name: str) -> str | None:
+    """Local (no-contact) reason the slot cannot dispatch, or None."""
+    if configuration.status != "ready":
+        return configuration.error_code or "configuration_unreadable"
+    if configuration.egress_revoked:
+        return "provider_policy_revoked"
+    setup = configuration.near_tee
+    slot = near_tee_slot(configuration, slot_name)
+    if setup is None or slot is None:
+        return "near_tee_slot_unconfigured"
+    if not slot.enabled:
+        return "near_tee_slot_disabled"
+    if slot_name == "embedding" and NEAR_TEE_EMBEDDING_ALIASING_EVIDENCE is None:
+        # ADR-035 evidence gate; nothing local or catalog-derived clears it.
+        return NEAR_TEE_EMBEDDING_EVIDENCE_REQUIRED
+    if slot.purpose_consent_revision != configuration.egress_revision:
+        return "near_tee_purpose_consent_required"
+    if not setup.credential_fingerprint:
+        return "near_tee_credential_required"
+    if configuration.inference_lane is None:
+        return "inference_lane_required"
+    if slot.request_cost_bound_microusd > configuration.inference_lane.spend_ceiling_microusd:
+        return "near_tee_request_reserve_exceeds_lane_ceiling"
+    return None
+
+
+def near_tee_policy_for_runtime(configuration: "ModelFabricConfiguration", runtime_path: str) -> WorkloadPolicy | None:
+    """The NEAR TEE route for a canonical runtime path, when usable."""
+    from .caller_context import canonical_route_spec
+    try:
+        slot_name = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+    except ValueError:
+        return None
+    if slot_name not in NEAR_TEE_IMPLEMENTED_SLOTS or near_tee_slot_block_reason(configuration, slot_name):
+        return None
+    return WorkloadPolicy(runtime_path=runtime_path, egress_class=EgressClass.CLOUD_ALLOWED_FULL,
+        cloud_egress_acknowledged=True, allowed_profile_ids=(near_tee_profile_id(slot_name),),
+        allowed_provider_kinds=(NEAR_TEE_PROVIDER_KIND,), fallback_allowed=False,
+        max_cost_microusd=configuration.inference_lane.spend_ceiling_microusd)
+
+
+async def capture_near_tee_credential(*, expected_revision: int, expected_fingerprint: str) -> str:
+    """Read the write-only vault key with a fingerprint/revision fence; no env fallback."""
+    from src.vault.repository import vault_repository
+    configured = read_model_fabric_configuration()
+    if (configured.egress_revision != expected_revision or configured.near_tee is None
+            or configured.near_tee.credential_fingerprint != expected_fingerprint):
+        raise PermissionError("near_tee_credential_revision_changed")
+    value = await vault_repository.get(NEAR_TEE_VAULT_KEY)
+    if not isinstance(value, str) or not value or len(value) > 512 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PermissionError("near_tee_credential_unavailable")
+    current = read_model_fabric_configuration()
+    if (current.egress_revision != expected_revision or current.near_tee is None
+            or _near_credential_fingerprint(value) != expected_fingerprint):
+        raise PermissionError("near_tee_credential_revision_changed")
+    return value
+
+
+NEAR_TEE_CREDENTIAL_BINDING_SCHEMA = "seraph.near.tee.credential.binding.v1"
+
+
+def _near_tee_credential_binding_path() -> Path:
+    return Path(settings.workspace_dir).expanduser().resolve() / "near-tee-credential-binding.json"
+
+
+def _read_near_tee_credential_binding() -> dict | None:
+    try:
+        payload = json.loads(_near_tee_credential_binding_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(payload, dict) or payload.get("schema_version") != NEAR_TEE_CREDENTIAL_BINDING_SCHEMA
+            or not _valid_binding(payload)):
+        return None
+    return payload
+
+
+def _valid_binding(entry: object) -> bool:
+    return (isinstance(entry, dict) and isinstance(entry.get("fingerprint"), str)
+        and type(entry.get("bound_since")) in (int, float) and math.isfinite(entry["bound_since"]))
+
+
+def _write_near_tee_credential_binding(current: dict, previous: dict | None) -> None:
+    path = _near_tee_credential_binding_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    payload = {"schema_version": NEAR_TEE_CREDENTIAL_BINDING_SCHEMA, "fingerprint": current["fingerprint"],
+        "bound_since": float(current["bound_since"])}
+    if previous is not None:
+        payload["previous"] = {"fingerprint": previous["fingerprint"], "bound_since": float(previous["bound_since"])}
+    try:
+        descriptor = os.open(temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def record_near_tee_credential_binding(fingerprint: str, *, now: float | None = None) -> float:
+    """Record that NEAR TEE capability proofs are bound to ``fingerprint`` from now on.
+
+    ADR-035 amendment 2026-11-14 (#1178): capability checks never expire by
+    age, so a deliberate credential change is one of the binding changes that
+    requires the one-time setup checks again. Proofs checked before
+    ``bound_since`` belong to an earlier credential and no longer count. The
+    replaced binding is kept as ``previous`` so a save that fails after this
+    point (the configuration still names the old key) restores it instead of
+    invalidating proofs for an unchanged key.
+    """
+    import time as _time
+    if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{12}", fingerprint) is None:
+        raise ValueError("invalid NEAR TEE credential fingerprint")
+    since = _time.time() if now is None else float(now)
+    existing = _read_near_tee_credential_binding()
+    if existing is not None and existing["fingerprint"] == fingerprint:
+        return float(existing["bound_since"])
+    prior = existing.get("previous") if existing is not None else None
+    if _valid_binding(prior) and prior["fingerprint"] == fingerprint:
+        # Back to the key just replaced (e.g. re-saving key A after a failed
+        # key-B save): its binding, and the proofs checked with it, return.
+        since = float(prior["bound_since"])
+    current = {"fingerprint": existing["fingerprint"], "bound_since": existing["bound_since"]} \
+        if existing is not None else None
+    _write_near_tee_credential_binding({"fingerprint": fingerprint, "bound_since": since}, current)
+    return since
+
+
+def near_tee_credential_bound_since(fingerprint: str | None = None) -> float | None:
+    """Earliest ``checked_at`` a NEAR TEE proof needs for the current credential.
+
+    ``None`` means no credential change has been recorded (proofs from before
+    #1178 keep counting while their profile binding matches). This fails open
+    on a missing or unreadable record on purpose: a wrong key is caught per
+    request by NEAR's own auth refusal; the binding only tracks deliberate key
+    changes. When the configured fingerprint is the recorded ``previous`` one
+    (a key-change save that failed after recording), that binding is restored.
+    Any other mismatch (a change recorded nowhere else) is re-recorded now.
+    """
+    if fingerprint is None:
+        configured = read_model_fabric_configuration()
+        fingerprint = configured.near_tee.credential_fingerprint if configured.near_tee is not None else None
+    if not fingerprint:
+        return None
+    payload = _read_near_tee_credential_binding()
+    if payload is None:
+        return None
+    if payload["fingerprint"] == fingerprint:
+        return float(payload["bound_since"])
+    try:
+        # Restores the ``previous`` binding when it names this key.
+        return record_near_tee_credential_binding(fingerprint)
+    except (OSError, ValueError):
+        # Fail open (see above): never a reason to block a request.
+        return None
+
+
+def _near_tee_slot_from_payload(raw: object) -> NearTeeSlot:
+    declared = set(NearTeeSlot.__dataclass_fields__)
+    required = {"model_id", "max_input_tokens", "max_output_tokens", "request_cost_bound_microusd"}
+    if not isinstance(raw, dict) or not required <= set(raw) <= declared:
+        raise ValueError("NEAR TEE slot must contain exactly the declared fields")
+    return NearTeeSlot(**raw)
+
+
+def _near_tee_from_payload(raw: object) -> NearTeeSetup:
+    if not isinstance(raw, dict) or set(raw) - set(NearTeeSetup.__dataclass_fields__):
+        raise ValueError("invalid NEAR TEE setup fields")
+    values = dict(raw)
+    slots = values.get("slots")
+    if slots is not None:
+        if not isinstance(slots, dict):
+            raise ValueError("invalid NEAR TEE slots")
+        values["slots"] = {name: (None if item is None else _near_tee_slot_from_payload(item))
+            for name, item in slots.items()}
+    try:
+        setup = NearTeeSetup(**values)
+    except TypeError as exc:
+        raise ValueError("invalid NEAR TEE setup") from exc
+    validate_near_tee_setup(setup)
+    return setup
+
+
+def _near_tee_payload(setup: NearTeeSetup) -> dict[str, object]:
+    payload = asdict(setup)
+    payload["slots"] = {name: (None if slot is None else asdict(slot)) for name, slot in (setup.slots or {}).items()}
+    return payload
+
+
+def validate_inference_lane(lane: InferenceLaneConfig) -> None:
+    if not isinstance(lane, InferenceLaneConfig) or lane.schema_version != INFERENCE_LANE_SCHEMA_VERSION:
+        raise ValueError("unsupported inference lane schema")
+    for field, lower, upper in (("spend_ceiling_microusd", 1, 1_000_000_000),
+            ("max_queued", 1, _MAX_OPENROUTER_QUEUE), ("max_inflight", 1, 1),
+            ("max_outstanding_per_owner", 1, _MAX_OPENROUTER_OWNER_OUTSTANDING),
+            ("max_retries", 0, _MAX_OPENROUTER_RETRIES)):
+        value = getattr(lane, field)
+        if type(value) is not int or not lower <= value <= upper:
+            raise ValueError(f"invalid inference lane {field}")
+    review = lane.request_reserve_review_microusd
+    if review is not None and (type(review) is not int or not 1 <= review <= lane.spend_ceiling_microusd):
+        raise ValueError("invalid inference lane request_reserve_review_microusd")
+
+
+def _inference_lane_from_payload(payload: object) -> InferenceLaneConfig:
+    declared = set(InferenceLaneConfig.__dataclass_fields__)
+    if not isinstance(payload, dict) or set(payload) != declared:
+        raise ValueError("inference lane must contain exactly the declared fields")
+    lane = InferenceLaneConfig(**payload)
+    validate_inference_lane(lane)
+    return lane
+
+
+def migrate_inference_lane(openrouter_setup: "OpenRouterSetup | None",
+        near_text: "NearTextSetup | None") -> InferenceLaneConfig | None:
+    """Pure projection of the legacy lane limits into the neutral lane.
+
+    Copies the persisted values exactly; it never touches ledgers, liabilities,
+    reservations or revisions, and makes no provider contact.
+    """
+    if openrouter_setup is not None:
+        lane = InferenceLaneConfig(
+            spend_ceiling_microusd=openrouter_setup.spend_ceiling_microusd,
+            max_queued=openrouter_setup.max_queued,
+            max_inflight=openrouter_setup.max_inflight,
+            max_outstanding_per_owner=openrouter_setup.max_outstanding_per_owner,
+            max_retries=openrouter_setup.max_retries,
+        )
+    elif near_text is not None:
+        lane = InferenceLaneConfig(spend_ceiling_microusd=near_text.spend_ceiling_microusd)
+    else:
+        return None
+    validate_inference_lane(lane)
+    return lane
+
+
+def effective_inference_lane(configuration: "ModelFabricConfiguration") -> InferenceLaneConfig | None:
+    """The persisted lane, or its pure migration when not yet published."""
+    if configuration.inference_lane is not None:
+        return configuration.inference_lane
+    return migrate_inference_lane(configuration.openrouter_setup, configuration.near_text)
+
+
+def retire_openrouter_setup(setup: "OpenRouterSetup | None") -> "OpenRouterSetup | None":
+    """Route-scoped revoke of stored OpenRouter routes (ADR-035).
+
+    Disables every stored route, drops purpose consents and withdraws cloud
+    egress acknowledgement, so an older binary cannot resume contact. Model
+    ids, credential metadata and bounds stay readable for reconciliation.
+    Global egress (and therefore NEAR) is not fenced by this projection.
+    """
+    if setup is None:
+        return None
+    routes = setup.routes
+    if routes is not None:
+        routes = {slot: (replace(route, enabled=False) if route is not None else None) for slot, route in routes.items()}
+    return replace(setup, routes=routes,
+        purpose_consents={} if setup.purpose_consents is not None or routes is not None else None,
+        cloud_egress_acknowledged=False)
+
+
+def openrouter_setup_is_retired(setup: "OpenRouterSetup | None") -> bool:
+    return setup is not None and retire_openrouter_setup(setup) == setup
 
 
 def validate_near_text_setup(setup: NearTextSetup) -> None:
@@ -175,8 +702,20 @@ def near_text_profile_for_setup(setup: NearTextSetup) -> ProviderProfile:
 
 
 def deployment_spend_ceiling(configuration: ModelFabricConfiguration) -> int:
-    values = [setup.spend_ceiling_microusd for setup in
-        (configuration.openrouter_setup, configuration.near_text) if setup is not None]
+    """Return the one deployment ceiling.
+
+    Once the provider-neutral lane is published it is the only authority:
+    NEAR text must mirror it, and a retained (retired) OpenRouter ceiling is
+    historical readback only. Before publication, the legacy mirror rule
+    between OpenRouter and NEAR text still applies.
+    """
+    if configuration.inference_lane is not None:
+        values = [configuration.inference_lane.spend_ceiling_microusd]
+        if configuration.near_text is not None:
+            values.append(configuration.near_text.spend_ceiling_microusd)
+    else:
+        values = [setup.spend_ceiling_microusd for setup in
+            (configuration.openrouter_setup, configuration.near_text) if setup is not None]
     if not values or any(type(value) is not int or not 1 <= value <= 1_000_000_000 for value in values):
         raise ValueError("deployment spend ceiling unavailable")
     if len(set(values)) != 1:
@@ -217,6 +756,9 @@ class ModelFabricConfiguration:
     egress_revoked: bool = False
     egress_revocation_key: str | None = None
     v1_rollback_snapshot: dict[str, object] | None = None
+    audio_metadata_access: dict[str, object] | None = None
+    inference_lane: InferenceLaneConfig | None = None
+    near_tee: NearTeeSetup | None = None
 
 
 def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> WorkloadPolicy:
@@ -226,10 +768,12 @@ def openrouter_policy_for_setup(setup: OpenRouterSetup, runtime_path: str) -> Wo
     route.  Keeping this derivation here prevents readiness and caller-side
     admission from falling back to mutable legacy environment controls.
     """
+    if runtime_path == "audio_transcription" and setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+        raise ValueError("audio_setup_v3_required")
     profile_id = setup.profile_id
-    if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         from .caller_context import canonical_route_spec
-        slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+        slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class, schema_version=setup.schema_version)
         route = (setup.routes or {}).get(slot)
         if route is None or not route.enabled or slot != "text" and slot not in (setup.purpose_consents or {}):
             return WorkloadPolicy(runtime_path=runtime_path)
@@ -256,7 +800,7 @@ def read_model_fabric_configuration() -> ModelFabricConfiguration:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         configured = _configuration_from_payload(payload)
-        if configured.openrouter_setup is not None or configured.near_text is not None:
+        if configured.openrouter_setup is not None or configured.near_text is not None or configured.inference_lane is not None or configured.near_tee is not None:
             from src.workspace.accounting_witness import policy_continuity
             from src.workspace.production import ProductionWorkspace
             try:
@@ -314,23 +858,33 @@ def write_model_fabric_configuration(configuration: ModelFabricConfiguration, *,
     validated = _configuration_from_payload(_configuration_payload(configuration))
     path = model_fabric_configuration_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if validated.openrouter_setup is not None or validated.near_text is not None:
-        from src.workspace.accounting_witness import _publish_policy_locked, publish_policy_configuration
+    def publish(publication):
+        # Accounting is already held for governed branches. Never acquire it
+        # underneath this process lock; STATE exchanges remain short/pure.
+        from src.operator.home_projection import home_projection
+        with _policy_publication_lock:
+            generation = home_projection.begin_policy_publication()
+            publication()
+            home_projection.finish_policy_publication(generation,validated)
+    if validated.openrouter_setup is not None or validated.near_text is not None or validated.inference_lane is not None or validated.near_tee is not None:
+        from src.workspace.accounting_witness import _publish_policy_locked, maintenance_accounting_lock
         if publication_workspace is None:
-            publish_policy_configuration(path.parent, _configuration_payload(validated), expected_revision=expected_revision)
+            with maintenance_accounting_lock(path.parent) as workspace:
+                publish(lambda: _publish_policy_locked(workspace,_configuration_payload(validated),
+                    target_path=path,expected_revision=expected_revision))
         else:
             if publication_workspace.host_root != path.parent:
                 raise ValueError("publication workspace does not match configuration")
-            _publish_policy_locked(publication_workspace, _configuration_payload(validated), target_path=path, expected_revision=expected_revision)
+            publish(lambda: _publish_policy_locked(publication_workspace,_configuration_payload(validated),
+                target_path=path,expected_revision=expected_revision))
         return
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(_configuration_payload(validated), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    temporary.chmod(0o600)
-    os.replace(temporary, path)
-    path.chmod(0o600)
+    def publish_legacy():
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(_configuration_payload(validated),indent=2,sort_keys=True),encoding="utf-8")
+        temporary.chmod(0o600)
+        os.replace(temporary,path)
+        path.chmod(0o600)
+    publish(publish_legacy)
 
 
 def validate_active_model_fabric_configuration(
@@ -339,20 +893,145 @@ def validate_active_model_fabric_configuration(
     """Validate that a newly supplied configuration cannot activate legacy routes."""
     validated = _configuration_from_payload(_configuration_payload(configuration))
     for profile in validated.profiles:
-        if reason := active_provider_exclusion_reason(profile):
+        # Retained OpenRouter profiles stay structurally valid and readable;
+        # retirement is enforced at every route, not by refusing the file.
+        if reason := openrouter_contract_exclusion_reason(profile):
             raise ValueError(f"model-fabric profile is ineligible: {reason}")
-        if reason := profile_exclusion_reason(profile):
+        if (reason := profile_exclusion_reason(profile)) and reason != OPENROUTER_RETIRED_REASON:
             raise ValueError(f"model-fabric profile is ineligible: {reason}")
     for policy in validated.workload_policies:
         if policy.fallback_allowed:
             raise ValueError("active model-fabric policies must disable fallback")
         if policy.allowed_provider_kinds and set(policy.allowed_provider_kinds) != {"openrouter"}:
-            raise ValueError("active model-fabric policies may allow only openrouter")
+            raise ValueError("stored model-fabric policies may allow only openrouter; NEAR TEE routes derive from near_tee")
     if validated.openrouter_setup is not None:
-        validate_openrouter_setup(validated.openrouter_setup, allow_unconsented=validated.near_text is not None)
+        validate_openrouter_setup(validated.openrouter_setup,
+            allow_unconsented=validated.near_text is not None or validated.inference_lane is not None)
     if validated.near_text is not None:
         validate_near_text_setup(validated.near_text)
+    if validated.inference_lane is not None:
+        validate_inference_lane(validated.inference_lane)
+    if validated.near_tee is not None:
+        _validate_near_tee_against_lane(validated)
+    if validated.near_text is not None or validated.inference_lane is not None:
         deployment_spend_ceiling(validated)
+
+
+_openrouter_route_revoke_status: dict[str, object] = {"status": "not_run", "reason_code": None}
+
+
+def openrouter_route_revoke_status() -> dict[str, object]:
+    return dict(_openrouter_route_revoke_status)
+
+
+def _retired_openrouter_profiles(profiles: tuple[ProviderProfile, ...]) -> tuple[ProviderProfile, ...]:
+    return tuple(replace(profile, enabled=False) if profile.provider_kind == OPENROUTER_PROVIDER_KIND else profile
+        for profile in profiles)
+
+
+BOOT_ROUTE_REVOKE_KEY_PREFIX = "boot:openrouter_route_revoke:"
+
+
+def _boot_revoke_plan(configured: "ModelFabricConfiguration") -> tuple[str, "ModelFabricConfiguration | None", int]:
+    """Classify the stored configuration for the boot revoke.
+
+    Returns ("noop" | "publish" | "complete" | "degraded:<code>", final, base).
+    ``complete`` finishes an interrupted boot publication whose revoked
+    intermediate (r+1) carries this publication's own revocation key.
+    """
+    if configured.status == "missing":
+        return "noop", None, 0
+    if configured.status != "ready":
+        return "degraded:" + (configured.error_code or "configuration_unavailable"), None, 0
+    key = configured.egress_revocation_key or ""
+    if configured.egress_revoked and key.startswith(BOOT_ROUTE_REVOKE_KEY_PREFIX):
+        prior = key.removeprefix(BOOT_ROUTE_REVOKE_KEY_PREFIX)
+        if (prior not in {"active", "revoked"} or not openrouter_setup_is_retired(configured.openrouter_setup)
+                or _retired_openrouter_profiles(configured.profiles) != configured.profiles
+                or configured.inference_lane is None):
+            return "degraded:openrouter_route_revoke_interrupted", None, 0
+        # The intermediate already holds the final values (NEAR consent was
+        # carried to r+2 under the existing rule); only the revoke flag and
+        # this publication's key are restored.
+        final = replace(configured, egress_revision=configured.egress_revision + 1,
+            egress_revoked=prior == "revoked", egress_revocation_key=None,
+            updated_at=datetime.now(timezone.utc).isoformat())
+        return "complete", final, configured.egress_revision
+    setup = configured.openrouter_setup
+    profiles = _retired_openrouter_profiles(configured.profiles)
+    if profiles == configured.profiles and (setup is None or openrouter_setup_is_retired(setup)):
+        return "noop", None, 0
+    revision = configured.egress_revision
+    final_revision = revision + 2
+    near = configured.near_text
+    if (near is not None and near.enabled and not configured.egress_revoked
+            and near.plaintext_egress_consent_revision == revision):
+        near = replace(near, plaintext_egress_consent_revision=final_revision)
+    final = replace(configured, openrouter_setup=retire_openrouter_setup(setup), profiles=profiles,
+        near_text=near, inference_lane=effective_inference_lane(configured),
+        egress_revision=final_revision, egress_revocation_key=None,
+        updated_at=datetime.now(timezone.utc).isoformat())
+    return "publish", final, revision
+
+
+def publish_openrouter_route_revoke() -> dict[str, object]:
+    """One-shot, idempotent, witnessed boot publication of the ADR-035 revoke.
+
+    Disables the stored OpenRouter routes and profiles and withdraws their
+    consents so an older binary cannot resume contact, without waiting for an
+    operator save. Publishes revoked (r+1, keyed as this publication) then
+    final (r+2) under the maintenance accounting lock with revision CAS, and
+    re-reads the configuration under that lock so concurrent workers no-op.
+    A crash between r+1 and r+2 is completed on the next boot when the
+    witnessed intermediate carries this publication's key; anything else is
+    reported as ``openrouter_route_revoke_interrupted``. It never touches the
+    ledger; when no lane is published yet, the migrated lane (identical
+    ceiling and bounds) is published with it so the retained, unconsented
+    OpenRouter object stays a valid readable configuration. Global egress
+    revocation is preserved, never set or cleared; a current NEAR text
+    consent is carried to the new revision, so NEAR is not fenced.
+    """
+    global _openrouter_route_revoke_status
+    if not openrouter_retired():
+        result = {"status": "skipped", "reason_code": "openrouter_not_retired"}
+    else:
+        path = model_fabric_configuration_path()
+        if not path.exists():
+            result = {"status": "noop", "reason_code": None}
+        else:
+            from src.workspace.accounting_witness import maintenance_accounting_lock
+            with maintenance_accounting_lock(path.parent) as workspace:
+                plan, final, base = _boot_revoke_plan(read_model_fabric_configuration())
+                if plan == "publish":
+                    marker = BOOT_ROUTE_REVOKE_KEY_PREFIX + ("revoked" if final.egress_revoked else "active")
+                    write_model_fabric_configuration(replace(final, egress_revision=base + 1, egress_revoked=True,
+                        egress_revocation_key=marker), expected_revision=base, publication_workspace=workspace)
+                    write_model_fabric_configuration(final, expected_revision=base + 1,
+                        publication_workspace=workspace)
+                elif plan == "complete":
+                    write_model_fabric_configuration(final, expected_revision=base, publication_workspace=workspace)
+            if plan in {"publish", "complete"}:
+                result = {"status": "published" if plan == "publish" else "completed", "reason_code": None,
+                    "revision": final.egress_revision}
+            elif plan.startswith("degraded:"):
+                result = {"status": "degraded", "reason_code": plan.removeprefix("degraded:")}
+            else:
+                result = {"status": "noop", "reason_code": None}
+    _openrouter_route_revoke_status = result
+    return dict(result)
+
+
+def run_openrouter_route_revoke_at_boot() -> dict[str, object]:
+    """Startup wrapper: never raises; a failure stays visible as degraded."""
+    global _openrouter_route_revoke_status
+    try:
+        return publish_openrouter_route_revoke()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("OpenRouter route-scoped revoke publication failed; "
+            "OpenRouter stays retired at every route", exc_info=True)
+        _openrouter_route_revoke_status = {"status": "degraded", "reason_code": "openrouter_route_revoke_unavailable"}
+        return dict(_openrouter_route_revoke_status)
 
 
 def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> dict[str, ProviderProfile]:
@@ -361,20 +1040,21 @@ def effective_provider_profiles(legacy_profiles: dict[str, ProviderProfile]) -> 
     profiles = dict(legacy_profiles)
     if configured.status == "ready":
         profiles.update({profile.id: profile for profile in configured.profiles})
-        setup = configured.openrouter_setup
-        if setup is not None:
+        profiles.update({profile.id: profile for profile in near_tee_profiles(configured)})
+        lane = effective_inference_lane(configured)
+        if lane is not None:
             # The admission broker is process-local by design, but its limits
-            # are still canonical policy. Apply them on every profile
-            # resolution so a restart or a settings update cannot leave the
-            # active lane using stale defaults.
+            # are still canonical policy. Apply the provider-neutral lane on
+            # every profile resolution so a restart or a settings update
+            # cannot leave the shared lane using stale defaults.
             from .remote_inference_admission import configure_remote_inference_admission
 
             configure_remote_inference_admission(
-                max_queued=setup.max_queued,
-                max_inflight=setup.max_inflight,
-                max_outstanding_per_owner=setup.max_outstanding_per_owner,
-                max_owner_cost_microusd=setup.spend_ceiling_microusd,
-                max_retries=setup.max_retries,
+                max_queued=lane.max_queued,
+                max_inflight=lane.max_inflight,
+                max_outstanding_per_owner=lane.max_outstanding_per_owner,
+                max_owner_cost_microusd=lane.spend_ceiling_microusd,
+                max_retries=lane.max_retries,
             )
     else:
         from .remote_inference_admission import configure_remote_inference_admission
@@ -387,13 +1067,23 @@ def effective_workload_policy(runtime_path: str) -> WorkloadPolicy:
     configured = read_model_fabric_configuration()
     if configured.egress_revoked:
         return WorkloadPolicy(runtime_path=runtime_path)
+    if configured.near_tee is not None:
+        # ADR-035: a configured NEAR TEE slot is the only active provider of
+        # its canonical routes. Unusable slots fail closed, never fall back.
+        policy = near_tee_policy_for_runtime(configured, runtime_path)
+        if policy is not None or openrouter_retired():
+            return policy or WorkloadPolicy(runtime_path=runtime_path)
+    if openrouter_retired():
+        # Retired by policy and no NEAR TEE slot: no canonical route has an
+        # active provider. Fail closed, never fall back.
+        return WorkloadPolicy(runtime_path=runtime_path)
     if configured.status == "ready":
         if configured.openrouter_setup is not None:
             if not configured.openrouter_setup.cloud_egress_acknowledged:
                 return WorkloadPolicy(runtime_path=runtime_path)
-            if configured.openrouter_setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+            if configured.openrouter_setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
                 from .caller_context import canonical_route_spec
-                slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)
+                slot = route_slot_for_task_class(canonical_route_spec(runtime_path).task_class, schema_version=configured.openrouter_setup.schema_version)
                 if slot != "text" and (configured.openrouter_setup.purpose_consents or {}).get(slot) != configured.egress_revision:
                     return WorkloadPolicy(runtime_path=runtime_path)
             return openrouter_policy_for_setup(configured.openrouter_setup, runtime_path)
@@ -428,8 +1118,13 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         except TypeError as exc:
             raise ValueError("invalid NEAR setup") from exc
         validate_near_text_setup(near)
+    raw_lane = payload.get("inference_lane")
+    lane = _inference_lane_from_payload(raw_lane) if raw_lane is not None else None
+    raw_tee = payload.get("near_tee")
+    tee = _near_tee_from_payload(raw_tee) if raw_tee is not None else None
     raw_setup = payload.get("openrouter_setup")
-    setup = _openrouter_setup_from_payload(raw_setup, allow_unconsented=near is not None) if raw_setup is not None else None
+    setup = (_openrouter_setup_from_payload(raw_setup, allow_unconsented=near is not None or lane is not None)
+        if raw_setup is not None else None)
     configuration = ModelFabricConfiguration(
         profiles=profiles,
         workload_policies=policies,
@@ -441,8 +1136,16 @@ def _configuration_from_payload(payload: object) -> ModelFabricConfiguration:
         egress_revoked=payload.get("egress_revoked", False),
         egress_revocation_key=payload.get("egress_revocation_key"),
         v1_rollback_snapshot=payload.get("v1_rollback_snapshot"),
+        audio_metadata_access=payload.get("audio_metadata_access"),
+        inference_lane=lane,
+        near_tee=tee,
     )
-    if near is not None:
+    if tee is not None:
+        _validate_near_tee_against_lane(configuration)
+    if configuration.audio_metadata_access is not None:
+        from .audio_documentation import AudioMetadataAccessV1
+        AudioMetadataAccessV1.model_validate(configuration.audio_metadata_access)
+    if near is not None or lane is not None:
         deployment_spend_ceiling(configuration)
     return configuration
 
@@ -552,11 +1255,28 @@ def _configuration_payload(configuration: ModelFabricConfiguration) -> dict[str,
     }
     if configuration.v1_rollback_snapshot is not None:
         payload["v1_rollback_snapshot"] = configuration.v1_rollback_snapshot
+    if configuration.audio_metadata_access is not None:
+        payload["audio_metadata_access"] = configuration.audio_metadata_access
     if configuration.openrouter_setup is not None:
         payload["openrouter_setup"] = _openrouter_setup_payload(configuration.openrouter_setup)
     if configuration.near_text is not None:
         payload["near_text"] = asdict(configuration.near_text)
+    if configuration.inference_lane is not None:
+        payload["inference_lane"] = asdict(configuration.inference_lane)
+    if configuration.near_tee is not None:
+        payload["near_tee"] = _near_tee_payload(configuration.near_tee)
     return payload
+
+
+def _validate_near_tee_against_lane(configuration: ModelFabricConfiguration) -> None:
+    """NEAR TEE mirrors the provider-neutral lane ceiling; it never funds its own."""
+    validate_near_tee_setup(configuration.near_tee)
+    enabled = [slot for slot in (configuration.near_tee.slots or {}).values() if slot is not None and slot.enabled]
+    if enabled and configuration.inference_lane is None:
+        raise ValueError("inference_lane_required")
+    for slot in enabled:
+        if slot.request_cost_bound_microusd > configuration.inference_lane.spend_ceiling_microusd:
+            raise ValueError("NEAR TEE request reserve exceeds shared ceiling")
 
 
 def _profile_payload(profile: ProviderProfile) -> dict[str, object]:
@@ -587,10 +1307,12 @@ def normalize_openrouter_model_id(value: object) -> str:
     return f"openrouter/{candidate}"
 
 
-def route_slot_for_task_class(task_class: str) -> str:
+def route_slot_for_task_class(task_class: str, *, schema_version: str | None = None) -> str:
+    if task_class == "audio_transcription" and schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+        raise ValueError("audio_setup_v3_required")
     mapping = {"interactive_chat": "text", "agent_reasoning": "text",
         "report_synthesis": "text", "memory_synthesis": "text",
-        "vision_analysis": "vision", "memory_embedding": "embedding"}
+        "vision_analysis": "vision", "memory_embedding": "embedding", "audio_transcription": "audio"}
     if task_class not in mapping:
         raise ValueError("route_slot_unmapped")
     return mapping[task_class]
@@ -598,9 +1320,11 @@ def route_slot_for_task_class(task_class: str) -> str:
 
 def openrouter_profile_id_for_runtime_path(runtime_path: str) -> str:
     configured = read_model_fabric_configuration()
-    if configured.openrouter_setup is not None and configured.openrouter_setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if runtime_path == "audio_transcription" and (configured.openrouter_setup is None or configured.openrouter_setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION):
+        raise ValueError("audio_setup_v3_required")
+    if configured.openrouter_setup is not None and configured.openrouter_setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         from .caller_context import canonical_route_spec
-        return f"openrouter.{route_slot_for_task_class(canonical_route_spec(runtime_path).task_class)}"
+        return f"openrouter.{route_slot_for_task_class(canonical_route_spec(runtime_path).task_class, schema_version=configured.openrouter_setup.schema_version)}"
     return "openrouter"
 
 
@@ -611,7 +1335,8 @@ def _legacy_setup_for_route(setup: OpenRouterSetup, route: OpenRouterRoute) -> O
         allowed_upstreams=route.allowed_upstreams, temperature=route.temperature,
         max_output_tokens=route.max_output_tokens, timeout_seconds=route.timeout_seconds,
         zero_data_retention=route.zero_data_retention,
-        request_cost_bound_microusd=route.request_cost_bound_microusd)
+        request_cost_bound_microusd=route.request_cost_bound_microusd,
+        context_window_tokens=route.context_window_tokens)
 
 
 def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRouterRoute, *, allow_unconsented: bool = False) -> None:
@@ -625,6 +1350,19 @@ def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRou
             raise ValueError("OpenRouter route numbers must be finite")
     if not 0 <= route.temperature <= 2 or not 1 <= route.timeout_seconds <= _MAX_OPENROUTER_TIMEOUT_SECONDS:
         raise ValueError("OpenRouter route numbers must be within declared bounds")
+    if slot == "audio":
+        from .audio_contracts import validate_exact_audio_endpoint_slug
+        if setup.schema_version != OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+            raise ValueError("audio_setup_v3_required")
+        if len(route.capabilities) != 2 or set(route.capabilities) != {"text", "audio_input"}:
+            raise ValueError("audio_capabilities_invalid")
+        if len(route.allowed_upstreams) != 1:
+            raise ValueError("audio_endpoint_not_exact")
+        validate_exact_audio_endpoint_slug(route.allowed_upstreams[0])
+        normalize_openrouter_model_id(route.model_id)
+        if not math.isfinite(route.temperature) or not math.isfinite(route.timeout_seconds) or not 1 <= route.timeout_seconds <= 60 or not 1 <= route.max_output_tokens <= 8192 or route.zero_data_retention is not True or not 1 <= route.request_cost_bound_microusd <= setup.spend_ceiling_microusd:
+            raise ValueError("audio_route_bounds_invalid")
+        return
     required = {"text": {"text"}, "vision": {"text", "vision"}, "embedding": {"embedding"}}[slot]
     if not required.issubset(route.capabilities) or slot != "embedding" and "embedding" in route.capabilities or slot == "text" and "vision" in route.capabilities:
         raise ValueError("OpenRouter route capabilities do not match its purpose")
@@ -635,14 +1373,15 @@ def _validate_openrouter_route(setup: OpenRouterSetup, slot: str, route: OpenRou
 
 def migrate_openrouter_setup_v1_to_v2(setup: OpenRouterSetup, *, egress_revision: int = 1, allow_unconsented: bool = False) -> OpenRouterSetup:
     """Pure projection; no publication, provider contact or proof migration."""
-    if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         return setup
     validate_openrouter_setup(setup, allow_unconsented=allow_unconsented)
     route = OpenRouterRoute(model_id=setup.model_ids[0], enabled=True,
         capabilities=setup.capabilities, allowed_upstreams=setup.allowed_upstreams,
         temperature=setup.temperature, max_output_tokens=setup.max_output_tokens,
         timeout_seconds=setup.timeout_seconds, zero_data_retention=setup.zero_data_retention,
-        request_cost_bound_microusd=setup.request_cost_bound_microusd or setup.spend_ceiling_microusd)
+        request_cost_bound_microusd=setup.request_cost_bound_microusd or setup.spend_ceiling_microusd,
+        context_window_tokens=setup.context_window_tokens)
     routes = {slot: None for slot in OPENROUTER_ROUTE_SLOTS}
     consents = {}
     if setup.capabilities == ("embedding",):
@@ -655,7 +1394,7 @@ def migrate_openrouter_setup_v1_to_v2(setup: OpenRouterSetup, *, egress_revision
             consents["vision"] = egress_revision
     return replace(setup, schema_version=OPENROUTER_SETUP_V2_SCHEMA_VERSION,
         model_ids=(), capabilities=(), allowed_upstreams=(), routes=routes,
-        purpose_consents=consents)
+        purpose_consents=consents, context_window_tokens=None)
 
 
 def openrouter_profiles_for_setup(setup: OpenRouterSetup, *, existing: tuple[ProviderProfile, ...] = ()) -> tuple[ProviderProfile, ...]:
@@ -663,12 +1402,13 @@ def openrouter_profiles_for_setup(setup: OpenRouterSetup, *, existing: tuple[Pro
         return (openrouter_profile_for_setup(setup),)
     validate_openrouter_setup(setup)
     profiles = []
-    for slot in OPENROUTER_ROUTE_SLOTS:
+    for slot in route_slots_for_setup(setup):
         route = (setup.routes or {}).get(slot)
         if route is None:
             continue
-        profile = openrouter_profile_for_setup(_legacy_setup_for_route(setup, route))
-        tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis", "vision_analysis", "memory_embedding") if route_slot_for_task_class(task) == slot)
+        profile = (_profile_for_validated_setup(_legacy_setup_for_route(setup, route))
+            if slot == "audio" else openrouter_profile_for_setup(_legacy_setup_for_route(setup, route)))
+        tasks = tuple(task for task in ("interactive_chat", "agent_reasoning", "report_synthesis", "memory_synthesis", "vision_analysis", "memory_embedding", "audio_transcription") if (task != "audio_transcription" or setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION) and route_slot_for_task_class(task, schema_version=setup.schema_version) == slot)
         controls = dict(profile.options[OPENROUTER_RUNTIME_CONTROLS_KEY])
         controls["request_cost_bound_microusd"] = route.request_cost_bound_microusd
         profile = replace(profile, id=f"openrouter.{slot}", enabled=route.enabled,
@@ -685,11 +1425,11 @@ def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool
     """Validate the complete user-facing OpenRouter setup contract."""
     # A retained revoked OR object is inspectable beside NEAR, never authority.
     # Only complete dual-provider configuration parsing uses this mode.
-    if not isinstance(setup.schema_version, str) or setup.schema_version not in {OPENROUTER_SETUP_SCHEMA_VERSION, OPENROUTER_SETUP_V2_SCHEMA_VERSION}:
+    if not isinstance(setup.schema_version, str) or setup.schema_version not in {OPENROUTER_SETUP_SCHEMA_VERSION, OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}:
         raise ValueError("unsupported OpenRouter setup schema")
     if setup.profile_id != "openrouter":
         raise ValueError("OpenRouter setup must use the canonical openrouter profile")
-    v2 = setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION
+    v2 = setup.schema_version in {OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION}
     if v2:
         # Persisted JSON has no Pydantic boundary. Reject malformed shared
         # shapes before numeric conversion, hashing, or collection operations.
@@ -709,11 +1449,11 @@ def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool
             raise ValueError("OpenRouter setup booleans must be literal")
         if not isinstance(setup.credential_ref, str) or setup.credential_fingerprint is not None and not isinstance(setup.credential_fingerprint, str):
             raise ValueError("OpenRouter setup credential metadata must be strings")
-        if not isinstance(setup.routes, dict) or set(setup.routes) - set(OPENROUTER_ROUTE_SLOTS):
+        if not isinstance(setup.routes, dict) or set(setup.routes) - set(route_slots_for_setup(setup)):
             raise ValueError("unsupported OpenRouter route slot")
         if setup.purpose_consents is not None and (
             not isinstance(setup.purpose_consents, dict)
-            or set(setup.purpose_consents) - {"vision", "embedding"}
+            or set(setup.purpose_consents) - ({"vision", "embedding", "audio"} if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else {"vision", "embedding"})
             or any(type(value) is not int or value < 1 for value in setup.purpose_consents.values())
         ):
             raise ValueError("invalid OpenRouter purpose consent")
@@ -773,6 +1513,9 @@ def validate_openrouter_setup(setup: OpenRouterSetup, *, allow_unconsented: bool
         raise ValueError("OpenRouter credential reference must use the trusted vault or env reference")
     if setup.credential_fingerprint is not None and re.fullmatch(r"[0-9a-f]{12}", setup.credential_fingerprint) is None:
         raise ValueError("OpenRouter credential fingerprint is invalid")
+    window = setup.context_window_tokens
+    if window is not None and (type(window) is not int or not _MIN_OPENROUTER_CONTEXT_WINDOW_TOKENS <= window <= _MAX_OPENROUTER_CONTEXT_WINDOW_TOKENS):
+        raise ValueError("OpenRouter context window must be between 1024 and 2097152 tokens")
 
 
 def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool = False) -> OpenRouterSetup:
@@ -782,7 +1525,7 @@ def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool =
     if set(payload) - allowed:
         raise ValueError("OpenRouter setup contains unsupported fields")
     values = dict(payload)
-    if values.get("schema_version") == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
+    if values.get("schema_version") in (OPENROUTER_SETUP_V2_SCHEMA_VERSION, OPENROUTER_SETUP_V3_SCHEMA_VERSION):
         if "credential_ref" in values and not isinstance(values["credential_ref"], str):
             raise ValueError("OpenRouter setup credential reference must be a string")
         raw_routes = values.get("routes")
@@ -790,12 +1533,13 @@ def _openrouter_setup_from_payload(payload: object, *, allow_unconsented: bool =
             raise ValueError("OpenRouter routes must be an object")
         routes = {}
         for slot, raw in raw_routes.items():
-            if slot not in OPENROUTER_ROUTE_SLOTS:
+            if slot not in (OPENROUTER_V3_ROUTE_SLOTS if values.get("schema_version") == OPENROUTER_SETUP_V3_SCHEMA_VERSION else OPENROUTER_ROUTE_SLOTS):
                 raise ValueError("unsupported OpenRouter route slot")
             if raw is None:
                 routes[slot] = None
                 continue
-            if not isinstance(raw, dict) or set(raw) != set(OpenRouterRoute.__dataclass_fields__):
+            declared = set(OpenRouterRoute.__dataclass_fields__)
+            if not isinstance(raw, dict) or not declared - _OPENROUTER_ROUTE_OPTIONAL_FIELDS <= set(raw) <= declared:
                 raise ValueError("OpenRouter route must contain exactly the declared fields")
             raw = dict(raw)
             for field in ("capabilities", "allowed_upstreams"):
@@ -832,16 +1576,38 @@ def _openrouter_setup_payload(setup: OpenRouterSetup) -> dict[str, object]:
     if setup.schema_version == OPENROUTER_SETUP_SCHEMA_VERSION:
         payload.pop("routes", None)
         payload.pop("purpose_consents", None)
+        if setup.context_window_tokens is None:
+            payload.pop("context_window_tokens", None)
     else:
-        for field in ("model_ids", "capabilities", "temperature", "max_output_tokens", "timeout_seconds", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd"):
+        for field in ("model_ids", "capabilities", "temperature", "max_output_tokens", "timeout_seconds", "allowed_upstreams", "zero_data_retention", "request_cost_bound_microusd", "context_window_tokens"):
             payload.pop(field, None)
-        payload["routes"] = {slot: asdict(route) if route is not None else None for slot, route in (setup.routes or {}).items()}
+        payload["routes"] = {slot: _openrouter_route_payload(route) if route is not None else None for slot, route in (setup.routes or {}).items()}
     return payload
+
+
+def _openrouter_route_payload(route: OpenRouterRoute) -> dict[str, object]:
+    # Omit an unset optional field so previously persisted routes keep their
+    # exact serialized form (and policy-continuity digests) until re-saved.
+    payload = asdict(route)
+    if route.context_window_tokens is None:
+        payload.pop("context_window_tokens")
+    return payload
+
+
+def openrouter_context_window_tokens(setup: OpenRouterSetup) -> int:
+    """Return the declared prompt window, independent of the output cap."""
+    if setup.context_window_tokens is not None:
+        return int(setup.context_window_tokens)
+    return max(DEFAULT_OPENROUTER_CONTEXT_WINDOW_TOKENS, int(setup.max_output_tokens))
 
 
 def openrouter_profile_for_setup(setup: OpenRouterSetup) -> ProviderProfile:
     """Build the existing canonical profile from one validated setup."""
     validate_openrouter_setup(setup)
+    return _profile_for_validated_setup(setup)
+
+
+def _profile_for_validated_setup(setup: OpenRouterSetup) -> ProviderProfile:
     routing_model = setup.model_ids[0]
     transport_model = transport_model_for_provider(OPENROUTER_PROVIDER_KIND, routing_model)
     runtime_controls = {
@@ -894,10 +1660,24 @@ def openrouter_profile_for_setup(setup: OpenRouterSetup) -> ProviderProfile:
             if setup.capabilities == (ModelCapability.EMBEDDING.value,)
             else "openai_compatible_chat"
         ),
-        context_window_tokens=max(setup.max_output_tokens, 4096),
+        context_window_tokens=openrouter_context_window_tokens(setup),
         max_output_tokens=setup.max_output_tokens,
         cost_microusd=setup.spend_ceiling_microusd,
         cost_source="operator_spend_ceiling",
         cost_source_updated_at=datetime.now(timezone.utc).timestamp(),
         max_latency_ms=max(int(setup.timeout_seconds * 1000), 1),
     )
+
+
+def route_slots_for_setup(setup: OpenRouterSetup) -> tuple[str, ...]:
+    return OPENROUTER_V3_ROUTE_SLOTS if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION else OPENROUTER_ROUTE_SLOTS
+
+
+def migrate_openrouter_setup_to_v3(setup: OpenRouterSetup, *, egress_revision: int = 1, allow_unconsented: bool = False) -> OpenRouterSetup:
+    """Pure optional projection; preserves all original receipts and consent."""
+    if setup.schema_version == OPENROUTER_SETUP_V3_SCHEMA_VERSION:
+        validate_openrouter_setup(setup, allow_unconsented=allow_unconsented)
+        return setup
+    projected = migrate_openrouter_setup_v1_to_v2(setup, egress_revision=egress_revision, allow_unconsented=allow_unconsented)
+    return replace(projected, schema_version=OPENROUTER_SETUP_V3_SCHEMA_VERSION,
+        routes={**projected.routes, "audio": None})

@@ -157,7 +157,7 @@ class Admission:
                 "deadline_at": self.payload["deadline_at"], "guard_identity": self.payload["guard_identity"]}
 
 
-def admit(stage, source, preview, patch, binding, *, directory, guard_fd, seconds_limit=30):
+def admit(stage, source, preview, patch, binding, *, directory, guard_fd, seconds_limit=30, approved_patch=None):
     """Capture approved fixed inputs before the canonical producer checkpoint."""
     from src.execution.repo_publication import digest
     runtime = identity()
@@ -171,6 +171,12 @@ def admit(stage, source, preview, patch, binding, *, directory, guard_fd, second
                "patch_sha256": sha(patch), "binding": binding, "runtime": runtime,
                "token": secrets.token_hex(32), "deadline_at": time.monotonic() + seconds_limit,
                "guard_identity": [metadata.st_dev, metadata.st_ino]}
+    expected_approved = preview.get("repair_binding", {}).get("approved_input_patch_digest")
+    if (approved_patch is None) != (expected_approved is None) or (
+            approved_patch is not None and sha(approved_patch) != expected_approved):
+        raise ValueError("publication_approved_input_patch_changed")
+    if approved_patch is not None:
+        payload["approved_patch"] = base64.b64encode(approved_patch).decode()
     raw = canonical(payload)
     if len(raw) > MAX_REQUEST:
         raise ValueError("publication_supervisor_input_limit")
@@ -202,7 +208,7 @@ def run(admission, authorize, *, process_observer=None):
     """Only the canonical caller can acknowledge each authority-sensitive step."""
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     deadline = admission.payload["deadline_at"]
-    process = subprocess.Popen([admission.payload["runtime"]["interpreter_path"], "-I", str(Path(__file__).absolute()),
+    process = subprocess.Popen([admission.payload["runtime"]["interpreter_path"], "-I", "-B", str(Path(__file__).absolute()),
                                 str(admission.path), str(child.fileno()), str(admission.guard_fd)],
                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                pass_fds=(child.fileno(), admission.guard_fd), start_new_session=True,
@@ -307,7 +313,10 @@ def main(path, control_fd, guard_fd):
     from src.execution.repo_sandbox import _open_trusted_directory
     enable_subreaper()
     directory = _open_trusted_directory(path.parent)
-    control = socket.socket(fileno=control_fd)
+    control = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET, fileno=control_fd)
+    if (control.getsockopt(socket.SOL_SOCKET, socket.SO_DOMAIN) != socket.AF_UNIX
+            or control.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_SEQPACKET):
+        raise ValueError("publication_supervisor_control_socket_invalid")
     raw = _read(directory, path.name, MAX_REQUEST)
     admission = json.loads(raw)
     runtime = identity()
@@ -317,6 +326,12 @@ def main(path, control_fd, guard_fd):
     patch = base64.b64decode(admission["patch"], validate=True)
     if sha(patch) != admission["patch_sha256"] or len(patch) > 2 * 1024 * 1024:
         raise ValueError("publication_supervisor_patch_changed")
+    expected_approved = admission["preview"].get("repair_binding", {}).get("approved_input_patch_digest")
+    approved_patch = (base64.b64decode(admission["approved_patch"], validate=True)
+        if "approved_patch" in admission else None)
+    if (approved_patch is None) != (expected_approved is None) or (
+            approved_patch is not None and sha(approved_patch) != expected_approved):
+        raise ValueError("publication_supervisor_approved_patch_changed")
     deadline = float(admission["deadline_at"])
     if not 0 < deadline - time.monotonic() <= 30:
         raise ValueError("publication_supervisor_deadline")
@@ -355,7 +370,8 @@ def main(path, control_fd, guard_fd):
     reason = None
     try:
         result = _produce_direct(Path(admission["stage"]), SourceGit(Path(admission["source"])), admission["preview"], patch, authorize,
-                                 deadline_at=deadline, guard_fd=guard_fd, process_observer=observe)
+                                 deadline_at=deadline, guard_fd=guard_fd, process_observer=observe,
+                                 approved_patch=approved_patch)
     except (ValueError, OSError, EOFError) as exc:
         reason = str(exc)[:256] or type(exc).__name__
     finally:

@@ -2475,6 +2475,10 @@ class ScheduledJobRepository:
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         async with get_session() as db:
+            from src.runtime_plugins.lifecycle import assert_tick_fence
+            # #1025: a run is recorded only while the scheduler owner the tick
+            # was admitted under is still ready at its epoch (same transaction).
+            await assert_tick_fence(db)
             run = ScheduledJobRun(
                 scheduled_job_id=str(job.get("id") or ""),
                 job_name=str(job.get("name") or ""),

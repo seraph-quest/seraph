@@ -72,6 +72,7 @@ async def _unlocked(db, task):
 async def _current_operator(db, owner, operator):
     if operator is None:  # Internal callers already carry the server owner.
         return
+    from src.auth.service import local_root_marker_valid
     now = datetime.now(timezone.utc)
     row = await db.get(OperatorSession, owner.session_id, populate_existing=True)
     def utc(value):
@@ -81,7 +82,7 @@ async def _current_operator(db, owner, operator):
         or row.principal_id != owner.principal_id or row.revoked_at is not None
         or row.replaced_by_id is not None or row.is_bearer_tombstone
         or utc(row.idle_expires_at) <= now or utc(row.absolute_expires_at) <= now
-        or row.token_hash != operator._token_hash):
+        or row.token_hash != operator._token_hash or not local_root_marker_valid(row.token_hash)):
         raise BoardError('evidence_owner_not_current', 'The original authenticated owner is no longer current', status_code=409)
 
 

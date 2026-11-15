@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 
 from sqlmodel import select
 
-from src.db.engine import get_session
+from src.db.engine import commit_or_defer, get_session
 from src.conversation.identity import ConversationIdentityError
 from src.db.models import Goal, QueuedInsight
 
@@ -66,6 +66,10 @@ async def _remove_invalid_goal_rows(db, rows: list[QueuedInsight]) -> list[Queue
             continue
         valid.append(row)
     return valid
+
+
+# Read-path cleanup waits at most this long for SQLite's writer lock.
+_READ_CLEANUP_WAIT_MS = 250
 
 
 class InsightQueue:
@@ -181,21 +185,31 @@ class InsightQueue:
     async def peek_all(self) -> list[QueuedInsight]:
         """Return all non-expired items ordered by urgency desc without removing them.
 
-        Expired rows are still cleaned up opportunistically.
+        Expired and orphaned rows are already filtered from the result; their
+        cleanup is opportunistic and skipped while another writer holds the
+        lock, so the cockpit read never waits on it (#1074).
         """
         cutoff = _cutoff_time()
         async with get_session() as db:
-            result = await db.execute(
-                select(QueuedInsight)
-                .where(QueuedInsight.created_at > cutoff)
-                .order_by(QueuedInsight.urgency.desc())
-                .limit(PEEK_ALL_LIMIT)
-            )
-            items = await _remove_invalid_goal_rows(db, list(result.scalars().all()))
-            expired_result = await db.execute(select(QueuedInsight).where(QueuedInsight.created_at <= cutoff))
-            expired_rows = list(expired_result.scalars().all())
-            for row in expired_rows:
-                await db.delete(row)
+            # Deletions stay pending until commit_or_defer: an autoflush from
+            # the next query would take the writer lock at the full timeout.
+            with db.no_autoflush:
+                result = await db.execute(
+                    select(QueuedInsight)
+                    .where(QueuedInsight.created_at > cutoff)
+                    .order_by(QueuedInsight.urgency.desc())
+                    .limit(PEEK_ALL_LIMIT)
+                )
+                items = await _remove_invalid_goal_rows(db, list(result.scalars().all()))
+                expired_result = await db.execute(select(QueuedInsight).where(QueuedInsight.created_at <= cutoff))
+                expired_rows = list(expired_result.scalars().all())
+                for row in expired_rows:
+                    await db.delete(row)
+            if db.deleted:
+                for item in items:
+                    db.expunge(item)
+                if not await commit_or_defer(db, _READ_CLEANUP_WAIT_MS):
+                    logger.info("Queued insight cleanup deferred: database busy")
         return items
 
     async def delete_many(self, ids: list[str]) -> int:

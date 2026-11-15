@@ -258,6 +258,10 @@ def _attachment_receipt_key() -> bytes:
 
     configured = str(settings.operator_auth_secret or settings.operator_auth_secret_hash or "").strip()
     if not configured:
+        from src.auth.local_keys import local_no_login_vault_secret
+
+        configured = local_no_login_vault_secret(b"seraph.attachment-receipt.local-no-login.v1") or ""
+    if not configured:
         raise ConversationIdentityError(
             "attachment_receipt_unavailable",
             "A configured server secret is required for attachment quarantine receipts.",

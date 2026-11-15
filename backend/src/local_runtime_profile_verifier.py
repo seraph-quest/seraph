@@ -32,19 +32,20 @@ async def verify_local_runtime_profiles(
 ) -> dict[str, Any]:
     """Verify the historical local gateway profile behavior and write a receipt.
 
-    The active OpenRouter-only runtime cannot probe a local or GPU gateway.
-    Legacy generation is therefore available only to an explicitly opted-in
-    diagnostic caller while the active provider-only setting is disabled.
+    Under ADR-035 (NEAR TEE-hosted inference only) the active runtime cannot
+    probe a local or GPU gateway. Legacy generation is available only to an
+    explicitly opted-in diagnostic caller while the historical
+    ``openrouter_provider_only`` setting (default on) is disabled.
     """
     if bool(getattr(settings, "openrouter_provider_only", True)):
         return _blocked_receipt(
             base_url=base_url,
             model=model,
             output_dir=output_dir,
-            reason_code="local_runtime_profile_probe_disabled_openrouter_only",
+            reason_code="local_runtime_profile_probe_disabled_near_tee_only",
             note=(
-                "local runtime profile verification is blocked while the active "
-                "OpenRouter-only policy is enabled"
+                "local runtime profile verification is blocked: inference is NEAR TEE "
+                "only (ADR-035) while the provider-only setting is enabled"
             ),
         )
     if not allow_legacy_local_probe:

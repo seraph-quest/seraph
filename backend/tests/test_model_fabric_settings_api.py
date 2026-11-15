@@ -25,6 +25,12 @@ from src.security.trust_contract import (
 )
 
 
+# ADR-035 retired OpenRouter by policy: the settings API now refuses OpenRouter
+# profile saves and canaries (tests/test_openrouter_retirement.py). This module
+# pins the historical generic-profile/canary mechanics behind the explicit
+# legacy fixture.
+pytestmark = pytest.mark.openrouter_legacy
+
 PERSISTED_PROFILE_ID = "persisted-openrouter"
 CANONICAL_LEGACY_PROBE_ID = "openrouter"
 PERSISTED_MODEL = "anthropic/claude-sonnet-4"
@@ -188,6 +194,19 @@ async def test_put_get_configuration_becomes_canonical_profile_and_policy(client
     assert context.allowed_provider_kinds == ("openrouter",)
     assert context.fallback_allowed is False
     assert context.requirements.max_cost_microusd == 5000
+
+
+@pytest.mark.asyncio
+async def test_retired_audio_metadata_selection_is_refused(client, model_fabric_workspace):
+    """#1179: the audio documentation metadata selection was retired with voice input."""
+    before = read_model_fabric_configuration()
+    response = await client.put(
+        "/api/settings/model-fabric",
+        json={"audio_metadata_access": {"action": "disable"}, "expected_policy_revision": 1},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "audio_route_retired"
+    assert read_model_fabric_configuration() == before
 
 
 @pytest.mark.asyncio

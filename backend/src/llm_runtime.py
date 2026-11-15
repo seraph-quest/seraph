@@ -22,8 +22,14 @@ from typing import Any
 from urllib.parse import urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
-from smolagents import LiteLLMModel as BaseLiteLLMModel
-from smolagents.models import ChatMessage, MessageRole
+from smolagents import LiteLLMModel as BaseLiteLLMModel, Tool
+from smolagents.models import (
+    ChatMessage,
+    MessageRole,
+    get_clean_message_list,
+    get_tool_json_schema,
+    tool_role_conversions,
+)
 
 from config.settings import settings
 from src.agent.prompt_compaction import compact_messages_for_local_runtime
@@ -37,6 +43,7 @@ from src.model_fabric.contracts import (
     ProviderProfile,
     SUPPORTED_SECRET_REFS,
     finalized_openai_compatible_body,
+    provider_uncertain_on_error,
     transport_model_for_provider,
 )
 from src.model_fabric.remote_inference_admission import (
@@ -66,6 +73,10 @@ from src.vlm_runtime import (
 logger = logging.getLogger(__name__)
 _runtime_request_lock = Lock()
 _runtime_requests: dict[str, bool] = {}
+# Monotonic deadlines of registered requests whose caller waits with a timeout.
+_runtime_request_deadlines: dict[str, float] = {}
+# Request ids whose turn reached a provider transport at least once.
+_runtime_request_contacts: set[str] = set()
 _target_health_lock = Lock()
 _unhealthy_targets: dict[tuple[str, str | None, str | None], float] = {}
 _target_feedback_lock = Lock()
@@ -1256,7 +1267,7 @@ def _profile_model_id(profile: str) -> str:
     provider_profile = _provider_profile(profile)
     if provider_profile is not None:
         return provider_profile.routing_model or provider_profile.model
-    if profile in {"openrouter.text", "openrouter.vision", "openrouter.embedding"}:
+    if profile in {"openrouter.text", "openrouter.vision", "openrouter.embedding", "openrouter.audio"}:
         return ""
     return settings.default_model
 
@@ -1526,6 +1537,52 @@ def _openai_message_payload(message: Any) -> dict[str, Any]:
     return result
 
 
+_SMOLAGENTS_MEMORY_ROLES = frozenset({MessageRole.TOOL_CALL.value, MessageRole.TOOL_RESPONSE.value})
+
+
+def _role_value(message: Any) -> str:
+    role = _message_value(message, "role", "")
+    return str(getattr(role, "value", role))
+
+
+def _is_agent_memory(messages: list[Any]) -> bool:
+    """smolagents agent memory: ``ChatMessage`` objects or smolagents-only roles."""
+    return any(
+        isinstance(message, ChatMessage) or _role_value(message) in _SMOLAGENTS_MEMORY_ROLES
+        for message in messages
+    )
+
+
+def _provider_chat_messages(
+    messages: list[Any],
+    *,
+    role_conversions: dict[str, str] | None,
+    flatten_messages_as_text: bool,
+) -> list[dict[str, Any]]:
+    """Agent memory exactly as smolagents' ``LiteLLMModel`` would send it.
+
+    Agent memory uses smolagents roles (``tool-call``, ``tool-response``) that
+    no OpenAI-compatible provider accepts; ``LiteLLMModel`` maps them to
+    ``assistant``/``user`` and merges consecutive turns of one role. The
+    governed transport sends the result with plain string roles (#1107).
+    Plain string content is wrapped as one text part first, because the
+    smolagents cleaner assumes part lists.
+    """
+    parts = []
+    for message in messages:
+        content = _message_value(message, "content")
+        if isinstance(content, str):
+            message = {"role": _role_value(message), "content": [{"type": "text", "text": content}]}
+        parts.append(message)
+    cleaned = get_clean_message_list(
+        parts,
+        role_conversions=role_conversions or tool_role_conversions,
+        convert_images_to_image_urls=True,
+        flatten_messages_as_text=flatten_messages_as_text,
+    )
+    return [{**message, "role": str(getattr(message["role"], "value", message["role"]))} for message in cleaned]
+
+
 def _transport_json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -1533,6 +1590,12 @@ def _transport_json_value(value: Any) -> Any:
         return {str(key): _transport_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_transport_json_value(item) for item in value]
+    if isinstance(value, Tool) or _is_managed_agent(value):
+        # The tool-calling schema actually sent to the provider (a managed specialist
+        # is offered as a tool, #1020). ``Tool.to_dict`` is smolagents' save-to-source
+        # export: it refuses Seraph's wrapper tools, which failed every canonical
+        # agent turn that offered tools (#1107).
+        return get_tool_json_schema(value)
     for method_name in ("model_dump", "to_dict", "dict"):
         method = getattr(value, method_name, None)
         if callable(method):
@@ -1609,6 +1672,8 @@ def _governed_openai_chat_completion(
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
     from src.model_fabric.accounting import assert_current_inference_policy, capture_response_usage
+    from src.model_fabric.retirement import assert_openrouter_contact_allowed
+    assert_openrouter_contact_allowed(provider_kind=candidate.profile.provider_kind, api_base=candidate.endpoint)
     assert_current_inference_policy()
     with httpx.Client(follow_redirects=False, timeout=httpx.Timeout(remaining)) as client:
         response = client.post(candidate.endpoint, headers=headers, json=body)
@@ -1635,14 +1700,18 @@ def _governed_openai_chat_completion(
     return SimpleNamespace(choices=[SimpleNamespace(message=message)]), payload
 
 
-async def _governed_research_chat_completion(
-    *, decision: Any, context: Any, body: dict[str, Any], api_key: str | None,
-) -> tuple[SimpleNamespace, dict[str, Any]]:
+async def _governed_bounded_chat_transfer(
+    *, decision: Any, context: Any, body: dict[str, Any], api_key: str | None, envelope: str,
+) -> dict[str, Any]:
     """One governed POST with an absolute deadline and fixed raw-byte envelope.
 
     Model output is nonstreaming JSON; only its HTTP transfer is streamed. No
     SDK, candidate loop, fallback, redirect or retry occurs in this helper.
     """
+    # #1179 retired voice input, and with it the "audio" transfer envelope.
+    if envelope != "research":
+        raise ValueError("governed_envelope_invalid")
+    response_limit = 64 * 1024
     import httpx
     from src.model_fabric.accounting import assert_current_inference_policy, capture_response_usage
 
@@ -1651,13 +1720,15 @@ async def _governed_research_chat_completion(
         raise NoCompliantModelRouteError()
     candidate = decision.selected
     if candidate.adapter != "openai_compatible_chat" or context.fallback_allowed:
-        raise ProviderProfileConfigurationError("research requires one governed chat target")
+        raise ProviderProfileConfigurationError("bounded transfer requires one governed chat target")
     remaining = float(context.deadline_at) - time.time()
     if remaining <= 0:
         raise TimeoutError("model_fabric_deadline_exceeded")
     headers = {"content-type": "application/json", "accept-encoding": "identity"}
     if api_key:
         headers["authorization"] = f"Bearer {api_key}"
+    from src.model_fabric.retirement import assert_openrouter_contact_allowed
+    assert_openrouter_contact_allowed(provider_kind=candidate.profile.provider_kind, api_base=candidate.endpoint)
     assert_current_inference_policy()
     # Final policy work consumes the original deadline; it never grants a
     # fresh relative timeout before the provider transfer begins.
@@ -1670,32 +1741,38 @@ async def _governed_research_chat_completion(
                 timeout=httpx.Timeout(remaining)) as client:
             async with client.stream("POST", candidate.endpoint, headers=headers, json=body) as incoming:
                 if incoming.headers.get("content-encoding", "identity").lower() != "identity":
-                    raise RuntimeError("research_response_encoding_denied")
+                    raise RuntimeError(f"{envelope}_response_encoding_denied")
                 declared = incoming.headers.get("content-length")
                 length = None
                 if declared is not None:
                     try:
                         length = int(declared)
                     except ValueError as error:
-                        raise RuntimeError("research_response_length_invalid") from error
-                    if not 0 <= length <= 64 * 1024:
-                        raise RuntimeError("research_response_envelope_exceeded")
+                        raise RuntimeError(f"{envelope}_response_length_invalid") from error
+                    if not 0 <= length <= response_limit:
+                        raise RuntimeError(f"{envelope}_response_envelope_exceeded")
                 content = bytearray()
                 async for chunk in incoming.aiter_raw(chunk_size=8192):
-                    if len(content) + len(chunk) > 64 * 1024:
-                        raise RuntimeError("research_response_envelope_exceeded")
+                    if len(content) + len(chunk) > response_limit:
+                        raise RuntimeError(f"{envelope}_response_envelope_exceeded")
                     content.extend(chunk)
                 if length is not None and len(content) != length:
-                    raise RuntimeError("research_response_truncated")
+                    raise RuntimeError(f"{envelope}_response_truncated")
                 response = httpx.Response(incoming.status_code, headers=incoming.headers,
                     content=bytes(content), request=incoming.request)
-    capture_response_usage(response)
+    if envelope == "research":
+        capture_response_usage(response)
     assert_runtime_not_revoked()
     assert_current_inference_policy()
     if 300 <= response.status_code < 400:
         raise RuntimeError("model_fabric_redirect_denied")
     response.raise_for_status()
-    payload = response.json()
+    return response.json()
+
+
+async def _governed_research_chat_completion(*, decision, context, body, api_key):
+    payload = await _governed_bounded_chat_transfer(decision=decision, context=context,
+        body=body, api_key=api_key, envelope="research")
     try:
         raw_message = payload["choices"][0]["message"]
         if not isinstance(raw_message, dict) or not isinstance(raw_message.get("content"), str) or raw_message.get("tool_calls"):
@@ -3142,6 +3219,272 @@ async def preflight_governed_completion_target_async(
     return None
 
 
+def _openrouter_retired_target(target: dict[str, Any]) -> bool:
+    """True when a concrete target would contact retired OpenRouter."""
+    from src.model_fabric.retirement import is_openrouter_destination, openrouter_retired
+
+    if not openrouter_retired():
+        return False
+    profile_id = str(target.get("profile") or "")
+    resolved_id = "local-ollama" if profile_id == "local" else profile_id
+    profile = _provider_profile(resolved_id) if resolved_id else None
+    if profile is not None and profile.provider_kind == "openrouter":
+        return True
+    return is_openrouter_destination(api_base=target.get("api_base"), model_id=target.get("model_id"))
+
+
+def _near_tee_context(request_context: Any | None) -> bool:
+    """True when the caller's canonical context resolved to a NEAR TEE slot."""
+    from src.model_fabric.contracts import NEAR_TEE_PROVIDER_KIND
+
+    return tuple(getattr(request_context, "allowed_provider_kinds", ()) or ()) == (NEAR_TEE_PROVIDER_KIND,)
+
+
+def _near_tee_completion_sync(
+    *,
+    messages: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int,
+    request_context: Any,
+    request_id: str | None,
+    runtime_path: str,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: Any = None,
+    stop: list[str] | None = None,
+    response_format: dict[str, Any] | None = None,
+    agent: bool = False,
+) -> Any:
+    """ADR-035 NEAR TEE text slot through the existing governed sync path.
+
+    ``agent=True`` (the chat agent's tool turn, PR3c) returns one
+    ``ChatMessage`` that may carry OpenAI-compatible tool calls with
+    strictly parsed arguments; otherwise a completion response.
+
+    Precontact gates (slot policy, consent, catalog receipt, credential,
+    selector and capability proofs) run before admission; the transport runs
+    inside the one shared broker lease with its accounting reservation; no
+    fallback to another slot, model or provider exists.
+    """
+    from src.model_fabric.accounting import bind_precontact_guard
+    from src.model_fabric.near_tee import (
+        NearTeeDenied, NearTeeError, near_tee_precontact_reason, near_tee_transport, prepare_near_tee_call,
+    )
+    from src.model_fabric.execution import _run_awaitable_sync
+
+    assert_runtime_not_revoked()
+    receipt_session = _new_route_receipt_session(request_context)
+    try:
+        call = _run_receipt_hook_sync(prepare_near_tee_call(
+            context=request_context, messages=messages, temperature=temperature, max_tokens=max_tokens,
+            tools=tools, tool_choice=tool_choice, stop=stop, response_format=response_format))
+    except NearTeeDenied as denied:
+        _persist_denied_route_sync(request_context, denied.decision, (denied.code,))
+        if _can_log_request(request_id):
+            _log_llm_runtime_event_sync(event_type="llm_target_policy_denied",
+                summary="NEAR TEE route denied before contact",
+                details={"runtime_path": runtime_path, "provider": "near_tee", "reason": denied.code},
+                request_id=request_id)
+        raise
+    started = False
+
+    def operation():
+        nonlocal started
+        receipt_session.attempt_started(call.decision, capability_proof_hashes=call.proof_hashes)
+        started = True
+        _note_provider_contact()
+        return _run_awaitable_sync(near_tee_transport(call))
+
+    try:
+        with bind_precontact_guard(lambda: near_tee_precontact_reason(call)):
+            outcome = _execute_sync_with_gpu_admission(
+                context=call.context,
+                decision=call.decision,
+                operation_id=str(call.decision.attempt_id or f"{call.context.request_id}:near_tee"),
+                operation=operation,
+            )
+    except BaseException as error:
+        if started:
+            code = getattr(error, "code", None) if isinstance(error, NearTeeError) else "transport_failed"
+            receipt_session.attempt_finished(outcome="failed", error_code=code or "transport_failed",
+                decision=call.decision, degradation_code="transport_failed")
+            _finalize_route_receipt_sync(receipt_session, outcome="failed", request_id=request_id,
+                degradation_codes=("near_tee_transport_failed",))
+        raise
+    if outcome.failure_code is not None or (outcome.text is None and outcome.message is None):
+        code = outcome.failure_code or "near_tee_empty_output"
+        receipt_session.attempt_finished(outcome="failed", error_code=code, decision=call.decision,
+            degradation_code="near_tee_output_not_adopted")
+        _finalize_route_receipt_sync(receipt_session, outcome="failed", request_id=request_id,
+            degradation_codes=(code,))
+        # Contact happened and its cost was settled; no output is adopted.
+        raise NearTeeError(code)
+    receipt_session.attempt_finished(outcome="succeeded", error_code=None, decision=call.decision)
+    _finalize_route_receipt_sync(receipt_session, outcome="succeeded", request_id=request_id)
+    if _can_log_request(request_id):
+        _log_llm_runtime_event_sync(event_type="llm_primary_success",
+            summary=f"NEAR TEE completion succeeded via {call.body['model']}",
+            details={"runtime_path": runtime_path, "runtime_profile": call.decision.selected.profile.id,
+                "primary_model": str(call.body["model"]), "used_fallback": False, "provider": "near_tee"},
+            request_id=request_id)
+    if agent:
+        payload = dict(outcome.message or {"role": "assistant", "content": outcome.text})
+        if isinstance(payload.get("content"), str):
+            payload["content"] = _trim_after_stop_sequences(payload["content"], stop)
+        # No raw provider payload is retained: reasoning never leaves the adapter.
+        return ChatMessage.from_dict(payload)
+    message = ChatMessage.from_dict({"role": "assistant", "content": outcome.text})
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)], model=str(call.body["model"]))
+
+
+def _near_tee_runtime_controls(runtime_path: str) -> dict[str, Any] | None:
+    """The usable NEAR TEE slot's output/timeout bounds for a canonical route."""
+    try:
+        from src.model_fabric.caller_context import canonical_route_spec
+        from src.model_fabric.configuration import (
+            near_tee_policy_for_runtime, near_tee_slot, read_model_fabric_configuration, route_slot_for_task_class,
+        )
+
+        configured = read_model_fabric_configuration()
+        if configured.egress_revoked or near_tee_policy_for_runtime(configured, runtime_path) is None:
+            return None
+        slot = near_tee_slot(configured, route_slot_for_task_class(canonical_route_spec(runtime_path).task_class))
+    except Exception:
+        return None
+    if slot is None:
+        return None
+    return {"output_limit": int(slot.max_output_tokens), "timeout_seconds": float(slot.timeout_seconds)}
+
+
+async def _near_tee_stream(
+    *,
+    messages: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int,
+    request_context: Any,
+    request_id: str | None,
+    runtime_path: str,
+):
+    """ADR-035 NEAR TEE text-slot streaming through the one shared broker.
+
+    The same precontact gates as the non-streaming slot run before admission
+    (a denial is durable and never contacted). The stream runs inside the
+    admitted lease with its accounting reservation; it is ended no later
+    than the billing reserve before the original deadline and NEAR billing
+    is read back in that lease. Deltas already yielded are never retracted.
+    A known-cost failure settles the charge and releases the lease, then
+    fails the operation; a missing cost is an Unknown liability that keeps
+    the lease blocked. Caller cancellation follows the existing streaming
+    semantics (an uncertain provider outcome). No fallback exists.
+    """
+    from src.model_fabric import persist_denied_route
+    from src.model_fabric.accounting import bind_precontact_guard
+    from src.model_fabric.execution import _persist_bound_admission_receipt
+    from src.model_fabric.hooks import RouteReceiptSession
+    from src.model_fabric.near_tee import (
+        NearTeeDenied, NearTeeError, NearTeeStreamState, near_tee_precontact_reason, near_tee_stream_transport,
+        prepare_near_tee_call,
+    )
+
+    assert_runtime_not_revoked()
+    try:
+        call = await prepare_near_tee_call(context=request_context, messages=messages, temperature=temperature,
+            max_tokens=max_tokens, stream=True)
+    except NearTeeDenied as denied:
+        await persist_denied_route(context=request_context, decision=denied.decision, reason_codes=(denied.code,))
+        if _can_log_request(request_id):
+            await _log_llm_runtime_event(event_type="llm_target_policy_denied",
+                summary="NEAR TEE streaming route denied before contact",
+                details={"runtime_path": runtime_path, "provider": "near_tee", "reason": denied.code},
+                request_id=request_id)
+        raise
+    session = RouteReceiptSession(context=call.context)
+    profile_id = call.decision.selected.profile.id
+    request = GpuAdmissionRequest.from_inference_context(
+        call.context,
+        operation_id=stable_remote_inference_operation_id(call.context, profile_id=profile_id,
+            fallback=str(call.decision.attempt_id or f"{call.context.request_id}:near_tee")),
+        uncertain_on_error=provider_uncertain_on_error(call.decision.selected.profile.provider_kind),
+    )
+    bind_accounting_profile(request.operation_id, profile_id)
+    await prepare_bound_remote_inference(request, profile_id=profile_id)
+    state = NearTeeStreamState()
+    started = False
+
+    async def admitted():
+        nonlocal started
+        session.attempt_started(call.decision, capability_proof_hashes=call.proof_hashes)
+        started = True
+        _note_provider_contact()
+        async for delta in near_tee_stream_transport(call, state):
+            yield delta
+
+    error_receipt = None
+    broker_stream = gpu_admission_broker.stream(request, admitted)
+    try:
+        with bind_precontact_guard(lambda: near_tee_precontact_reason(call)):
+            try:
+                async for delta in broker_stream:
+                    yield delta
+            except GeneratorExit:
+                if not started:
+                    raise
+                # The consumer stopped reading (closed stream, WebSocket gone,
+                # Cordis output cut). Ask the transport to end the provider
+                # stream and drain it in this task so billing is read back and
+                # the known cost settles inside the same lease.
+                state.stop_requested = True
+                try:
+                    async for _delta in broker_stream:
+                        pass
+                except Exception as drained:
+                    error_receipt = getattr(drained, "receipt", None)
+                outcome_code = state.failure_code or "near_tee_stream_cancelled"
+                session.attempt_finished(outcome="failed", error_code=outcome_code, decision=call.decision,
+                    degradation_code="near_tee_output_not_adopted")
+                await session.finalize(outcome="failed", degradation_codes=(outcome_code,))
+                raise
+    except GeneratorExit:
+        raise
+    except BaseException as error:
+        if state.caller_cancelled and not isinstance(error, asyncio.CancelledError):
+            # The broker settled the known cost and released the lease as a
+            # caller cancellation; preserve the task's cancellation semantics.
+            error_receipt = getattr(error, "receipt", None)
+            session.attempt_finished(outcome="failed", error_code="near_tee_stream_cancelled",
+                decision=call.decision, degradation_code="near_tee_output_not_adopted")
+            await session.finalize(outcome="failed", degradation_codes=("near_tee_stream_cancelled",))
+            raise asyncio.CancelledError() from error
+        error_receipt = getattr(error, "receipt", None)
+        if started:
+            code = getattr(error, "code", None) if isinstance(error, NearTeeError) else "transport_failed"
+            session.attempt_finished(outcome="failed", error_code=code or "transport_failed",
+                decision=call.decision, degradation_code="transport_failed")
+            await session.finalize(outcome="failed", degradation_codes=("near_tee_transport_failed",))
+        elif isinstance(error, Exception):
+            await session.finalize_denied(decision=call.decision,
+                reason_codes=("gpu_admission_rejected", f"gpu_admission_{getattr(error, 'code', 'failed')}"),
+                fallback_reason_code="gpu_admission_rejected")
+        raise
+    finally:
+        await _persist_bound_admission_receipt(request.operation_id, receipt=error_receipt, readback=True)
+    if state.failure_code is not None:
+        session.attempt_finished(outcome="failed", error_code=state.failure_code, decision=call.decision,
+            degradation_code="near_tee_output_not_adopted")
+        await session.finalize(outcome="failed", degradation_codes=(state.failure_code,))
+        # Contact happened and its cost was settled; already-delivered
+        # deltas stand, but the answer is not adopted as complete.
+        raise NearTeeError(state.failure_code)
+    session.attempt_finished(outcome="succeeded", error_code=None, decision=call.decision)
+    await session.finalize(outcome="succeeded")
+    if _can_log_request(request_id):
+        await _log_llm_runtime_event(event_type="llm_primary_success",
+            summary=f"NEAR TEE stream succeeded via {call.body['model']}",
+            details={"runtime_path": runtime_path, "runtime_profile": profile_id,
+                "primary_model": str(call.body["model"]), "used_fallback": False, "provider": "near_tee",
+                "streaming": True},
+            request_id=request_id)
+
+
 def _governed_preflight_target(
     target: dict[str, Any],
     request_context: Any | None,
@@ -3324,9 +3667,8 @@ def _execute_sync_with_gpu_admission(
         request = GpuAdmissionRequest.from_inference_context(
             context,
             operation_id=effective_operation_id,
-            uncertain_on_error=(
+            uncertain_on_error=provider_uncertain_on_error(
                 getattr(getattr(getattr(decision, "selected", None), "profile", None), "provider_kind", "")
-                == "openrouter"
             ),
         )
         bind_accounting_profile(request.operation_id, profile_id)
@@ -3431,6 +3773,13 @@ def _register_request(request_id: str) -> None:
         _runtime_requests[request_id] = False
 
 
+def _start_request_deadline(request_id: str, timeout_seconds: float) -> None:
+    """Record the caller's deadline at the instant its own timeout starts."""
+    with _runtime_request_lock:
+        if request_id in _runtime_requests:
+            _runtime_request_deadlines[request_id] = monotonic() + max(float(timeout_seconds), 0.0)
+
+
 def _mark_request_timed_out(request_id: str) -> None:
     with _runtime_request_lock:
         if request_id in _runtime_requests:
@@ -3440,6 +3789,47 @@ def _mark_request_timed_out(request_id: str) -> None:
 def _finish_request(request_id: str) -> None:
     with _runtime_request_lock:
         _runtime_requests.pop(request_id, None)
+        _runtime_request_deadlines.pop(request_id, None)
+        _runtime_request_contacts.discard(request_id)
+
+
+def _note_provider_contact() -> None:
+    """Record that the bound chat request is about to reach a provider transport."""
+    request_id = _current_llm_request_id()
+    if request_id is None:
+        return
+    with _runtime_request_lock:
+        if request_id in _runtime_requests:
+            _runtime_request_contacts.add(request_id)
+
+
+def request_provider_contacted(request_id: str | None) -> bool:
+    """Return whether any model call of this registered request reached a transport.
+
+    A later route denial in the same agent turn is then a mid-turn block, not a
+    preflight refusal with no provider contact.
+    """
+    if request_id is None:
+        return False
+    with _runtime_request_lock:
+        return request_id in _runtime_request_contacts
+
+
+def _route_denial_error(denial_reasons: list[str], last_error: Exception) -> NoCompliantModelRouteError:
+    """Build the zero-contact denial, keeping an accounting refusal's reason.
+
+    Accounting refuses before the transport callback runs, so the attempt is
+    still a no-contact denial; carrying its code lets operator surfaces name the
+    actual recovery (for example an unreviewed provider overrun).
+    """
+    from src.workflows.inference_accounting import InferenceAccountingError
+
+    reasons = tuple(denial_reasons)
+    if not reasons and isinstance(last_error, InferenceAccountingError):
+        error = NoCompliantModelRouteError((last_error.code,))
+        error.__cause__ = last_error
+        return error
+    return NoCompliantModelRouteError(reasons)
 
 
 def _can_log_request(request_id: str | None) -> bool:
@@ -3447,9 +3837,12 @@ def _can_log_request(request_id: str | None) -> bool:
         return True
     with _runtime_request_lock:
         timed_out = _runtime_requests.get(request_id)
+        deadline = _runtime_request_deadlines.get(request_id)
     if timed_out is None:
         return False
-    return not timed_out
+    # The worker thread judges lateness against the caller's own deadline: the
+    # caller's loop may mark the timeout only after the worker has returned.
+    return not timed_out and (deadline is None or monotonic() < deadline)
 
 
 def set_current_llm_request_id(request_id: str) -> contextvars.Token[str | None]:
@@ -3602,6 +3995,56 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         self._fallback_models = tuple(fallback_models)
         self._fallback_model = self._fallback_models[0] if self._fallback_models else None
 
+    def _provider_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+        """The governed body's messages.
+
+        Agent memory is prepared as smolagents' ``LiteLLMModel`` would send it.
+        Plain OpenAI-style message dicts from direct callers (mail reply,
+        calendar, repository iteration) are sent unchanged, byte for byte.
+        """
+        if not _is_agent_memory(messages):
+            return [_openai_message_payload(message) for message in messages]
+        return [
+            _openai_message_payload(message)
+            for message in _provider_chat_messages(
+                messages,
+                role_conversions=self.custom_role_conversions,
+                flatten_messages_as_text=bool(self.flatten_messages_as_text),
+            )
+        ]
+
+    def prepare_repository_iteration_transport(self, messages, *, response_format, max_tokens):
+        """Prepare the fixed primary strategist body without contacting a provider.
+
+        Preparation grants no dispatch authority. The capability's source
+        owner stages and consents these bytes; generate verifies its sealed
+        binding against the actual final body before broker admission.
+        """
+        if (self._runtime_path != "strategist_agent"
+                or str(self.api_base or "").rstrip("/") != "https://openrouter.ai/api/v1"
+                or type(max_tokens) is not int or not 1 <= max_tokens <= 4096):
+            raise PermissionError("fixed governed repository strategist route required")
+        controls = _openrouter_runtime_controls(self._runtime_profile)
+        if not controls:
+            raise PermissionError("current configured repository strategist profile required")
+        output_limit = min(max_tokens, int(controls["output_limit"]))
+        target = {"model_id": _profile_model_id(self._runtime_profile),
+            "api_base": self.api_base, "api_key": self.api_key,
+            "profile": self._runtime_profile, "source": "primary",
+            "options": dict(self._seraph_transport_options)}
+        reject_legacy_external_agent_model(target["model_id"])
+        target_messages = _messages_for_local_target(messages, target=target,
+            runtime_path="strategist_agent", reserved_output_tokens=output_limit)
+        body = finalized_openai_compatible_body(
+            model_id=_target_transport_model(target),
+            messages=self._provider_messages(target_messages),
+            options=_transport_json_value(target["options"]),
+            temperature=float(controls["temperature"]), max_tokens=output_limit,
+            additional_fields={"response_format": _transport_json_value(response_format)},
+        )
+        from src.workflows.repo_repair_source import repository_transport_route_digest
+        return {"body": body, "route_digest": repository_transport_route_digest(target, "strategist_agent")}
+
     def generate(
         self,
         messages,
@@ -3615,7 +4058,12 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
         primary_model = self.model_id
         reject_legacy_external_agent_model(primary_model)
         runtime_path = self._runtime_path or "agent_generate"
-        runtime_controls = _openrouter_runtime_controls(self._runtime_profile)
+        # A usable NEAR TEE slot shapes the call whether or not the caller
+        # supplied its context; retired OpenRouter controls never do.
+        near_controls = (_near_tee_runtime_controls(runtime_path)
+            if request_context is None or _near_tee_context(request_context) else None)
+        # A usable NEAR TEE slot owns the route; retired OpenRouter controls never apply.
+        runtime_controls = {} if near_controls else _openrouter_runtime_controls(self._runtime_profile)
         if runtime_controls:
             kwargs["temperature"] = float(runtime_controls["temperature"])
             kwargs["max_tokens"] = min(
@@ -3628,6 +4076,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             kwargs=kwargs,
             fallback=getattr(self, "_seraph_max_tokens", None),
         )
+        if near_controls:
+            # ADR-035: the NEAR TEE slot's own output bound caps the agent turn.
+            reserved_output_tokens = min(reserved_output_tokens, near_controls["output_limit"])
         if request_context is None:
             from src.model_fabric.caller_context import (
                 build_canonical_inference_context,
@@ -3644,7 +4095,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     extra_capabilities.append(ModelCapability.TOOL_USE)
                 if response_format is not None:
                     extra_capabilities.append(ModelCapability.STRUCTURED_OUTPUT)
-                request_context = build_canonical_inference_context(
+                from src.model_fabric.retirement import retired_as_route_error
+                with retired_as_route_error():
+                    request_context = build_canonical_inference_context(
                     runtime_path,
                     payload={
                         "messages": _transport_json_value(messages),
@@ -3656,6 +4109,9 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     timeout_seconds=(
                         float(runtime_controls["timeout_seconds"])
                         if runtime_controls
+                        # The slot timeout plus the reserved NEAR billing window.
+                        else near_controls["timeout_seconds"] + 16.0
+                        if near_controls
                         else float(settings.agent_chat_timeout)
                     ),
                     principal=principal,
@@ -3672,6 +4128,26 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         "active OpenRouter-only inference requires a registered canonical runtime path"
                     )
         request_id = _current_llm_request_id()
+        if _near_tee_context(request_context):
+            # ADR-035 PR3c: the chat agent's tool turns use the NEAR TEE text
+            # slot only; no OpenRouter target and no fallback is consulted.
+            temperature = kwargs.get("temperature", dict(getattr(self, "kwargs", {}) or {}).get("temperature"))
+            tools = _transport_json_value(tools_to_call_from) if tools_to_call_from else None
+            return _near_tee_completion_sync(
+                messages=self._provider_messages(messages),
+                temperature=float(settings.model_temperature if temperature is None else temperature),
+                max_tokens=reserved_output_tokens,
+                request_context=request_context,
+                request_id=request_id,
+                runtime_path=runtime_path,
+                tools=tools,
+                # As the governed OpenRouter path: a tool-calling turn must
+                # answer with a tool call (``final_answer`` included).
+                tool_choice="required" if tools else None,
+                stop=list(stop_sequences) if stop_sequences else None,
+                response_format=_transport_json_value(response_format) if response_format is not None else None,
+                agent=True,
+            )
         primary_target = {
             "model_id": primary_model,
             "api_base": self.api_base,
@@ -3769,6 +4245,16 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
             assert_runtime_not_revoked()
             reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
+            if _openrouter_retired_target(target):
+                # ADR-035: zero OpenRouter contact on governed and legacy
+                # targets alike; a retired target is a precontact denial with
+                # no fallback to another provider.
+                from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
+                if is_primary:
+                    primary_preflight_rejected = True
+                denial_reasons.append(OPENROUTER_RETIRED_REASON)
+                last_error = NoCompliantModelRouteError((OPENROUTER_RETIRED_REASON,))
+                continue
             route_attempt_started = False
             try:
                 target_messages = _messages_for_local_target(
@@ -3788,14 +4274,20 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                     additional_fields["response_format"] = _transport_json_value(response_format)
                 if tools_to_call_from:
                     additional_fields["tools"] = _transport_json_value(tools_to_call_from)
+                    # As smolagents' LiteLLMModel: a tool-calling agent turn must
+                    # answer with a tool call (``final_answer`` included).
+                    additional_fields["tool_choice"] = "required"
                 transport_body = finalized_openai_compatible_body(
                     model_id=_target_transport_model(target),
-                    messages=[_openai_message_payload(message) for message in target_messages],
+                    messages=self._provider_messages(target_messages),
                     options=_transport_json_value(dict(target.get("options") or {})),
                     temperature=effective_temperature,
                     max_tokens=reserved_output_tokens,
                     additional_fields=additional_fields,
                 )
+                from src.workflows.repo_repair_source import verify_repository_iteration_transport_body
+                verify_repository_iteration_transport_body(transport_body, target=target,
+                    runtime_path=runtime_path)
                 governed_context = request_context
                 if request_context is not None:
                     from src.model_fabric import bind_final_inference_payload
@@ -3829,6 +4321,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                             )
                             route_attempt_started = True
                         governed_attempted = request_context is not None
+                        _note_provider_contact()
                         if governed_context is not None:
                             governed_response, raw_payload = _governed_openai_chat_completion(
                                 decision=route_decision,
@@ -3908,6 +4401,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         )
                         route_attempt_started = True
                     governed_attempted = request_context is not None
+                    _note_provider_contact()
                     if governed_context is not None:
                         governed_response, raw_payload = _governed_openai_chat_completion(
                             decision=route_decision,
@@ -4027,6 +4521,15 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                         decision=route_decision,
                         degradation_code="transport_failed",
                     )
+                from src.model_fabric.accounting import current_repository_iteration_accounting_witness
+                if current_repository_iteration_accounting_witness() is not None:
+                    if receipt_session is not None and governed_attempted:
+                        _finalize_route_receipt_sync(receipt_session, outcome="failed",
+                            request_id=request_id,
+                            degradation_codes=("repository_iteration_transport_blocked",))
+                    # The original capability iteration owns one exact body
+                    # and route; no second target inherits its source consent.
+                    raise
                 last_error = error
                 if is_primary:
                     primary_error = error
@@ -4064,7 +4567,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 denied_decision,
                 tuple(denial_reasons or ("no_compliant_route",)),
             )
-            last_error = NoCompliantModelRouteError()
+            last_error = _route_denial_error(denial_reasons, last_error)
         if receipt_session is not None and governed_attempted:
             _finalize_route_receipt_sync(
                 receipt_session,
@@ -4154,7 +4657,9 @@ def completion_with_fallback_sync(
             principal = get_current_trust_principal()
             if principal is None:
                 raise PermissionError("canonical completion requires explicit runtime principal")
-            request_context = build_canonical_inference_context(
+            from src.model_fabric.retirement import retired_as_route_error
+            with retired_as_route_error():
+                request_context = build_canonical_inference_context(
                 runtime_path,
                 payload={
                     "messages": _transport_json_value(messages),
@@ -4174,6 +4679,20 @@ def completion_with_fallback_sync(
                 raise PermissionError(
                     "active OpenRouter-only inference requires a registered canonical runtime path"
                 )
+
+    if _near_tee_context(request_context):
+        try:
+            return _near_tee_completion_sync(
+                messages=messages,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens),
+                request_context=request_context,
+                request_id=request_id,
+                runtime_path=runtime_path,
+            )
+        finally:
+            if request_id is not None:
+                _finish_request(request_id)
 
     try:
         primary_kwargs = build_completion_kwargs(
@@ -4314,6 +4833,16 @@ def completion_with_fallback_sync(
             assert_runtime_not_revoked()
             reject_legacy_external_agent_model(target.get("model_id"))
             is_primary = target["source"] == "primary"
+            if _openrouter_retired_target(target):
+                # ADR-035: zero OpenRouter contact on governed and legacy
+                # targets alike; a retired target is a precontact denial with
+                # no fallback to another provider.
+                from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
+                if is_primary:
+                    primary_preflight_rejected = True
+                denial_reasons.append(OPENROUTER_RETIRED_REASON)
+                last_error = NoCompliantModelRouteError((OPENROUTER_RETIRED_REASON,))
+                continue
             route_attempt_started = False
             try:
                 target_messages = _messages_for_local_target(
@@ -4362,6 +4891,7 @@ def completion_with_fallback_sync(
                             )
                             route_attempt_started = True
                         governed_attempted = request_context is not None
+                        _note_provider_contact()
                         if governed_context is not None:
                             return _governed_openai_chat_completion(
                                 decision=route_decision,
@@ -4441,6 +4971,7 @@ def completion_with_fallback_sync(
                         )
                         route_attempt_started = True
                     governed_attempted = request_context is not None
+                    _note_provider_contact()
                     if governed_context is not None:
                         return _governed_openai_chat_completion(
                             decision=route_decision,
@@ -4578,7 +5109,7 @@ def completion_with_fallback_sync(
                 denied_decision,
                 tuple(denial_reasons or ("no_compliant_route",)),
             )
-            last_error = NoCompliantModelRouteError()
+            last_error = _route_denial_error(denial_reasons, last_error)
         if receipt_session is not None and governed_attempted:
             _finalize_route_receipt_sync(
                 receipt_session,
@@ -4661,6 +5192,13 @@ async def completion_with_fallback(
     try:
         if timeout is None:
             return await coro
+        # The worker starts only when awaited here, so its lateness is judged
+        # from the same instant wait_for starts its timer. Separately, if the
+        # loop stalls past the deadline, the thread's result can be delivered
+        # before the timeout callback runs and wait_for then returns normally;
+        # that pre-existing asyncio race returns a result the provider did
+        # produce, and the worker logged it only if it finished in time.
+        _start_request_deadline(request_id, timeout)
         return await asyncio.wait_for(coro, timeout=timeout)
     except asyncio.TimeoutError:
         _mark_request_timed_out(request_id)
@@ -4698,6 +5236,18 @@ async def stream_completion_with_fallback(
         raise ProviderProfileConfigurationError("governed streaming requires explicit request context")
     if request_id is not None and request_id != request_context.request_id:
         raise ProviderProfileConfigurationError("request id does not match inference context")
+    if _near_tee_context(request_context):
+        # ADR-035 PR3c: the NEAR TEE text slot streams through the same broker.
+        from contextlib import aclosing
+
+        # aclosing: a consumer that stops early closes the NEAR stream in this
+        # task, so its billing readback runs before the lease is released.
+        async with aclosing(_near_tee_stream(messages=messages, temperature=float(temperature),
+                max_tokens=int(max_tokens), request_context=request_context, request_id=request_id,
+                runtime_path=runtime_path)) as stream:
+            async for delta in stream:
+                yield delta
+        return
 
     profile_ids = (
         [request_context.requested_profile_id]
@@ -4752,6 +5302,8 @@ async def stream_completion_with_fallback(
             raise TimeoutError("model_fabric_deadline_exceeded")
         async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds) as client:
             from src.model_fabric.accounting import assert_current_inference_policy, capture_inference_usage
+            from src.model_fabric.retirement import assert_openrouter_contact_allowed
+            assert_openrouter_contact_allowed(provider_kind=candidate.profile.provider_kind, api_base=candidate.endpoint)
             assert_current_inference_policy()
             async with client.stream(
                 "POST", candidate.endpoint, headers=headers, json=transport_body
@@ -4785,3 +5337,9 @@ async def stream_completion_with_fallback(
         hooks=hooks,
     ):
         yield delta
+
+
+def _is_managed_agent(value: Any) -> bool:
+    """A named managed agent, which smolagents offers to its manager as a tool."""
+    return (bool(getattr(value, "name", None)) and isinstance(getattr(value, "inputs", None), dict)
+            and callable(getattr(value, "run", None)) and hasattr(value, "managed_agents"))

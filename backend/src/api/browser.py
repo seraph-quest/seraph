@@ -8,7 +8,7 @@ from typing import AsyncIterator
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from config.settings import settings
 from src.agent.session import session_manager
@@ -16,7 +16,7 @@ from src.approval.runtime import get_current_session_id, reset_runtime_context, 
 from src.api.capabilities import _require_authenticated_capability_operator
 from src.api.chat import _begin_rest_revocation_watch, _end_rest_revocation_watch, _ensure_rest_authorized
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
-from src.auth.service import auth_enabled, bind_operator_principal
+from src.auth.service import auth_enabled, bind_operator_principal, local_no_login_active
 from src.browser.sessions import browser_session_runtime
 from src.extensions.browser_providers import list_browser_provider_inventory
 from src.extensions.registry import ExtensionRegistry, default_manifest_roots_for_workspace
@@ -26,6 +26,177 @@ from src.tools.browser_session_tool import _resolve_browser_provider
 from src.tools.browser_tool import browse_webpage, redact_browser_error
 
 router = APIRouter()
+
+# V2 uses the canonical authenticated Root/Goal, not caller conversation IDs.
+from src.browser.interaction_contracts import (
+    InteractionPrepare, InteractionActionRequest, InteractionClose, InteractionCleanup, InteractionError,
+)
+from src.browser.sessions import profiled_interaction_sessions
+from src.work_board.contracts import WorkBoardOwner
+
+
+class InteractionOwner(WorkBoardOwner):
+    authenticated_token_hash: str | None = Field(default=None, exclude=True, repr=False)
+
+
+def _interaction_owner(request: Request):
+    from src.api.work_board import _operator, _owner
+    from src.security.trust_contract import AuthorityGrant
+    operator = _operator(request)
+    grants = {getattr(v, "value", v) for v in operator.principal.grants}
+    if AuthorityGrant.CAPABILITY_EXECUTE.value not in grants:
+        raise HTTPException(403, detail={"code": "browser_current_operator_grant_required"})
+    bound = _owner(operator)
+    return InteractionOwner(principal_id=bound.principal_id, session_id=bound.session_id,
+        authenticated_token_hash=getattr(operator, "_token_hash", None))
+
+
+async def _interaction_response(call):
+    from src.work_board.repository import BoardError
+    from src.workflows.job_runtime import DurableJobError
+    try:
+        return await call
+    except InteractionError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code}) from None
+    except BoardError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code}) from None
+    except DurableJobError:
+        raise HTTPException(409, detail={"code": "browser_durable_job_conflict"}) from None
+    except asyncio.TimeoutError:
+        raise HTTPException(409, detail={"code": "browser_original_deadline_expired"}) from None
+
+
+class BrowserDownloadRequest(BaseModel):
+    """Exact operator-granted public file URLs (C5.3); uploads are never accepted."""
+    model_config = ConfigDict(extra="forbid")
+    request_key: str = Field(pattern=r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+    urls: list[str] = Field(min_length=1, max_length=2)
+    redirect_urls: list[str] = Field(default_factory=list, max_length=6)
+
+
+def _download_owner(request: Request) -> dict:
+    owner = _interaction_owner(request)
+    return {"principal_id": owner.principal_id, "session_id": owner.session_id}
+
+
+_DOWNLOAD_STATUS = {"download_not_found": 404, "browser_native_boot_proof_unavailable": 503,
+                    "browser_interaction_runtime_unavailable": 503, "browser_cleanup_witness_unavailable": 503}
+
+
+@router.post("/browser/downloads")
+async def start_browser_downloads(request: Request, body: BrowserDownloadRequest):
+    from src.browser.downloads import DownloadError, DownloadGrant, run_download_request
+    from src.browser.interaction_contracts import digest
+    owner = _download_owner(request)
+    try:
+        grant = DownloadGrant(urls=body.urls, redirect_urls=body.redirect_urls)
+    except ValueError:
+        raise HTTPException(422, detail={"code": "download_grant_invalid"}) from None
+    job_id = "browser-download-" + digest([owner["principal_id"], owner["session_id"], body.request_key])[:32]
+    try:
+        return await run_download_request(grant, job_id=job_id, owner=owner)
+    except DownloadError as exc:
+        raise HTTPException(_DOWNLOAD_STATUS.get(exc.code, 409), detail={"code": exc.code}) from None
+
+
+@router.get("/browser/downloads/{artifact_id}")
+async def inspect_browser_download(request: Request, artifact_id: str):
+    from src.browser.downloads import DownloadError, DownloadQuarantine
+    try:
+        return DownloadQuarantine().inspect(artifact_id, owner=_download_owner(request))
+    except DownloadError as exc:
+        raise HTTPException(404 if exc.code == "download_not_found" else 409, detail={"code": exc.code}) from None
+
+
+@router.delete("/browser/downloads/{artifact_id}")
+async def revoke_browser_download(request: Request, artifact_id: str):
+    from src.browser.downloads import DownloadError, DownloadQuarantine
+    try:
+        return {"revoked": DownloadQuarantine().revoke(artifact_id, owner=_download_owner(request))}
+    except DownloadError as exc:
+        raise HTTPException(404, detail={"code": exc.code}) from None
+
+
+@router.get("/capabilities/browser-interactions/profiles")
+async def interaction_profiles(request: Request):
+    owner = _interaction_owner(request)
+    from src.browser.task_lane import browser_task_lane_wait_reason
+    from src.browser.task_runner import _playwright_browser_executable_present
+    from src.db import engine
+    from src.browser.task_lane import native_boot_session
+    continuity_reason = None
+    async with engine.get_session() as db:
+        try:
+            await profiled_interaction_sessions._stable_root(db, owner)
+        except InteractionError as exc:
+            continuity_reason = exc.code
+    continuity_reason = continuity_reason or ("browser_native_boot_proof_unavailable" if native_boot_session() is None else None)
+    ready = profiled_interaction_sessions.started and (
+        profiled_interaction_sessions.browser_launcher is not None or _playwright_browser_executable_present()) and not continuity_reason
+    return {"capability_id": "browser.interact.v2",
+        "runtime_state": "active" if ready else "inactive",
+        "blocked_reason": continuity_reason or browser_task_lane_wait_reason(settings.workspace_dir) or (
+            "browser_interaction_runtime_unavailable" if profiled_interaction_sessions.started and not ready else None), "profiles": [{
+        "id": "httpbin.forms.v1", "url": "https://httpbin.org/forms/post",
+        "name": "HTTPBin public form preview", "authenticated": False,
+        "read_effect": "One public document contact and site access logging",
+        "preparation": "offline", "submission": "blocked_exact_effect_authority_required",
+        "max_actions": 20, "max_origins": 1, "max_runtime_seconds": 180,
+        "private_field_max_bytes": 2048, "no_learning": True}]}
+
+
+@router.post("/capabilities/browser-interactions/jobs")
+async def open_interaction(request: Request, body: InteractionPrepare):
+    return await _interaction_response(profiled_interaction_sessions.open(_interaction_owner(request), body))
+
+
+@router.get("/capabilities/browser-interactions/jobs")
+async def list_interactions(request: Request):
+    return await _interaction_response(profiled_interaction_sessions.list_jobs(_interaction_owner(request)))
+
+
+@router.get("/capabilities/browser-interactions/jobs/cleanup-candidates")
+async def browser_cleanup_candidates(request: Request):
+    return await _interaction_response(profiled_interaction_sessions.cleanup_candidates(_interaction_owner(request)))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/cleanup")
+async def reconcile_browser_cleanup(request: Request, job_id: str, body: InteractionCleanup):
+    return await _interaction_response(profiled_interaction_sessions.reconcile_cleanup(_interaction_owner(request), job_id))
+
+
+@router.get("/capabilities/browser-interactions/jobs/{job_id}")
+async def inspect_interaction(request: Request, job_id: str):
+    return await _interaction_response(profiled_interaction_sessions.inspect(_interaction_owner(request), job_id))
+
+
+@router.get("/capabilities/browser-interactions/requests/{request_key}")
+async def inspect_interaction_request(request: Request, request_key: str):
+    import uuid
+    from src.browser.interaction_contracts import digest
+    try:
+        if str(uuid.UUID(request_key)) != request_key:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(422, detail={"code": "browser_request_key_invalid"}) from None
+    owner = _interaction_owner(request)
+    job_id = "browser-interact-" + digest([owner.principal_id, owner.session_id, request_key])[:32]
+    return await _interaction_response(profiled_interaction_sessions.inspect(owner, job_id))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/actions")
+async def action_interaction(request: Request, job_id: str, body: InteractionActionRequest):
+    return await _interaction_response(profiled_interaction_sessions.action(_interaction_owner(request), job_id, body))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/close")
+async def close_interaction(request: Request, job_id: str, body: InteractionClose):
+    return await _interaction_response(profiled_interaction_sessions.close(_interaction_owner(request), job_id, body))
+
+
+@router.post("/capabilities/browser-interactions/jobs/{job_id}/snapshot")
+async def refresh_interaction(request: Request, job_id: str, body: InteractionClose):
+    return await _interaction_response(profiled_interaction_sessions.refresh(_interaction_owner(request), job_id, body))
 
 
 class BrowserSessionOpenRequest(BaseModel):
@@ -101,7 +272,7 @@ async def _bind_browser_operator(request: Request, owner_session_id: str | None)
             detail={"code": "browser_owner_session_mismatch"},
         )
     canonical_owner_session_id = requested_session_id or active_runtime_session_id or None
-    if canonical_owner_session_id and not active_runtime_session_id and auth_enabled():
+    if canonical_owner_session_id and not active_runtime_session_id and (auth_enabled() or local_no_login_active()):
         conversation = await session_manager.get(canonical_owner_session_id)
         if (
             conversation is None

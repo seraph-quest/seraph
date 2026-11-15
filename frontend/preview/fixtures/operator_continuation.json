@@ -1,0 +1,159 @@
+{
+ "active_goals": {
+  "state": "ready",
+  "source_as_of": "2026-10-09T10:00:00Z",
+  "items": [
+   {
+    "source_at": "2026-10-09T10:00:00Z",
+    "ownership_access": "current",
+    "kind": "active_goal",
+    "title": "Current Goal",
+    "goal_id": "goal-1",
+    "goal_revision": 1,
+    "status": "active",
+    "sort_order": 0,
+    "due_at": null,
+    "target": {
+     "kind": "goal",
+     "goal_id": "goal-1",
+     "goal_revision": 1
+    }
+   }
+  ]
+ },
+ "programme_status": {
+  "state": "ready",
+  "source_as_of": "2026-10-09T10:00:00Z",
+  "items": [
+   {
+    "source_at": "2026-10-09T10:00:00Z",
+    "ownership_access": "current",
+    "kind": "programme",
+    "goal_id": "goal-1",
+    "goal_revision": 1,
+    "programme_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "grant_revision": 1,
+    "state": "active",
+    "reason_code": null,
+    "expires_at": "2026-10-10T10:00:00Z",
+    "next_digest_at": "2026-10-10T06:00:00Z",
+    "target": {
+     "kind": "programme",
+     "goal_id": "goal-1",
+     "goal_revision": 1,
+     "programme_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   }
+  ]
+ },
+ "task_next_actions": {
+  "state": "ready",
+  "source_as_of": "2026-10-09T10:00:00Z",
+  "items": [
+   {
+    "source_at": "2026-10-09T10:00:00Z",
+    "ownership_access": "current",
+    "kind": "task_next_action",
+    "task_id": "task-1",
+    "task_revision": 1,
+    "goal_id": "goal-1",
+    "goal_revision": 1,
+    "status": "todo",
+    "priority": 50,
+    "scheduled_at": null,
+    "action": "inspect_task",
+    "method": {
+     "status": "admitted",
+     "method_id": "proposal-1",
+     "version": "version-1",
+     "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "admitted_at": "2026-10-09T10:00:00Z",
+     "lifecycle": "rolled_back_metadata",
+     "reason_code": "method_rolled_back",
+     "target": {
+      "kind": "method",
+      "proposal_id": "proposal-1",
+      "version": "version-1",
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+     }
+    },
+    "target": {
+     "kind": "task",
+     "task_id": "task-1",
+     "task_revision": 1
+    }
+   }
+  ]
+ },
+ "prepared_outputs": {
+  "state": "ready",
+  "source_as_of": "2026-10-09T10:00:00Z",
+  "items": [
+   {
+    "source_at": "2026-10-09T10:00:00Z",
+    "ownership_access": "current",
+    "kind": "prepared_output",
+    "task_id": "task-result",
+    "task_revision": 4,
+    "attempt_id": "attempt-1",
+    "output_state": "unknown",
+    "method": {
+     "status": "unknown",
+     "method_id": null,
+     "version": null,
+     "digest": null,
+     "admitted_at": null,
+     "lifecycle": "unknown",
+     "reason_code": "method_projection_missing",
+     "target": null
+    },
+    "target": {
+     "kind": "output",
+     "task_id": "task-result",
+     "task_revision": 4,
+     "attempt_id": "attempt-1"
+    }
+   }
+  ]
+ },
+ "approvals": {
+  "state": "ready",
+  "source_as_of": "2026-10-09T10:00:00Z",
+  "items": [
+   {
+    "source_at": "2026-10-09T10:00:00Z",
+    "ownership_access": "current",
+    "kind": "approval",
+    "approval_id": "approval-1",
+    "status": "pending",
+    "expires_at": null,
+    "target": {
+     "kind": "approval",
+     "approval_id": "approval-1"
+    }
+   }
+  ]
+ },
+ "blocked_items": {
+  "state": "ready",
+  "source_as_of": "2026-10-09T10:00:00Z",
+  "items": [
+   {
+    "source_at": "2026-10-09T10:00:00Z",
+    "ownership_access": "current",
+    "kind": "blocked_task",
+    "task_id": "task-blocked",
+    "task_revision": 2,
+    "goal_id": "goal-1",
+    "goal_revision": 1,
+    "reason_code": "unknown_effect",
+    "target": {
+     "kind": "task",
+     "task_id": "task-blocked",
+     "task_revision": 2
+    }
+   }
+  ]
+ },
+ "as_of": "2026-10-09T10:00:00Z"
+}

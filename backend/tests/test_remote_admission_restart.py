@@ -54,6 +54,9 @@ from src.workflows.job_runtime import (
     durable_job_repository,
 )
 
+# ADR-035: pins durable remote-admission fencing over the intercepted historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 OWNER_ID = "service:remote-inference"
 LEASE_OWNER = "runner:remote-inference"

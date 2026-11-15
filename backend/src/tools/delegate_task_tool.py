@@ -312,6 +312,10 @@ def delegate_task(task: str, specialist: str = "") -> str:
 
     if not settings.use_delegation:
         return "Error: Delegation runtime is disabled."
+    from src.approval.runtime import get_current_trust_principal
+    principal = get_current_trust_principal()
+    if principal is not None and principal.job_id:
+        return "Error: Durable tasks require the registered native delegation owner."
     current_depth = _DELEGATION_DEPTH.get()
     if current_depth > 0:
         return "Error: Nested delegation is not allowed."

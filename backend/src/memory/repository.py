@@ -10,10 +10,12 @@ import os
 import re
 import stat
 import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import quote
 
 from config.settings import settings
@@ -22,7 +24,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import aliased, defer
 from sqlmodel import col, select
 
-from src.db.engine import get_session
+from src.db.engine import bound_lock_wait, get_session
 from src.db.models import (
     AuditEvent,
     Memory,
@@ -111,6 +113,37 @@ def _coerce_enum(
         return enum_cls(value)
     except ValueError as exc:
         raise ValueError(f"Invalid {enum_cls.__name__}: {value!r}") from exc
+
+
+END_OF_DAY_REPORT_SOURCE_TOOL = "end_of_day_goal_report"
+END_OF_DAY_REPORT_KIND = "end_of_day_goal_report"
+END_OF_DAY_REPORT_SCHEMA = "seraph.end_of_day_goal_report.v1"
+END_OF_DAY_REPORT_LIST_MAX = 100
+END_OF_DAY_REPORT_SCAN_CAP = 1_000
+
+
+def end_of_day_report_metadata(episode: MemoryEpisode) -> dict[str, Any]:
+    """Parse an episode's stored metadata JSON; malformed metadata is empty."""
+
+    try:
+        payload = json.loads(episode.metadata_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def is_end_of_day_report_episode(episode: MemoryEpisode) -> bool:
+    """True only for episodes written by ``store_end_of_day_goal_report``."""
+
+    if str(getattr(episode.episode_type, "value", episode.episode_type)) != MemoryEpisodeType.observer.value:
+        return False
+    if episode.source_tool_name != END_OF_DAY_REPORT_SOURCE_TOOL:
+        return False
+    metadata = end_of_day_report_metadata(episode)
+    return (
+        metadata.get("kind") == END_OF_DAY_REPORT_KIND
+        and metadata.get("artifact_schema") == END_OF_DAY_REPORT_SCHEMA
+    )
 
 
 _CANONICAL_MEMORY_DELETE_EXPORT_REASON = "operator_delete_export"
@@ -242,6 +275,27 @@ def _memory_record_bounded_text(
     if len(normalized) <= max_length:
         return normalized, False
     return normalized[:max_length], True
+
+
+# One guardian-state build reconciles tombstones at most once (#1074).
+_TOMBSTONE_RECONCILIATION_SCOPE: ContextVar[tuple[object, dict[str, dict[str, int | str]]] | None] = ContextVar(
+    "seraph_tombstone_reconciliation_scope", default=None,
+)
+
+
+@contextmanager
+def tombstone_reconciliation_scope() -> Iterator[None]:
+    """Reuse one tombstone reconciliation receipt for the enclosed work.
+
+    Only a receipt computed inside the scope is reused, and only by the task
+    that opened it: tasks it spawns inherit the context but reconcile for
+    themselves, so concurrent work never trusts another task's receipt.
+    """
+    token = _TOMBSTONE_RECONCILIATION_SCOPE.set((asyncio.current_task(), {}))
+    try:
+        yield
+    finally:
+        _TOMBSTONE_RECONCILIATION_SCOPE.reset(token)
 
 
 async def _begin_canonical_write(db) -> None:
@@ -438,6 +492,12 @@ def _m5_selection_scope(value: Any) -> dict[str, Any] | None:
     malformed canonical projection fails closed.
     """
 
+    if isinstance(value, dict) and value.get("schema_version") == "task_method_scope.v1":
+        from src.memory.task_methods import TaskMethodScope
+        try:
+            return TaskMethodScope.model_validate(value).model_dump(mode="json")
+        except (TypeError, ValueError):
+            return None
     if isinstance(value, dict) and value.get("schema_version") == "guardian_opportunity_preference.v1":
         from src.guardian.opportunity_preferences import OpportunityPreferenceScope
         try:
@@ -2116,13 +2176,13 @@ def _ordinary_model_memory_clause(memory_model=Memory):
     """
     metadata = case((func.json_valid(memory_model.metadata_json) == 1,
         memory_model.metadata_json), else_="{}")
-    namespace = "guardian_opportunity_preference.v1"
+    namespaces = ("guardian_opportunity_preference.v1", "task_method_scope.v1")
     return and_(
-        *(func.coalesce(func.json_extract(metadata, path), "") != namespace for path in (
+        *(func.coalesce(func.json_extract(metadata, path), "").not_in(namespaces) for path in (
             "$.work_board_provenance.memory_scope.schema_version",
             "$.provenance.memory_scope.schema_version", "$.memory_scope.schema_version")),
         ~exists().where(MemoryProposal.accepted_memory_id == memory_model.id,
-            MemoryProposal.schema_version == "opportunity_recommendation.v1"),
+            MemoryProposal.schema_version.in_(("opportunity_recommendation.v1", "task_method_proposal.v1"))),
     )
 
 
@@ -2858,6 +2918,46 @@ async def _load_memory_record_source_previews(
     }
 
 
+async def current_memory_record_summaries(
+    db,
+    *,
+    owner_session_id: str,
+    memory_ids: list[str],
+) -> dict[str, tuple[str | None, bool]]:
+    """Current owner-visible list-safe summaries for exact record ids.
+
+    Uses the caller's session (so a writer can recheck inside its own
+    transaction) with the same owner/tombstone/deletion-marker predicate,
+    preview bound and fail-closed redaction as ``list_memory_records``.
+    Records no longer visible are omitted.
+    """
+
+    ids = list(dict.fromkeys(memory_ids))
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            _memory_record_scope_statement(owner_session_id=owner_session_id, status=MemoryStatus.active)
+            .where(Memory.id.in_(ids))
+            .options(defer(Memory.content), defer(Memory.summary))
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    visible = [row for row in rows if _canonical_memory_deletion_marker(row, check_text=False) is None]
+    previews = await _load_memory_record_previews(
+        db,
+        memory_ids=[row.id for row in visible],
+        field="summary",
+        max_length=_MEMORY_RECORD_SUMMARY_MAX,
+    )
+    summaries: dict[str, tuple[str | None, bool]] = {}
+    for row in visible:
+        value, truncated = previews.get(row.id, (None, False))
+        safe_summary, _degraded = await _memory_record_redact(db, value)
+        summaries[row.id] = (safe_summary, truncated)
+    return summaries
+
+
 async def _memory_record_projection(
     db,
     memory: Memory,
@@ -3395,6 +3495,7 @@ class MemoryRepository:
         confidence: float,
         corrects_memory_id: str | None = None,
         proposal_id: str = "",
+        _memory_id: str | None = None,
     ) -> Memory:
         """Write one M5 memory through the canonical repository transaction.
 
@@ -3405,6 +3506,16 @@ class MemoryRepository:
         """
 
         normalized_content = content.strip()
+        if _memory_id is not None:
+            from uuid import UUID
+            from src.memory.task_methods import TaskMethodScope, CANDIDATE, digest as method_digest
+            scope = TaskMethodScope.model_validate(json.loads(metadata_json)["work_board_provenance"]["memory_scope"])
+            candidate = CANDIDATE.validate_json(normalized_content).model_dump(mode="json")
+            if (str(UUID(_memory_id)) != _memory_id or scope.candidate_version != _memory_id
+                or scope.proposal_id != proposal_id or str(getattr(kind, "value", kind)) != "pattern"
+                or scope.candidate_schema != candidate["schema_version"]
+                or scope.candidate_digest != method_digest(candidate)):
+                raise ValueError("canonical_method_version_conflict")
         if not normalized_content:
             raise ValueError("content must be non-empty")
         normalized_kind = _coerce_enum(kind, MemoryKind)
@@ -3426,8 +3537,12 @@ class MemoryRepository:
                 )
             except (TypeError, ValueError, AttributeError):
                 existing_provenance = {}
+            if _memory_id is not None and TaskMethodScope.model_validate(
+                existing_provenance.get("memory_scope")) != scope:
+                raise ValueError("canonical_method_version_conflict")
             if (
                 existing.source_session_id != source_session_id
+                or (_memory_id is not None and existing.id != _memory_id)
                 or existing_provenance.get("proposal_id") != proposal_id
                 or existing.content != normalized_content
                 or _canonical_memory_deletion_marker(existing) is not None
@@ -3436,6 +3551,7 @@ class MemoryRepository:
             return existing
 
         memory = Memory(
+            **({"id": _memory_id} if _memory_id is not None else {}),
             content=normalized_content,
             category=MemoryCategory.fact if normalized_kind is MemoryKind.fact else MemoryCategory.pattern,
             kind=normalized_kind,
@@ -3723,6 +3839,7 @@ class MemoryRepository:
                         MemoryProposal.status == MemoryProposalStatus.accepted,
                         MemoryProposal.schema_version != "procedure_recommendation.v1",
                         MemoryProposal.schema_version != "opportunity_recommendation.v1",
+                        MemoryProposal.schema_version != "task_method_proposal.v1",
                         or_(case((func.json_valid(MemoryProposal.memory_scope_json) == 1,
                                 func.json_extract(MemoryProposal.memory_scope_json, "$.schema_version")), else_=None).is_(None),
                             case((func.json_valid(MemoryProposal.memory_scope_json) == 1,
@@ -6922,99 +7039,100 @@ class MemoryRepository:
 
         async with get_session() as db:
             await _begin_canonical_write(db)
-            memory = (
-                await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
-            ).scalars().first()
-            if memory is None:
-                raise ValueError(f"Unknown memory id: {normalized_memory_id}")
+            return await self.mark_memory_tombstoned_in_session(db, memory_id, actor=actor,
+                reason=reason, metadata_updates=metadata_updates, deleted_at=deleted_at)
 
-            tombstone = (
-                await db.execute(
-                    select(MemoryTombstone).where(
-                        MemoryTombstone.memory_id == normalized_memory_id
-                    )
-                )
-            ).scalars().first()
-            created = tombstone is None
-            if tombstone is None:
-                tombstone = MemoryTombstone(
-                    memory_id=normalized_memory_id,
-                    actor=normalized_actor,
-                    reason=normalized_reason,
-                    created_at=deletion_time,
-                )
-                db.add(tombstone)
-                try:
-                    # The process-local lock covers the normal path.  Keep a
-                    # database-level retry as well for two workers with
-                    # separate repository instances racing on the unique key.
-                    await db.flush()
-                except IntegrityError:
-                    await db.rollback()
-                    await _begin_canonical_write(db)
-                    tombstone = (
-                        await db.execute(
-                            select(MemoryTombstone).where(
-                                MemoryTombstone.memory_id == normalized_memory_id
-                            )
-                        )
-                    ).scalars().first()
-                    memory = (
-                        await db.execute(
-                            select(Memory).where(Memory.id == normalized_memory_id)
-                        )
-                    ).scalars().first()
-                    if tombstone is None or memory is None:
-                        raise
-                    created = False
-            # Once the ledger row exists its actor, reason, and timestamp are
-            # immutable audit authority.  A repeated request may reapply
-            # redaction, but must not replace first-request provenance with a
-            # later caller's metadata.
-            updates = dict(metadata_updates or {}) if created else {}
-            try:
-                metadata = json.loads(memory.metadata_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                metadata = {}
-            if not isinstance(metadata, dict):
-                metadata = {}
-            metadata.update(updates)
-            metadata["canonical_tombstone_id"] = tombstone.id
-            metadata["archived_reason"] = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
-            memory.status = MemoryStatus.archived
-            memory.content = _CANONICAL_MEMORY_DELETE_CONTENT
-            memory.summary = _CANONICAL_MEMORY_DELETE_CONTENT
-            memory.confidence = 0.0
-            memory.importance = 0.0
-            memory.reinforcement = 0.0
-            memory.metadata_json = json.dumps(metadata, sort_keys=True)
-            memory.updated_at = tombstone.created_at
-            db.add(memory)
-            await db.execute(
-                update(MemorySource)
-                .where(MemorySource.memory_id == normalized_memory_id)
-                .where(MemorySource.snippet.is_not(None))
-                .values(snippet=None)
-            )
-            # M5 proposal previews and decision receipts are a privacy
-            # projection of canonical memory.  The tombstone wins in the
-            # same immediate transaction and invalidates any pending/confirmed
-            # dispatch effect before commit.
-            from src.memory.m5 import redact_m5_memory_references
+    async def mark_memory_tombstoned_in_session(self, db, memory_id, *, actor, reason=None,
+                                              metadata_updates=None, deleted_at=None):
+        """Use the canonical tombstone owner inside an existing immediate writer."""
+        normalized_memory_id = str(memory_id or "").strip()
+        normalized_actor = str(actor or "").strip()
+        normalized_reason = str(reason or _CANONICAL_MEMORY_DELETE_EXPORT_REASON).strip()
+        if not normalized_memory_id:
+            raise ValueError("memory_id must be non-empty")
+        if not normalized_actor:
+            raise ValueError("actor must be non-empty")
+        if not normalized_reason:
+            normalized_reason = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
+        if len(normalized_actor) > 255 or len(normalized_reason) > 255:
+            raise ValueError("actor and reason must be at most 255 characters")
+        deletion_time = deleted_at or _now()
+        if deletion_time.tzinfo is None:
+            deletion_time = deletion_time.replace(tzinfo=timezone.utc)
+        else:
+            deletion_time = deletion_time.astimezone(timezone.utc)
 
-            await redact_m5_memory_references(db, normalized_memory_id)
+        memory = (
+            await db.execute(select(Memory).where(Memory.id == normalized_memory_id))
+        ).scalars().first()
+        if memory is None:
+            raise ValueError(f"Unknown memory id: {normalized_memory_id}")
+
+        tombstone = (
             await db.execute(
-                update(MemorySnapshot)
-                .values(content="", source_hash=None, updated_at=tombstone.created_at)
+                select(MemoryTombstone).where(
+                    MemoryTombstone.memory_id == normalized_memory_id
+                )
             )
+        ).scalars().first()
+        created = tombstone is None
+        if tombstone is None:
+            tombstone = MemoryTombstone(
+                memory_id=normalized_memory_id,
+                actor=normalized_actor,
+                reason=normalized_reason,
+                created_at=deletion_time,
+            )
+            db.add(tombstone)
             await db.flush()
-            db.expunge(memory)
-            db.expunge(tombstone)
-            return MemoryTombstoneWriteResult(
-                memory=memory,
-                tombstone=tombstone,
-                created=created,
-            )
+        # Once the ledger row exists its actor, reason, and timestamp are
+        # immutable audit authority.  A repeated request may reapply
+        # redaction, but must not replace first-request provenance with a
+        # later caller's metadata.
+        updates = dict(metadata_updates or {}) if created else {}
+        try:
+            metadata = json.loads(memory.metadata_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(updates)
+        metadata["canonical_tombstone_id"] = tombstone.id
+        metadata["archived_reason"] = _CANONICAL_MEMORY_DELETE_EXPORT_REASON
+        memory.status = MemoryStatus.archived
+        memory.content = _CANONICAL_MEMORY_DELETE_CONTENT
+        memory.summary = _CANONICAL_MEMORY_DELETE_CONTENT
+        memory.confidence = 0.0
+        memory.importance = 0.0
+        memory.reinforcement = 0.0
+        memory.metadata_json = json.dumps(metadata, sort_keys=True)
+        memory.updated_at = tombstone.created_at
+        db.add(memory)
+        await db.execute(
+            update(MemorySource)
+            .where(MemorySource.memory_id == normalized_memory_id)
+            .where(MemorySource.snippet.is_not(None))
+            .values(snippet=None)
+        )
+        # M5 proposal previews and decision receipts are a privacy
+        # projection of canonical memory.  The tombstone wins in the
+        # same immediate transaction and invalidates any pending/confirmed
+        # dispatch effect before commit.
+        from src.memory.m5 import redact_m5_memory_references
+
+        await redact_m5_memory_references(db, normalized_memory_id)
+        await db.execute(
+            update(MemorySnapshot)
+            .values(content="", source_hash=None, updated_at=tombstone.created_at)
+        )
+        await db.flush()
+        db.expunge(memory)
+        db.expunge(tombstone)
+        return MemoryTombstoneWriteResult(
+            memory=memory,
+            tombstone=tombstone,
+            created=created,
+        )
 
     async def reconcile_memory_tombstones(
         self,
@@ -7029,21 +7147,44 @@ class MemoryRepository:
         operator restore repair; no deleted content is returned.  Recovery
         callers pass their authenticated owner so receipt counts and revision
         inputs cannot disclose another owner's tombstone activity.
+
+        Reads check for due work in a deferred snapshot first and take the
+        canonical lock plus SQLite's writer lock only when a tombstone must
+        actually be re-applied (#1074). Callers that already hold the lock
+        (``_acquire_lock=False``) always run the serialized pass.
         """
 
         normalized_owner = str(owner_session_id or "").strip()
-        if _acquire_lock:
+        if not _acquire_lock:
+            return await self._reconcile_memory_tombstones_pass(normalized_owner, apply=True)
+        owned_scope = _TOMBSTONE_RECONCILIATION_SCOPE.get()
+        scope = owned_scope[1] if owned_scope is not None and owned_scope[0] is asyncio.current_task() else None
+        if scope is not None and normalized_owner in scope:
+            return dict(scope[normalized_owner])
+        receipt = await self._reconcile_memory_tombstones_pass(normalized_owner, apply=False)
+        if receipt.pop("reapply_due"):
             async with self._canonical_memory_lock:
-                return await self.reconcile_memory_tombstones(
-                    owner_session_id=normalized_owner or None,
-                    _acquire_lock=False,
-                )
+                receipt = await self._reconcile_memory_tombstones_pass(normalized_owner, apply=True)
+        if scope is not None:
+            scope[normalized_owner] = dict(receipt)
+        return receipt
 
+    async def _reconcile_memory_tombstones_pass(
+        self,
+        normalized_owner: str,
+        *,
+        apply: bool,
+    ) -> dict[str, int | str]:
         checked_count = 0
         reapplied_count = 0
         missing_memory_count = 0
+        reapply_due = 0
         async with get_session() as db:
-            await _begin_canonical_write(db)
+            if apply:
+                await _begin_canonical_write(db)
+            else:
+                # One consistent WAL snapshot without the writer lock.
+                await db.execute(text("BEGIN"))
             tombstone_statement = select(MemoryTombstone)
             if normalized_owner:
                 tombstone_statement = tombstone_statement.join(
@@ -7095,12 +7236,6 @@ class MemoryRepository:
                     "source": "canonical_tombstone_ledger",
                     "recorded_at": tombstone.created_at.isoformat(),
                 }
-                source_redaction = await db.execute(
-                    update(MemorySource)
-                    .where(MemorySource.memory_id == tombstone.memory_id)
-                    .where(MemorySource.snippet.is_not(None))
-                    .values(snippet=None)
-                )
                 needs_reapply = any(
                     (
                         memory.status != MemoryStatus.archived,
@@ -7111,6 +7246,21 @@ class MemoryRepository:
                         float(memory.reinforcement or 0.0) != 0.0,
                         memory.metadata_json != json.dumps(metadata, sort_keys=True),
                     )
+                )
+                unredacted_source = (
+                    MemorySource.memory_id == tombstone.memory_id,
+                    MemorySource.snippet.is_not(None),
+                )
+                if not apply:
+                    if needs_reapply or (
+                        await db.execute(select(MemorySource.id).where(*unredacted_source).limit(1))
+                    ).first() is not None:
+                        reapply_due += 1
+                    continue
+                source_redaction = await db.execute(
+                    update(MemorySource)
+                    .where(*unredacted_source)
+                    .values(snippet=None)
                 )
                 if needs_reapply or source_redaction.rowcount > 0:
                     memory.status = MemoryStatus.archived
@@ -7129,13 +7279,16 @@ class MemoryRepository:
                     .values(content="", source_hash=None, updated_at=_now())
                 )
             await db.flush()
-        return {
+        receipt: dict[str, int | str] = {
             "schema_version": "guardian.memory_tombstone.v1",
             "status": "degraded" if missing_memory_count else "ready",
             "checked_count": checked_count,
             "reapplied_count": reapplied_count,
             "missing_memory_count": missing_memory_count,
         }
+        if not apply:
+            receipt["reapply_due"] = reapply_due
+        return receipt
 
     async def list_memories_for_reindex(self, *, limit: int = 10_000) -> list[Memory]:
         """Return active canonical rows safe for a local deterministic reindex.
@@ -7154,6 +7307,7 @@ class MemoryRepository:
                     select(Memory)
                     .outerjoin(MemoryTombstone, MemoryTombstone.memory_id == Memory.id)
                     .where(Memory.status == MemoryStatus.active)
+                    .where(_ordinary_model_memory_clause())
                     .where(MemoryTombstone.id.is_(None))
                     .order_by(col(Memory.updated_at).asc(), col(Memory.id).asc())
                     .limit(bounded_limit)
@@ -7459,7 +7613,7 @@ class MemoryRepository:
                 )
                 .limit(limit)
             )
-            exact_stmt = exact_stmt.where(_canonical_memory_without_tombstone_clause())
+            exact_stmt = exact_stmt.where(_canonical_memory_without_tombstone_clause(), _ordinary_model_memory_clause())
             exact_result = await db.execute(exact_stmt)
             for memory in exact_result.scalars().all():
                 if _canonical_memory_deletion_marker(memory) is not None:
@@ -7490,7 +7644,7 @@ class MemoryRepository:
                 )
                 .limit(limit)
             )
-            legacy_stmt = legacy_stmt.where(_canonical_memory_without_tombstone_clause())
+            legacy_stmt = legacy_stmt.where(_canonical_memory_without_tombstone_clause(), _ordinary_model_memory_clause())
             for key, value in normalized_scope.items():
                 legacy_stmt = legacy_stmt.where(
                     func.json_extract(Memory.metadata_json, _sqlite_json_object_path(key)) == value
@@ -7651,6 +7805,57 @@ class MemoryRepository:
                 db.expunge(episode)
             return list(episodes)
 
+    async def list_end_of_day_report_episodes(self, *, limit: int = 30) -> list[MemoryEpisode]:
+        """Return stored end-of-day goal report episodes, newest first.
+
+        SQL prefilters on the indexed ``episode_type`` and ``source_tool_name``
+        columns.  The report ``kind`` and ``artifact_schema`` live inside the
+        JSON ``metadata_json`` text, so they are checked in Python on bounded
+        pages.  At most ``END_OF_DAY_REPORT_SCAN_CAP`` candidate rows are read,
+        so a store polluted with look-alike rows cannot make this unbounded.
+        """
+
+        bounded_limit = max(1, min(int(limit), END_OF_DAY_REPORT_LIST_MAX))
+        page_size = max(bounded_limit, 25)
+        collected: list[MemoryEpisode] = []
+        scanned = 0
+        async with get_session() as db:
+            while len(collected) < bounded_limit and scanned < END_OF_DAY_REPORT_SCAN_CAP:
+                stmt = (
+                    select(MemoryEpisode)
+                    .where(MemoryEpisode.episode_type == MemoryEpisodeType.observer)
+                    .where(MemoryEpisode.source_tool_name == END_OF_DAY_REPORT_SOURCE_TOOL)
+                    .order_by(
+                        col(MemoryEpisode.observed_at).desc(),
+                        col(MemoryEpisode.created_at).desc(),
+                        col(MemoryEpisode.id).desc(),
+                    )
+                    .offset(scanned)
+                    .limit(min(page_size, END_OF_DAY_REPORT_SCAN_CAP - scanned))
+                )
+                page = list((await db.execute(stmt)).scalars().all())
+                if not page:
+                    break
+                scanned += len(page)
+                for episode in page:
+                    db.expunge(episode)
+                    if len(collected) < bounded_limit and is_end_of_day_report_episode(episode):
+                        collected.append(episode)
+        return collected
+
+    async def get_end_of_day_report_episode(self, episode_id: str) -> MemoryEpisode | None:
+        """Return one end-of-day report episode, or ``None`` if it is not one."""
+
+        normalized_id = str(episode_id or "").strip()
+        if not normalized_id:
+            return None
+        async with get_session() as db:
+            episode = await db.get(MemoryEpisode, normalized_id)
+            if episode is None:
+                return None
+            db.expunge(episode)
+        return episode if is_end_of_day_report_episode(episode) else None
+
     async def create_edge(
         self,
         *,
@@ -7777,12 +7982,16 @@ class MemoryRepository:
         content: str,
         source_hash: str | None = None,
         canonical_tombstone_revision: str | None = None,
+        lock_wait_ms: int | None = None,
     ) -> MemorySnapshot:
         normalized_kind = _coerce_enum(kind, MemorySnapshotKind)
         reconciliation = await self.reconcile_memory_tombstones()
         if reconciliation.get("status") != "ready":
             raise RuntimeError("canonical memory authority unavailable for snapshot write")
         async with get_session() as db:
+            if lock_wait_ms is not None:
+                # Cache writers on read paths give up instead of queueing.
+                await bound_lock_wait(db, lock_wait_ms)
             await _begin_canonical_write(db)
             current_revision = await _memory_tombstone_revision(db)
             if canonical_tombstone_revision is None:
@@ -7836,7 +8045,11 @@ class MemoryRepository:
         if reconciliation.get("status") != "ready":
             return None
         async with get_session() as db:
-            await _begin_canonical_write(db)
+            # A deferred snapshot keeps the revision and the row consistent
+            # without the writer lock (#1074). A stale row is reported as
+            # absent; the next save_snapshot replaces it under the lock, and
+            # only this method reads snapshots, so it is never served.
+            await db.execute(text("BEGIN"))
             current_revision = await _memory_tombstone_revision(db)
             result = await db.execute(
                 select(MemorySnapshot).where(MemorySnapshot.kind == normalized_kind)
@@ -7851,11 +8064,6 @@ class MemoryRepository:
                         and current_revision == _EMPTY_TOMBSTONE_REVISION
                     )
                 ):
-                    snapshot.content = ""
-                    snapshot.source_hash = None
-                    snapshot.canonical_tombstone_revision = current_revision
-                    snapshot.updated_at = _now()
-                    await db.flush()
                     return None
             if snapshot is not None:
                 db.expunge(snapshot)

@@ -1,3 +1,4 @@
+import importlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,7 +16,6 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
-os.environ.setdefault("WORKSPACE_DIR", "/tmp/seraph-test")
 os.environ.setdefault("CAPABILITY_JOURNAL_SECRET", "test-capability-journal-secret")
 
 
@@ -61,8 +61,8 @@ _PATCH_TARGETS = [
     "src.scheduler.scheduled_jobs.get_session",
     "src.observer.insight_queue.get_session",
     "src.observer.screenshot_folder_source.get_session",
+    "src.observer.local_capture_upload.get_session",
     "src.guardian.feedback.get_session",
-    "src.guardian.audio_worker.get_session",
     "src.vault.repository.get_session",
     "src.observer.screen_repository.get_session",
     "src.memory.repository.get_session",
@@ -128,6 +128,17 @@ async def async_db(request, tmp_path_factory):
                 await session.rollback()
                 raise
 
+    import sys
+    import src.db.engine as canonical_engine
+
+    canonical_get_session = canonical_engine.get_session
+    # Import every patched module before patching any of them. Otherwise a
+    # module first imported here binds ``from src.db.engine import
+    # get_session`` to this fixture's patched function, and that stale binding
+    # is what its own patcher later "restores". The teardown sweep below also
+    # repairs captures by modules first imported during the test body.
+    for target in _PATCH_TARGETS:
+        importlib.import_module(target.rsplit(".", 1)[0])
     patches = []
     for target in _PATCH_TARGETS:
         p = patch(target, _get_session)
@@ -144,6 +155,16 @@ async def async_db(request, tmp_path_factory):
     finally:
         for p in patches:
             p.stop()
+        # A module first imported during this test ran
+        # ``from src.db.engine import get_session`` while the patch above was
+        # active and captured this fixture's private session function. Point
+        # every such capture back at the canonical function, or later tests
+        # (and their session-factory overrides) reach this disposed database.
+        for module in list(sys.modules.values()):
+            if getattr(module, "__name__", "").startswith("src."):
+                for name, value in list(vars(module).items()):
+                    if value is _get_session:
+                        setattr(module, name, canonical_get_session)
         await engine.dispose()
     if teardown_error is not None:
         raise teardown_error
@@ -174,6 +195,9 @@ def isolate_operator_auth_defaults(monkeypatch):
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", True)
     monkeypatch.setattr(settings, "operator_auth_secret", "")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
+    # No background NEAR catalog reads in tests (#1178); tests drive
+    # refresh_catalog_observations directly over intercepted transport.
+    monkeypatch.setattr(settings, "near_tee_catalog_refresh_enabled", False)
     yield
     _reset_login_throttle_for_tests()
 
@@ -229,6 +253,78 @@ def reset_bounded_snapshot_cache():
     _reset_bounded_guardian_snapshot_cache()
 
 
+@pytest.fixture
+def real_repo_isolation():
+    """Opt a test into the host's real repository OS sandbox (#1065)."""
+    from src.execution.repo_isolation import clear_probe_cache
+    clear_probe_cache()
+    yield
+    clear_probe_cache()
+
+
+@pytest.fixture(autouse=True)
+def default_repo_isolation_not_isolated(request, monkeypatch):
+    """Repository tests exercise the declared not-isolated path by default.
+
+    Many of them observe host side effects of the repository command (marker
+    files, detached processes), which the real sandbox correctly prevents.
+    Tests that request ``real_repo_isolation`` use the actual host probe.
+    """
+    callspec = getattr(request.node, "callspec", None)
+    if "real_repo_isolation" in request.fixturenames or (
+            callspec is not None and callspec.params.get("repo_isolation") == "real"):
+        from src.execution.repo_isolation import clear_probe_cache
+        clear_probe_cache()
+        return
+    from src.execution import repo_isolation
+
+    def not_isolated(runtime, limits, **_kwargs):
+        return repo_isolation._not_isolated("bwrap_missing", limits)
+    monkeypatch.setattr(repo_isolation, "probe", not_isolated)
+
+
+@pytest.fixture(autouse=True)
+def inference_ledger_shadow_oracle(monkeypatch):
+    """#1086: every accounting test also checks bounded verification against
+    the pre-#1086 full-ledger decisions, and starts from a fresh process view."""
+    from src.workflows import inference_ledger
+    inference_ledger.reset_process_state()
+    monkeypatch.setattr(inference_ledger, "SHADOW_FULL_LEDGER", True)
+    yield
+    inference_ledger.reset_process_state()
+
+
+@pytest.fixture(autouse=True)
+def reset_process_singletons(monkeypatch):
+    """Give each test the fresh per-process state a real app boot has.
+
+    The observer ``context_manager`` singleton carries operator modes (tool,
+    MCP, approval, interruption) and a wall-clock-derived user state; a prior
+    test's refresh or mode change otherwise leaks into later tests (e.g. an
+    evening refresh makes delivery "quiet", a safe tool mode hides workflow
+    tools). The configuration mutation lock is loop-agnostic, but a fresh
+    instance keeps a test that leaks it held from blocking later tests.
+    """
+    from src.model_fabric import effective_policy
+    from src.observer.manager import ContextManager, context_manager
+    fresh = ContextManager()
+    # Reset in place: many modules hold a reference to this exact object.
+    context_manager.__dict__.update(fresh.__dict__)
+    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", effective_policy.LoopAgnosticLock())
+    # Contention backoffs from #702/#1074: a prior test's deferred touch or
+    # audited empty poll must not suppress the next test's.
+    from src.api import observer as observer_api
+    from src.auth import service as auth_service
+    monkeypatch.setattr(auth_service, "_auth_touch_retry_after", 0.0)
+    monkeypatch.setattr(observer_api, "_empty_poll_audited_at", {})
+    # The Vault cipher is cached from the first key it loads; each test has its
+    # own workspace and key, so a key cached by a prior test must not decrypt
+    # (and fail closed on) this test's Vault.
+    from src.vault import crypto as vault_crypto
+    monkeypatch.setattr(vault_crypto, "_fernet", None)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def reset_memory_flush_cache():
     _reset_memory_flush_state()
@@ -261,6 +357,26 @@ def clear_ambient_screenshot_analysis_provider():
         patch.object(settings, "local_vlm_base_url", ""),
     ):
         yield
+
+
+@pytest.fixture
+def openrouter_legacy_reenabled(monkeypatch):
+    """Explicit opt-in to the retired OpenRouter route (ADR-035).
+
+    OpenRouter is retired by policy and no production setting can re-enable
+    it. Regression tests that pin its historical mechanics (adapters, proofs,
+    accounting, reconciliation shapes) request this fixture, or carry the
+    ``openrouter_legacy`` marker, with transport still intercepted.
+    """
+    from src.model_fabric import retirement
+
+    monkeypatch.setattr(retirement, "_OPENROUTER_RETIRED", False)
+
+
+@pytest.fixture(autouse=True)
+def apply_openrouter_legacy_marker(request):
+    if request.node.get_closest_marker("openrouter_legacy") is not None:
+        request.getfixturevalue("openrouter_legacy_reenabled")
 
 
 @pytest.fixture(autouse=True)

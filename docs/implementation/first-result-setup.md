@@ -4,7 +4,9 @@ title: Guided First Result Setup
 
 # Guided First Result Setup
 
-**Status:** Partial, branch-local implementation; not shipped on `develop`.
+**Status:** Partial; shipped on `develop` and opened from Home
+(`CockpitHome` → `FirstResultSetup`). Live public-source usefulness remains
+externally unverified (see [STATUS](./STATUS.md)).
 **Scope:** guided setup through the existing Goal, source-watch, typed-input,
 Work queue, activity ledger, and artifact readback contracts.
 

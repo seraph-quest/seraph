@@ -583,6 +583,7 @@ def test_active_deadline_watchdog_blocks_before_sync_callback_returns():
     assert asyncio.run(broker.status())["active"] is None
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical sync completion admission over the intercepted historical OpenRouter route
 def test_canonical_sync_completion_admits_provider_and_finishes_receipt():
     broker = GpuAdmissionBroker()
     context = _canonical_context(request_id="sync-success")
@@ -630,6 +631,7 @@ def test_canonical_sync_completion_admits_provider_and_finishes_receipt():
     )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: canonical sync completion admission over the intercepted historical OpenRouter route
 def test_canonical_sync_admission_denial_stops_fallback_and_persists_denial():
     broker = MagicMock()
     broker.execute_sync.side_effect = _capacity_error("attempt-denied")

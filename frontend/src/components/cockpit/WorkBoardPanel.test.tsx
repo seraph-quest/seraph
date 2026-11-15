@@ -242,6 +242,26 @@ describe("WorkBoardPanel", () => {
     expect(screen.getAllByRole("button", { name: "Refresh research" })).toHaveLength(1);
   });
 
+  it("closes only the verified channel review Task on source denial and rejects late detail", async () => {
+    const currentTask = task();
+    taskResponse(fetchMock, currentTask);
+    const props = { ownerPrincipalId: "operator:one", ownerSessionId: "operator-session-1" };
+    const mounted = render(<WorkBoardPanel {...props} focusTaskId="task-1" />);
+    await screen.findByRole("region", { name: "Task details for Bounded task" });
+    mounted.rerender(<WorkBoardPanel {...props} discardFocusedTaskId="other-task" />);
+    expect(screen.getByRole("region", { name: "Task details for Bounded task" })).toBeInTheDocument();
+    mounted.rerender(<WorkBoardPanel {...props} discardFocusedTaskId="task-1" />);
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Task details for Bounded task" })).not.toBeInTheDocument());
+    let resolveDetail: ((value: unknown) => void) | undefined;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => String(input).endsWith("/tasks/task-1")
+      ? new Promise(resolve => { resolveDetail = resolve; }) : Promise.resolve(response({})));
+    mounted.rerender(<WorkBoardPanel {...props} focusTaskId="task-1" discardFocusedTaskId={null} />);
+    await waitFor(() => expect(resolveDetail).toBeDefined());
+    mounted.rerender(<WorkBoardPanel {...props} discardFocusedTaskId="task-1" />);
+    await act(async () => resolveDetail?.(response(detail(currentTask))));
+    expect(screen.queryByRole("region", { name: "Task details for Bounded task" })).not.toBeInTheDocument();
+  });
+
   it("returns recovered history to its exact origin while all effect controls stay readonly", async () => {
     const currentTask = task({ ownership_access: "recovered_read_only", status: "blocked", recovery_action: "reconcile_external_effect", block_kind: "unknown_effect" });
     taskResponse(fetchMock, currentTask);
@@ -1467,6 +1487,24 @@ describe("WorkBoardPanel", () => {
     expect(screen.queryByRole("button", { name: /Retry/ })).not.toBeInTheDocument();
   });
 
+  it("explains a retry-safe Board draft runtime refusal", async () => {
+    const refused = task({
+      status: "blocked",
+      title: "Mail reply draft",
+      block_kind: "capability",
+      block_reason: "board_worker_settlement_refused",
+      recovery_action: "retry",
+      latest_attempt: null,
+    });
+    taskResponse(fetchMock, refused);
+
+    render(<WorkBoardPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open task Mail reply draft" }));
+
+    expect(within(screen.getByRole("region", { name: "Task details for Mail reply draft" })).getByText(
+      "Blocked: board_worker_settlement_refused · Inference was spent, no external effect was made; safe to retry.")).toBeInTheDocument();
+  });
+
   it("shows review reviewer and evidence without inventing a verdict action", async () => {
     const review = task({
       status: "review",
@@ -1705,4 +1743,7 @@ describe("WorkBoardPanel", () => {
     expect(retryArtifactBody).toEqual(firstArtifactBody);
     expect(artifactAttempts).toBe(2);
   });
+  it("focuses the exact original Home output Attempt and never substitutes the latest Attempt", async () => { const first = endedAttempt(); const latest = endedAttempt({ attempt_id: "attempt-latest", fencing_token: 2 }); const currentTask = task({ latest_attempt: latest }); taskResponse(fetchMock, currentTask, 7, detail(currentTask, { attempts: [first, latest] })); render(<WorkBoardPanel focusTaskId="task-1" continuationOutput={{ kind: "output", task_id: "task-1", task_revision: 3, attempt_id: "attempt-1" }} />); const original = await screen.findByLabelText("Output Attempt attempt-1"); await waitFor(() => expect(original).toHaveFocus()); expect(await screen.findByLabelText("Output Attempt attempt-latest")).not.toHaveFocus(); expect(screen.getByLabelText("Selected Home output")).toHaveTextContent("Exact Attempt metadata found"); });
+  it("reports a missing exact Home output without selecting another output", async () => { const latest = endedAttempt({ attempt_id: "attempt-latest" }); const currentTask = task({ latest_attempt: latest }); taskResponse(fetchMock, currentTask, 7, detail(currentTask, { attempts: [latest] })); render(<WorkBoardPanel focusTaskId="task-1" continuationOutput={{ kind: "output", task_id: "task-1", task_revision: 3, attempt_id: "missing-original" }} />); await screen.findByLabelText("Selected Home output"); expect(screen.getByLabelText("Selected Home output")).toHaveTextContent("No replacement output was selected"); });
+
 });

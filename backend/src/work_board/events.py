@@ -120,7 +120,7 @@ def _safe_event_metadata(value: object) -> dict[str, object]:
             reference = safe_workflow_run_id(candidate)
             if reference is not None:
                 safe[key] = reference
-        elif key == "body_digest":
+        elif key in {"body_digest","decision_digest"}:
             if isinstance(candidate, str) and _SAFE_EVENT_DIGEST.fullmatch(candidate.lower()):
                 safe[key] = candidate.lower()
         elif key == "changed_fields":
@@ -153,11 +153,16 @@ def _event_payload(event: WorkBoardEvent) -> dict[str, object]:
         created_at = serialize_utc_datetime(created_at)
     elif hasattr(created_at, "value"):
         created_at = created_at.value
+    if event.kind in {"task.specialist_published","task.specialist_origin"}:
+        from src.workflows.specialist_lineage import safe_lineage_event
+        safe_metadata = safe_lineage_event(event,metadata)
+    else:
+        safe_metadata = _safe_event_metadata(metadata)
     return {
         "event_id": event.event_id,
         "task_id": event.task_id,
         "kind": _safe_event_kind(event.kind),
-        "metadata": _safe_event_metadata(metadata),
+        "metadata": safe_metadata,
         "created_at": created_at,
     }
 

@@ -1,4 +1,7 @@
-class ApprovalRequired(Exception):
+from src.agent.exceptions import AgentControlFlowInterrupt
+
+
+class ApprovalRequired(AgentControlFlowInterrupt):
     """Raised when a high-risk tool call needs explicit user approval."""
 
     def __init__(

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import type { AttentionItem } from "../../lib/cockpitAttention";
 import "./AttentionList.css";
 
@@ -8,6 +8,17 @@ export interface AttentionListProps {
   available: boolean;
   focusItemId?: string | null;
   onOpen: (item: AttentionItem) => void;
+}
+
+/** Shared keyboard traversal for current Home and Inbox attention metadata. */
+export function moveAttentionFocus(event: KeyboardEvent<HTMLElement>) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !(event.target instanceof HTMLButtonElement) || !event.target.hasAttribute("data-attention-id")) return;
+  const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("button[data-attention-id]")];
+  const index = buttons.indexOf(event.target);
+  if (index < 0 || buttons.length === 0) return;
+  event.preventDefault();
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+  buttons[next].focus();
 }
 
 function age(value: string | null): string {
@@ -29,7 +40,7 @@ export function AttentionList({ items, confirmedAt, available, focusItemId, onOp
     <article className="cockpit-home-card cockpit-attention" aria-label="Needs attention">
       <h3>Needs attention</h3>
       <p className="cockpit-home-muted">Snapshot · {confirmedAt ?? "confirmation time unavailable"}. Refresh Home to check current state.</p>
-      <div ref={listRef} className="cockpit-attention-list" tabIndex={-1} aria-label="Attention snapshot">
+      <div ref={listRef} className="cockpit-attention-list" tabIndex={-1} aria-label="Attention snapshot" onKeyDown={moveAttentionFocus}>
         {items.map((item) => (
           <button key={item.id} type="button" data-attention-id={item.id} className="cockpit-attention-item" onClick={() => onOpen(item)}>
             <strong>{item.title}</strong>

@@ -428,3 +428,18 @@ def _observation(
         details_json=json.dumps(details),
         blocked=False,
     )
+
+
+def test_digest_records_are_bounded_whole_and_local_text_capped():
+    from src.scheduler.jobs.screenshot_observation_digest import (
+        _LOCAL_ANALYSIS_TEXT_MAX,
+        _bounded_records_json,
+    )
+    import json as _json
+
+    big = {"local_analysis": {"text": "x" * 8000}, "app_name": "A"}
+    small = {"app_name": "B"}
+    out = _bounded_records_json([small, big, small], 600)
+    parsed = _json.loads(out)  # never cut mid-record → always valid JSON
+    assert parsed == [small, small]
+    assert _LOCAL_ANALYSIS_TEXT_MAX <= 500

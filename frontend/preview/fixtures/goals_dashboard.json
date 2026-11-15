@@ -1,0 +1,19 @@
+{
+ "active_count": 3,
+ "completed_count": 1,
+ "total_count": 4,
+ "domains": {
+  "productivity": {
+   "active": 2,
+   "completed": 1,
+   "total": 3,
+   "progress": 50
+  },
+  "growth": {
+   "active": 1,
+   "completed": 0,
+   "total": 1,
+   "progress": 25
+  }
+ }
+}

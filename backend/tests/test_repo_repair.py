@@ -394,6 +394,7 @@ def test_repo_repair_input_requires_source_paths_inside_allowlist():
         )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_repo_repair_real_input_producer_reaches_private_source_review(
     client, async_db, tmp_path: Path, monkeypatch, repo_sandbox_mode
@@ -2194,6 +2195,7 @@ async def test_inspect_rejects_reclaimed_attempt(async_db, tmp_path: Path, monke
         assert blocked.value.code == "repair_attempt_authority_invalid"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_generate_blocks_before_model_contact_when_sandbox_preflight_fails(
     async_db, tmp_path: Path, monkeypatch
@@ -2297,6 +2299,7 @@ async def test_generate_blocks_before_model_contact_when_sandbox_preflight_fails
         assert checkpoint["payload"]["receipt"]["reason"] == "resource_controller_unavailable:cpu"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_generate_adopts_private_response_checkpoint_without_second_model_contact(
     async_db, tmp_path: Path, monkeypatch
@@ -2664,6 +2667,7 @@ async def test_generate_adopts_private_response_checkpoint_without_second_model_
         assert model_calls == 1
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["session_revoked", "goal_revised"])
 async def test_generate_rechecks_authority_after_preflight_before_model_contact(
@@ -2793,6 +2797,7 @@ async def test_generate_rechecks_authority_after_preflight_before_model_contact(
         assert model_calls == 0
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 async def test_generate_rejects_route_drift_before_model_contact(async_db, tmp_path: Path, monkeypatch):
     workspace = tmp_path / "workspace"
@@ -2899,6 +2904,7 @@ async def test_generate_rejects_route_drift_before_model_contact(async_db, tmp_p
         assert model_calls == 0
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: repair generation and authority rechecks run over the intercepted historical OpenRouter strategist route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["goal", "session", "attempt_cancelled", "attempt_fenced"])
 async def test_generate_quarantines_response_when_authority_changes_after_model_contact(

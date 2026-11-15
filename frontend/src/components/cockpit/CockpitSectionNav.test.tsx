@@ -8,7 +8,7 @@ describe("CockpitSectionNav", () => {
   it("renders the fixed accessible desktop order and selection", () => {
     const onSelect = vi.fn();
     render(<CockpitSectionNav activeSection="inbox" onSelect={onSelect} />);
-    expect(screen.getByTestId("cockpit-section-nav").textContent).toContain("HomeInboxWorkGoalsLibraryConnections");
+    expect(screen.getByTestId("cockpit-section-nav").textContent).toContain("HomeInboxWorkGoalsLibraryConnectionsReports");
     expect(screen.getByTestId("cockpit-section-inbox")).toHaveAttribute("aria-current", "page");
     fireEvent.click(screen.getByTestId("cockpit-section-work"));
     expect(onSelect).toHaveBeenCalledWith("work");
@@ -20,5 +20,8 @@ describe("CockpitSectionNav", () => {
     fireEvent.click(screen.getByRole("button", { name: "More" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Connections" }));
     expect(onSelect).toHaveBeenCalledWith("connections");
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Reports" }));
+    expect(onSelect).toHaveBeenCalledWith("reports");
   });
 });

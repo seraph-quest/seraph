@@ -16,6 +16,7 @@ from src.workflows.job_runtime import durable_job_repository
 from src.workflows.inference_accounting import InferenceAccountingError
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: guardian contact writer over the intercepted historical OpenRouter route
 @pytest.mark.parametrize("change", ["source_grant", "source_expiry", "root", "policy", "watch", "valid"])
 async def test_actual_contact_writer_current_permissions(accounting_db, monkeypatch, change):
     from src.api import model_fabric_settings

@@ -88,4 +88,27 @@ describe("InferenceAccountingPanel", () => {
     expect(normalizeInferenceAccounting({ ...accounting, revision: Infinity,
       period_review: { ...control, expected_revision: Infinity } })?.period_review).toBeNull();
   });
+
+  it("shows each unreviewed overrun charge and the minimum bound that reviews it", () => {
+    const normalized = normalizeInferenceAccounting({
+      ...accounting, status: "blocked", reason_code: "provider_charge_exceeded_reservation",
+      overrun_max_cost_microusd: 612_340,
+      unreviewed_overruns: [
+        { operation_id: "op-big", job_id: "job-big", runtime_path: "chat_agent", period_id: "2026-10", bound_microusd: 500_000, actual_cost_microusd: 612_340 },
+        { operation_id: "op-small", job_id: "job-small", runtime_path: "strategist_agent", period_id: "2026-10", bound_microusd: 50_000, actual_cost_microusd: "bad" },
+      ],
+    });
+    expect(normalized?.unreviewed_overruns).toHaveLength(1);
+    render(<InferenceAccountingPanel accounting={normalized} stale={false} onRefresh={vi.fn(async () => {})} />);
+    const box = screen.getByTestId("unreviewed-overruns");
+    expect(box).toHaveTextContent("chat_agent · month 2026-10 · charged $0.61234 (612,340 µUSD) against a $0.5 bound");
+    expect(box).toHaveTextContent("Operation op-big · job job-big");
+    expect(box).toHaveTextContent("raise the request cost bound to at least $0.61234 (612,340 µUSD) and save");
+    expect(box).toHaveTextContent("press Prove route again");
+  });
+
+  it("hides the overrun review when there is none", () => {
+    render(<InferenceAccountingPanel accounting={{ ...accounting, overrun_max_cost_microusd: 0 }} stale={false} onRefresh={vi.fn(async () => {})} />);
+    expect(screen.queryByTestId("unreviewed-overruns")).toBeNull();
+  });
 });

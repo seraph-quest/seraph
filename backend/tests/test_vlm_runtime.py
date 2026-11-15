@@ -23,7 +23,7 @@ async def test_probe_effective_vlm_runtime_is_disabled_without_network_access():
     assert probe == {
         "checked": False,
         "reachable": False,
-        "reason": "local_vlm_disabled_openrouter_only",
+        "reason": "local_vlm_disabled_near_tee_only",
         "health": {"checked": False, "ok": False, "status_code": None, "error": ""},
         "backend_health": {"checked": False, "ok": False, "status_code": None, "error": ""},
         "queue_status": {"checked": False, "ok": False, "status_code": None, "error": ""},
@@ -42,7 +42,7 @@ def test_effective_vlm_status_is_explicitly_inactive_even_when_legacy_config_exi
         status = effective_vlm_status(live_probe=deferred_vlm_live_probe())
 
     assert status["active"] is False
-    assert status["disabled_reason"] == "local_vlm_disabled_openrouter_only"
+    assert status["disabled_reason"] == "local_vlm_disabled_near_tee_only"
     assert status["configured"] is True
     assert status["base_url"] == "http://192.168.1.26:8001"
     assert status["backend_url"] == "http://192.168.1.26:8000"
@@ -52,7 +52,7 @@ def test_effective_vlm_status_is_explicitly_inactive_even_when_legacy_config_exi
 
 @pytest.mark.asyncio
 async def test_direct_local_chat_route_error_blocks_legacy_callers():
-    assert await direct_local_chat_route_error() == "local_vlm_disabled_openrouter_only"
+    assert await direct_local_chat_route_error() == "local_vlm_disabled_near_tee_only"
 
 
 @pytest.mark.asyncio
@@ -64,5 +64,5 @@ async def test_direct_local_chat_route_error_allows_canonical_openrouter_path_wi
 @pytest.mark.asyncio
 async def test_direct_local_chat_route_error_keeps_unknown_route_fail_closed():
     assert await direct_local_chat_route_error(runtime_path="legacy_unknown_route") == (
-        "local_vlm_disabled_openrouter_only"
+        "local_vlm_disabled_near_tee_only"
     )

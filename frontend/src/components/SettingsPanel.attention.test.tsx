@@ -32,3 +32,15 @@ it.each(["wrong-owner", "stale-root", "expired", "invalid-expiry"])("ignores %s 
   act(() => appEventBus.emit("settings:inspect-accounting", { principalId: condition === "wrong-owner" ? "other" : "owner", sessionId: condition === "stale-root" ? "old-root" : "root" }));
   expect(useChatStore.getState().settingsPanelOpen).toBe(false);
 });
+
+it("opens Settings on the exact section a shell status action names (#1172)", async () => {
+  const { openSettingsSection } = await import("../lib/settingsNavigation");
+  render(<SettingsPanel />);
+  act(() => openSettingsSection("policies"));
+  expect(useChatStore.getState().settingsPanelOpen).toBe(true);
+  expect(screen.getByRole("button", { name: "Policies" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.queryByLabelText("Inference accounting")).not.toBeInTheDocument();
+  act(() => useChatStore.getState().setSettingsPanelOpen(false));
+  act(() => openSettingsSection("artifacts"));
+  expect(await screen.findByLabelText("Inference accounting")).toBeInTheDocument();
+});

@@ -2389,3 +2389,19 @@ async def test_workflow_draft_validation_and_save(client, tmp_path):
     assert save_payload["file_path"].endswith(
         "extensions/workspace-capabilities/workflows/web_brief_to_file.md"
     )
+
+
+def test_capability_overview_scans_the_extension_catalog_once():
+    """#702: the overview rescanned every catalog package once per starter pack."""
+    from src.api import catalog
+    from src.api.capabilities import _build_capability_overview, _load_starter_packs
+
+    assert len(_load_starter_packs()) > 1
+    with patch(
+        "src.api.catalog._load_catalog_extension_packages",
+        side_effect=catalog._load_catalog_extension_packages,
+    ) as scan:
+        overview = _build_capability_overview()
+
+    assert scan.call_count == 1
+    assert overview["starter_packs"]

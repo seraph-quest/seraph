@@ -17,7 +17,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, Query
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 from sqlalchemy import select, case
 
 from config.settings import settings
@@ -56,6 +56,16 @@ class PrepareRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=18000)
     idempotency_key: str = Field(min_length=36, max_length=36)
+    # The operator's explicit acceptance of a changed linked project source
+    # revision (C4.3). Absent for unlinked repairs and older requests.
+    acknowledged_project_source_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def preserve_legacy_request(self, handler):
+        result = handler(self)
+        if self.acknowledged_project_source_digest is None:
+            result.pop("acknowledged_project_source_digest", None)
+        return result
 
     @field_validator("title", "commit_message", "body")
     @classmethod
@@ -118,8 +128,20 @@ def write_file(relative: str, raw: bytes) -> None:
 
 
 class RepoPublicationService:
-    def __init__(self, *, adapter=None):
+    def __init__(self, *, adapter=None, repository_source_service=None):
         self.adapter = adapter or GitHubFollowthroughService()
+        self.repository_source_service = repository_source_service
+
+    def source_owner(self):
+        if self.repository_source_service is not None:
+            return self.repository_source_service
+        from src.api.work_board import dispatcher
+        from src.work_board.general_task import GeneralTaskService
+        from src.workflows.repo_repair import RepoRepairService
+        service = dispatcher.general_tasks
+        if type(service) is not GeneralTaskService or not service.started or type(service.repository_source_service) is not RepoRepairService:
+            raise PublicationError("repository_source_owner_unavailable")
+        return service.repository_source_service
 
     async def live(self, principal, session):
         await live_operator(principal, session)
@@ -176,13 +198,24 @@ class RepoPublicationService:
             "scan_limit_reached": len(identities) > 20 and offset >= 2000,
             "rejected_count": rejected}
 
-    async def repair(self, request, principal, session):
+    async def repair(self, request, principal, session, *, _with_source_witness=False, _refresh_project_source=None):
         await self.live(principal, session)
         root = await jobs.get_job(request.repair_job_id)
         if not root or root.get("job_kind") != "engineering.repo-repair.v1" or root.get("owner", {}).get("principal_id") != principal or root.get("operator_session_id") != session:
             raise PublicationError("repair_not_found", status_code=404)
         if root.get("status") != "succeeded" or root.get("revision") != request.expected_repair_revision:
             raise PublicationError("repair_success_revision_stale")
+        from src.workflows.repo_repair_source import repository_publication_source_present, stage_repository_publication_witness
+        source_witness = None
+        source_binding = None
+        if await repository_publication_source_present(jobs, request.repair_job_id):
+            from src.work_board.contracts import WorkBoardOwner
+            source_witness = await stage_repository_publication_witness(self.source_owner(), jobs,
+                repair_job_id=request.repair_job_id,
+                owner=WorkBoardOwner(principal_id=principal, session_id=session))
+            source_binding = source_witness.projection()
+            if source_binding["final_proposal_id"] != request.proposal_id or source_binding["final_proposal_revision"] != request.expected_proposal_revision:
+                raise PublicationError("source_final_proposal_changed")
         async with db_engine.get_session() as db:
             proposal = await db.get(RepoRepairProposal, request.proposal_id)
             if not proposal or proposal.owner_principal_id != principal or proposal.owner_session_id != session or proposal.workflow_run_id != request.repair_job_id:
@@ -201,6 +234,18 @@ class RepoPublicationService:
         historical = await approval_repository.get(approval_id or "")
         if not historical or historical.owner_principal_id != principal or historical.operator_session_id != session or historical.fingerprint != approval_fingerprint or historical.status not in {"consumed", "approved"}:
             raise PublicationError("repair_execution_approval_unproven")
+        if source_binding is not None:
+            binding["source_binding"] = digest(source_binding)
+            binding["repair_executor"] = source_binding["executor_kind"]
+            binding["repair_executor_posture_digest"] = source_binding["executor_posture_digest"]
+            if source_binding["approved_input_patch_digest"] != binding["patch_sha256"]:
+                raise PublicationError("source_approved_input_patch_changed")
+            binding["approved_input_patch_artifact_id"] = binding["patch_artifact_id"]
+            binding["approved_input_patch_digest"] = binding["patch_sha256"]
+            binding["patch_artifact_id"] = source_binding["publication_artifacts"]["diff.patch"]["path"]
+            binding["patch_sha256"] = source_binding["tested_cumulative_diff_digest"]
+        tested_authority = source_binding["iteration_authority_digest"] if source_binding is not None else root["authority_digest"]
+        approved_patch_digest = binding.get("approved_input_patch_digest", binding["patch_sha256"])
         artifacts = {Path(item.get("file_path", "")).name: item for item in root.get("artifacts", []) if str(item.get("file_path", "")).startswith(f"artifacts/repo-repair/{root['job_id']}/")}
         required = {"manifest.json", "readback.json", "diff.patch"}
         if not required.issubset(artifacts):
@@ -213,12 +258,16 @@ class RepoPublicationService:
         readback = json.loads(contents["readback.json"])
         if manifest != readback or manifest.get("status") != "succeeded" or manifest.get("exit_code") != 0 or manifest.get("cleanup_proven") is not True:
             raise PublicationError("tested_execution_unproven")
-        if manifest.get("job_id") != root["job_id"] or manifest.get("authority_digest") != root["authority_digest"] or manifest.get("posture_digest") != binding["repair_executor_posture_digest"]:
+        if manifest.get("job_id") != root["job_id"] or manifest.get("authority_digest") != tested_authority or manifest.get("posture_digest") != binding["repair_executor_posture_digest"]:
             raise PublicationError("tested_execution_binding_unproven")
+        if source_binding is not None:
+            approved_patch = read_file(binding["approved_input_patch_artifact_id"])
+            if hashlib.sha256(approved_patch).hexdigest() != approved_patch_digest or manifest.get("patch_sha256") != approved_patch_digest:
+                raise PublicationError("source_approved_input_patch_changed")
         if not any(item.get("receipt_kind") == "readback" and item.get("status") == "succeeded" and item.get("target_path") == artifacts["readback.json"]["file_path"] and item.get("content_sha256") == hashlib.sha256(contents["readback.json"]).hexdigest() and (item.get("details") or {}).get("verified") is True for item in root.get("effects", [])):
             raise PublicationError("repair_readback_unproven")
         tested = manifest.get("publication_test_input")
-        if not isinstance(tested, dict) or tested.get("schema") != "seraph.repo-publication.tested-input.v1" or tested.get("job_id") != root["job_id"] or tested.get("authority_digest") != root["authority_digest"] or tested.get("base_digest") != binding["base_snapshot_digest"] or tested.get("patch_sha256") != binding["patch_sha256"] or tested.get("exit_code") != 0 or tested.get("environment_unchanged") is not True or tested.get("environment", {}).get("available") is not True:
+        if not isinstance(tested, dict) or tested.get("schema") != "seraph.repo-publication.tested-input.v1" or tested.get("job_id") != root["job_id"] or tested.get("authority_digest") != tested_authority or tested.get("base_digest") != binding["base_snapshot_digest"] or tested.get("patch_sha256") != approved_patch_digest or tested.get("exit_code") != 0 or tested.get("environment_unchanged") is not True or tested.get("environment", {}).get("available") is not True:
             raise PublicationError("tested_base_equivalence_unavailable")
         if tested.get("tested_files") != tested.get("output_files"):
             raise PublicationError("test_mutated_publication_inputs")
@@ -227,13 +276,54 @@ class RepoPublicationService:
             raise PublicationError("patch_digest_changed")
         binding["test_artifacts"] = {name: {"file_path": artifacts[name]["file_path"], "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in contents.items()}
         binding["tested_input_digest"] = digest(tested)
-        return binding, tested, patch
+        # A repair whose C1 task came from a project finding binds the exact
+        # accepted source revision; the item is re-read before external action.
+        from src.extensions.github_followthrough import GitHubFollowthroughError
+        from src.integrations.project_source import project_link_for_repair, project_source_publication_binding
+        link = await project_link_for_repair(root["job_id"], principal)
+        acknowledged = getattr(request, "acknowledged_project_source_digest", None)
+        if link is not None:
+            try:
+                binding["project_source"] = await project_source_publication_binding(self.adapter, link=link,
+                    principal=principal, session=session, connection=await self.adapter._get_connection_row(principal),
+                    acknowledged_digest=acknowledged,
+                    refresh=_with_source_witness if _refresh_project_source is None else _refresh_project_source)
+            except GitHubFollowthroughError as exc:
+                raise PublicationError(exc.code, status_code=exc.status_code) from exc
+        elif acknowledged is not None:
+            raise PublicationError("project_source_not_linked", status_code=422)
+        return (binding, tested, patch, source_witness) if _with_source_witness else (binding, tested, patch)
+
+    async def refresh_project_source(self, preview, principal, session):
+        """Re-read the linked project item before an external action.
+
+        A no-op for an unlinked repair. Otherwise the current item must still
+        equal the exact revision bound into this approval (the task's, or the
+        one the operator explicitly accepted), or nothing is written.
+        """
+        expected = preview["repair_binding"].get("project_source")
+        if expected is None:
+            return
+        from src.extensions.github_followthrough import GitHubFollowthroughError
+        from src.integrations.project_source import project_link_for_repair, project_source_publication_binding
+        link = await project_link_for_repair(preview["repair_binding"]["repair_job_id"], principal)
+        if link is None:
+            raise PublicationError("project_source_link_missing")
+        try:
+            current = await project_source_publication_binding(self.adapter, link=link, principal=principal,
+                session=session, connection=await self.adapter._get_connection_row(principal),
+                acknowledged_digest=expected["accepted_digest"] if expected["operator_accepted_new_revision"] else None,
+                refresh=True)
+        except GitHubFollowthroughError as exc:
+            raise PublicationError(exc.code, status_code=exc.status_code) from exc
+        if current != expected:
+            raise PublicationError("project_source_changed_decision_required")
 
     async def tested_runtime_current(self, binding, tested):
         from src.execution.repo_sandbox import build_repo_repair_executor
         from src.execution.repo_publication_runtime import RuntimeUnavailable, posture_projection
         executor = build_repo_repair_executor()
-        preflight = await asyncio.to_thread(executor.preflight)
+        preflight = await asyncio.to_thread(executor.iterative_preflight if "source_binding" in binding else executor.preflight)
         environment = tested.get("environment") or {}
         try:
             tested_projection = posture_projection(environment.get("runtime_proof"), environment.get("configuration_revision"))
@@ -243,6 +333,14 @@ class RepoPublicationService:
             raise PublicationError("tested_runtime_or_configuration_changed")
 
     async def prepare(self, request, principal, session):
+        from src.workflows.repo_repair_source import repository_publication_source_present
+        if await repository_publication_source_present(jobs, request.repair_job_id):
+            from src.model_fabric.effective_policy import configuration_mutation_lock
+            async with configuration_mutation_lock:
+                return await self._prepare(request, principal, session)
+        return await self._prepare(request, principal, session)
+
+    async def _prepare(self, request, principal, session):
         branch(request.base_branch); branch(request.branch_name, feature=True); oid(request.expected_base_commit)
         try:
             key = uuid.UUID(request.idempotency_key)
@@ -256,8 +354,14 @@ class RepoPublicationService:
             old = await self.owned(job_id, principal, session)
             if old["declared_authority"].get("request_digest") != request_digest:
                 raise PublicationError("idempotency_conflict")
-            return await self.view(old)
-        binding, tested, patch = await self.repair(request, principal, session)
+            if old["status"] in {"succeeded", "cancelled", "unknown_external_effect", "blocked", "failed"}:
+                return await self.view(old)
+            from src.workflows.repo_repair_source import repository_publication_source_present
+            if not await repository_publication_source_present(jobs, request.repair_job_id):
+                if "source_binding" in (old["declared_authority"].get("repair_binding") or {}):
+                    raise PublicationError("source_publication_binding_changed")
+                return await self.view(old)
+        binding, tested, patch, source_witness = await self.repair(request, principal, session, _with_source_witness=True)
         await self.tested_runtime_current(binding, tested)
         connection = await self.adapter._get_connection_row(principal)
         if not connection or connection.mode != "active" or connection.revision != request.expected_connection_revision:
@@ -273,9 +377,25 @@ class RepoPublicationService:
         tree, base_files, _ = source.tree(request.expected_base_commit)
         equivalent(base_files, tested["base_files"])
         equivalent(file_manifest(source_path), tested["base_files"])
+        if old:
+            old_preview = self.preview(old)
+            if old_preview.get("repair_binding") != binding or old_preview.get("tested_input") != tested or old_preview.get("github_consent") != consent_binding:
+                raise PublicationError("source_publication_binding_changed")
+            from src.workflows.repo_repair_source import validate_repository_publication_in_writer
+            async with jobs._session() as db:
+                from sqlalchemy import text
+                if db.get_bind().dialect.name == "sqlite":
+                    await db.execute(text("BEGIN IMMEDIATE"))
+                run = await jobs._fetch(db, job_id)
+                await validate_repository_publication_in_writer(db, source_witness, publication_run=run,
+                    preview_digest=digest(old_preview), connection_id=connection.id,
+                    connection_revision=connection.revision, consent_binding=consent_binding)
+            return await self.view(old)
         local_posture = posture()
         preview = {"schema": "seraph.repo-publication.preview.v1", "operation_id": operation, "job_id": job_id, "owner_principal_id": principal, "owner_session_id": session, "request": request.model_dump(), "repair_binding": binding, "tested_input": tested, "repository": connection.repository, "connection_id": connection.id, "connection_revision": connection.revision, "base_branch": request.base_branch, "base_commit": request.expected_base_commit, "base_tree": tree, "branch_name": request.branch_name, "commit_message": request.commit_message, "commit_date": now().replace(microsecond=0).isoformat(), "title": request.title, "body": request.body + f"\n\n<!-- seraph-operation:{operation} -->", "local_posture": local_posture, "local_posture_digest": digest(local_posture), "required_permissions": PERMISSIONS, "transport": "git_data_rest", "learning": "no_learning"}
         preview["github_consent"] = consent_binding
+        if source_witness is not None:
+            preview["source_projection"] = source_witness.projection()
         try:
             preview["commit_date"] = datetime.fromisoformat(binding["repair_finished_at"]).replace(tzinfo=timezone.utc, microsecond=0).isoformat()
         except (TypeError, ValueError) as exc:
@@ -284,7 +404,15 @@ class RepoPublicationService:
         path = f"artifacts/repo-publication/{job_id}/preview.json"
         authority = {"session_id": session, "principal": principal, "connection_id": connection.id, "connection_revision": connection.revision, "repository": connection.repository, "request_digest": request_digest, "preview_path": path, "preview_digest": preview_digest, "required_permissions": PERMISSIONS, "local_host_execution_required": True, "executor_kind": "local", "executor_posture_digest": preview["local_posture_digest"], "repair_binding": binding, "github_consent": consent_binding}
         authority["budget_microusd"] = 0
-        admitted = await jobs.admit_job(DurableJobSpec(identity=DurableJobIdentity(job_id=job_id, owner_kind="user", owner_principal_id=principal, job_kind=CAPABILITY, capability_version="1", idempotency_scope="repo-publication", idempotency_key=str(key)), inputs={"request_digest": request_digest, "preview_digest": preview_digest}, session_id=session, operator_session_id=session, conversation_id=session, goal_id=binding["goal_id"], goal_revision=binding["goal_revision"], dependencies=(request.repair_job_id,), declared_authority=authority, deadline_at=now() + timedelta(minutes=10), max_attempts=2, priority=50, budget_microusd=0, run_fingerprint=preview_digest))
+        admission_options = {}
+        if source_witness is not None:
+            async def source_admission(db, run):
+                from src.workflows.repo_repair_source import validate_repository_publication_in_writer
+                await validate_repository_publication_in_writer(db, source_witness, publication_run=run,
+                    preview_digest=preview_digest, connection_id=connection.id,
+                    connection_revision=connection.revision, consent_binding=consent_binding)
+            admission_options["admission_authority_check"] = source_admission
+        admitted = await jobs.admit_job(DurableJobSpec(identity=DurableJobIdentity(job_id=job_id, owner_kind="user", owner_principal_id=principal, job_kind=CAPABILITY, capability_version="1", idempotency_scope="repo-publication", idempotency_key=str(key)), inputs={"request_digest": request_digest, "preview_digest": preview_digest}, session_id=session, operator_session_id=session, conversation_id=session, goal_id=binding["goal_id"], goal_revision=binding["goal_revision"], dependencies=(request.repair_job_id,), declared_authority=authority, deadline_at=now() + timedelta(minutes=10), max_attempts=2, priority=50, budget_microusd=0, run_fingerprint=preview_digest), **admission_options)
         if admitted["status"] != "accepted":
             return await self.view(admitted)
         current = await jobs.queue_job(job_id, expected_revision=admitted["revision"])
@@ -297,6 +425,10 @@ class RepoPublicationService:
         current = await jobs.bind_approval_id(job_id, approval.id, **self.fence(current))
         await approval_repository.update_pending_details(approval.id, owner_principal_id=principal, operator_session_id=session, updates={"durable_authority_digest": current["authority_digest"], "durable_approval_id": approval.id, "approval_operator_principal_id": principal, "approval_expires_at": _approval_expiry(approval.expires_at).timestamp()})
         current = await jobs.transition_job(job_id, "awaiting_approval", reason="repo_publication_fresh_approval_required", **self.fence(current))
+        if "project_source" in binding:
+            from src.integrations.project_source import project_link_for_repair, record_project_link
+            await record_project_link(source=await project_link_for_repair(request.repair_job_id, principal),
+                link_kind="publication", target_id=job_id, parent_target_id=request.repair_job_id)
         return await self.view(current)
 
     @staticmethod
@@ -426,7 +558,37 @@ class RepoPublicationService:
             self.require(expiry is not None and expiry > now(), "publication_approval_not_current")
             expires = expiry.timestamp()
             fields = {"approval_id": approval.id, "authority_digest": current["authority_digest"], "goal_id": current["goal_id"], "goal_revision": current["goal_revision"], "plan_revision": current.get("plan_revision"), "capability_version": "1", "owner_kind": "user", "owner_principal_id": principal, "service_id": None, "budget_microusd": 0, "budget_digest": current["budget_digest"], "operator_principal_id": principal, "operator_session_id": session, "expires_at": expires}
-            current = await jobs.resume_approved_job(job_id, approval_receipt={**fields, "status": "approved", "authenticated": True}, expected_revision=current["revision"], **fields)
+            from src.workflows.repo_repair_source import repository_publication_source_present
+            source_bound = await repository_publication_source_present(jobs, preview["request"]["repair_job_id"])
+            if source_bound:
+                from src.model_fabric.effective_policy import configuration_mutation_lock
+                # The linked project item's network read stays outside the
+                # configuration lock; the binding inside it is compared without
+                # another read, and the item is read again before the first write.
+                await self.refresh_project_source(preview, principal, session)
+                async with configuration_mutation_lock:
+                    binding, tested, _patch, witness = await self.repair(PrepareRequest(**preview["request"]), principal, session,
+                        _with_source_witness=True, _refresh_project_source=False)
+                    if binding != preview["repair_binding"] or tested != preview["tested_input"]:
+                        raise PublicationError("publication_source_or_posture_changed")
+                    await self.tested_runtime_current(binding, tested)
+                    connection = await self.adapter._get_connection_row(principal)
+                    if not connection or connection.id != preview["connection_id"] or connection.mode != "active" or connection.revision != preview["connection_revision"]:
+                        raise PublicationError("connection_authority_changed")
+                    await require_consent(connection, principal=principal, root=session,
+                        repository=preview["repository"], revision=preview["connection_revision"],
+                        required_actions=PUBLICATION_ACTIONS, binding=preview["github_consent"])
+                    if (await self.adapter.get_connection(principal)).get("credential_configured") is not True:
+                        raise PublicationError("credential_not_configured")
+                    source = SourceGit(Path(canonical_workspace_root(settings.workspace_dir)) / binding["repository_ref"])
+                    if source.head() != preview["base_commit"]:
+                        raise PublicationError("source_commit_base_mismatch")
+                    equivalent(file_manifest(source.root), tested["base_files"])
+                    if digest(self.preview(current)) != digest(preview):
+                        raise PublicationError("preview_changed")
+                    current = await jobs.resume_approved_job(job_id, approval_receipt={**fields, "status": "approved", "authenticated": True}, expected_revision=current["revision"], _repository_publication_witness=witness, **fields)
+            else:
+                current = await jobs.resume_approved_job(job_id, approval_receipt={**fields, "status": "approved", "authenticated": True}, expected_revision=current["revision"], **fields)
         if current["status"] != "queued":
             return await self.view(current)
         current = await jobs.claim_job(job_id, owner="repo-publication:" + job_id, lease_seconds=120, expected_revision=current["revision"])
@@ -457,13 +619,19 @@ class RepoPublicationService:
                         datetime.fromisoformat(current["lease"]["expires_at"]).replace(tzinfo=timezone.utc),
                         datetime.fromisoformat(current["deadline_at"]).replace(tzinfo=timezone.utc),
                     ) - now()).total_seconds())
+                    approved_patch = None
+                    if "approved_input_patch_artifact_id" in preview["repair_binding"]:
+                        # Iterative Source: the published tree must equal the
+                        # base plus the operator-approved input patch, never
+                        # only the worker-exported (test-writable) diff.
+                        approved_patch = read_file(preview["repair_binding"]["approved_input_patch_artifact_id"])
                     admission = admit(stage, source, preview, patch, {
                         "job_id": job_id, "root": session, "principal": principal,
                         "attempt": current["attempt_count"], "authority_digest": current["authority_digest"],
                         "input_digest": current["input_digest"], "run_fingerprint": current["run_fingerprint"],
                         "fence": current["lease"]["fencing_token"], "goal_id": current["goal_id"],
                         "goal_revision": current["goal_revision"], "preview_digest": digest(preview),
-                    }, directory=directory, guard_fd=guard_fd, seconds_limit=remaining)
+                    }, directory=directory, guard_fd=guard_fd, seconds_limit=remaining, approved_patch=approved_patch)
                     supervisor_binding = admission.checkpoint()
                     current = await jobs.record_checkpoint(job_id, checkpoint_id="publication_supervisor_admission", state={"admission_sha256": admission.digest}, checkpoint_payload=supervisor_binding, **self.fence(current))
                     await self.check(current, preview, full_runtime=True)
@@ -487,6 +655,8 @@ class RepoPublicationService:
             remote_base = await self.request(current, preview, prefix + "/git/ref/heads/" + preview["base_branch"])
             self.require(remote_base.get("object", {}).get("sha") == preview["base_commit"], "remote_base_changed")
             await self.verify_tree(current, preview, preview["base_commit"], preview["base_tree"], preview["tested_input"]["base_files"])
+            # Last read of the linked project item before the first GitHub write.
+            await self.refresh_project_source(preview, principal, session)
             for item in produced["files"]:
                 if item["path"] not in produced["changed_paths"]:
                     continue
@@ -812,11 +982,14 @@ class RepoPublicationService:
 
 
 async def invoke(request, method, *args):
+    from src.work_board.repository import BoardError
     operator = _operator(request)
     try:
         return await getattr(RepoPublicationService(), method)(*args, _principal_id(operator), _session_id(operator))
     except PublicationError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    except (DurableJobError, BoardError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=409, detail={"code": "publication_authority_changed"}) from exc
 
 
 @router.post("/prepare")

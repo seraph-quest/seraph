@@ -48,6 +48,7 @@ async def redact_secrets_in_text_readonly(
     text: str,
     *,
     fail_closed: bool = True,
+    minimum_secret_length: int = _MIN_SECRET_LENGTH,
 ) -> str:
     """Redact through a caller-owned session without opening an audit writer.
 
@@ -56,6 +57,8 @@ async def redact_secrets_in_text_readonly(
     This opt-in path reads the canonical secret rows using that same session;
     normal callers keep the audited helper above.
     """
+    if type(minimum_secret_length) is not int or not 1 <= minimum_secret_length <= _MIN_SECRET_LENGTH:
+        raise ValueError("secret redaction minimum must be an integer from 1 to 6")
     if not text:
         return text
     try:
@@ -109,7 +112,7 @@ async def redact_secrets_in_text_readonly(
     try:
         for secret in secrets:
             value = fernet.decrypt(str(secret.encrypted_value or "").encode()).decode()
-            if len(value) >= _MIN_SECRET_LENGTH:
+            if len(value) >= minimum_secret_length:
                 values.append(value)
     except (InvalidToken, OSError, RuntimeError, TypeError, ValueError):
         return "[redaction unavailable]" if fail_closed else text

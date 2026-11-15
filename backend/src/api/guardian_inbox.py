@@ -15,6 +15,40 @@ from src.guardian import inbox as inbox_service
 
 router = APIRouter(prefix="/guardian/inbox")
 
+from src.guardian.programme_digest import FindingAction, NotificationPreference
+
+
+async def _programme_call(http_request, method, **kwargs):
+    from src.guardian import programme_digest
+    from src.guardian.goal_programmes import GoalProgrammeError
+    from src.auth.service import AuthFailure
+    from src.work_board.repository import BoardError
+    try:
+        return await getattr(programme_digest, method)(operator=_operator(http_request), **kwargs)
+    except AuthFailure as exc:
+        raise HTTPException(status_code=401, detail={"code": exc.code}) from None
+    except BoardError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from None
+    except GoalProgrammeError as exc:
+        raise HTTPException(status_code=404 if exc.code == "programme_finding_not_found" else 409,
+            detail={"code": exc.code, "recovery": "Review current programme, sources and operator authority."}) from None
+
+
+# Static paths precede the existing opaque item route.
+@router.get("/programme-digests")
+async def programme_digests(request: Request):
+    return await _programme_call(request, "list_digests")
+
+
+@router.post("/programme-findings/{finding_id}/actions")
+async def programme_finding_action(finding_id: str, body: FindingAction, request: Request):
+    return await _programme_call(request, "action", identifier=finding_id, request=body)
+
+
+@router.post("/programme-notifications")
+async def programme_notifications(body: NotificationPreference, request: Request):
+    return await _programme_call(request, "preferences", request=body)
+
 
 class GuardianInboxActionRequest(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)

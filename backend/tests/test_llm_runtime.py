@@ -163,17 +163,18 @@ def clear_ambient_runtime_profile_preferences(monkeypatch):
     from src.model_fabric import caller_context
 
     monkeypatch.setattr(caller_context, "is_canonical_inference_route", lambda _path: False)
-    with (
-        patch.object(settings, "runtime_profile_preferences", ""),
-        patch.object(settings, "local_runtime_paths", ""),
-        patch.object(settings, "seraph_vlm_api_key", ""),
-        patch.object(settings, "local_vlm_api_key", ""),
-        # These tests exercise the historical provider-matrix and routing
-        # compatibility contract.  Active OpenRouter-only behavior has
-        # dedicated focused coverage in test_model_fabric_openrouter_policy.
-        patch.object(settings, "openrouter_provider_only", False),
-    ):
-        yield
+    # Use the same monkeypatch as the per-test opt-in fixtures below: mixing a
+    # ``patch.object`` context with a later ``monkeypatch.setattr`` of the same
+    # attribute restored them out of order and leaked ``False`` process-wide.
+    monkeypatch.setattr(settings, "runtime_profile_preferences", "")
+    monkeypatch.setattr(settings, "local_runtime_paths", "")
+    monkeypatch.setattr(settings, "seraph_vlm_api_key", "")
+    monkeypatch.setattr(settings, "local_vlm_api_key", "")
+    # These tests exercise the historical provider-matrix and routing
+    # compatibility contract.  Active OpenRouter-only behavior has
+    # dedicated focused coverage in test_model_fabric_openrouter_policy.
+    monkeypatch.setattr(settings, "openrouter_provider_only", False)
+    yield
 
 
 @pytest.fixture
@@ -1215,6 +1216,7 @@ def test_build_model_kwargs_explicit_profile_wins_over_runtime_override():
     assert kwargs["api_base"] == "http://localhost:11434/v1"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_prefers_capability_matched_fallback(transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="fast path won"))]
@@ -1325,6 +1327,7 @@ def test_fallback_policy_respects_intent_priority_before_config_order():
     ]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_prefers_highest_weighted_policy_score(transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="weighted score won"))]
@@ -1710,6 +1713,7 @@ def test_fallback_litellm_model_generate_rejects_codex_local(async_db):
     mock_completion.assert_not_called()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_uses_runtime_model_override(async_db, transitional_legacy_completion_path):
     success_response = MagicMock()
 
@@ -1748,6 +1752,7 @@ def test_completion_with_fallback_sync_uses_runtime_model_override(async_db, tra
     assert events[0]["details"]["primary_model"] == "openai/gpt-4.1-mini"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_keeps_remote_fallback_base_for_local_runtime_path(transitional_legacy_completion_path):
     fallback_response = MagicMock()
 
@@ -2063,6 +2068,7 @@ def test_fallback_litellm_model_runtime_override_can_force_default_profile_over_
     assert model._fallback_model.api_base == "https://openrouter.ai/api/v1"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_retries_with_fallback():
     primary_error = RuntimeError("primary down")
     fallback_response = MagicMock()
@@ -2086,6 +2092,7 @@ def test_completion_with_fallback_sync_retries_with_fallback():
     assert mock_completion.call_args_list[1].kwargs["api_base"] == "http://localhost:11434/v1"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_governed_completion_reauthorizes_fallback_after_primary_failure():
     primary_decision = MagicMock(allowed=True)
     fallback_decision = MagicMock(allowed=True)
@@ -2153,6 +2160,7 @@ def test_governed_completion_reauthorizes_fallback_after_primary_failure():
     )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_governed_fallback_receipt_distinguishes_primary_preflight_rejection():
     primary_denied = MagicMock(
         allowed=False,
@@ -2210,6 +2218,7 @@ def test_governed_fallback_receipt_distinguishes_primary_preflight_rejection():
     )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_governed_primary_success_finalizes_bound_receipt():
     decision = MagicMock(allowed=True)
     receipt_session = MagicMock()
@@ -2327,6 +2336,7 @@ def test_canonical_completion_builds_context_before_route_selection(canonical_op
     legacy_transport.assert_not_called()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_governed_agent_primary_success_finalizes_bound_receipt():
     decision = MagicMock(allowed=True)
     receipt_session = MagicMock(workload="interactive")
@@ -2383,6 +2393,7 @@ def test_governed_agent_primary_success_finalizes_bound_receipt():
     )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_governed_agent_fallback_preserves_tool_only_response():
     primary_decision = MagicMock(allowed=True)
     fallback_decision = MagicMock(allowed=True)
@@ -2473,6 +2484,7 @@ def test_governed_agent_all_denied_is_zero_transport():
     denied_receipt.assert_awaited_once()
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_walks_fallback_chain(async_db):
     completion_response = MagicMock()
 
@@ -2522,6 +2534,7 @@ def test_completion_with_fallback_sync_walks_fallback_chain(async_db):
     assert events[0]["details"]["fallback_attempts"] == 2
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_uses_runtime_fallback_override_chain(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
 
@@ -2574,6 +2587,7 @@ def test_completion_with_fallback_sync_uses_runtime_fallback_override_chain(asyn
     assert events[0]["details"]["fallback_attempts"] == 2
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_reroutes_away_from_unhealthy_primary(async_db):
     first_fallback_response = MagicMock()
     rerouted_response = MagicMock()
@@ -2639,6 +2653,7 @@ def test_completion_with_fallback_sync_reroutes_away_from_unhealthy_primary(asyn
     assert "unhealthy_cooldown" in primary_candidate["reason_codes"]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_uses_live_feedback_to_deprioritize_recently_failing_target(async_db, transitional_legacy_completion_path):
     first_success = MagicMock()
     second_success = MagicMock()
@@ -2871,6 +2886,7 @@ def test_fallback_litellm_model_logs_session_and_request_context(async_db):
     assert events[0]["details"]["request_id"] == "req-agent-123"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_logs_fallback_success(async_db):
     primary_error = RuntimeError("primary down")
     fallback_response = MagicMock()
@@ -2904,6 +2920,7 @@ def test_completion_with_fallback_sync_logs_fallback_success(async_db):
     assert "primary down" in events[0]["details"]["primary_error"]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_sync_logs_final_chain_failure(async_db):
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -2948,6 +2965,7 @@ def test_completion_with_fallback_sync_logs_final_chain_failure(async_db):
     ]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_retries_generate_with_fallback(async_db):
     primary_error = RuntimeError("primary down")
     fallback_response = MagicMock()
@@ -2987,6 +3005,7 @@ def test_fallback_litellm_model_retries_generate_with_fallback(async_db):
     assert "primary down" in events[0]["details"]["primary_error"]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_walks_fallback_chain(async_db):
     fallback_response = MagicMock()
 
@@ -3094,6 +3113,7 @@ def test_fallback_litellm_model_uses_runtime_profile_preferences_before_fallback
     assert getattr(model._fallback_models[1], "runtime_profile") is None
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_reroutes_away_from_unhealthy_primary(async_db):
     first_fallback_response = MagicMock()
     rerouted_response = MagicMock()
@@ -3150,6 +3170,7 @@ def test_fallback_litellm_model_reroutes_away_from_unhealthy_primary(async_db):
     assert events[0]["details"]["rerouted_model"] == "ollama/llama3.2"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_prefers_alternate_runtime_profile_before_explicit_fallback(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
 
@@ -3237,6 +3258,7 @@ def test_fallback_litellm_model_orders_targets_by_weighted_policy_score():
     ]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_logs_routing_decision(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="fast path won"))]
@@ -3542,6 +3564,7 @@ def test_build_routing_decision_details_marks_legacy_order_when_planning_winner_
     )
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_logs_weighted_policy_scores(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="weighted policy path"))]
@@ -3596,6 +3619,7 @@ def test_completion_with_fallback_logs_weighted_policy_scores(async_db, transiti
     assert details["candidate_targets"][2]["policy_score"] == 5.0
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_reroutes_to_guardrail_compliant_target(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="guardrail-compliant path"))]
@@ -3653,6 +3677,7 @@ def test_completion_with_fallback_reroutes_to_guardrail_compliant_target(async_d
     assert primary_candidate["decision"] == "skipped"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_prefers_lower_budget_compliant_route_on_score_tie(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="budget-steered path"))]
@@ -3725,6 +3750,7 @@ def test_completion_with_fallback_prefers_lower_budget_compliant_route_on_score_
     assert details["simulated_routes"][1]["route_score"] == 1.0
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_keeps_intent_match_ahead_of_budget_steering(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="intent-first path"))]
@@ -3827,6 +3853,7 @@ def test_completion_with_fallback_fails_closed_when_no_guardrail_compliant_targe
     assert "no_guardrail_compliant_targets" in details["candidate_targets"][0]["reason_codes"]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_applies_cost_and_latency_guardrails(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="guardrail tier path"))]
@@ -3873,6 +3900,7 @@ def test_completion_with_fallback_applies_cost_and_latency_guardrails(async_db, 
     assert "latency_guardrail_exceeded" in primary_candidate["reason_codes"]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_applies_task_and_budget_guardrails(async_db, transitional_legacy_completion_path):
     completion_response = MagicMock()
     completion_response.choices = [MagicMock(message=MagicMock(content="task-safe provider"))]
@@ -3919,6 +3947,7 @@ def test_completion_with_fallback_applies_task_and_budget_guardrails(async_db, t
     assert "budget_guardrail_exceeded" in primary_candidate["reason_codes"]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_completion_with_fallback_does_not_try_noncompliant_target_after_guardrail_skip(async_db, transitional_legacy_completion_path):
     with (
         patch.object(settings, "default_model", "openrouter/anthropic/claude-sonnet-4"),
@@ -3955,6 +3984,7 @@ def test_completion_with_fallback_does_not_try_noncompliant_target_after_guardra
     ]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_does_not_try_noncompliant_target_after_guardrail_skip(async_db):
     with (
         patch.object(settings, "fallback_model", ""),
@@ -4062,6 +4092,11 @@ def test_fallback_litellm_model_deduplicates_chain_targets():
 
 
 @pytest.mark.asyncio
+# The worker thread writes its own audit rows (routing decision) while the
+# caller's loop records the timeout. A file database gives each writer its own
+# pooled connection as in production; the single shared in-memory connection
+# lets one session's rollback discard the other's committed-looking row.
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_completion_with_fallback_timeout_does_not_log_late_success(async_db):
     success_response = MagicMock()
 
@@ -4094,6 +4129,47 @@ async def test_completion_with_fallback_timeout_does_not_log_late_success(async_
     assert timeout_events[0]["details"]["timeout_seconds"] == 0.01
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_completion_timeout_ignores_late_success_even_when_the_loop_stalls(async_db):
+    """A provider returning after the caller's deadline is late even if the
+    caller's loop has not yet marked the timeout (a stalled loop)."""
+    import src.llm_runtime as runtime
+
+    success_response = MagicMock()
+    original_mark = runtime._mark_request_timed_out
+
+    def _slow_success(**_kwargs):
+        time.sleep(0.1)
+        return success_response
+
+    def _stalled_mark(request_id):
+        time.sleep(0.25)  # the loop is blocked past the provider's late return
+        original_mark(request_id)
+
+    with (
+        patch.object(settings, "default_model", "openai/gpt-4o-mini"),
+        patch.object(settings, "llm_api_key", "primary-key"),
+        patch.object(settings, "llm_api_base", "http://localhost:11434/v1"),
+        patch.object(settings, "fallback_model", ""),
+        patch("litellm.completion", side_effect=_slow_success),
+        patch.object(runtime, "_mark_request_timed_out", side_effect=_stalled_mark),
+    ):
+        with pytest.raises(asyncio.TimeoutError):
+            await completion_with_fallback(
+                messages=[{"role": "user", "content": "hello"}],
+                temperature=0.3,
+                max_tokens=256,
+                timeout=0.01,
+            )
+        await asyncio.sleep(0.15)
+
+    events = await audit_repository.list_events(limit=10)
+    assert [e for e in events if e["event_type"] == "llm_primary_success"] == []
+    assert [e for e in events if e["event_type"] == "llm_timed_out"]
+
+
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_logs_primary_success(async_db):
     success_response = MagicMock()
 
@@ -4128,6 +4204,7 @@ def test_fallback_litellm_model_logs_primary_success(async_db):
     assert events[0]["details"]["used_fallback"] is False
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_logs_primary_failure_without_fallback(async_db):
     primary_error = RuntimeError("primary down")
 
@@ -4160,6 +4237,7 @@ def test_fallback_litellm_model_logs_primary_failure_without_fallback(async_db):
     assert events[0]["details"]["error"] == "primary down"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_logs_fallback_failure(async_db):
     with (
         patch.object(settings, "fallback_model", "ollama/llama3.2"),
@@ -4192,6 +4270,7 @@ def test_fallback_litellm_model_logs_fallback_failure(async_db):
     assert events[0]["details"]["fallback_error"] == "fallback down"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: routing/fallback mechanics over historical OpenRouter targets
 def test_fallback_litellm_model_logs_final_chain_failure(async_db):
     with (
         patch.object(settings, "fallback_model", ""),

@@ -1092,3 +1092,53 @@ async def test_authenticated_operator_can_read_runtime_and_settings_without_prov
     # material must never be returned.
     assert "test-key" not in runtime.text
     assert "test-key" not in settings_response.text
+
+
+def _locked_auth_store(*_args, **_kwargs):
+    from sqlalchemy.exc import OperationalError
+    raise OperationalError("UPDATE operator_sessions", {}, Exception("database is locked"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "recovery"), [("/api/sessions", None), ("/api/calendar/status", "retry_existing_request")])
+async def test_auth_store_contention_is_retryable_not_a_login_verdict(monkeypatch, path, recovery):
+    """#702: lock contention while authenticating is a 503 retry, never 500 or 401."""
+    monkeypatch.setattr("src.auth.middleware.authenticate_token", _locked_auth_store)
+    called = False
+
+    async def endpoint(_request):
+        nonlocal called
+        called = True
+
+    request = Request({"type": "http", "method": "GET", "path": path, "query_string": b"",
+        "headers": [(b"host", b"test"), (b"cookie", f"{settings.operator_auth_cookie_name}=token".encode())],
+        "client": ("127.0.0.1", 1234), "server": ("test", 80), "scheme": "http"})
+    response = await OperatorAuthMiddleware(lambda *_args, **_kwargs: None).dispatch(request, endpoint)
+    assert response.status_code == 503 and called is False
+    import json
+    detail = json.loads(response.body)["detail"]
+    assert detail["code"] == "auth_storage_busy"
+    assert detail.get("recovery_action") == recovery
+
+
+@pytest.mark.asyncio
+async def test_websocket_handshake_contention_closes_retryable(monkeypatch):
+    monkeypatch.setattr("src.auth.middleware.authenticate_token", _locked_auth_store)
+
+    class FakeWebSocket:
+        accepted = False
+        closed = None
+        headers = {"host": "localhost", "origin": ORIGIN}
+        cookies = {settings.operator_auth_cookie_name: "token"}
+
+        async def accept(self):
+            self.accepted = True
+
+        async def close(self, *, code, reason):
+            self.closed = (code, reason)
+
+    websocket = FakeWebSocket()
+    await websocket_chat(websocket)
+    assert websocket.accepted is False
+    # 1013 is "try again later": the cockpit reconnects instead of signing out.
+    assert websocket.closed == (1013, "auth_storage_busy")

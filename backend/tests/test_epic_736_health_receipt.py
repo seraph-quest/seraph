@@ -126,7 +126,7 @@ def test_unprobed_optional_capabilities_are_skipped(tmp_path: Path, monkeypatch:
     _configured(monkeypatch, tmp_path)
     receipt, exit_code, _ = health.build_receipt()
     checks = {item["id"]: item for item in receipt["checks"]}
-    for identifier in ("memory.embedding_capability", "edge.mac", "voice.audio", "telegram"):
+    for identifier in ("memory.embedding_capability", "edge.mac", "telegram"):
         assert checks[identifier]["status"] == "skipped"
         assert checks[identifier]["evidence_mode"] == "external_unverified"
     assert exit_code == 2
@@ -142,6 +142,9 @@ def test_excluded_stable_criteria_remain_explicit(tmp_path: Path, monkeypatch: p
         "evolution.hidden_evaluation": 771,
         "evolution.scoped_canary_rollback": 771,
         "evaluation.comparator_scope_coverage": 754,
+        # #1179 retired voice input by operator decision.
+        "audio.capture_decode_persistence": 751,
+        "voice.audio": 751,
     }
     assert set(expected) <= checks.keys()
     for identifier, owner in expected.items():
@@ -174,6 +177,8 @@ def test_matrix_matches_python_evidence_contract() -> None:
         for item in matrix["exclusion_mapping"]
     }
     assert exclusions["research.harness_improvement"] == (771, "excluded", "deferred_outside_epic_736")
+    assert exclusions["audio.capture_decode_persistence"] == (751, "excluded", "retired_by_operator_decision_1179")
+    assert exclusions["voice.audio"] == (751, "excluded", "retired_by_operator_decision_1179")
 
 
 def test_required_child_criteria_are_mapped_and_source_check_is_separate() -> None:
@@ -181,7 +186,6 @@ def test_required_child_criteria_are_mapped_and_source_check_is_separate() -> No
         "conversation.identity_outbox": 750,
         "native_software.loop": 748,
         "edge.paired_transport": 749,
-        "audio.capture_decode_persistence": 751,
         "telegram.durable_transport": 752,
         "capability_pack.lifecycle": 755,
     }

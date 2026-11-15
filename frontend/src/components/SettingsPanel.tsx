@@ -11,6 +11,8 @@ import { AuditLogPanel } from "./settings/AuditLogPanel";
 import { WorkflowPanel } from "./settings/WorkflowPanel";
 import { SourceWatchPanel } from "./settings/SourceWatchPanel";
 import { ArtifactStoragePanel } from "./settings/ArtifactStoragePanel";
+import { BackgroundInferencePanel } from "./settings/BackgroundInferencePanel";
+import { TelegramPairingPanel } from "./settings/TelegramPairingPanel";
 import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
 import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfiles";
 import { SelectedContextPairing } from "./settings/SelectedContextPairing";
@@ -20,6 +22,8 @@ import { ForgejoTitlePanel } from "./settings/ForgejoTitlePanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
 import { MailConnectionPanel } from "./settings/MailConnectionPanel";
 import { useOptionalOperatorAuth } from "./auth/OperatorAuthGate";
+import { isLocalNoLoginSession, LocalNoLoginBadge } from "./auth/localNoLogin";
+import { SETTINGS_OPEN_SECTION_EVENT, type SettingsSectionId } from "../lib/settingsNavigation";
 import { appEventBus } from "../lib/appEventBus";
 
 interface SkillInfo {
@@ -143,12 +147,13 @@ interface McpServer {
   auth_hint: string;
 }
 
-type SettingsSection = "artifacts" | "general" | "native" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
+type SettingsSection = "artifacts" | "general" | "native" | "telegram" | "repo-sandbox" | "policies" | "audit" | "workflows" | "guardian" | "calendar" | "mail" | "github" | "moltbook" | "forgejo" | "skills" | "discover" | "mcp";
 
 const SETTINGS_SECTIONS: Array<{ id: SettingsSection; label: string }> = [
-  { id: "artifacts", label: "Screenshot/VLM" },
+  { id: "artifacts", label: "Models & OpenRouter" },
   { id: "general", label: "General" },
   { id: "native", label: "Native" },
+  { id: "telegram", label: "Telegram" },
   { id: "repo-sandbox", label: "Repo Sandbox" },
   { id: "policies", label: "Policies" },
   { id: "audit", label: "Audit" },
@@ -467,12 +472,28 @@ export function SettingsPanel() {
   }, [setSettingsPanelOpen]);
   const wasOpenRef = useRef(false);
 
+  // A deep link (#1172: status items name the section that resolves them)
+  // survives the open transition, which otherwise resets to the first section.
+  const requestedSectionRef = useRef<SettingsSection | null>(null);
+  useEffect(() => {
+    const openSection = (event: { section: SettingsSectionId } | undefined) => {
+      const section = event?.section;
+      if (!section || !SETTINGS_SECTIONS.some((entry) => entry.id === section)) return;
+      requestedSectionRef.current = section;
+      setActiveSection(section);
+      setSettingsPanelOpen(true);
+    };
+    appEventBus.on(SETTINGS_OPEN_SECTION_EVENT, openSection);
+    return () => appEventBus.off(SETTINGS_OPEN_SECTION_EVENT, openSection);
+  }, [setSettingsPanelOpen]);
+
   useLayoutEffect(() => {
     if (settingsPanelOpen && !wasOpenRef.current) {
-      setActiveSection("artifacts");
+      setActiveSection(requestedSectionRef.current ?? "artifacts");
     } else if (!settingsPanelOpen && wasOpenRef.current) {
       setActiveSection("artifacts");
     }
+    requestedSectionRef.current = null;
     wasOpenRef.current = settingsPanelOpen;
   }, [settingsPanelOpen]);
 
@@ -645,6 +666,7 @@ export function SettingsPanel() {
                     ? "border-retro-highlight text-retro-highlight"
                     : "border-retro-text/15 text-retro-text/45 hover:text-retro-text"
                 }`}
+                aria-pressed={activeSection === section.id}
                 onClick={() => setActiveSection(section.id)}
               >
                 {section.label}
@@ -712,10 +734,12 @@ export function SettingsPanel() {
                 <div className="cockpit-settings-copy">
                   <div className="cockpit-settings-label">Operator session</div>
                   <div className="cockpit-settings-note">
-                    {operatorAuth.session.principal_id} · expires {new Date(operatorAuth.session.idle_expires_at).toLocaleString()}
+                    {isLocalNoLoginSession(operatorAuth.session)
+                      ? <>{operatorAuth.session.principal_id} · <LocalNoLoginBadge /></>
+                      : <>{operatorAuth.session.principal_id} · expires {new Date(operatorAuth.session.idle_expires_at).toLocaleString()}</>}
                   </div>
                 </div>
-                <div className="flex gap-1">
+                {!isLocalNoLoginSession(operatorAuth.session) && <div className="flex gap-1">
                   <button
                     type="button"
                     className="cockpit-settings-choice"
@@ -730,7 +754,7 @@ export function SettingsPanel() {
                   >
                     Sign out
                   </button>
-                </div>
+                </div>}
               </div>
             )}
           </div>
@@ -741,9 +765,16 @@ export function SettingsPanel() {
           {activeSection === "native" && <DaemonStatus />}
           {activeSection === "native" && <SelectedContextPairing ownerPrincipalId={operatorAuth?.session.principal_id} ownerSessionId={operatorAuth?.session.session_id}/>}
 
+          {activeSection === "telegram" && <TelegramPairingPanel />}
+
           {activeSection === "repo-sandbox" && <RepoSandboxPanel />}
 
-          {activeSection === "artifacts" && <ArtifactStoragePanel />}
+          {activeSection === "artifacts" && (
+            <>
+              <ArtifactStoragePanel />
+              <BackgroundInferencePanel />
+            </>
+          )}
 
           {activeSection === "policies" && <ToolPolicyModeToggle />}
 

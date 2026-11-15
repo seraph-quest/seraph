@@ -19,7 +19,21 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Final
 
-from src.guardian.audio_ingress import AUDIO_INGRESS_SCHEMA_VERSION, AudioProviderStatus
+
+
+# #1179 retired Seraph's own voice-input pipeline (guardian/audio_ingress.py).
+# Telegram voice notes keep their metadata-only handoff record, which never
+# reaches a transcription owner; the closed status vocabulary and the schema
+# label it records were moved here unchanged so stored receipts stay readable.
+AUDIO_INGRESS_SCHEMA_VERSION: Final = "seraph.guardian.audio-ingress.v1"
+
+
+class AudioProviderStatus(str, Enum):
+    """Provider proof state; this module does not perform the proof."""
+
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
+    UNVERIFIED = "unverified"
 
 
 TELEGRAM_INGRESS_SCHEMA_VERSION: Final = "seraph.telegram.ingress.v1"
@@ -192,6 +206,13 @@ class TelegramIngressPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class TelegramDocumentMetadata:
+    file_id: str
+    size_bytes: int
+    format: str
+
+
+@dataclass(frozen=True, slots=True)
 class TelegramUpdate:
     """External update plus canonical-owner identity references."""
 
@@ -207,6 +228,7 @@ class TelegramUpdate:
     sequence: int = 1
     server_owned_identity: bool = True
     local_fallback_requested: bool = False
+    document: TelegramDocumentMetadata | None = None
 
     @property
     def normalized_text(self) -> str | None:
@@ -564,6 +586,9 @@ def canonical_telegram_request_digest(update: TelegramUpdate) -> str:
         "server_owned_identity": update.server_owned_identity,
         "local_fallback_requested": update.local_fallback_requested,
     }
+    if update.document is not None:
+        payload["document"] = {"file_id": update.document.file_id,
+            "size_bytes": update.document.size_bytes, "format": update.document.format}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 

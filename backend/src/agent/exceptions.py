@@ -1,7 +1,17 @@
 """Agent/runtime exceptions that intentionally interrupt execution."""
 
 
-class ClarificationRequired(Exception):
+class AgentControlFlowInterrupt(Exception):
+    """A deliberate pause raised from inside a tool that must leave the agent loop.
+
+    smolagents turns every exception a tool raises into an error observation
+    and lets the model continue. Subclasses of this class are instead
+    re-raised out of ``agent.run`` by Seraph's ``ToolCallingAgent``, so the
+    chat transports can present the approval or clarification.
+    """
+
+
+class ClarificationRequired(AgentControlFlowInterrupt):
     """Raised when the agent needs a missing input before it can continue."""
 
     def __init__(

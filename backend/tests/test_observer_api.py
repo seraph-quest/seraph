@@ -107,6 +107,9 @@ class TestObserverAPI:
         assert "time_of_day" in data
         assert "is_working_hours" in data
         assert "upcoming_events" in data
+        # #1172: an operator scope that has not been refreshed yet says so.
+        assert data["data_quality"] == "degraded"
+        assert data["data_quality_reason"] == "unscoped_fallback"
 
     @pytest.mark.asyncio
     async def test_post_screen_context(self, client):

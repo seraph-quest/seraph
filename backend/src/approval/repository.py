@@ -9,7 +9,9 @@ from typing import Any, Mapping
 from sqlalchemy import or_, update
 from sqlmodel import select, col
 
-from src.db.engine import get_session
+from sqlalchemy.exc import OperationalError
+
+from src.db.engine import bound_lock_wait, get_session, is_database_locked
 from src.db.models import ApprovalRequest, Session
 from src.db.session_refs import ensure_sessions_exist
 from src.approval.runtime import (
@@ -548,6 +550,162 @@ class ApprovalRepository:
             await db.flush()
             db.expunge(request)
             return request
+
+    async def attach_general_task_wait_binding_in_session(
+        self, db, approval_id: str, *, owner_principal_id: str,
+        operator_session_id: str, runtime_owner: str, binding: Mapping[str, Any],
+        tool_name: str, approval_context: Mapping[str, Any],
+        original_input_digest: str, verify_current,
+    ) -> ApprovalRequest | None:
+        """Attach display/recovery metadata without changing approved scope.
+
+        A fast operator decision may precede the task's no-contact checkpoint.
+        The exact unconsumed row may already be approved; its fingerprint,
+        arguments and approval context remain immutable. This transaction
+        neither consumes approval nor claims that a durable wait exists.
+        """
+        from src.db.models import WorkflowRunState
+        from src.workflows.job_runtime import _assert_canonical_goal_fence
+        from src.auth.service import authenticate_principal
+        exact = dict(binding)
+        now = datetime.now(timezone.utc)
+        request = await db.get(ApprovalRequest, approval_id)
+        run = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == exact.get("job_id")))
+        if request is None or run is None:
+            return None
+        try:
+            details = json.loads(request.details_json or "{}")
+        except (TypeError, ValueError):
+            return None
+        if (not isinstance(details, dict) or request.status not in {"pending", "approved"}
+            or _pending_is_expired(request.expires_at, now=now)
+            or request.owner_principal_id != owner_principal_id
+            or request.operator_session_id != operator_session_id
+            or request.session_id != operator_session_id
+            or request.tool_name != tool_name or request.fingerprint != exact.get("fingerprint")
+            or details.get("approval_context") != dict(approval_context)
+            or approval_context.get("workflow_run_identity") != run.run_identity
+            or run.job_kind != "agent.task.v1" or run.status != "running"
+            or run.parent_job_id is not None or run.root_run_identity != run.run_identity
+            or run.owner_kind != "user" or run.owner_principal_id != owner_principal_id
+            or run.operator_session_id != operator_session_id or run.session_id != operator_session_id
+            or run.lease_owner != runtime_owner or run.fencing_token != exact.get("fence")
+            or _pending_is_expired(run.lease_expires_at, now=now)
+            or _pending_is_expired(run.deadline_at, now=now)
+            or run.input_digest != original_input_digest
+            or run.authority_digest != exact.get("authority_digest")
+            or _approval_expiry(run.deadline_at) != _approval_expiry(exact.get("deadline_at"))):
+            return None
+        operator = await authenticate_principal(owner_principal_id, db=db)
+        from src.security.trust_contract import AuthorityGrant
+        if (operator.session_id != operator_session_id
+            or AuthorityGrant.CAPABILITY_EXECUTE not in operator.principal.grants):
+            return None
+        await _assert_canonical_goal_fence(db, goal_id=run.goal_id,
+            goal_revision=run.goal_revision, owner_kind=run.owner_kind,
+            owner_principal_id=owner_principal_id, session_id=operator_session_id,
+            authority=run.declared_authority_json)
+        await verify_current(db, run)
+        scope = {"workflow_run_identity": run.run_identity,
+            "goal_id": run.goal_id, "goal_revision": run.goal_revision}
+        updates = {"scope": scope, "general_task_step_id": exact["step_id"],
+            "general_task_wait_binding": exact}
+        # Repeated attachment is exact-only; approved data cannot be
+        # rebound to a different input, deadline, root or descriptor.
+        if any(key in details and details[key] != value for key, value in updates.items()):
+            return None
+        prior_details = request.details_json
+        details.update(updates)
+        mutation = await db.execute(update(ApprovalRequest).where(
+            ApprovalRequest.id == approval_id,
+            ApprovalRequest.status == request.status,
+            ApprovalRequest.fingerprint == request.fingerprint,
+            ApprovalRequest.resolved_at == request.resolved_at,
+            ApprovalRequest.details_json == prior_details if prior_details is not None
+            else ApprovalRequest.details_json.is_(None),
+        ).values(details_json=json.dumps(details, sort_keys=True))
+            .execution_options(synchronize_session=False))
+        if mutation.rowcount != 1:
+            return None
+        await db.refresh(request)
+        db.expunge(request)
+        return request
+
+    async def attach_general_task_native_child_wait_binding_in_session(
+        self, db, approval_id: str, *, binding, tool_name: str,
+        approval_context: Mapping[str, Any],
+    ) -> ApprovalRequest | None:
+        """Attach the fixed child wait without changing approval authority."""
+        from src.db.models import WorkflowRunState
+        from src.work_board.contracts import GeneralTaskApprovalTransitionV1
+        from src.workflows.general_task_guard import child_binding, read_manifest, _protected_payload, approval_checkpoint_id
+        from src.workflows.job_runtime import _assert_canonical_goal_fence, _digest
+        from src.auth.service import authenticate_principal
+        from src.security.trust_contract import AuthorityGrant
+        if type(binding) is not GeneralTaskApprovalTransitionV1 or binding.phase != "approval_wait":
+            return None
+        original = binding.original_binding
+        run = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == original.invocation_id).execution_options(populate_existing=True))
+        parent = await db.scalar(select(WorkflowRunState).where(
+            WorkflowRunState.run_identity == original.parent_job_id).execution_options(populate_existing=True))
+        request = await db.get(ApprovalRequest, approval_id)
+        if run is None or parent is None or request is None:
+            return None
+        now = datetime.now(timezone.utc)
+        try:
+            details = json.loads(request.details_json or "{}")
+            manifest = read_manifest(parent)
+            if (child_binding(run) != original or run.status != "paused"
+                or run.failure_reason != "general_task_approval_required"
+                or run.lease_owner or run.lease_expires_at or run.attempt_count != 1
+                or run.fencing_token != binding.waiting_child_fence
+                or parent.status != "paused" or parent.failure_reason != "general_task_approval_required"
+                or manifest.phase != "approval_wait" or manifest.phase_digest != binding.phase_digest
+                or manifest.task_revision != binding.task_revision
+                or _protected_payload(parent, approval_checkpoint_id(original), GeneralTaskApprovalTransitionV1) != binding
+                or request.id != binding.approval_id or request.status not in {"pending", "approved"}
+                or _pending_is_expired(request.expires_at, now=now)
+                or _pending_is_expired(run.deadline_at, now=now)
+                or request.owner_principal_id != original.owner_principal_id
+                or request.operator_session_id != original.original_root_id
+                or request.session_id != original.original_root_id
+                or request.tool_name != tool_name or request.fingerprint != binding.approval_fingerprint
+                or not isinstance(details, dict) or details.get("approval_context") != dict(approval_context)
+                or _digest(dict(approval_context)) != binding.approval_context_digest
+                or approval_context.get("workflow_run_identity") != run.run_identity):
+                return None
+            operator = await authenticate_principal(original.owner_principal_id, db=db)
+            if (operator.session_id != original.original_root_id
+                or AuthorityGrant.CAPABILITY_EXECUTE not in operator.principal.grants):
+                return None
+            await _assert_canonical_goal_fence(db, goal_id=run.goal_id, goal_revision=run.goal_revision,
+                owner_kind=run.owner_kind, owner_principal_id=run.owner_principal_id,
+                session_id=run.session_id, authority=run.declared_authority_json)
+        except (KeyError, TypeError, ValueError):
+            return None
+        updates = {"scope": {"workflow_run_identity": run.run_identity,
+            "goal_id": run.goal_id, "goal_revision": run.goal_revision},
+            "general_task_step_id": original.step_id,
+            "general_task_wait_binding": binding.model_dump(mode="json")}
+        if any(key in details and details[key] != value for key, value in updates.items()):
+            return None
+        prior = request.details_json
+        details.update(updates)
+        changed = await db.execute(update(ApprovalRequest).where(
+            ApprovalRequest.id == approval_id, ApprovalRequest.status == request.status,
+            ApprovalRequest.fingerprint == request.fingerprint,
+            ApprovalRequest.resolved_at == request.resolved_at,
+            ApprovalRequest.details_json == prior if prior is not None else ApprovalRequest.details_json.is_(None),
+        ).values(details_json=json.dumps(details, sort_keys=True, separators=(",", ":")))
+            .execution_options(synchronize_session=False))
+        if changed.rowcount != 1:
+            return None
+        await db.refresh(request)
+        from src.workflows.general_task_guard import verify_native_approval_transition
+        await verify_native_approval_transition(db, run, parent)
+        return request
 
     async def get_or_create_pending(
         self,
@@ -1433,17 +1591,11 @@ class ApprovalRepository:
             result = await db.execute(stmt)
             requests = result.scalars().all()
             output: list[dict[str, Any]] = []
+            expired_ids: list[str] = []
             for request in requests:
                 if _approval_is_expired(request.expires_at):
-                    await db.execute(
-                        update(ApprovalRequest)
-                        .execution_options(synchronize_session=False)
-                        .where(
-                            ApprovalRequest.id == request.id,
-                            ApprovalRequest.status == "pending",
-                        )
-                        .values(status="expired", resolved_at=datetime.now(timezone.utc))
-                    )
+                    # Never shown as pending; persisted below if the lock allows.
+                    expired_ids.append(request.id)
                     continue
                 try:
                     details = json.loads(request.details_json) if request.details_json else {}
@@ -1500,7 +1652,35 @@ class ApprovalRepository:
                         "created_at": _approval_timestamp(request.created_at),
                     }
                 )
+            if expired_ids:
+                await _persist_read_expiry(db, expired_ids)
             return output
+
+
+# The cockpit's pending-approval read waits at most this long to persist the
+# expiry it already applied to its answer (#1074).
+_READ_EXPIRY_WAIT_MS = 250
+
+
+async def _persist_read_expiry(db, expired_ids: list[str]) -> None:
+    await bound_lock_wait(db, _READ_EXPIRY_WAIT_MS)
+    try:
+        await db.execute(
+            update(ApprovalRequest)
+            .execution_options(synchronize_session=False)
+            .where(
+                ApprovalRequest.id.in_(expired_ids),
+                ApprovalRequest.status == "pending",
+            )
+            .values(status="expired", resolved_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+    except OperationalError as exc:
+        if not is_database_locked(exc):
+            raise
+        # Expiry is time-derived, so every later read and resolution sees it
+        # regardless; the status column catches up on the next free read.
+        await db.rollback()
 
 
 approval_repository = ApprovalRepository()

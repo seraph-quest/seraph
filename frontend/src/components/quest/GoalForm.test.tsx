@@ -14,7 +14,11 @@ describe("GoalForm", () => {
     createGoal.mockReset().mockResolvedValue(undefined);
     updateGoal.mockReset().mockResolvedValue(undefined);
     useQuestStore.setState({ createGoal, updateGoal });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200,
+      json: async () => ({ goal_id: "goal-1", grant_revision: 0, programmes: [] }) }));
   });
+
+  afterEach(() => { vi.unstubAllGlobals(); });
 
   it("submits the existing criterion and finite reviewed budget contract", async () => {
     const onClose = vi.fn();

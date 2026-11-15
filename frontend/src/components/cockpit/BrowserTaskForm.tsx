@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { BrowserInteractionPanel } from "./BrowserInteractionPanel";
 import {
   BrowserTaskApiError,
   browserTaskRequest,
@@ -255,6 +256,7 @@ export function BrowserTaskForm({
   ownerPrincipalId,
   ownerSessionId,
 }: BrowserTaskFormProps) {
+  const [interactionOpen, setInteractionOpen] = useState(false);
   const [goals, setGoals] = useState<GoalInfo[]>(goalOptions);
   const [goalId, setGoalId] = useState(initialPending?.draft.goalId ?? goalOptions[0]?.id ?? "");
   const [title, setTitle] = useState(initialPending?.draft.title ?? "Read approved public documentation");
@@ -547,7 +549,7 @@ export function BrowserTaskForm({
         role="dialog"
         aria-modal="true"
         aria-labelledby="browser-task-form-title"
-        onSubmit={(event) => void submit(event)}
+        onSubmit={(event) => { if (interactionOpen) event.preventDefault(); else void submit(event); }}
       >
         <div className="flex items-center justify-between gap-2">
           <div>
@@ -556,6 +558,8 @@ export function BrowserTaskForm({
           </div>
           <button type="button" className="cockpit-feedback-button" onClick={requestClose} disabled={submitState === "submitting"}>Close</button>
         </div>
+        <button type="button" className="cockpit-feedback-button mt-2" disabled={Boolean(pending) || submitState === "submitting"} onClick={() => setInteractionOpen(true)}>Prepare a reviewed public form</button>
+        {interactionOpen ? <BrowserInteractionPanel goals={goalOptions} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} /> : <>
         <p className="mt-1 text-xs opacity-75">HTTPS GET/HEAD navigation and bounded extraction only. GET/HEAD restrictions reduce the action surface; a public site may still have site-specific effects when visited, so this is not a universal no-mutation guarantee. The server owns policy, admission, durable execution, and recovery.</p>
 
         {formError && <div className="mt-3 rounded border border-amber-500/40 p-2 text-sm" role="alert">{formError}</div>}
@@ -610,6 +614,7 @@ export function BrowserTaskForm({
         </fieldset>
 
         <div className="mt-3 flex flex-wrap items-center justify-end gap-2"><button type="button" className="cockpit-feedback-button" onClick={requestClose} disabled={submitState === "submitting"}>Cancel</button><button type="submit" className="cockpit-feedback-button" disabled={submitState === "submitting" || !goalRevision}>{submitState === "submitting" ? "Submitting…" : pending ? "Retry exact request" : "Create public browser task"}</button></div>
+        </>}
       </form>
     </div>
   );

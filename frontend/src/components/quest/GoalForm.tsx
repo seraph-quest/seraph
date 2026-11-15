@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { GoalUpdateError, useQuestStore } from "../../stores/questStore";
 import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
+import { GoalProgrammePanel } from "./GoalProgrammePanel";
 import { createGuardianUuid, fetchGuardianPolicyWatches, GuardianInboxApiError, isGuardianGoalPolicy, saveGuardianPolicy } from "../../lib/guardianInbox";
 import type {
   GoalAdmissionBudget,
@@ -525,6 +526,12 @@ export function GoalForm({ goal, onClose }: Props) {
               ? "Editing this priority invalidates its assessment policy. Review and rebind its source watches, then explicitly review the policy in the Goal loop."
               : "Cited opportunity assessments stay off until this priority has a finite reviewed grant and current public source watches, then you explicitly save its assessment policy in the Goal loop."}
           </div>
+
+          {goal ? <GoalProgrammePanel key={goal.id} goal={goal} goalDraftChanged={
+            title !== goal.title || description !== (goal.description ?? "") || level !== goal.level
+            || domain !== goal.domain || dueDate !== dateInputValue(goal.due_date)
+            || criterionTouched || proactiveTouched
+          } /> : <p className="text-xs">Save your priority, then reopen it to configure a finite public programme.</p>}
 
           {error && <div className="text-[10px] text-rose-400" role="alert">{error}</div>}
 

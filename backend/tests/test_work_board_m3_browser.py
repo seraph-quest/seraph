@@ -1164,6 +1164,7 @@ async def test_post_claim_readiness_rejects_forged_attempt_context(async_db, mon
 
 def test_registered_typed_artifact_capabilities_have_an_explicit_opt_in_allowlist():
     approved_public_capabilities = {
+        "agent.task.v1",
         "browser.public-task.v1",
         "calendar.meeting-prep.v1",
         "calendar.observe_due_events.v1",

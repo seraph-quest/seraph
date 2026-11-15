@@ -28,7 +28,23 @@ def _get_fernet() -> Fernet:
     global _fernet
     if _fernet is not None:
         return _fernet
+    _fernet = Fernet(_vault_key(announce=True))
+    return _fernet
 
+
+def vault_key_material() -> bytes:
+    """Return the vault master key bytes for derived server keys.
+
+    Resolution matches the vault cipher (configured key, else the 0600
+    workspace key file, generated on first use). Raises when the key is
+    unreadable or malformed so callers fail closed; never log the value.
+    """
+    key = _vault_key(announce=False)
+    Fernet(key)
+    return key
+
+
+def _vault_key(*, announce: bool) -> bytes:
     key = settings.vault_encryption_key
 
     if not key:
@@ -40,7 +56,8 @@ def _get_fernet() -> Fernet:
         if os.path.exists(key_path):
             with open(key_path, "r") as f:
                 key = f.read().strip()
-            logger.info("Vault key loaded from %s", key_path)
+            if announce:
+                logger.info("Vault key loaded from %s", key_path)
         else:
             key = Fernet.generate_key().decode()
             os.makedirs(os.path.dirname(key_path), exist_ok=True)
@@ -49,8 +66,7 @@ def _get_fernet() -> Fernet:
             os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)  # 600
             logger.info("Vault key generated and saved to %s", key_path)
 
-    _fernet = Fernet(key.encode() if isinstance(key, str) else key)
-    return _fernet
+    return key.encode() if isinstance(key, str) else key
 
 
 def encrypt(plaintext: str) -> str:

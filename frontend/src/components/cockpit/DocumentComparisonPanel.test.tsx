@@ -81,7 +81,10 @@ it("clears cached report and CSV on a typed authority denial and on unavailable 
   await screen.findByRole("alert");
   expect(screen.queryByText("private literal output")).toBeNull();
   expect(screen.queryByRole("link", { name: "Save verified derived CSV" })).toBeNull();
-  expect(revoke).toHaveBeenCalledWith("blob:authority-bound");
+  // The report and link leave in the denial's own commit; the Blob URL is
+  // revoked by that commit's passive effect cleanup, which can run after the
+  // alert is observable, so wait for it rather than reading it synchronously.
+  await waitFor(() => expect(revoke).toHaveBeenCalledWith("blob:authority-bound"));
   expect(screen.getByRole("button", { name: "Prepare verified derived CSV" })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Read original parser and recovery state" }));
   await screen.findByText(/succeeded · stale_goal_revision/);

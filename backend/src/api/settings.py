@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, Mapping
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import func, update
 from sqlmodel import col, select
 
@@ -55,6 +55,14 @@ from src.observer.screen_analysis_settings import (
 from src.observer.screenshot_semantic_analysis import semantic_analysis_status_from_details
 from src.observer.user_state import InterruptionMode
 from src.tools.policy import MCP_POLICY_MODES, TOOL_POLICY_MODES
+from src.scheduler.background_inference import (
+    BACKGROUND_INFERENCE_JOBS,
+    SETTINGS_UNREADABLE,
+    BackgroundInferenceSettingsUnreadable,
+    background_inference_job_enabled,
+    background_inference_status,
+    write_background_inference_settings,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -62,6 +70,14 @@ router = APIRouter()
 
 class InterruptionModeRequest(BaseModel):
     mode: str
+
+
+class BackgroundInferenceSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jobs: dict[str, StrictBool] = Field(min_length=1, max_length=len(BACKGROUND_INFERENCE_JOBS))
+    # Required (with every job listed) to overwrite an unreadable toggle file.
+    replace_unreadable: StrictBool = False
 
 
 class ScreenAnalysisSettingsRequest(BaseModel):
@@ -113,11 +129,12 @@ class RepoSandboxSettingsRequest(BaseModel):
     worker_image_digest: str | None = None
     profile: str | None = None
     node_runtime_path: str | None = None
+    require_isolation: bool | None = None
 
 
 # Active screenshot semantic analysis is OpenRouter-only. Retained settings
 # from the historical local/Apple routes are normalized away by the reader.
-_VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter"})
+_VALID_SCREEN_ANALYSIS_PROVIDERS = frozenset({"", "openrouter", "near_tee"})
 _VALID_TOOL_POLICY_MODES = set(TOOL_POLICY_MODES)
 _VALID_MCP_POLICY_MODES = set(MCP_POLICY_MODES)
 _VALID_APPROVAL_MODES = {"off", "high_risk"}
@@ -382,6 +399,7 @@ def _repo_sandbox_settings_payload(
         "worker_image_digest": value.worker_image_digest,
         "profile": value.profile,
         "node_runtime_path": value.node_runtime_path,
+        "require_isolation": bool(getattr(value, "require_isolation", False)),
         "limits": limits_payload,
         "limits_digest": digest,
         "limits_editable": False,
@@ -491,6 +509,21 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
 
 def _read_screen_analysis_settings() -> dict[str, object]:
     return read_screen_analysis_settings()
+
+
+def _strip_derived_screen_fields(payload: dict[str, object], *, explicit_provider: bool = False) -> None:
+    """Drop read-time projections before persisting. Only the operator's
+    provider choice is stored; the NEAR TEE model is canonical model-fabric
+    state and is never persisted here."""
+    selected = payload.pop("provider_selected", None)
+    for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff",
+            "near_tee_vision_available"):
+        payload.pop(derived, None)
+    if payload.get("provider") in {"", None} and selected == "near_tee" and not explicit_provider:
+        # Keep the operator's NEAR TEE choice across a temporarily unavailable slot.
+        payload["provider"] = "near_tee"
+    if payload.get("provider") == "near_tee":
+        payload["model"] = ""
 
 
 def _write_screen_analysis_settings(payload: dict[str, object]) -> None:
@@ -737,12 +770,15 @@ def _classify_screenshot_observation(
 
 
 async def _screenshot_folder_pipeline_summary(root: Path | None = None) -> dict[str, object]:
-    from src.observer.screenshot_folder_source import screenshot_folder_persistence_status
+    from src.observer.screenshot_folder_source import (
+        screenshot_folder_persistence_status,
+        screenshot_pipeline_filter,
+    )
 
     async with get_db() as db:
         base_filters = [
             col(ScreenObservation.blocked) == False,  # noqa: E712
-            col(ScreenObservation.app_name) == "Screenshot Folder",
+            screenshot_pipeline_filter(),
         ]
 
         status_counts: dict[str, int] = {
@@ -1091,6 +1127,14 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
     if body.enabled is not None:
         payload["enabled"] = body.enabled
     if body.provider is not None:
+        from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON
+        from src.observer.screen_analysis_settings import selectable_screen_analysis_providers
+        if body.provider == "near_tee" and body.provider not in selectable_screen_analysis_providers():
+            raise HTTPException(status_code=422, detail={"code": "near_tee_vision_slot_required",
+                "message": "Configure and consent to the NEAR TEE vision slot in model settings first."})
+        if body.provider in _VALID_SCREEN_ANALYSIS_PROVIDERS and body.provider not in selectable_screen_analysis_providers():
+            raise HTTPException(status_code=422, detail={"code": OPENROUTER_RETIRED_REASON,
+                "message": "OpenRouter is retired (ADR-035); no cloud screenshot provider can be selected."})
         if body.provider not in _VALID_SCREEN_ANALYSIS_PROVIDERS:
             raise HTTPException(
                 status_code=422,
@@ -1141,6 +1185,7 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
         payload["archive_retention_days"] = body.archive_retention_days
+    _strip_derived_screen_fields(payload, explicit_provider=body.provider is not None)
     _write_screen_analysis_settings(payload)
     return await get_screen_analysis_settings()
 
@@ -1157,6 +1202,7 @@ async def pick_screenshot_folder(request: Request):
     payload = _read_screen_analysis_settings()
     payload["screenshot_folder"] = normalized
     payload["screenshot_folder_source"] = "screen-analysis-settings"
+    _strip_derived_screen_fields(payload)
     _write_screen_analysis_settings(payload)
     return ScreenshotFolderPickResponse(
         screenshot_folder=normalized,
@@ -1169,12 +1215,14 @@ async def clear_stale_screenshot_folder_observations(request: Request):
     """Archive stale incomplete screenshot-folder rows without deleting analyzed history."""
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Screenshot folder cleanup is only available from localhost")
+    from src.observer.screenshot_folder_source import screenshot_pipeline_filter
+
     screenshot_folder, _ = _screenshot_folder()
     async with get_db() as db:
         result = await db.execute(
             select(ScreenObservation)
             .where(col(ScreenObservation.blocked) == False)  # noqa: E712
-            .where(col(ScreenObservation.app_name) == "Screenshot Folder")
+            .where(screenshot_pipeline_filter())
             .order_by(col(ScreenObservation.timestamp).desc())
         )
         stale_ids: list[str] = []
@@ -1331,7 +1379,7 @@ async def get_artifact_storage_settings():
             # The legacy provider flag can disable the active cloud phase, but
             # it must never make the retired local/GPU route executable again.
             "active": False,
-            "disabled_reason": "local_inference_disabled_openrouter_only",
+            "disabled_reason": "local_inference_disabled_near_tee_only",
             "gateway_configured": bool(
                 settings.local_llm_api_base.strip() or effective_vlm_base_url()
             ),
@@ -1349,7 +1397,12 @@ async def get_artifact_storage_settings():
         "reports": {
             "enabled": settings.end_of_day_report_enabled,
             "hour": settings.end_of_day_report_hour,
-            "analysis_provider": "llm" if settings.end_of_day_report_llm_enabled else "llm_disabled",
+            "analysis_provider": (
+                "llm"
+                if settings.end_of_day_report_llm_enabled
+                and background_inference_job_enabled("end_of_day_goal_report")
+                else "llm_disabled"
+            ),
             "archive_dir": str(report_archive_dir),
             "archive_dir_source": report_archive_source,
             **report_dir_status,
@@ -1404,6 +1457,15 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
 
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Repository sandbox settings are localhost-only")
+    from src.model_fabric.effective_policy import configuration_mutation_lock
+    async with configuration_mutation_lock:
+        _persist_repo_sandbox_selector_update(body)
+    # Readiness/preflight work runs after the short canonical mutation fence.
+    return await get_repo_sandbox_settings()
+
+
+def _persist_repo_sandbox_selector_update(body: RepoSandboxSettingsRequest):
+    """The existing selector owner, called under its configuration fence."""
     current, _configuration_error = _load_persisted_repo_sandbox_settings()
     updates = body.model_dump(exclude_none=True)
     try:
@@ -1441,7 +1503,6 @@ async def set_repo_sandbox_settings(body: RepoSandboxSettingsRequest, request: R
     # failed write therefore cannot leave this process executing selectors it
     # could not recover after restart.
     settings.repo_sandbox = candidate
-    return await get_repo_sandbox_settings()
 
 
 @router.post("/settings/end-of-day-report/manual")
@@ -1462,6 +1523,35 @@ async def send_end_of_day_report_test_email():
     from src.scheduler.jobs.end_of_day_goal_report import send_end_of_day_report_test_email
 
     return await send_end_of_day_report_test_email()
+
+
+@router.get("/settings/background-inference")
+async def get_background_inference_settings():
+    """Return per-job background inference toggles with call estimates."""
+    return background_inference_status()
+
+
+@router.put("/settings/background-inference")
+async def set_background_inference_settings(body: BackgroundInferenceSettingsRequest):
+    """Persist per-job toggles; changes apply at each job's next run."""
+    try:
+        write_background_inference_settings(dict(body.jobs), replace_unreadable=body.replace_unreadable)
+    except BackgroundInferenceSettingsUnreadable as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": SETTINGS_UNREADABLE,
+                "message": "Stored toggles are unreadable. Review every job and confirm replacing them.",
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "background_inference_job_invalid", "message": str(exc)}) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "background_inference_settings_persist_failed", "message": "Toggles were not saved."},
+        ) from exc
+    return background_inference_status()
 
 
 @router.get("/settings/tool-policy-mode")

@@ -31,6 +31,7 @@ import {
   withMailDeadline as bounded,
   verifyMailConnection,
 } from "../../lib/mailApi";
+import { ConnectionSyncPanel } from "../cockpit/ConnectionSyncPanel";
 import { MailReplyProfiles } from "./MailReplyProfiles";
 import type { GoalInfo } from "../../types";
 
@@ -247,6 +248,7 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
   const [consentExpiry, setConsentExpiry] = useState(() => localInput(new Date(Date.now() + 24 * 60 * 60 * 1000)));
   const [maxMessages, setMaxMessages] = useState("10");
   const [sourceAcknowledged, setSourceAcknowledged] = useState(false);
+  const [syncAcknowledged, setSyncAcknowledged] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [receivedAfter, setReceivedAfter] = useState(() => localInput(new Date(Date.now() - 24 * 60 * 60 * 1000)));
@@ -621,13 +623,15 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
     const requestOwnerScope = snapshot.ownerScope;
     setConsentBusy(true);
     try {
-      const result = await bounded((signal) => createMailConsent({ schema_version: 1, connection_id: selectedConnection.connection_id, expected_connection_revision: selectedConnection.revision, goal_id: selectedGoal.id, expected_goal_revision: selectedGoal.revision, label_ids: selectedLabelIds, expires_at: expiry, max_messages: limit, allowed_body_fields: BODY_FIELDS, acknowledge_source_read: true, idempotency_key: idempotencyKey("gmail-consent") }, signal));
+      const result = await bounded((signal) => createMailConsent({ schema_version: 1, connection_id: selectedConnection.connection_id, expected_connection_revision: selectedConnection.revision, goal_id: selectedGoal.id, expected_goal_revision: selectedGoal.revision, label_ids: selectedLabelIds, expires_at: expiry, max_messages: limit, allowed_body_fields: BODY_FIELDS, acknowledge_source_read: true, acknowledge_sync_metadata: syncAcknowledged, idempotency_key: idempotencyKey("gmail-consent") }, signal));
       if (!isCurrentRequest(generation, requestOwnerScope) || !sameSelection(snapshot)) return;
       if (result.connection_id !== snapshot.connectionId || result.connection_revision !== snapshot.connectionRevision || result.goal_id !== snapshot.goalId || result.goal_revision !== snapshot.goalRevision || result.label_ids.length !== snapshot.labelIds.length || result.label_ids.some((id, index) => id !== snapshot.labelIds[index])) {
         throw new MailApiError(200, "consent_selection_mismatch", "The source consent receipt did not match the selected connection, Goal, or labels.", "refresh_mail_metadata");
       }
+      if ((result.sync_metadata_limit ?? 0) !== (syncAcknowledged ? 50 : 0)) throw new MailApiError(200, "consent_sync_grant_mismatch", "The metadata sync grant is unconfirmed. Refresh consent before synchronizing.", "refresh_mail_metadata");
       setConsents((current) => [result, ...current.filter((item) => item.consent_id !== result.consent_id)]);
       setSourceAcknowledged(false);
+      setSyncAcknowledged(false);
       setConsentError(null);
     } catch (error) {
       if (isCurrentRequest(generation, requestOwnerScope) && sameSelection(snapshot) && !isAbort(error)) setConsentError(safeError(error));
@@ -944,6 +948,7 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
           {goalError && <div className="mt-2 text-amber-300" role="alert">{goalError}</div>}
           {consentError && <div className="mt-2 text-amber-300" role="alert">{consentError}</div>}
           <label className="mt-2 flex items-start gap-2 text-[10px]"><input type="checkbox" checked={sourceAcknowledged} onChange={(event) => setSourceAcknowledged(event.currentTarget.checked)} />I acknowledge one bounded metadata/body read within the selected labels, Goal revision, expiry, and message limit. This does not grant model egress.</label>
+          <label className="mt-2 flex gap-2 text-[10px]"><input type="checkbox" checked={syncAcknowledged} onChange={e => setSyncAcknowledged(e.target.checked)} />Also grant bounded metadata sync: up to 50 items per run in these selected labels over seven days. Body reads retain the separate maximum of ten selected messages; no model egress.</label>
           <button type="submit" className="cockpit-feedback-button mt-2" disabled={consentBusy}>{consentBusy ? "Saving consent…" : "Create source consent"}</button>
         </form>
 
@@ -953,6 +958,7 @@ export function MailConnectionPanel({ ownerPrincipalId, ownerSessionId }: MailCo
           {selectedConsent && <div className="mt-2 rounded border border-cyan-500/30 p-2"><div className="text-[10px]">Separate model consent</div><div className="mt-1 text-[9px] text-retro-text/50">Exact ordered fields: {selectedConsent.allowed_body_fields.join(", ")}. Source reading works without this grant.</div><label className="mt-2 flex items-start gap-2 text-[10px]"><input type="checkbox" checked={modelAcknowledged} onChange={(event) => setModelAcknowledged(event.currentTarget.checked)} />I acknowledge exactly these text fields may be sent through the governed model route for a local draft.</label>{modelError && <div className="mt-2 text-amber-300" role="alert">{modelError}</div>}<div className="mt-2 flex flex-wrap gap-2"><button type="button" className="cockpit-feedback-button" disabled={modelBusy || !modelAcknowledged} onClick={() => void changeModelConsent(true)}>{modelBusy ? "Saving…" : modelAllowed || selectedConsent.model_egress_allowed ? "Model consent enabled" : "Allow model for draft"}</button>{(modelAllowed || selectedConsent.model_egress_allowed) && <button type="button" className="cockpit-feedback-button" disabled={modelBusy || !modelAcknowledged} onClick={() => void changeModelConsent(false)}>Revoke model consent</button>}</div></div>}
         </div>
 
+        {selectedConsent && Boolean(selectedConsent.sync_metadata_limit) && <ConnectionSyncPanel provider="gmail" ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} connectionId={selectedConnection.connection_id} connectionRevision={selectedConnection.revision} connectionState={selectedConnection.state} labelIds={selectedLabelIds} consent={{ id: selectedConsent.consent_id, revision: selectedConsent.source_revision, goalId: selectedConsent.goal_id, goalRevision: selectedConsent.goal_revision, state: selectedConsent.state, expiresAt: selectedConsent.expires_at, metadataLimit: selectedConsent.sync_metadata_limit ?? 0, privateLimit: selectedConsent.max_messages }} />}
         <div className="mt-3 rounded border border-retro-text/10 p-2">
           <div className="text-[10px] uppercase tracking-wider text-retro-border font-bold mb-1">Bounded metadata scan</div>
           <div className="grid gap-2 sm:grid-cols-2"><label className="text-[10px]">Received after<input className="cockpit-input mt-1 w-full" type="datetime-local" value={receivedAfter} onChange={(event) => setReceivedAfter(event.currentTarget.value)} /></label><label className="text-[10px]">Messages<input className="cockpit-input mt-1 w-full" type="number" min={1} max={10} value={maxMessages} onChange={(event) => setMaxMessages(event.currentTarget.value)} /></label></div>

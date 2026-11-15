@@ -1263,6 +1263,7 @@ async def test_valid_rfc3339_consent_and_schedule_have_strict_bounded_envelopes(
         "allowed_fields",
         "window_minutes",
         "max_events",
+        "sync_metadata_limit",
         "allow_remote_model",
         "expires_at",
         "state",
@@ -1271,6 +1272,7 @@ async def test_valid_rfc3339_consent_and_schedule_have_strict_bounded_envelopes(
         "created_at",
         "updated_at",
     }
+    assert consent["sync_metadata_limit"] == 0  # No implicit sync grant for legacy consent.
     assert "calendar_id" not in consent
     assert consent["state"] == "active"
     assert consent["expires_at"].endswith("Z")
@@ -2059,3 +2061,24 @@ async def test_connection_revoke_cleanup_failure_is_unknown_and_does_not_retry(c
     )
     _safe_detail(retry, status=409)
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_seven_day_sync_consent_requires_explicit_acknowledgement(client, async_db, monkeypatch):
+    await _seed_goal(async_db)
+    provider = _GoogleTransportScript()
+    monkeypatch.setattr("src.integrations.google_calendar.request_pinned_https", provider)
+    connection = await _create_connection(client, key="bounded-sync-connection")
+    verified = await client.post(f"/api/calendar/connections/{connection['connection_id']}/verify", headers=ORIGIN_HEADERS, json={"expected_revision": connection["revision"], "idempotency_key": "bounded-sync-verify"})
+    assert verified.status_code == 200, verified.text
+    body = {"schema_version": 1, "connection_id": connection["connection_id"], "calendar_id": "owner-calendar", "goal_id": "calendar-goal", "goal_revision": 1, "allowed_fields": ["summary", "start", "end"], "window_minutes": 10080, "max_events": 50, "allow_remote_model": False, "expires_at": _utc_after(1), "idempotency_key": "bounded-sync-consent"}
+    refused = await client.post("/api/calendar/read-consents", headers=ORIGIN_HEADERS, json=body)
+    assert _safe_detail(refused, status=422)["code"] == "calendar_sync_acknowledgement_required"
+    accepted = await client.post("/api/calendar/read-consents", headers=ORIGIN_HEADERS, json={**body, "acknowledge_sync_metadata": True})
+    assert accepted.status_code in {200, 201}, accepted.text
+    consent = accepted.json()["consent"]
+    assert consent["window_minutes"] == 10080 and consent["sync_metadata_limit"] == 50
+    replay = await client.post("/api/calendar/read-consents", headers=ORIGIN_HEADERS, json={**body, "acknowledge_sync_metadata": True})
+    assert replay.status_code in {200, 201} and replay.json()["consent"]["consent_id"] == consent["consent_id"]
+    changed = await client.post("/api/calendar/read-consents", headers=ORIGIN_HEADERS, json={**body, "window_minutes": 60})
+    assert changed.status_code == 409

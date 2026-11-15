@@ -201,7 +201,7 @@ those later imports depend on.
 - validation:
   - `python3 -m py_compile backend/src/extensions/capability_contributions.py backend/src/extensions/connector_health.py backend/src/extensions/doctor.py backend/src/extensions/lifecycle.py backend/src/extensions/manifest.py backend/src/extensions/layout.py backend/src/extensions/permissions.py backend/src/extensions/registry.py backend/src/extensions/scaffold.py`
   - `cd backend && UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_extension_manifest.py tests/test_extension_scaffold.py tests/test_extension_registry.py tests/test_extension_doctor.py tests/test_extensions_api.py -q`
-  - `cd backend && OPENROUTER_API_KEY=test-key WORKSPACE_DIR=/tmp/seraph-test UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
+  - `cd backend && OPENROUTER_API_KEY=test-key UV_CACHE_DIR=/tmp/uv-cache uv run pytest -q`
   - `cd frontend && npm test`
   - `cd frontend && npm run build`
   - `cd docs && npm run build`

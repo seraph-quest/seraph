@@ -29,6 +29,9 @@ from tests.test_guardian_opportunity_notifications import _actual_notification_i
 from tests.test_inference_accounting import accounting_db
 from tests.test_research_native_vertical import real_auth
 
+# ADR-035: pins guardian daemon privacy whose fixture saves the historical OpenRouter route
+pytestmark = pytest.mark.openrouter_legacy
+
 
 WORKER = "same-caller-chosen-daemon"
 HEADERS = {"X-Seraph-Daemon-Id": WORKER}

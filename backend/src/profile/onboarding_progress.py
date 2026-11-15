@@ -28,7 +28,7 @@ from src.work_board.repository import BoardError, WorkBoardRepository
 from src.work_board.review import _verified_workflow_readback
 from src.work_board.dispatcher import _parse_typed_input, TypedInputError
 from src.workflows.job_runtime import durable_job_repository, _digest
-from src.tools.filesystem_tool import _safe_resolve, _open_workspace_file
+from src.tools.filesystem_tool import _open_workspace_file, _safe_resolve, assert_agent_readable
 
 EVENT_TYPE = "onboarding_first_result_step"
 
@@ -241,6 +241,7 @@ async def open_verified_result(request: Request, task_id: str) -> dict:
         raise HTTPException(status_code=409, detail={"code": "setup_artifact_readback_required"})
     try:
         path = _safe_resolve(artifact["file_path"])
+        assert_agent_readable(path, file_path=artifact["file_path"], operation="setup_artifact_readback")
         # Reuse the descriptor-relative no-follow workspace boundary, including
         # parent-directory replacement and single-link regular-file checks.
         with _open_workspace_file(path, flags=os.O_RDONLY) as descriptor:

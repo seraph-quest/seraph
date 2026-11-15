@@ -4,7 +4,6 @@ from src.api.activity import router as activity_router
 from src.api.auth import router as auth_router
 from src.api.audit import router as audit_router
 from src.api.approvals import router as approvals_router
-from src.api.audio import router as audio_router
 from src.api.automation import router as automation_router
 from src.api.browser import router as browser_router
 from src.api.calendar import router as calendar_router
@@ -23,10 +22,12 @@ from src.api.memory import router as memory_router
 from src.api.moltbook import router as moltbook_router
 from src.api.forgejo import router as forgejo_router
 from src.api.task_evidence import router as task_evidence_router
+from src.api.documents import router as documents_router
 from src.api.model_fabric_settings import router as model_fabric_settings_router
 from src.api.nodes import router as nodes_router
 from src.api.operator import router as operator_router
 from src.api.profile import router as profile_router
+from src.api.reports import router as reports_router
 from src.api.sessions import router as sessions_router
 from src.api.selected_context import router as selected_context_router
 from src.api.observer import router as observer_router
@@ -38,6 +39,7 @@ from src.api.vault import router as vault_router
 from src.api.work_board import router as work_board_router
 from src.api.workflows import router as workflows_router
 from src.api.ws import router as ws_router
+from src.api.runtime_composition import router as runtime_composition_router
 
 api_router = APIRouter()
 
@@ -46,7 +48,6 @@ api_router.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 api_router.include_router(activity_router, prefix="/api", tags=["activity"])
 api_router.include_router(audit_router, prefix="/api", tags=["audit"])
 api_router.include_router(approvals_router, prefix="/api", tags=["approvals"])
-api_router.include_router(audio_router, prefix="/api", tags=["audio"])
 api_router.include_router(automation_router, prefix="/api", tags=["automation"])
 api_router.include_router(browser_router, prefix="/api", tags=["browser"])
 api_router.include_router(calendar_router, prefix="/api", tags=["calendar"])
@@ -63,6 +64,7 @@ api_router.include_router(selected_context_router, prefix="/api", tags=["selecte
 api_router.include_router(goals_router, prefix="/api", tags=["goals"])
 api_router.include_router(guardian_inbox_router, prefix="/api", tags=["guardian-inbox"])
 api_router.include_router(profile_router, prefix="/api", tags=["profile"])
+api_router.include_router(reports_router, prefix="/api", tags=["reports"])
 api_router.include_router(tools_router, prefix="/api", tags=["tools"])
 api_router.include_router(telegram_router, prefix="/api", tags=["telegram"])
 api_router.include_router(mcp_router, prefix="/api", tags=["mcp"])
@@ -70,6 +72,7 @@ api_router.include_router(memory_router, prefix="/api", tags=["memory"])
 api_router.include_router(moltbook_router, prefix="/api", tags=["moltbook"])
 api_router.include_router(forgejo_router, prefix="/api", tags=["forgejo"])
 api_router.include_router(task_evidence_router, prefix="/api", tags=["task-evidence"])
+api_router.include_router(documents_router, prefix="/api", tags=["documents"])
 api_router.include_router(model_fabric_settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(nodes_router, prefix="/api", tags=["nodes"])
 api_router.include_router(operator_router, prefix="/api", tags=["operator"])
@@ -80,3 +83,4 @@ api_router.include_router(settings_router, prefix="/api", tags=["settings"])
 api_router.include_router(vault_router, prefix="/api", tags=["vault"])
 api_router.include_router(work_board_router, prefix="/api", tags=["work-board"])
 api_router.include_router(ws_router, prefix="/ws", tags=["websocket"])
+api_router.include_router(runtime_composition_router, prefix="/api", tags=["runtime"])

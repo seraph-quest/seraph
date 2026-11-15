@@ -1,6 +1,6 @@
 """One governed fixed-route HTTPS request; no SDK, fallback or hidden retry."""
 
-import asyncio
+
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
 import hashlib
@@ -8,7 +8,7 @@ import json
 import time
 from uuid import uuid4
 
-import httpx
+import httpx  # noqa: F401  (tests intercept near_text.httpx.AsyncClient)
 
 from src.security.trust_contract import (
     AuthorityGrant, DestinationClass, DigestSentinel, TrustDestination,
@@ -17,25 +17,17 @@ from src.security.trust_contract import (
 )
 from .contracts import EndpointClass, InferenceRequestContext, ModelRouteCandidate, RouteDecision, RouteRejection, bind_final_inference_payload
 from .execution import RouteReceiptHooks, run_preflighted_adapter
+from .near_client import NEAR_API_BASE, near_http_client, read_near_billing, read_near_response, strict_json_object
 from .near_text_contracts import NearTextAnswer, NearTextError, NearTextInput, NearTextReceipt
 
 
 PROFILE = "near.text"
 MODEL = "z-ai/glm-5.3-flash"
-BASE = "https://cloud-api.near.ai/v1"
+BASE = NEAR_API_BASE
 
 
 def _json_object(raw):
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("duplicate_key")
-            result[key] = value
-        return result
-    def invalid_constant(value):
-        raise ValueError("invalid_constant")
-    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=invalid_constant)
+    return strict_json_object(raw)
 
 
 def preflight_near_text(context, profile):
@@ -80,25 +72,10 @@ def preflight_near_text(context, profile):
 
 
 async def _read_response(client, path, *, body, key, timeout, cap):
-    if timeout <= 0:
-        raise NearTextError("near_text_deadline_expired")
-    try:
-        async with asyncio.timeout(timeout):
-            async with client.stream("POST", BASE + path, content=body,
-                    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
-                             "Accept-Encoding": "identity"}, timeout=timeout) as response:
-                if response.headers.get("content-encoding", "identity").lower() != "identity":
-                    raise NearTextError("near_text_response_encoding_invalid")
-                if response.status_code != 200:
-                    raise NearTextError("near_text_http_error")
-                raw = bytearray()
-                async for chunk in response.aiter_raw():
-                    if len(raw) + len(chunk) > cap:
-                        raise NearTextError("near_text_response_too_large")
-                    raw.extend(chunk)
-                return bytes(raw), response.headers
-    except (httpx.HTTPError, TimeoutError) as exc:
-        raise NearTextError("near_text_transport_uncertain") from None
+    # ADR-035: near_text rides the shared NEAR client, which sends the
+    # canonical id with ``x-no-aliasing: true`` on every request.
+    return await read_near_response(client, path, body=body, key=key, timeout=timeout, cap=cap,
+        no_aliasing=True, error=NearTextError, prefix="near_text")
 
 
 def _answer(payload):
@@ -124,7 +101,7 @@ async def invoke_near_text(*, context: InferenceRequestContext, question: str,
         hooks: RouteReceiptHooks) -> NearTextAnswer:
     from .configuration import near_text_profile_for_setup, capture_near_text_credential
     from .effective_policy import current_near_text_policy
-    from .near_text_billing import derive_near_inference_id, parse_near_billing_evidence, NearTextBillingError
+    from .near_text_billing import derive_near_inference_id
     from .accounting import current_near_accounting_operation_id, capture_near_billing_evidence
 
     inputs = NearTextInput(schema_version="seraph.near.text.input.v1", question=question,
@@ -153,7 +130,7 @@ async def invoke_near_text(*, context: InferenceRequestContext, question: str,
                 or inputs.max_output_tokens > current.near_text.max_output_tokens):
             raise NearTextError("near_text_policy_changed")
         operation_id = current_near_accounting_operation_id()
-        async with httpx.AsyncClient(verify=True, trust_env=False, follow_redirects=False) as client:
+        async with near_http_client() as client:
             raw, headers = await _read_response(client, "/chat/completions", body=encoded, key=key,
                 timeout=min(45, setup.timeout_seconds, context.deadline_at - time.time()), cap=262144)
             try:
@@ -170,23 +147,9 @@ async def invoke_near_text(*, context: InferenceRequestContext, question: str,
                 text = None
                 answer_invalid = True
             del raw, payload
-            billing_deadline = min(context.deadline_at, time.time() + 15)
-            evidence = None
-            for index in range(2):
-                if index:
-                    if billing_deadline - time.time() <= 1:
-                        break
-                    await asyncio.sleep(1)
-                try:
-                    billing_raw, _ = await _read_response(client, "/billing/costs",
-                        body=json.dumps({"requestIds": [provider_id]}, separators=(",", ":")).encode(), key=key,
-                        timeout=billing_deadline - time.time(), cap=16384)
-                    evidence = parse_near_billing_evidence(response_body=billing_raw,
-                        original_operation_id=operation_id, inference_identity=identity)
-                    capture_near_billing_evidence(evidence)
-                    break
-                except (NearTextError, NearTextBillingError):
-                    continue
+            evidence = await read_near_billing(client, key=key, identity=identity,
+                operation_id=operation_id, deadline_at=context.deadline_at, no_aliasing=True,
+                error=NearTextError, prefix="near_text", capture=capture_near_billing_evidence)
             if evidence is None:
                 text = None
                 raise NearTextError("near_text_cost_liability")

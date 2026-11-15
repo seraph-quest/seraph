@@ -539,3 +539,67 @@ async def test_observer_api_requires_delivery_fence_and_records_failure(async_db
     assert attempts[0]["error_code"] == "authorization=[redacted]"
 
     await native_notification_queue.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_db", ["file"], indirect=True)
+async def test_reads_never_take_the_writer_lock_and_present_due_expiry_virtually(async_db):
+    """#702: every list() issued UPDATEs, so a foreign writer stalled reads."""
+    import sqlite3
+    import threading
+    import time
+    from sqlalchemy import event
+
+    queue = NativeNotificationQueue()
+    expiring = await queue.enqueue(**_enqueue_kwargs(), idempotency_key="native:read-expiry")
+    kept = await queue.enqueue(
+        **_enqueue_kwargs(intervention_id="intervention-2"), idempotency_key="native:read-kept",
+    )
+    async with async_db() as db:
+        engine = db.get_bind()
+        database = engine.url.database
+    writes = []
+    event.listen(engine, "before_cursor_execute", lambda _c, _cur, statement, *_a: writes.append(statement)
+        if statement.split()[0].upper() in {"INSERT", "UPDATE", "DELETE"} else None)
+
+    assert [item.id for item in await queue.list()] == [expiring.id, kept.id]
+    assert await queue.count() == 2
+    assert await queue.recovery() == []
+    assert writes == []
+
+    async with async_db() as db:
+        row = await db.get(NativeNotificationOutbox, expiring.id)
+        row.deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    held, release = threading.Event(), threading.Event()
+
+    def foreign_writer():
+        connection = sqlite3.connect(database, isolation_level=None, timeout=30)
+        connection.execute("BEGIN IMMEDIATE")
+        held.set()
+        release.wait(10)
+        connection.execute("COMMIT")
+        connection.close()
+
+    writer = threading.Thread(target=foreign_writer, daemon=True)
+    writer.start()
+    assert held.wait(5)
+    try:
+        started = time.monotonic()
+        # The due expiry cannot persist, but no read shows it as deliverable.
+        assert [item.id for item in await queue.list()] == [kept.id]
+        assert await queue.count() == 1
+        virtual = await queue.get(expiring.id)
+        assert (virtual.delivery_status, virtual.degraded_state) == ("failed", "delivery_deadline_expired")
+        assert time.monotonic() - started < 2.0
+    finally:
+        release.set()
+        writer.join(10)
+
+    async with async_db() as db:
+        assert (await db.get(NativeNotificationOutbox, expiring.id)).status == "queued"
+    # The next read with the lock free persists the same transition.
+    assert [item.id for item in await queue.list()] == [kept.id]
+    async with async_db() as db:
+        persisted = await db.get(NativeNotificationOutbox, expiring.id)
+        assert (persisted.status, persisted.degraded_state) == ("failed", "delivery_deadline_expired")
+    assert [item["notification"]["id"] for item in await queue.recovery()] == [expiring.id]

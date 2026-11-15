@@ -53,7 +53,7 @@ class _RuntimeSettingsClient:
 
 
 class _FakeProvider:
-    def __init__(self, name="codex-local", available=True):
+    def __init__(self, name="apple-vision", available=True):
         self.name = name
         self.available = available
         self.closed = False
@@ -106,15 +106,14 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
         model=None,
         preserve_captures=False,
         archive_dir=str(tmp_path / "fallback"),
-        openrouter_api_key=None,
         blocklist_file=None,
     )
     first_archive = tmp_path / "first"
     first_client = _RuntimeSettingsClient(
         {
             "enabled": True,
-            "provider": "codex-local",
-            "model": "gpt-5.5",
+            "provider": "apple-vision",
+            "model": "",
             "preserve_captures": True,
             "archive_dir": str(first_archive),
             "min_seconds_between_captures": 30,
@@ -130,7 +129,7 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
         await runtime.refresh(first_client, "http://localhost:8004", force=True)
 
         assert runtime.provider is not None
-        assert runtime.provider.name == "codex-local"
+        assert runtime.provider.name == "apple-vision"
         assert runtime.preserve_captures is True
         assert runtime.archive_dir == str(first_archive)
         assert runtime.min_seconds_between_captures == 30
@@ -166,11 +165,10 @@ async def test_screen_analysis_runtime_refreshes_provider_and_archive_from_setti
 def test_screen_analysis_runtime_budget_records_and_skips(tmp_path):
     runtime = ScreenAnalysisRuntime(
         enabled=True,
-        provider="codex-local",
+        provider="apple-vision",
         model=None,
         preserve_captures=True,
         archive_dir=str(tmp_path),
-        openrouter_api_key=None,
         blocklist_file=None,
     )
     runtime._update_budget_settings(60, 1, 365, 0)
@@ -186,25 +184,24 @@ def test_screen_analysis_runtime_budget_records_and_skips(tmp_path):
 
 @pytest.mark.asyncio
 async def test_screen_analysis_runtime_pauses_on_unavailable_settings_provider(tmp_path):
-    providers = [_FakeProvider("codex-local"), _FakeProvider("openrouter", available=False)]
+    providers = [_FakeProvider("apple-vision"), _FakeProvider("apple-vision", available=False)]
 
     def fake_create_provider(**_kwargs):
         return providers.pop(0)
 
     runtime = ScreenAnalysisRuntime(
         enabled=True,
-        provider="codex-local",
+        provider="apple-vision",
         model=None,
         preserve_captures=True,
         archive_dir=str(tmp_path / "fallback"),
-        openrouter_api_key=None,
         blocklist_file=None,
     )
     first_client = _RuntimeSettingsClient(
         {
             "enabled": True,
-            "provider": "codex-local",
-            "model": "gpt-5.5",
+            "provider": "apple-vision",
+            "model": "",
             "preserve_captures": True,
             "archive_dir": str(tmp_path / "first"),
         }
@@ -212,8 +209,8 @@ async def test_screen_analysis_runtime_pauses_on_unavailable_settings_provider(t
     second_client = _RuntimeSettingsClient(
         {
             "enabled": True,
-            "provider": "openrouter",
-            "model": "google/gemini-2.5-flash-lite",
+            "provider": "apple-vision",
+            "model": "",
             "preserve_captures": True,
             "archive_dir": str(tmp_path / "second"),
         }
@@ -325,7 +322,7 @@ class TestPeriodicCaptureLoop:
         """Detailed mode should periodically analyze and preserve screenshots."""
         posts = []
         provider = SimpleNamespace(
-            name="codex-local",
+            name="apple-vision",
             analyze_screen=AsyncMock(
                 return_value=AnalysisResult(
                     success=True,
@@ -383,13 +380,13 @@ class TestPeriodicCaptureLoop:
         assert len(posts) == 1
         observation = posts[0]["observation"]
         assert observation["summary"] == "Editing Seraph settings."
-        assert observation["analysis_usage"]["provider"] == "codex-local"
-        assert observation["analysis_usage"]["cost_posture"] == "local_no_api_price"
+        assert observation["analysis_usage"]["provider"] == "apple-vision"
+        assert observation["analysis_usage"]["cost_posture"] == "local_on_device"
         assert observation["analysis_usage"]["duration_ms"] == 12
-        assert observation["capture_artifacts"]["provider"] == "codex-local"
+        assert observation["capture_artifacts"]["provider"] == "apple-vision"
         assert Path(observation["capture_artifacts"]["image_path"]).read_bytes() == b"png bytes"
         analysis_payload = json.loads(Path(observation["capture_artifacts"]["analysis_path"]).read_text(encoding="utf-8"))
-        assert analysis_payload["analysis_usage"]["cost_posture"] == "local_no_api_price"
+        assert analysis_payload["analysis_usage"]["cost_posture"] == "local_on_device"
         assert provider.analyze_screen.await_count == 1
         screen_runtime.record_capture.assert_called_once()
         assert screen_runtime.refresh.await_count >= 1
@@ -397,14 +394,13 @@ class TestPeriodicCaptureLoop:
     @pytest.mark.asyncio
     async def test_detailed_mode_posts_budget_skip_reason(self, tmp_path):
         posts = []
-        provider = SimpleNamespace(name="codex-local")
+        provider = SimpleNamespace(name="apple-vision")
         runtime = ScreenAnalysisRuntime(
             enabled=True,
-            provider="codex-local",
+            provider="apple-vision",
             model=None,
             preserve_captures=True,
             archive_dir=str(tmp_path),
-            openrouter_api_key=None,
             blocklist_file=None,
         )
         runtime.provider = provider

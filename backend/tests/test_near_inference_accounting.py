@@ -27,6 +27,7 @@ def test_billing_capture_requires_actual_near_callback():
         capture_near_billing_evidence(billing("foreign-operation"))
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: creates a historical OpenRouter row
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unsealed", [False, True])
 async def test_near_evidence_cannot_settle_openrouter_row(accounting_db, unsealed):

@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlmodel import select
 
 from src.browser.forgejo_issue_title import ForgejoError, PROFILE, PROVIDER_VERSION, canonical, checked_segment
+from src.browser.forgejo_forms import active_profiles, profile_document, clear_profiles
 from src.db import engine
 from src.db.models import ForgejoConnection, OperatorSession, Secret
 from src.vault.crypto import encrypt
@@ -54,6 +55,15 @@ def credential_payload(raw):
 
 
 def connection_view(row, *, available=False):
+    profiles=active_profiles(row.reviewed_form_profiles_json) if row else []
+    projections=[]
+    if (row and row.state=="active" and row.read_consent_expires_at
+        and utc(row.read_consent_expires_at)>now()):
+        from src.browser.interaction_contracts import BrowserConnection
+        projections=[BrowserConnection(owner=row.owner_principal_id,site_origin="https://codeberg.org",
+            profile_ref=profile,credential_ref="credential-binding:"+row.credential_binding,
+            expiry=utc(row.read_consent_expires_at),read_scope="forgejo_private_read",
+            revision=row.revision).model_dump(mode="json") for profile in profiles]
     return {"configured": row is not None, "connection_id": row.id if row else None,
         "revision": row.revision if row else 0, "state": row.state if row else "configured",
         "site_profile": PROFILE, "provider_version": PROVIDER_VERSION,
@@ -62,6 +72,9 @@ def connection_view(row, *, available=False):
         "read_consent_revision": row.read_consent_revision if row else 0,
         "read_consent_expires_at": utc(row.read_consent_expires_at).isoformat() if row and row.read_consent_expires_at else None,
         "provisioning_job_id": row.provisioning_job_id if row else None,
+        "reviewed_form_profile_ids": profiles,
+        "browser_connections": projections,
+        "form_profiles_revision": row.form_profiles_revision if row else 0,
         "available": available, "production_acceptance": "blocked_unverified",
         "credential_is_consent": False, "no_learning": True}
 
@@ -112,6 +125,7 @@ class ForgejoService:
                 row = ForgejoConnection(id=identity, owner_principal_id=owner.principal_id,
                                         owner_session_id=owner.session_id)
             else:
+                clear_profiles(row)
                 for key in (row.credential_vault_key, row.session_vault_key):
                     old = await db.scalar(select(Secret).where(Secret.key == key,
                         Secret.owner_principal_id == owner.principal_id)) if key else None
@@ -144,9 +158,47 @@ class ForgejoService:
                 Secret.owner_principal_id == owner.principal_id)) if row.session_vault_key else None
             if old: old.revoked_at = now(); db.add(old)
             row.revision += 1; row.read_consent_revision += 1
+            clear_profiles(row)
             row.state = "revoked"; row.read_consent_expires_at = None
             row.session_vault_key = row.session_binding = ""
             row.updated_at = now(); db.add(row)
+            return connection_view(row, available=not self.browser.production_blocked)
+
+    async def activate_form_profiles(self, owner, *, expected_revision,
+                                     expected_form_profiles_revision, profile_ids, profile_ack):
+        if profile_ack is not True:
+            raise ForgejoError("forgejo_explicit_profile_ack_required", status_code=422)
+        raw = profile_document(profile_ids)
+        # Availability is compiled, never caller-selected. The empty set must
+        # always remain revocable even while production acceptance is blocked.
+        if profile_ids:
+            self.browser.require_available()
+        async with engine.get_session() as db:
+            await writer(db)
+            await original_root(db, owner)
+            row = await db.scalar(select(ForgejoConnection).where(
+                ForgejoConnection.owner_principal_id == owner.principal_id,
+                ForgejoConnection.owner_session_id == owner.session_id))
+            if (row is None or row.revision != expected_revision
+                or row.form_profiles_revision != expected_form_profiles_revision):
+                raise ForgejoError("forgejo_form_activation_revision_changed")
+            for key, binding in ((row.credential_vault_key, row.credential_binding),
+                                 (row.session_vault_key, row.session_binding)):
+                secret = await db.scalar(select(Secret).where(Secret.key == key,
+                    Secret.owner_principal_id == owner.principal_id, Secret.revoked_at.is_(None)))
+                if profile_ids and (secret is None or secret_binding_digest(secret) != binding):
+                    raise ForgejoError("forgejo_original_vault_binding_changed")
+            if profile_ids and (row.state != "active" or row.provider_version != PROVIDER_VERSION
+                or row.site_profile != PROFILE or type(row.provider_user_id) is not int
+                or row.provider_user_id <= 0 or not row.provider_login):
+                raise ForgejoError("forgejo_current_numeric_account_required")
+            active_profiles(row.reviewed_form_profiles_json)
+            if row.reviewed_form_profiles_json != raw:
+                row.reviewed_form_profiles_json = raw
+                row.form_profiles_revision += 1
+                row.revision += 1
+                row.updated_at = now()
+                db.add(row)
             return connection_view(row, available=not self.browser.production_blocked)
 
 

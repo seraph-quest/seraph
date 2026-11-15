@@ -6,6 +6,7 @@ import pytest_asyncio
 
 from src.models.schemas import WSResponse
 from src.scheduler.connection_manager import BroadcastResult, ConnectionManager
+from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
 
 # ── ConnectionManager ──────────────────────────────────────
@@ -137,17 +138,55 @@ class TestSchedulerEngine:
                     "screenshot_observation_digest",
                     "weekly_activity_review",
                     "screen_cleanup",
-                    "audio_ingress_cleanup",
+                    "cordis_mail_retention",
+                    "inference_ledger_verification",
                     "work_board_dispatch",
                     "guardian_opportunity_assessment",
+                    "goal_public_discovery",
+                    "programme_daily_digest",
                 }
+                digest = scheduler.get_job("programme_daily_digest")
+                assert digest.trigger.interval.total_seconds() == 60
+                assert digest.coalesce is True and digest.max_instances == 1
+                assert digest.misfire_grace_time == 60
+                discovery = scheduler.get_job("goal_public_discovery")
+                assert discovery.trigger.interval.total_seconds() == 60
+                assert discovery.coalesce is True and discovery.max_instances == 1
+                assert discovery.misfire_grace_time == 60
                 screenshot_analysis_job = scheduler.get_job("screenshot_folder_analysis")
                 assert screenshot_analysis_job is not None
                 assert screenshot_analysis_job.trigger.interval.total_seconds() == 1
                 assert screenshot_analysis_job.coalesce is True
                 assert screenshot_analysis_job.max_instances == 1
+                await self._assert_cordis_mail_retention_job(scheduler)
             finally:
                 shutdown_scheduler()
+
+    @staticmethod
+    async def _assert_cordis_mail_retention_job(scheduler):
+        """The registered job itself sweeps globally, expires stale handoffs and never raises."""
+        import time
+        from src.runtime_plugins import bound_adapters
+
+        retention = scheduler.get_job("cordis_mail_retention")
+        assert retention.trigger.interval.total_seconds() == 15 * 60
+        assert retention.coalesce is True and retention.max_instances == 1
+        stale = time.monotonic() - bound_adapters.HANDOFF_TTL_SECONDS - 1
+        bound_adapters._handoff["scheduler-stale"] = (stale, {"plain_text": "x"})
+        bound_adapters._handoff["scheduler-fresh"] = (time.monotonic(), {"plain_text": "y"})
+        purge = AsyncMock(side_effect=[1, RuntimeError("storage fault")])
+        try:
+            with patch.object(bound_adapters, "purge_cordis_mail_results", purge):
+                await retention.func()
+                assert purge.await_args_list[0].args == () and purge.await_args_list[0].kwargs == {}
+                assert "scheduler-stale" not in bound_adapters._handoff
+                assert "scheduler-fresh" in bound_adapters._handoff
+                # A failing sweep is logged and retried next interval, never raised into the scheduler.
+                await retention.func()
+            assert purge.await_count == 2
+        finally:
+            bound_adapters._handoff.pop("scheduler-stale", None)
+            bound_adapters._handoff.pop("scheduler-fresh", None)
 
     def test_startup_next_run_only_when_enabled(self):
         from src.scheduler.engine import _startup_next_run
@@ -212,10 +251,21 @@ class TestSchedulerEngine:
         assert get_current_trust_principal() is None
 
     @pytest.mark.asyncio
-    async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self):
+    async def test_async_job_wrapper_does_not_grant_model_inference_to_non_model_job(self, model_fabric_workspace):
+        """ADR-035 retired world: with a usable NEAR TEE text slot the route is
+        active, so the canonical context reaches the identity fence, and a
+        non-model scheduler job is refused for lacking model_inference."""
         from src.approval.runtime import get_current_trust_principal
         from src.model_fabric.caller_context import build_canonical_inference_context
+        from src.model_fabric.configuration import effective_workload_policy
+        from src.model_fabric.retirement import openrouter_retired
         from src.scheduler.engine import _async_job_wrapper
+        from tests.near_tee_support import write_near_tee_text_configuration
+
+        assert openrouter_retired() is True
+        write_near_tee_text_configuration()
+        assert effective_workload_policy("daily_briefing").allowed_provider_kinds == ("near_tee",)
+        observed = []
 
         async def non_model_job():
             principal = get_current_trust_principal()
@@ -229,13 +279,26 @@ class TestSchedulerEngine:
                     timeout_seconds=10,
                     job_id=principal.job_id,
                 )
+            observed.append("non_model")
 
-        wrapper = _async_job_wrapper(
-            non_model_job,
-            asyncio.get_running_loop(),
-            job_id="screen_cleanup",
-        )
-        await wrapper()
+        async def model_job():
+            # Control: the same route with the model grant passes the fence,
+            # so the refusal above is the grant check, not a route denial.
+            principal = get_current_trust_principal()
+            context = build_canonical_inference_context(
+                "daily_briefing",
+                payload="private briefing",
+                output_tokens=100,
+                timeout_seconds=10,
+                job_id=principal.job_id,
+            )
+            assert context.allowed_provider_kinds == ("near_tee",)
+            observed.append("model")
+
+        await _async_job_wrapper(non_model_job, asyncio.get_running_loop(), job_id="screen_cleanup")()
+        await _async_job_wrapper(model_job, asyncio.get_running_loop(), job_id="daily_briefing",
+            allow_model_inference=True)()
+        assert observed == ["non_model", "model"]
 
     def test_shutdown_when_not_running(self):
         from src.scheduler.engine import shutdown_scheduler

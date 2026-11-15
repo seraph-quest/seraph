@@ -1,0 +1,634 @@
+"""Python owns one trusted child, bounded anonymous pipes and positive cleanup.
+
+This is a lifecycle host, not a policy engine, agent loop, sandbox or second lane.
+"""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from pathlib import Path
+import secrets
+import time
+from typing import Any
+
+from .composition import CHILD_ENV, CORDIS_VERSION, CompositionBlocked, ReviewedComposition, reviewed_composition
+from .contracts import SERVICE_METHODS, validate_request, validate_result
+from .protocol import MAX_PENDING, ProtocolError, encode_frame, read_frame, rpc_deadline
+
+STDERR_LIMIT = 65_536
+# Finite callbacks one original invocation's providers may make. Guardian
+# research reads up to four 256 KiB sources in 64 KiB chunks (#1008).
+MAX_CALLBACKS = 16
+BRANCH_CALLBACKS = {"programme_discovery": 64}
+
+
+def _callback_budget(native_binding: Any) -> int:
+    original = getattr(native_binding, "original", native_binding)
+    return BRANCH_CALLBACKS.get(getattr(getattr(original, "binding", None), "native_branch", None), MAX_CALLBACKS)
+
+
+NODE_REASONS = frozenset({"node_missing", "node_unavailable", "node_unsupported"})
+BUILD_REASONS = frozenset({"runtime_package_missing", "runtime_build_stale", "build_receipt_invalid",
+                           "runtime_package_invalid_or_missing", "package_pin_mismatch"})
+
+
+# Docker images build the reviewed package; there the fix is a rebuilt, restarted backend.
+DOCKER_RECOVERY = "Under Docker, rebuild and restart the backend with ./manage.sh -e prod up -d --build."
+
+
+def cordis_recovery(state: str, reason: str | None) -> str | None:
+    """The exact operator fix for a host that is not ready; never a fallback."""
+    if state == "ready":
+        return None
+    return f"{_local_recovery(state, reason)} {DOCKER_RECOVERY}"
+
+
+def _local_recovery(state: str, reason: str | None) -> str:
+    if reason in NODE_REASONS:
+        return ("Install Node 22.12+ or 24.x and set CORDIS_NODE_PATH to it (or put it first on PATH), "
+                "then run ./manage.sh -e dev cordis build and restart with ./manage.sh -e dev local up.")
+    if reason == "build_dependencies_missing":
+        return ("Run npm ci --prefix runtime/cordis --ignore-scripts (Node 24.13.1, npm 11.8.0), then restart with "
+                "./manage.sh -e dev local up, which builds the package.")
+    if reason in BUILD_REASONS:
+        return "Run ./manage.sh -e dev cordis build, then restart with ./manage.sh -e dev local up."
+    if state == "cleanup_unknown":
+        return "Reconcile the unknown Cordis cleanup, then restart with ./manage.sh -e dev local up."
+    return "Restart with ./manage.sh -e dev local up; if it stays blocked run ./manage.sh -e dev cordis probe."
+
+
+class HostBlocked(RuntimeError):
+    """Only Cordis-dependent work is blocked; current Python core remains usable."""
+
+
+# A boot whose provider reports cannot be produced or acknowledged never admits (#1024).
+_PROVIDER_REPORT_BLOCKS = frozenset({"provider_reports_unavailable", "provider_report_invalid",
+                                     "provider_report_not_acknowledged"})
+
+
+@dataclass
+class Pending:
+    frame: dict[str, Any]
+    future: asyncio.Future[dict[str, Any]]
+    native_binding: Any = None
+    native_callbacks: int = 0
+
+
+class CordisHost:
+    def __init__(self, *, node_path: Path | None = None, service_dispatch: Any = None, native_services: bool = False,
+                 package_root: Path | None = None):
+        # Only the fixed native owner may resolve/dispatch canonical invocations.
+        self.service_dispatch = service_dispatch
+        self._native_services = native_services
+        self._native_inflight: set[str] = set()
+        self.node_path = node_path
+        # A separately reviewed package copy (e.g. an alternative profile); None is the checked-in package.
+        self.package_root = package_root
+        self.state = "stopped"
+        self.reason: str | None = "not_started"
+        self.reviewed: ReviewedComposition | None = None
+        self.process: asyncio.subprocess.Process | None = None
+        self.boot_nonce: str | None = None
+        self._out_seq = 0
+        self._in_seq = 0
+        self._pending: dict[str, Pending] = {}
+        self._unresolved = 0
+        self._tasks: dict[str, asyncio.Task[Any] | None] = {}
+        self._cleanup_task: asyncio.Task[None] | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
+        self._reaped = False
+        self._cleanup_state = "not_started"
+        self._cordis_disposal = "not_started"
+        self._plugins: list[dict[str, Any]] = []
+        self._readiness_checked_at: int | None = None
+        self.stderr_bytes = 0
+        # Host-reported provider readiness the child acknowledged (#1024), and
+        # the host's source of fresh reports, sent after every (re)start.
+        self._provider_reports: dict[str, dict[str, Any]] = {}
+        self.provider_reports_source: Any = None
+
+    @property
+    def admitting(self) -> bool:
+        return self.state == "ready" and self.process is not None and self.process.returncode is None and self._cleanup_state == "pending"
+
+    def snapshot(self) -> dict[str, Any]:
+        """Cached diagnostics cannot establish current child readiness."""
+        return self._snapshot(verified=False)
+
+    def _snapshot(self, *, verified: bool) -> dict[str, Any]:
+        active_tasks = sum(task is None or not task.done() for task in self._tasks.values())
+        resources = active_tasks + (1 if self.process is not None and not self._reaped else 0)
+        state, reason = self.state, self.reason
+        if state == "ready" and not self.admitting:
+            state, reason = "blocked", reason or "child_unavailable"
+        readiness = "verified" if verified and self.admitting else "unknown"
+        if state == "ready" and not verified:
+            state, reason = "blocked", "readiness_not_checked"
+        elif state in {"blocked", "cleanup_unknown"}:
+            readiness = "blocked"
+        return {
+            "runtime_role": "lifecycle_host", "state": state, "reason": reason,
+            "recovery": cordis_recovery(state, reason),
+            "readiness": {"state": readiness, "checked_at": self._readiness_checked_at},
+            "native_services": self._native_service_snapshot(),
+            "profile_id": self.reviewed.profile["profile_id"] if self.reviewed else None,
+            "cordis_version": CORDIS_VERSION,
+            "node_version": self.reviewed.node_version if self.reviewed else None,
+            "composition_digest": self.reviewed.composition_digest if self.reviewed else None,
+            "package_digest": self.reviewed.package_digest if self.reviewed else None,
+            "plugins": [{**plugin, "state": "blocked", "reason": reason} if state == "blocked" else dict(plugin) for plugin in self._plugins],
+            "cleanup": {"state": self._cleanup_state, "process_reaped": self._reaped,
+                        "resources_remaining": resources if self._cleanup_state != "unknown" else None,
+                        "cordis_disposal": self._cordis_disposal},
+        }
+
+    def _native_service_snapshot(self) -> dict[str, Any]:
+        """Fixed inventory: blocked methods are visible, never silently successful."""
+        supported = sorted(getattr(self.service_dispatch, "supported_methods", ()))
+        if self.service_dispatch is None and self._native_services:
+            from .dispatch import SUPPORTED_METHODS
+            supported = sorted(SUPPORTED_METHODS)
+        return {"state": "partial" if supported and self.admitting else "blocked",
+                "supported_methods": supported,
+                "blocked_methods": sorted(SERVICE_METHODS - set(supported)),
+                # Typed per-call storage contention; these never fence the boot.
+                "transient_failures": getattr(self.service_dispatch, "transient_failures", 0),
+                "last_transient_reason": getattr(self.service_dispatch, "last_transient_reason", None)}
+
+    def _task(self, name: str, coroutine: Any) -> asyncio.Task[Any]:
+        if name in self._tasks:
+            coroutine.close()
+            raise HostBlocked("resource ownership conflict")
+        self._tasks[name] = None  # Reserve before the task can start.
+        task = asyncio.create_task(coroutine, name=f"cordis-owned-{name}")
+        self._tasks[name] = task
+        return task
+
+    def _fence(self, reason: str) -> None:
+        self.state, self.reason = "blocked", reason
+        for pending in self._pending.values():
+            if not pending.future.done():
+                pending.future.set_exception(HostBlocked(reason))
+        if self.process is not None and (self._cleanup_task is None or self._cleanup_task.done()):
+            self._tasks.pop("cleanup", None)
+            self._cleanup_task = self._task("cleanup", self.stop(preserve_blocked=True))
+
+    async def start(self) -> bool:
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            await asyncio.shield(self._cleanup_task)
+        async with self._lifecycle_lock:
+            if self.admitting:
+                return True
+            if self._cleanup_state == "unknown":
+                self.state, self.reason = "cleanup_unknown", "owned_cleanup_unknown"
+                return False
+            if self.process is not None and not self._reaped:
+                await self._stop_owned(preserve_blocked=False)
+                if self._cleanup_state != "clean":
+                    return False
+            try:
+                self.reviewed = (reviewed_composition(node_path=self.node_path) if self.package_root is None
+                                 else reviewed_composition(node_path=self.node_path, root=self.package_root))
+            except CompositionBlocked as exc:
+                self.state, self.reason = "blocked", exc.reason
+                self._plugins = []
+                return False
+            if self._native_services and self.service_dispatch is None:
+                # Construction has no DB/contact side effects. Resolve the fixed
+                # owner only after the reviewed package preflight.
+                from .dispatch import NativeServiceDispatcher
+                self.service_dispatch = NativeServiceDispatcher()
+            self.state, self.reason = "starting", None
+            self.boot_nonce = secrets.token_hex(32)
+            self._provider_reports = {}
+            self._readiness_checked_at = None
+            self._in_seq = self._out_seq = 0
+            self._pending.clear()
+            self._tasks.clear()
+            self._cleanup_state, self._cordis_disposal = "pending", "not_started"
+            self._reaped, self.stderr_bytes = False, 0
+            self.process = None
+            # Reserve process ownership before subprocess creation. Shield creation
+            # so cancellation cannot lose the returned trusted child handle.
+            spawn = self._task("spawn", asyncio.create_subprocess_exec(
+                str(self.reviewed.node), str(self.reviewed.entrypoint),
+                cwd=str(self.reviewed.root), env=dict(CHILD_ENV), close_fds=True,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, limit=1_048_580,
+            ))
+            try:
+                self.process = await asyncio.shield(spawn)
+                # The loop that owns the child's pipes; other loops must hop onto it (#1020).
+                self.owner_loop = asyncio.get_running_loop()
+                self._task("stdout", self._read_loop())
+                self._task("stderr", self._stderr_loop())
+                response = await self._rpc("bootstrap.hello", internal=True)
+                self._plugins = response["payload"]["plugins"]
+                self._verify_plugins(self._plugins)
+                if self.provider_reports_source is not None:
+                    # Every boot's facades learn what Python currently hosts
+                    # before the host admits anything (#1024); a source or
+                    # report failure blocks this boot and stops the child.
+                    try:
+                        reports = await self.provider_reports_source()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - typed block, child stopped below
+                        raise HostBlocked("provider_reports_unavailable") from exc
+                    from .protocol import validate_provider_report
+                    try:
+                        reports = [validate_provider_report(dict(report), "provider.readiness") for report in reports]
+                    except (ProtocolError, TypeError, ValueError) as exc:
+                        raise HostBlocked("provider_report_invalid") from exc
+                    await self._send_provider_reports(reports)
+                self.state, self.reason = "ready", None
+                return True
+            except asyncio.CancelledError:
+                self.process = await spawn
+                self.state, self.reason = "blocked", "startup_cancelled"
+                await self._stop_owned(preserve_blocked=True)
+                raise
+            except HostBlocked as exc:
+                self.state, self.reason = "blocked", self.reason or (
+                    exc.args[0] if exc.args and exc.args[0] in _PROVIDER_REPORT_BLOCKS else "child_failed")
+                await self._stop_owned(preserve_blocked=True)
+                return False
+            except (OSError, ProtocolError, asyncio.TimeoutError):
+                self.state, self.reason = "blocked", self.reason or "child_failed"
+                await self._stop_owned(preserve_blocked=True)
+                return False
+
+    def _verify_plugins(self, plugins: list[dict[str, Any]]) -> None:
+        assert self.reviewed is not None
+        specs = {spec["id"]: spec for spec in self.reviewed.profile["plugins"]}
+        digests = self.reviewed.plugin_digests or {}
+        if ({plugin["id"] for plugin in plugins} != set(specs) or len(plugins) != len(specs)
+                or any(plugin["digest"] != digests.get(plugin["id"]) for plugin in plugins)
+                or any(specs[plugin["id"]]["required"] and plugin["state"] != "ready" for plugin in plugins)):
+            raise ProtocolError("required plugin unavailable or provider digest changed")
+
+    async def _read_loop(self) -> None:
+        assert self.process is not None and self.process.stdout is not None
+        try:
+            while True:
+                frame = await read_frame(self.process.stdout)
+                if (frame["boot_nonce"] != self.boot_nonce or frame["seq"] != self._in_seq + 1
+                        or self.reviewed is None or frame["composition_digest"] != self.reviewed.composition_digest
+                        or frame["package_digest"] != self.reviewed.package_digest):
+                    raise ProtocolError("boot, package or sequence mismatch")
+                if frame["kind"] == "request":
+                    # A child request is only a callback inside one pending
+                    # original native invocation; its method is gated by that
+                    # invocation's reviewed closure in the dispatcher.
+                    if (frame["method"] not in SERVICE_METHODS or self.service_dispatch is None
+                            or not self.admitting or frame["request_id"] != f"c-{frame['seq']}"
+                            or self._unresolved >= MAX_PENDING
+                            or frame["deadline_at"] <= int(time.time() * 1000)):
+                        raise ProtocolError("unadmitted native service request")
+                    originals = [entry for entry in self._pending.values()
+                                 if entry.native_binding is not None and not entry.future.done()
+                                 and entry.native_callbacks < _callback_budget(entry.native_binding)
+                                 and all(entry.frame[key] == frame[key] for key in (
+                                     "invocation_ref", "composition_epoch", "deadline_at",
+                                     "boot_nonce", "package_digest", "composition_digest"))]
+                    if len(originals) != 1:
+                        raise ProtocolError("native request lacks unique original scoped invocation")
+                    originals[0].native_callbacks += 1
+                    self._in_seq = frame["seq"]
+                    self._unresolved += 1
+                    name = f"service-{frame['seq']}"
+                    self._task(name, self._serve_native(frame, name, originals[0].native_binding))
+                    continue
+                pending = self._pending.get(frame["request_id"])
+                if pending is None or pending.future.done():
+                    raise ProtocolError("unsolicited or duplicate response")
+                request = pending.frame
+                expected = "runtime.ready" if request["method"] == "bootstrap.hello" else request["method"]
+                if frame["method"] != expected or any(frame[key] != request[key] for key in ("invocation_ref", "composition_epoch", "composition_digest", "package_digest", "deadline_at")) or frame["deadline_at"] <= int(time.time() * 1000):
+                    raise ProtocolError("response identity or deadline mismatch")
+                if frame["method"] in {"runtime.ready", "runtime.status"}:
+                    self._verify_plugins(frame["payload"]["plugins"])
+                self._in_seq = frame["seq"]
+                pending.future.set_result(frame)
+        except asyncio.CancelledError:
+            raise
+        except (ProtocolError, HostBlocked, OSError, ValueError, TypeError, KeyError):
+            if self.state not in {"quiescing", "stopped", "cleanup_unknown"}:
+                self._fence("protocol_rejected_or_pipe_lost")
+
+    async def _serve_native(self, request: dict[str, Any], name: str, called_scope: Any) -> None:
+        """One bounded native dispatch/result; a lost ACK never renews the job."""
+        original_boot = self.boot_nonce
+        try:
+            from .dispatch import CalledServiceInvocation
+            pending = self._pending.get(getattr(called_scope, "parent_request_id", None))
+            if (type(called_scope) is not CalledServiceInvocation or pending is None
+                    or pending.future.done() or pending.native_binding is not called_scope
+                    or called_scope.host_boot_nonce != original_boot):
+                raise ProtocolError("native parent correlation no longer active")
+            remaining = max(0, (request["deadline_at"] - int(time.time() * 1000)) / 1000)
+            async with asyncio.timeout(remaining):
+                payload = await self.service_dispatch.dispatch(request, called_scope=called_scope)
+                validate_result(request["method"], payload)
+                async with self._write_lock:
+                    if (self.boot_nonce != original_boot or not self.admitting
+                            or int(time.time() * 1000) >= request["deadline_at"]
+                            or self.process is None or self.process.stdin is None):
+                        raise ProtocolError("native result lost original boot/deadline")
+                    response = {**request, "kind": "response", "seq": self._out_seq + 1, "payload": payload}
+                    wire = encode_frame(response)
+                    self._out_seq = response["seq"]
+                    self.process.stdin.write(wire)
+                    await self.process.stdin.drain()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # No native exception message/private payload enters a child/log.
+            self._fence("native_service_failed_or_ack_lost")
+        finally:
+            self._unresolved -= 1
+            self._tasks.pop(name, None)
+
+    async def request_service(self, method: str, payload: dict[str, Any], *, original_scope: Any) -> dict[str, Any]:
+        """Forward only an already captured original native invocation scope."""
+        from .dispatch import OriginalServiceInvocation
+        from .ownership import RuntimeCompositionBinding
+        validate_request(method, payload)
+        if self.service_dispatch is None or not self.admitting:
+            raise HostBlocked("native_services_unavailable")
+        if (type(original_scope) is not OriginalServiceInvocation
+                or type(original_scope.binding) is not RuntimeCompositionBinding
+                or not original_scope.binding.allows(method)):
+            raise HostBlocked("native_original_scope_missing_or_method_changed")
+        if (original_scope.host_boot_nonce != self.boot_nonce or self.reviewed is None
+                or original_scope.witness["package_digest"] != self.reviewed.package_digest
+                or original_scope.witness["host_composition_digest"] != self.reviewed.composition_digest):
+            raise HostBlocked("native_original_host_changed")
+        key = original_scope.witness["invocation_ref"]
+        if key in self._native_inflight:
+            raise HostBlocked("native_original_scope_already_pending")
+        # A bare locator never fetches a later claim/fence or renews an old call.
+        self._native_inflight.add(key)
+        try:
+            response = await self._rpc(method, invocation_ref=key, deadline_at=original_scope.deadline_at,
+                                       composition_epoch=original_scope.binding.epoch_for(method),
+                                       payload=payload, native_binding=original_scope)
+            return validate_result(method, response["payload"])
+        finally:
+            self._native_inflight.discard(key)
+
+    async def _stderr_loop(self) -> None:
+        assert self.process is not None and self.process.stderr is not None
+        try:
+            while data := await self.process.stderr.read(4096):
+                self.stderr_bytes += len(data)
+                if self.stderr_bytes > STDERR_LIMIT:
+                    self._fence("stderr_limit_exceeded")
+                    return
+        except asyncio.CancelledError:
+            raise
+        except OSError:
+            self._fence("stderr_pipe_lost")
+
+    async def request(self, method: str = "runtime.status", *, invocation_ref: str | None = None,
+                      deadline_at: int | None = None) -> dict[str, Any]:
+        if not self.admitting:
+            raise HostBlocked(self.reason or "runtime_not_ready")
+        if method not in {"runtime.status", "invocation.cancel"}:
+            raise HostBlocked("control_not_public")
+        return (await self._rpc(method, invocation_ref=invocation_ref, deadline_at=deadline_at))["payload"]
+
+    async def report_providers(self, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Report Python-hosted provider readiness to the child's facades.
+
+        Frames flow host to child only and carry the closed five-field report;
+        the child never initiates one and nothing it answers can activate or
+        deactivate a provider.
+        """
+        if not self.admitting:
+            raise HostBlocked(self.reason or "runtime_not_ready")
+        return await self._send_provider_reports(reports)
+
+    async def _send_provider_reports(self, reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from .protocol import validate_provider_report
+        acknowledged = []
+        for report in reports:
+            report = validate_provider_report(dict(report), "provider.readiness")
+            response = await self._rpc("provider.readiness", internal=True, payload=report)
+            if response["payload"] != {"domain": report["domain"], "state": "recorded"}:
+                raise HostBlocked("provider_report_not_acknowledged")
+            self._provider_reports[report["domain"]] = report
+            acknowledged.append(response["payload"])
+        return acknowledged
+
+    async def refresh_status(self, *, deadline_at: int | None = None) -> dict[str, Any]:
+        """One current-boot readback, bounded below the browser's five seconds.
+
+        The caller's original deadline also bounds writer admission and response;
+        historical plugin details and timestamps never imply live readiness.
+        """
+        if not self.admitting:
+            return self.snapshot()
+        now = int(time.time() * 1000)
+        if deadline_at is not None and type(deadline_at) is not int:
+            return self.snapshot()
+        deadline = min(now + 4000, deadline_at if deadline_at is not None else now + 4000)
+        original_boot = self.boot_nonce
+        try:
+            payload = await self.request(deadline_at=deadline)
+        except (HostBlocked, ProtocolError):
+            return self.snapshot()
+        if original_boot != self.boot_nonce or not self.admitting or int(time.time() * 1000) >= deadline:
+            return self.snapshot()
+        if payload["state"] != "ready":
+            self._fence("runtime_not_ready")
+            return self.snapshot()
+        self._plugins = payload["plugins"]
+        self._readiness_checked_at = int(time.time() * 1000)
+        return self._snapshot(verified=True)
+
+    async def _rpc(self, method: str, *, internal: bool = False, invocation_ref: str | None = None,
+                   deadline_at: int | None = None, composition_epoch: int | None = None,
+                   payload: dict[str, Any] | None = None, native_binding: Any = None) -> dict[str, Any]:
+        if not internal and not self.admitting:
+            raise HostBlocked("runtime_not_ready")
+        if self.process is None or self.process.stdin is None or self.reviewed is None or self.boot_nonce is None:
+            raise HostBlocked("runtime_not_started")
+        if self._unresolved >= MAX_PENDING:
+            raise HostBlocked("rpc_capacity_exhausted")
+        now = int(time.time() * 1000)
+        if deadline_at is not None and (type(deadline_at) is not int or deadline_at <= now):
+            raise HostBlocked("deadline_expired")
+        if method in SERVICE_METHODS:
+            from .dispatch import OriginalServiceInvocation
+            if type(native_binding) is not OriginalServiceInvocation or deadline_at != native_binding.deadline_at:
+                raise HostBlocked("native_original_deadline_scope_required")
+        elif native_binding is not None:
+            raise HostBlocked("native_binding_unexpected")
+        try:
+            deadline = rpc_deadline(method, now=now, original_deadline=deadline_at)
+        except ProtocolError as error:
+            raise HostBlocked(str(error)) from error
+        original_boot = self.boot_nonce
+        self._unresolved += 1
+        future = asyncio.get_running_loop().create_future()
+        request_id: str | None = None
+        locked = False
+        try:
+            await asyncio.wait_for(self._write_lock.acquire(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            locked = True
+            if self.boot_nonce != original_boot or (not internal and not self.admitting):
+                raise HostBlocked("boot_changed_or_admission_closed")
+            if len(self._pending) >= MAX_PENDING:
+                raise HostBlocked("rpc_capacity_exhausted")
+            if deadline <= int(time.time() * 1000):
+                raise HostBlocked("deadline_expired")
+            seq = self._out_seq + 1
+            request_id = f"r-{seq}"
+            frame = {"protocol": 1, "boot_nonce": self.boot_nonce, "request_id": request_id, "seq": seq,
+                     "kind": "request", "method": method, "invocation_ref": invocation_ref,
+                     "composition_epoch": composition_epoch, "composition_digest": self.reviewed.composition_digest,
+                     "package_digest": self.reviewed.package_digest, "deadline_at": deadline,
+                     "payload": payload if payload is not None else {}}
+            wire = encode_frame(frame)  # Validate before consuming a sequence.
+            self._out_seq = seq
+            called = None
+            if native_binding is not None:
+                from .dispatch import CalledServiceInvocation
+                called = CalledServiceInvocation(native_binding, method, composition_epoch,
+                                                 deadline, request_id, original_boot)
+            self._pending[request_id] = Pending(frame, future, called)
+            self.process.stdin.write(wire)
+            await asyncio.wait_for(self.process.stdin.drain(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            self._write_lock.release()
+            locked = False
+            return await asyncio.wait_for(future, max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+        except asyncio.CancelledError:
+            if request_id in self._pending:
+                self._fence("rpc_cancelled")
+            raise
+        except (OSError, ConnectionError, asyncio.TimeoutError) as exc:
+            if request_id in self._pending:
+                self._fence("rpc_failed_or_deadline_expired")
+            raise HostBlocked(self.reason or "rpc_deadline_expired") from exc
+        finally:
+            if locked:
+                self._write_lock.release()
+            self._unresolved -= 1
+            if request_id is not None:
+                self._pending.pop(request_id, None)
+            if future.done() and not future.cancelled():
+                future.exception()  # Retrieve fenced write failures even before awaiting.
+            elif not future.done():
+                future.cancel()
+
+    async def stop(self, *, preserve_blocked: bool = False) -> None:
+        try:
+            cleanup = self._cleanup_task
+            if cleanup is not None and cleanup is not asyncio.current_task() and not cleanup.done():
+                await asyncio.shield(cleanup)
+            async with self._lifecycle_lock:
+                await self._stop_owned(preserve_blocked=preserve_blocked)
+            cleanup = self._cleanup_task
+            if cleanup is not None and cleanup is not asyncio.current_task() and not cleanup.done():
+                await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            # Caller cancellation must not orphan the owned child/reap obligation.
+            if asyncio.current_task() is not self._cleanup_task:
+                self._fence("shutdown_cancelled")
+            raise
+
+    async def _stop_owned(self, *, preserve_blocked: bool) -> None:
+        previous_reason = self.reason
+        process = self.process
+        if process is None:
+            if self._cleanup_state == "pending":
+                self._cleanup_state = "clean"
+            if not preserve_blocked:
+                self.state, self.reason = "stopped", None
+            return
+        if self._reaped:
+            if not preserve_blocked and self._cleanup_state == "clean":
+                self.state, self.reason = "stopped", None
+            return
+        # Admission closes before any drain/restart. No original RPC gets renewed.
+        self.state = "quiescing"
+        shutdown_disposal_proof = None
+        original_boot = self.boot_nonce
+        now = int(time.time() * 1000)
+        drain_deadline = min([now + 10_000, *[pending.frame["deadline_at"] for pending in self._pending.values()]])
+        if process.returncode is None and not preserve_blocked:
+            try:
+                for report in list(self._provider_reports.values()):
+                    # Best effort: the facades report quiescing; providers stay
+                    # Python-owned, and a lost report never blocks shutdown.
+                    try:
+                        await self._rpc("provider.quiesce", internal=True, deadline_at=drain_deadline,
+                                        payload={**report, "state": "quiescing", "reason_code": "host_stopping"})
+                    except (HostBlocked, ProtocolError):
+                        break
+                self._provider_reports.clear()
+                await self._rpc("runtime.quiesce", internal=True, deadline_at=drain_deadline)
+                response = await self._rpc("runtime.shutdown", internal=True, deadline_at=drain_deadline)
+                payload = response["payload"]
+                self._cordis_disposal = payload["cordis_disposal"]
+                if payload["resources_remaining"] == 0 and self._cordis_disposal == "confirmed":
+                    # _rpc verified the exact original shutdown frame identity.
+                    shutdown_disposal_proof = original_boot
+                if payload["resources_remaining"] != 0 or self._cordis_disposal != "confirmed":
+                    self._cleanup_state = "unknown"
+                await asyncio.wait_for(process.wait(), max(0.001, min(1.0, (drain_deadline - int(time.time() * 1000)) / 1000)))
+                self._reaped = True
+            except (HostBlocked, ProtocolError, asyncio.TimeoutError, OSError):
+                self._cordis_disposal = "unconfirmed"
+        if not self._reaped:
+            try:
+                if process.returncode is None:
+                    process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), 2)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await asyncio.wait_for(process.wait(), 2)
+                self._reaped = True
+                if self._cordis_disposal == "not_started":
+                    self._cordis_disposal = "unconfirmed"
+            except (OSError, asyncio.TimeoutError):
+                self._cleanup_state = "unknown"
+        if process.stdin is not None:
+            process.stdin.close()
+            try:
+                await asyncio.wait_for(process.stdin.wait_closed(), 2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The OS already closed this pipe.
+            except (OSError, asyncio.TimeoutError):
+                self._cleanup_state = "unknown"
+        for pending in self._pending.values():
+            if not pending.future.done():
+                pending.future.set_exception(HostBlocked("runtime_stopped"))
+        for name, task in self._tasks.items():
+            if name != "cleanup" and task is not None and not task.done() and task is not asyncio.current_task():
+                task.cancel()
+        results = await asyncio.gather(*[task for name, task in self._tasks.items() if name != "cleanup" and task is not None and task is not asyncio.current_task()], return_exceptions=True)
+        if any(isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError) for result in results):
+            self._cleanup_state = "unknown"
+        if not self._reaped:
+            self._cleanup_state = "unknown"
+        if (self._reaped and self._cleanup_state != "unknown"
+                and shutdown_disposal_proof is not None and self.boot_nonce == shutdown_disposal_proof):
+            # A confirmed original shutdown ACK plus positive reap stays confirmed
+            # even when only the post-ACK wait observation timed out.
+            self._cordis_disposal = "confirmed"
+        # This release owns only process-local resources. Positive OS reap proves
+        # pipe/listener/timer destruction even when Cordis disposal is unconfirmed.
+        if self._cleanup_state != "unknown":
+            self._cleanup_state = "clean"
+        if self._cleanup_state == "unknown":
+            self.state, self.reason = "cleanup_unknown", "owned_cleanup_unknown"
+        else:
+            self.state, self.reason = ("blocked", previous_reason) if preserve_blocked else ("stopped", None)
+            self._plugins = [{**plugin, "state": "stopped", "reason": None} for plugin in self._plugins]
+
+
+cordis_host = CordisHost(native_services=True)

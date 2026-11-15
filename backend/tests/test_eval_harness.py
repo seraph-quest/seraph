@@ -400,6 +400,7 @@ def _assert_runtime_eval_scenario_passes(scenario_name: str) -> None:
     assert [result.name for result in summary.results] == [scenario_name]
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: eval-harness wiring tests (intercepted, no live inference) build canonical contexts on the historical OpenRouter route
 def test_run_runtime_evals_passes_group_1():
     _assert_runtime_eval_group_passes(_runtime_group_1_without_source_report())
 
@@ -2358,6 +2359,7 @@ def test_batch_dl_scenarios_do_not_collide_with_existing_registry_names():
     assert duplicates == []
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: eval-harness wiring tests (intercepted, no live inference) build canonical contexts on the historical OpenRouter route
 def test_run_benchmark_suites_executes_guardian_memory_quality_suite():
     summary = asyncio.run(run_benchmark_suites(["guardian_memory_quality"]))
 
@@ -4514,6 +4516,7 @@ def test_eval_browser_helper_does_not_block_event_loop():
     assert asyncio.run(_run()) == "slow browser result"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: eval-harness wiring tests (intercepted, no live inference) build canonical contexts on the historical OpenRouter route
 @pytest.mark.asyncio
 async def test_scheduler_eval_wrapper_binds_authenticated_model_principal():
     from src.approval.runtime import get_current_trust_principal
@@ -4545,6 +4548,7 @@ async def test_scheduler_eval_wrapper_binds_authenticated_model_principal():
     assert principal.job_id.startswith("scheduler:eval:principal-contract:")
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: eval-harness wiring tests (intercepted, no live inference) build canonical contexts on the historical OpenRouter route
 @pytest.mark.asyncio
 async def test_model_eval_job_binds_scoped_service_principal_and_restores_context():
     from src.approval.runtime import get_current_trust_principal
@@ -4586,6 +4590,7 @@ async def test_model_eval_job_binds_scoped_service_principal_and_restores_contex
     assert get_current_trust_principal() is None
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: eval-harness wiring tests (intercepted, no live inference) build canonical contexts on the historical OpenRouter route
 def test_eval_inference_context_remains_fail_closed_without_principal():
     from src.model_fabric.caller_context import build_canonical_inference_context
 
@@ -5853,6 +5858,7 @@ def test_guardian_judgment_runtime_eval_exposes_conflict_suppression():
     assert details["decision_reason"] == "low_guardian_confidence"
 
 
+@pytest.mark.openrouter_legacy  # ADR-035: eval-harness wiring tests (intercepted, no live inference) build canonical contexts on the historical OpenRouter route
 def test_memory_runtime_eval_scenarios_expose_expected_details():
     summary = asyncio.run(
         run_runtime_evals(

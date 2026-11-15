@@ -36,7 +36,6 @@ child_evidence:
     - conversation.identity_outbox
     - native_software.loop
     - edge.paired_transport
-    - audio.capture_decode_persistence
     - telegram.durable_transport
     - capability_pack.lifecycle
 criterion_fields:
@@ -71,6 +70,14 @@ exclusion_mapping:
     owner_issue: 754
     status: excluded
     replacement: deferred_outside_epic_736
+  - id: audio.capture_decode_persistence
+    owner_issue: 751
+    status: excluded
+    replacement: retired_by_operator_decision_1179
+  - id: voice.audio
+    owner_issue: 751
+    status: excluded
+    replacement: retired_by_operator_decision_1179
 criteria:
   - id: core.authenticated_origin
     owner_issue: 747
@@ -144,14 +151,14 @@ criteria:
     residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay paired transport or revocation behavior
   - id: audio.capture_decode_persistence
     owner_issue: 751
-    required: true
-    evidence_mode: integration
-    command_or_probe: health::_contract_check (informational source check) + health::_child_evidence_check (validated child receipt)
-    expected_exit_or_result: pass only when the owning runner emits one current, hashed, revision-bound receipt with result pass; missing, invalid, stale, mismatched, or ambiguous evidence is unknown and overall degraded with exit 2
-    artifact_path: child-evidence:<sha256-prefix>
-    live_environment: owning runner command recorded in the child receipt; no microphone, media, or provider call by the collector
-    failure_meaning: governed audio capture, decode, or persistence behavior has no trusted current behavioral evidence
-    residual_risk_text: the receipt validates child evidence shape, hash, ownership, freshness, and revision binding; it does not independently replay media privacy, decode, or durable storage behavior
+    required: false
+    evidence_mode: excluded
+    command_or_probe: health::_excluded_check
+    expected_exit_or_result: skipped with explicit exclusion; no audio capture claim
+    artifact_path: exclusion:audio.capture_decode_persistence
+    live_environment: "voice input retired by #1179 (operator decision 2026-11-14)"
+    failure_meaning: "none; Seraph has no voice input"
+    residual_risk_text: historical audio rows remain stored but unused; no audio capability claim follows
   - id: telegram.durable_transport
     owner_issue: 752
     required: true
@@ -365,13 +372,13 @@ criteria:
   - id: voice.audio
     owner_issue: 751
     required: false
-    evidence_mode: external_unverified
-    command_or_probe: health::_optional_live_check
-    expected_exit_or_result: skipped and overall degraded with exit 2
-    artifact_path: none; separately authorised test-media canary required
-    live_environment: keyless local command; no provider or media call
-    failure_meaning: no live voice/audio readiness evidence was supplied
-    residual_risk_text: run an isolated consented media canary
+    evidence_mode: excluded
+    command_or_probe: health::_excluded_check
+    expected_exit_or_result: skipped with explicit exclusion; no voice readiness claim
+    artifact_path: exclusion:voice.audio
+    live_environment: "voice input retired by #1179 (operator decision 2026-11-14)"
+    failure_meaning: "none; Seraph has no voice input"
+    residual_risk_text: no voice or audio provider capability claim follows
   - id: telegram
     owner_issue: 752
     required: false

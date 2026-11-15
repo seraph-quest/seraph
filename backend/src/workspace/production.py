@@ -488,6 +488,10 @@ def _open_fenced_lock(workspace: ProductionWorkspace, *, exclusive: bool) -> int
     return descriptor
 
 
+# Process-wide count of held runtime owner leases (the backend lifespan takes one).
+_RUNTIME_OWNER_DEPTH = 0
+
+
 @contextmanager
 def runtime_workspace_owner(root: str | os.PathLike[str]) -> Iterator[None]:
     """Hold the exclusive workspace owner lease for the backend lifetime.
@@ -496,16 +500,24 @@ def runtime_workspace_owner(root: str | os.PathLike[str]) -> Iterator[None]:
     scheduler owner, or maintenance command therefore fails closed instead of
     reading or replacing a live generation.
     """
+    global _RUNTIME_OWNER_DEPTH
     resolved = canonical_workspace_root(root)
     workspace = ProductionWorkspace(host_root=resolved)
     descriptor = _open_fenced_lock(workspace, exclusive=True)
+    _RUNTIME_OWNER_DEPTH += 1
     try:
         yield
     finally:
+        _RUNTIME_OWNER_DEPTH -= 1
         try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+
+
+def runtime_workspace_owner_held() -> bool:
+    """Whether this process currently holds the runtime workspace owner lease."""
+    return _RUNTIME_OWNER_DEPTH > 0
 
 
 def lifecycle_receipt_path(workspace: ProductionWorkspace) -> Path:
@@ -1124,6 +1136,7 @@ __all__ = [
     "ProductionWorkspaceMountError",
     "maintenance_fence",
     "runtime_workspace_owner",
+    "runtime_workspace_owner_held",
     "lifecycle_receipt_path",
     "read_lifecycle_receipt",
     "reconcile_production_restore",

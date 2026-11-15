@@ -41,6 +41,7 @@ GMAIL_SERVICE = "gmail_readonly"
 MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024
 MAX_LABELS = 200
 MAX_MESSAGE_IDS = 10
+MAX_SYNC_METADATA = 50
 MAX_CONCURRENT_METADATA = 2
 MAX_SUBJECT_BYTES = 200
 MAX_PREVIEW_BYTES = 240
@@ -341,6 +342,9 @@ class GoogleGmailReadonlyAdapter:
         resolver: Any = None,
         authority_check: Callable[[], Awaitable[None]] | None = None,
         contact_observer: Callable[[], None] | None = None,
+        contact_timeout_seconds: float = 10,
+        deadline_at: datetime | None = None,
+        require_scope_evidence: bool = False,
     ) -> None:
         self.connection = connection
         self.owner_principal_id = owner_principal_id
@@ -348,6 +352,9 @@ class GoogleGmailReadonlyAdapter:
         self.resolver = resolver
         self.authority_check = authority_check
         self.contact_observer = contact_observer
+        self.contact_timeout_seconds = max(0.01, min(float(contact_timeout_seconds), 10))
+        self.deadline_at = deadline_at
+        self.require_scope_evidence = require_scope_evidence
         self._access_token: str | None = None
         self._credential_values: tuple[str, ...] = ()
         self._observed_provider_scopes: tuple[str, ...] | None = None
@@ -373,6 +380,14 @@ class GoogleGmailReadonlyAdapter:
         positive privilege evidence.
         """
         return self._observed_provider_scopes
+
+    def _contact_timeout(self) -> float:
+        remaining = self.contact_timeout_seconds
+        if self.deadline_at is not None:
+            remaining = min(remaining, (self.deadline_at - datetime.now(timezone.utc)).total_seconds())
+        if remaining <= 0:
+            raise GmailReadError("source_deadline_expired", "The original source read deadline expired", status_code=409, recovery_action="reconcile_existing_sync")
+        return remaining
 
     async def _check_authority(self) -> None:
         if self.authority_check is not None:
@@ -438,7 +453,7 @@ class GoogleGmailReadonlyAdapter:
                 form_body=urlencode(form).encode("utf-8"),
                 resolver=self.resolver or default_resolver,
                 transport=self.transport,
-                timeout_seconds=10,
+                timeout_seconds=self._contact_timeout(),
                 max_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 _lifecycle_marker=self._transport_lifecycle,
                 authority_check=self._check_authority,
@@ -464,6 +479,8 @@ class GoogleGmailReadonlyAdapter:
             self._observed_provider_scopes = tuple(scopes)
         else:
             self._observed_provider_scopes = None
+        if self.require_scope_evidence and (not isinstance(body.get("scope"), str) or set(body["scope"].split()) != {GMAIL_READONLY_SCOPE}):
+            raise GmailReadError("source_scope_missing", "Exact read-only provider scope evidence is missing", status_code=403, recovery_action="restore_prerequisite")
         self._access_token = token
         self._credential_values = tuple((*self._credential_values, token))
         return token
@@ -481,7 +498,7 @@ class GoogleGmailReadonlyAdapter:
                 headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
                 resolver=self.resolver or default_resolver,
                 transport=self.transport,
-                timeout_seconds=10,
+                timeout_seconds=self._contact_timeout(),
                 max_bytes=MAX_PROVIDER_RESPONSE_BYTES,
                 _lifecycle_marker=self._transport_lifecycle,
                 authority_check=self._check_authority,
@@ -491,6 +508,10 @@ class GoogleGmailReadonlyAdapter:
         await self._check_authority()
         if response.status_code in {401, 403}:
             raise GmailReadError("mail_provider_unauthorized", "Gmail authorization was refused", status_code=403, recovery_action="restore_prerequisite")
+        if response.status_code == 404:
+            raise GmailReadError("mail_item_deleted", "The selected Gmail item was deleted", status_code=404)
+        if response.status_code == 429:
+            raise GmailReadError("mail_rate_limited", "Gmail reads are temporarily rate limited", status_code=429, recovery_action="bounded_cooldown")
         if response.status_code != 200:
             raise GmailReadError("mail_provider_read_failed", "Gmail provider read failed", status_code=502, recovery_action="retry")
         return self._scrub(_validate_json_response(response))
@@ -565,6 +586,33 @@ class GoogleGmailReadonlyAdapter:
             _fixed_url(f"{GMAIL_API_PREFIX}/messages/{quote(provider_message_id, safe='')}", params)
         )
         return _metadata_from_payload(payload, provider_message_id=provider_message_id, secrets=self._credential_values)
+
+    async def list_sync_page(
+        self, provider_label_ids: list[str], *, received_after: datetime,
+        received_before: datetime, max_messages: int, page_token: str | None = None,
+    ) -> GmailMessageIdPage:
+        """One complete bounded page; this never expands an empty selection."""
+        if not 1 <= len(provider_label_ids) <= 3 or not 1 <= max_messages <= MAX_SYNC_METADATA:
+            raise GmailReadError("mail_request_invalid", "The Gmail sync selection is invalid", status_code=422)
+        if not received_after.tzinfo or not received_before.tzinfo or not 0 < (received_before - received_after).total_seconds() <= 7 * 86400:
+            raise GmailReadError("mail_window_invalid", "The Gmail sync window is invalid", status_code=422)
+        params = [("labelIds", _provider_id(value)) for value in provider_label_ids]
+        params.extend([("q", f"after:{int(received_after.timestamp())} before:{int(received_before.timestamp())} -label:spam -label:trash"), ("maxResults", str(max_messages))])
+        if page_token is not None:
+            if not page_token or len(page_token.encode("utf-8")) > 2048 or _CONTROL.search(page_token):
+                raise GmailReadError("mail_cursor_invalid", "The Gmail cursor is invalid", status_code=422)
+            params.append(("pageToken", page_token))
+        payload = await self._authorized_get(_fixed_url(GMAIL_API_PREFIX + "/messages", params))
+        raw = payload.get("messages", [])
+        if not isinstance(raw, list) or len(raw) > max_messages or any(not isinstance(item, Mapping) for item in raw):
+            raise GmailReadError("mail_provider_schema_invalid", "The Gmail sync page is invalid", status_code=502)
+        ids = tuple(_provider_id(item.get("id")) for item in raw)
+        if len(set(ids)) != len(ids):
+            raise GmailReadError("mail_provider_schema_invalid", "The Gmail sync page has duplicate identities", status_code=502)
+        token = payload.get("nextPageToken")
+        if token is not None and (not isinstance(token, str) or not token or len(token.encode("utf-8")) > 2048 or _CONTROL.search(token)):
+            raise GmailReadError("mail_provider_schema_invalid", "The Gmail sync cursor is invalid", status_code=502)
+        return GmailMessageIdPage(ids, token)
 
     async def get_message_full(self, provider_message_id: str) -> GmailMessageBody:
         provider_message_id = _provider_id(provider_message_id)

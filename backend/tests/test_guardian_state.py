@@ -1,6 +1,7 @@
 """Tests for explicit guardian-state synthesis."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
+import json
 
 import pytest
 
@@ -27,6 +28,19 @@ from src.memory.procedural_guidance import ProceduralMemoryGuidance
 from src.memory.retrieval_planner import MemoryRetrievalPlanResult
 from src.memory.repository import memory_repository
 from src.observer.context import CurrentContext
+
+
+async def _current_chat_principal(monkeypatch):
+    from config.settings import settings
+    from src.auth.service import bind_operator_principal, create_session
+    monkeypatch.setattr(settings, "operator_auth_secret", "disposable-owned-chat-test-secret")
+    _, operator = await create_session()
+    return bind_operator_principal(operator, "current")
+
+
+def _current_root_metadata(principal):
+    return json.dumps({"lineage": {"owner_principal_id": principal.principal_id,
+        "operator_session_id": principal.operator_session_id}})
 
 
 def _make_guardian_state() -> GuardianState:
@@ -143,9 +157,10 @@ def test_memory_benchmark_diagnostics_report_canonical_and_legacy_suppression_co
 
 
 @pytest.mark.asyncio
-async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db):
+async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db, monkeypatch):
+    principal = await _current_chat_principal(monkeypatch)
     sm = SessionManager()
-    await sm.get_or_create("current")
+    await sm.get_or_create("current", owner_principal_id=principal.principal_id)
     await sm.add_message("current", "user", "What should Seraph improve next?")
     await sm.add_message("current", "assistant", "Build explicit guardian state.")
     await sm.replace_todos(
@@ -155,9 +170,9 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
             {"content": "Review prior thread", "completed": True},
         ],
     )
-    await sm.get_or_create("prior")
+    await sm.get_or_create("prior", owner_principal_id=principal.principal_id)
     await sm.update_title("prior", "Prior roadmap")
-    await sm.add_message("prior", "assistant", "Land guardian-state synthesis next.")
+    await sm.add_message("prior", "assistant", "Land guardian-state synthesis next.", metadata_json=_current_root_metadata(principal))
 
     ctx = CurrentContext(
         time_of_day="morning",
@@ -213,7 +228,7 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
             return_value="- advisory delivered, feedback=helpful: Stretch and refocus.",
         ),
     ):
-        state = await build_guardian_state(session_id="current", user_message="What should Seraph improve next?")
+        state = await build_guardian_state(trust_principal=principal, session_id="current", user_message="What should Seraph improve next?")
 
     assert "## Identity\nBuilder" in state.soul_context
     assert state.active_goals_summary == "Ship guardian state"
@@ -249,9 +264,10 @@ async def test_build_guardian_state_collects_memory_and_recent_sessions(async_db
 
 
 @pytest.mark.asyncio
-async def test_build_guardian_state_marks_history_inferred_focus_as_partial(async_db):
+async def test_build_guardian_state_marks_history_inferred_focus_as_partial(async_db, monkeypatch):
+    principal = await _current_chat_principal(monkeypatch)
     sm = SessionManager()
-    await sm.get_or_create("current")
+    await sm.get_or_create("current", owner_principal_id=principal.principal_id)
     await sm.add_message("current", "user", "Where should attention go next?")
     await sm.add_message("current", "assistant", "Finish the Atlas launch checklist first.")
 
@@ -283,7 +299,7 @@ async def test_build_guardian_state_marks_history_inferred_focus_as_partial(asyn
             return_value="",
         ),
     ):
-        state = await build_guardian_state(
+        state = await build_guardian_state(trust_principal=principal,
             session_id="current",
             user_message="Where should attention go next?",
         )
@@ -761,17 +777,18 @@ async def test_build_guardian_state_surfaces_memory_reconciliation_diagnostics(a
 
 
 @pytest.mark.asyncio
-async def test_build_guardian_state_prioritizes_live_project_cross_thread_continuity(async_db):
+async def test_build_guardian_state_prioritizes_live_project_cross_thread_continuity(async_db, monkeypatch):
+    principal = await _current_chat_principal(monkeypatch)
     sm = SessionManager()
-    await sm.get_or_create("current")
+    await sm.get_or_create("current", owner_principal_id=principal.principal_id)
     await sm.add_message("current", "user", "What matters for Atlas today?")
     await sm.add_message("current", "assistant", "Let me reconcile the recent Atlas threads.")
-    await sm.get_or_create("prior-atlas")
+    await sm.get_or_create("prior-atlas", owner_principal_id=principal.principal_id)
     await sm.update_title("prior-atlas", "Atlas follow-up")
-    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.")
-    await sm.get_or_create("prior-hermes")
+    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.", metadata_json=_current_root_metadata(principal))
+    await sm.get_or_create("prior-hermes", owner_principal_id=principal.principal_id)
     await sm.update_title("prior-hermes", "Hermes migration")
-    await sm.add_message("prior-hermes", "assistant", "Prepare the Hermes rollout note.")
+    await sm.add_message("prior-hermes", "assistant", "Prepare the Hermes rollout note.", metadata_json=_current_root_metadata(principal))
 
     ctx = CurrentContext(
         time_of_day="morning",
@@ -816,7 +833,7 @@ async def test_build_guardian_state_prioritizes_live_project_cross_thread_contin
             return_value="",
         ),
     ):
-        state = await build_guardian_state(
+        state = await build_guardian_state(trust_principal=principal,
             session_id="current",
             user_message="What matters for Atlas today?",
         )
@@ -828,14 +845,15 @@ async def test_build_guardian_state_prioritizes_live_project_cross_thread_contin
 
 
 @pytest.mark.asyncio
-async def test_build_guardian_state_surfaces_follow_through_risk_from_cross_thread_and_execution(async_db):
+async def test_build_guardian_state_surfaces_follow_through_risk_from_cross_thread_and_execution(async_db, monkeypatch):
+    principal = await _current_chat_principal(monkeypatch)
     sm = SessionManager()
-    await sm.get_or_create("current")
+    await sm.get_or_create("current", owner_principal_id=principal.principal_id)
     await sm.add_message("current", "user", "What matters for Atlas today?")
     await sm.add_message("current", "assistant", "Let me reconcile the recent Atlas threads.")
-    await sm.get_or_create("prior-atlas")
+    await sm.get_or_create("prior-atlas", owner_principal_id=principal.principal_id)
     await sm.update_title("prior-atlas", "Atlas follow-up")
-    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.")
+    await sm.add_message("prior-atlas", "assistant", "Close the Atlas launch checklist before tomorrow.", metadata_json=_current_root_metadata(principal))
 
     ctx = CurrentContext(
         time_of_day="morning",
@@ -881,7 +899,7 @@ async def test_build_guardian_state_surfaces_follow_through_risk_from_cross_thre
             return_value="",
         ),
     ):
-        state = await build_guardian_state(
+        state = await build_guardian_state(trust_principal=principal,
             session_id="current",
             user_message="What matters for Atlas today?",
         )
@@ -2441,9 +2459,10 @@ async def test_build_guardian_state_routes_temporal_queries_into_episodic_contex
 
 
 @pytest.mark.asyncio
-async def test_build_guardian_state_uses_bounded_snapshot_with_todo_overlay(async_db):
+async def test_build_guardian_state_uses_bounded_snapshot_with_todo_overlay(async_db, monkeypatch):
+    principal = await _current_chat_principal(monkeypatch)
     sm = SessionManager()
-    await sm.get_or_create("current")
+    await sm.get_or_create("current", owner_principal_id=principal.principal_id)
     await sm.add_message("current", "user", "What should I focus on next?")
     await sm.add_message("current", "assistant", "Let me ground that in bounded recall.")
     await sm.replace_todos(
@@ -2509,7 +2528,7 @@ async def test_build_guardian_state_uses_bounded_snapshot_with_todo_overlay(asyn
             return_value="",
         ),
     ):
-        state = await build_guardian_state(session_id="current", user_message="What should I focus on next?")
+        state = await build_guardian_state(trust_principal=principal, session_id="current", user_message="What should I focus on next?")
 
     assert "Identity: Builder" in state.bounded_memory_context
     assert "Atlas launch" in state.bounded_memory_context
@@ -3650,7 +3669,8 @@ def test_create_agent_injects_guardian_state(mock_get_model, mock_agent_cls):
 def test_create_strategist_agent_accepts_guardian_state(mock_model_cls):
     mock_model_cls.return_value = MagicMock()
 
-    agent = create_strategist_agent(guardian_state=_make_guardian_state())
+    with patch("src.agent.strategist.build_model_kwargs", return_value={}):
+        agent = create_strategist_agent(guardian_state=_make_guardian_state())
 
     assert "Overall confidence: grounded" in agent.instructions
     assert "Current focus: Ship guardian state while in VS Code" in agent.instructions

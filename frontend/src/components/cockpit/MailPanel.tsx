@@ -1,3 +1,7 @@
+import type { CommunicationReplyInput } from "../../lib/communications";
+import { ConnectionSyncPanel, RelatedSourcesReview } from "./ConnectionSyncPanel";
+import { connectedTaskInput } from "../../lib/connectionSync";
+import type { RelatedSelection } from "../../lib/connectionSync";
 import { MailReplySendPanel } from "./MailReplySendPanel";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -23,6 +27,7 @@ import type {
 import type { GuardianInboxMailOrigin } from "../../types";
 
 export interface MailPanelProps {
+  onPrepareCommunication?: (input: CommunicationReplyInput) => void;
   taskId: string | null;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
@@ -233,12 +238,14 @@ function DraftPanel({ taskId, ownerPrincipalId, ownerSessionId, goalId, goalRevi
       {draft?.status === "pending" && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="status">Draft execution is still pending. {draft.recovery_action ?? "Refresh canonical readback when ready."}</div>}
       {draft?.status === "blocked" && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="status">Draft execution is blocked. {draft.recovery_action ?? "Reconcile the existing task before any new request."}</div>}
       {draft?.status === "verified" && draft.draft && <div className="mt-2 grid gap-2"><label className="text-[10px]">Subject<input className="cockpit-input mt-1 w-full" maxLength={500} value={subject} onChange={(event) => setSubject(event.currentTarget.value)} /></label><label className="text-[10px]">Plain-text draft<textarea className="cockpit-input mt-1 w-full" rows={8} maxLength={64 * 1024} value={plainbody} onChange={(event) => setPlainbody(event.currentTarget.value)} /></label>{draft.draft.caveats.length > 0 && <div className="text-[10px] text-amber-200">Caveats: {draft.draft.caveats.join(" · ")}</div>}<div className="flex flex-wrap gap-2"><button type="button" className="cockpit-feedback-button" onClick={() => void copyDraft()}>Copy local draft</button><span className="text-[10px] text-retro-text/60 self-center">Verified local artifact · sent: no · provider draft: no · memory: no learning</span></div>{copyStatus && <div className="text-[10px]" role="status">{copyStatus}</div>}</div>}
+      {draft?.related_sources && <RelatedSourcesReview related={draft.related_sources} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} />}
       {draft?.status === "verified" && draft.draft && draft.message_revision && <MailReplySendPanel taskId={taskId} messageRevision={draft.message_revision} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />}
     </section>
   );
 }
 
 interface PrivateMailReviewProps {
+  onPrepareCommunication?: (input: CommunicationReplyInput) => void;
   ownerPrincipalId?: string | null;
   ownerSessionId?: string | null;
   origin: GuardianInboxMailOrigin;
@@ -246,7 +253,7 @@ interface PrivateMailReviewProps {
   goalRevision?: number | null;
 }
 
-function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, goalRevision }: PrivateMailReviewProps) {
+function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, goalRevision, onPrepareCommunication }: PrivateMailReviewProps) {
   const ownerScope = ownerPrincipalId && ownerSessionId ? `${ownerPrincipalId}\u0000${ownerSessionId}` : null;
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -263,11 +270,13 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
   const [replyError, setReplyError] = useState<string | null>(null);
   const [replyTaskId, setReplyTaskId] = useState<string | null>(null);
   const [pendingReply, setPendingReply] = useState<PendingMailReply | null>(null);
+  const [relatedSelection, setRelatedSelection] = useState<RelatedSelection | null>(null);
 
   const loadContext = useCallback(async () => {
     const generation = generationRef.current + 1;
     generationRef.current = generation;
     setContext(null);
+    setRelatedSelection(null);
     setMessage(null);
     setReplyTaskId(null);
     setContextError(null);
@@ -378,6 +387,9 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
       setReplyError("The previous reply admission has no confirmed outcome. Refresh the accepted task and reconcile the original request before trying again.");
       return;
     }
+    let relatedInput: ReturnType<typeof connectedTaskInput>;
+    try { relatedInput = connectedTaskInput(relatedSelection); }
+    catch (error) { setReplyError((error as Error).message); return; }
     const idempotencyKey = makeMailIdempotencyKey("gmail-reply");
     const generation = generationRef.current;
     const snapshot = {
@@ -400,6 +412,7 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
     setReplyBusy(true);
     try {
       const result = await bounded((signal) => createMailReplyTask({
+        ...relatedInput,
         schema_version: 1,
         connection_id: context.connection.connection_id,
         expected_connection_revision: context.connection.revision,
@@ -500,9 +513,21 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
       <div className="mt-2 text-[10px] text-retro-text/60">The accepted candidate supplies only an opaque message binding and revision. Current owner/session, connection, consent, Goal, and model permissions are read again before each operation.</div>
       {contextError && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="alert">{contextError}</div>}
       {context && <div className="mt-2 rounded border border-white/10 p-2 text-[10px]">Source consent {context.consent.consent_id} · source revision {context.consent.source_revision} · Goal {context.consent.goal_id} rev {context.consent.goal_revision} · model {context.consent.model_egress_allowed ? `allowed rev ${context.consent.model_revision}` : "not granted"}</div>}
+      {context && Boolean(context.consent.sync_metadata_limit) && <ConnectionSyncPanel relatedGoal={goalId && goalRevision ? { id: goalId, revision: goalRevision } : null} onRelatedChange={setRelatedSelection} provider="gmail" ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} connectionId={context.connection.connection_id} connectionRevision={context.connection.revision} connectionState={context.connection.state} labelIds={context.watch.label_ids} consent={{ id: context.consent.consent_id, revision: context.consent.source_revision, goalId: context.consent.goal_id, goalRevision: context.consent.goal_revision, state: context.consent.state, expiresAt: context.consent.expires_at, metadataLimit: context.consent.sync_metadata_limit ?? 0, privateLimit: context.consent.max_messages }} />}
       {context && !message && <div className="mt-2 rounded border border-amber-500/30 p-2 text-[10px]"><div>Message metadata is private and remains unread until you acknowledge one bounded body read.</div><label className="mt-2 flex items-start gap-2"><input type="checkbox" checked={readAcknowledged} onChange={(event) => setReadAcknowledged(event.currentTarget.checked)} />I acknowledge this selected message may be read once within the current owner-scoped Mail consent.</label>{readError && <div className="mt-2 text-amber-300" role="alert">{readError}</div>}<button type="button" className="cockpit-feedback-button mt-2" disabled={readBusy || !readAcknowledged} onClick={() => void readPrivateMessage()}>{readBusy ? "Reading one message…" : "Read selected private message"}</button></div>}
       {message && <article className="mt-2 rounded border border-emerald-500/30 p-2" aria-label="Selected private Mail message"><div className="font-semibold">{message.subject}</div><div className="mt-2 whitespace-pre-wrap break-words">{message.plain_text}</div>{message.truncated && <div className="mt-2 text-amber-300">The bounded body was truncated by the server.</div>}<div className="mt-2 text-[9px] text-retro-text/50">Explicit local read · no learning · attachments and links were not fetched.</div></article>}
       {message && !replyTaskId && <div className="mt-2 rounded border border-white/10 p-2"><div className="font-semibold text-[10px]">Request a local reply draft</div>{!context?.consent.model_egress_allowed ? <div className="mt-1 text-[10px] text-amber-200">Model consent is not active. Use Mail settings to grant the exact subject/plainbody/replyintent fields before this action becomes available.</div> : <><label className="mt-2 block text-[10px]">Reply intent<textarea className="cockpit-input mt-1 w-full" rows={3} maxLength={2000} value={replyIntent} onChange={(event) => setReplyIntent(event.currentTarget.value)} placeholder="Describe the reply you want drafted; this is sent only through the governed local draft task." /></label><label className="mt-2 block text-[10px]">Style<select className="cockpit-input mt-1 w-full" value={replyStyle} onChange={(event) => setReplyStyle(event.currentTarget.value as "brief" | "formal")}><option value="brief">Brief</option><option value="formal">Formal</option></select></label>{!pendingReply && <button type="button" className="cockpit-feedback-button mt-2" disabled={replyBusy} onClick={() => void submitReply()}>{replyBusy ? "Admitting local draft…" : "Request local reply draft"}</button>}</>}</div>}
+      {onPrepareCommunication && !pendingReply && <button type="button" className="cockpit-feedback-button mt-2" disabled={replyBusy || !context || !message || !replyIntent.trim() || !context.consent.model_egress_allowed || context.watch.state !== "active" || Date.parse(context.watch.expires_at) <= Date.now() || context.consent.state !== "active" || Date.parse(context.consent.expires_at) <= Date.now()} onClick={() => {
+        if (!context || !message || !goalId || !goalRevision || !context.consent.model_egress_allowed
+          || context.consent.state !== "active" || context.watch.state !== "active" || Date.parse(context.consent.expires_at) <= Date.now()
+          || Date.parse(context.watch.expires_at) <= Date.now() || message.message_revision !== origin.message_revision) return;
+        try { onPrepareCommunication({ ...connectedTaskInput(relatedSelection), schema_version: 1, connection_id: context.connection.connection_id,
+          expected_connection_revision: context.connection.revision, message_binding_id: origin.message_binding_id,
+          expected_message_revision: origin.message_revision, mail_consent_id: context.consent.consent_id,
+          expected_source_consent_revision: context.consent.source_revision, expected_model_consent_revision: context.consent.model_revision,
+          goal_id: goalId, expected_goal_revision: goalRevision, reply_intent: replyIntent.trim().slice(0, 2000), style: replyStyle }); }
+        catch (error) { setReplyError((error as Error).message); }
+      }}>Add this reviewed reply source to communication preparation</button>}
       {replyError && <div className="mt-2 rounded border border-amber-500/40 p-2 text-[10px]" role="alert">{replyError}</div>}
       {pendingReply && <div className="mt-2 text-[10px] text-amber-200" role="status">A reply admission is pending reconciliation. The original opaque request key is retained; no replacement task will be created.</div>}
       {pendingReply && !replyTaskId && <button type="button" className="cockpit-feedback-button mt-2" disabled={replyBusy} onClick={() => void reconcileReply()}>{replyBusy ? "Reconciling original draft…" : "Reconcile original draft"}</button>}
@@ -511,9 +536,9 @@ function PrivateMailReview({ ownerPrincipalId, ownerSessionId, origin, goalId, g
   );
 }
 
-export function MailPanel({ taskId, ownerPrincipalId, ownerSessionId, mailOrigin, goalId, goalRevision }: MailPanelProps) {
+export function MailPanel({ taskId, ownerPrincipalId, ownerSessionId, mailOrigin, goalId, goalRevision, onPrepareCommunication }: MailPanelProps) {
   if (mailOrigin) {
-    return <PrivateMailReview origin={mailOrigin} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
+    return <PrivateMailReview onPrepareCommunication={onPrepareCommunication} origin={mailOrigin} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
   }
   return <DraftPanel taskId={taskId} ownerPrincipalId={ownerPrincipalId} ownerSessionId={ownerSessionId} goalId={goalId} goalRevision={goalRevision} />;
 }

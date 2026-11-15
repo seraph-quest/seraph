@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from xml.sax.saxutils import quoteattr
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -611,6 +613,29 @@ def pytest_invocations_for_target(path: str) -> list[tuple[str, list[str]]]:
     return SPECIALIZED_TEST_INVOCATIONS.get(path, [(path, [path])])
 
 
+def junit_report_path(junit_dir: Path, label: str) -> Path:
+    """One JUnit file per invocation; the label is unique within a shard."""
+    return junit_dir / f"{re.sub(r'[^A-Za-z0-9_.-]+', '_', label)}.xml"
+
+
+def write_timeout_junit(path: Path, label: str, timeout_seconds: int | None, duration_s: float) -> None:
+    """Record a whole-invocation kill, which leaves no pytest-written report."""
+    message = f"invocation killed by the shard runner after {timeout_seconds}s; no per-test report was written"
+    write_synthetic_junit(path, label, "shard-runner-timeout", message, duration_s)
+
+
+def write_synthetic_junit(path: Path, label: str, case: str, message: str, duration_s: float) -> None:
+    """One error case for an invocation that left no pytest-written report."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<testsuites><testsuite name={quoteattr(label)} tests="1" errors="1" failures="0" skipped="0" '
+        f'time="{duration_s:.3f}"><testcase classname={quoteattr(label)} name={quoteattr(case)} '
+        f'time="{duration_s:.3f}"><error message={quoteattr(message)} /></testcase></testsuite></testsuites>\n',
+        encoding="utf-8",
+    )
+
+
 def run_shard_files(
     root: Path,
     files: list[str],
@@ -619,12 +644,15 @@ def run_shard_files(
     file_timeout_seconds: int | None = None,
     exclude_cancelled_eval_harness: bool = False,
     keep_going: bool = False,
+    junit_dir: Path | None = None,
 ) -> int:
     """Run each file in its own pytest process.
 
     By default the first failing invocation ends the shard. ``keep_going``
     runs every assigned invocation and returns the first non-zero code, so a
     single red file cannot hide the rest of the shard's failures (#1180).
+    ``junit_dir`` writes one JUnit report per invocation (#1218); an
+    invocation the runner kills gets a synthetic error report instead.
     """
     if not files:
         print("No backend tests assigned to this shard.")
@@ -651,6 +679,10 @@ def run_shard_files(
                 continue
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args,
                        *(f"--deselect={node}" for node in retired_nodes)]
+            report_path = junit_report_path(junit_dir, label) if junit_dir is not None else None
+            if report_path is not None:
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                command += [f"--junitxml={report_path}", "-o", f"junit_suite_name={label}"]
             timeout_seconds = timeout_for_file(path, file_timeout_seconds)
             started_at = time.perf_counter()
             try:
@@ -666,6 +698,8 @@ def run_shard_files(
                     f"[backend-shard] {label} -> 124 ({duration_s:.2f}s) timed out after "
                     f"{timeout_seconds}s"
                 )
+                if report_path is not None:
+                    write_timeout_junit(report_path, label, timeout_seconds, duration_s)
                 if not keep_going:
                     return 124
                 failures.append((label, 124))
@@ -675,6 +709,12 @@ def run_shard_files(
                 f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)"
                 f"{f' timeout={timeout_seconds}s' if timeout_seconds is not None else ''}"
             )
+            if completed.returncode != 0 and report_path is not None and not report_path.exists():
+                # A crash, OOM kill or os._exit leaves pytest no chance to write XML.
+                write_synthetic_junit(
+                    report_path, label, "invocation-crashed",
+                    f"pytest exited {completed.returncode} without writing a report", duration_s,
+                )
             if completed.returncode != 0:
                 if not keep_going:
                     return completed.returncode
@@ -700,6 +740,10 @@ def main() -> int:
         "--keep-going", action="store_true",
         help="run every assigned file even after a failure; exit with the first failure's code",
     )
+    parser.add_argument(
+        "--junit-dir", type=Path, default=None,
+        help="write one JUnit XML report per pytest invocation into this directory",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     # Progress lines must reach the job log as each file ends, not at exit:
@@ -718,6 +762,7 @@ def main() -> int:
         file_timeout_seconds=args.file_timeout_seconds,
         exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
         keep_going=args.keep_going,
+        junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
     )
 
 

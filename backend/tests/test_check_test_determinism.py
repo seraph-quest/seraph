@@ -1,0 +1,327 @@
+"""Contract tests for scripts/check_test_determinism.py (#1218)."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+CHECK = ROOT / "scripts/check_test_determinism.py"
+
+
+def load_checker():
+    spec = importlib.util.spec_from_file_location("check_test_determinism", CHECK)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+checker = load_checker()
+
+
+def run_check(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CHECK), *args],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def make_tree(tmp_path: Path, files: dict[str, str]) -> tuple[Path, Path]:
+    tests = tmp_path / "backend/tests"
+    for name, source in files.items():
+        path = tests / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(source), encoding="utf-8")
+    return tests, tmp_path / "baseline.json"
+
+
+def counts(tmp_path: Path, files: dict[str, str]) -> dict[str, dict[str, int]]:
+    tests, _ = make_tree(tmp_path, files)
+    result = checker.scan(tests, tmp_path)
+    assert result.errors == []
+    return result.counts()
+
+
+def run_tree(tests: Path, root: Path, baseline: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    return run_check("--tests-dir", str(tests), "--root", str(root), "--baseline", str(baseline), *extra)
+
+
+def test_repository_tests_match_checked_in_baseline() -> None:
+    result = run_check()
+    assert result.returncode == 0, result.stderr
+    assert "test determinism: ok" in result.stdout
+
+
+def test_one_added_time_sleep_fails_and_names_the_line(tmp_path: Path) -> None:
+    tests, baseline = make_tree(tmp_path, {"test_a.py": "def test_a():\n    assert True\n"})
+    assert run_tree(tests, tmp_path, baseline, "--update").returncode == 0
+    assert run_tree(tests, tmp_path, baseline).returncode == 0
+
+    (tests / "test_a.py").write_text("import time\n\ndef test_a():\n    time.sleep(0.1)\n    assert True\n")
+    result = run_tree(tests, tmp_path, baseline)
+
+    assert result.returncode == 1
+    assert "backend/tests/test_a.py: sleep count 1 is above the baseline 0" in result.stderr
+    assert "backend/tests/test_a.py:4: time.sleep(0.1)" in result.stderr
+
+
+def test_count_below_baseline_fails_until_lowered_and_update_never_raises(tmp_path: Path) -> None:
+    two = "import time\n\ndef test_a():\n    time.sleep(1)\n    time.sleep(2)\n"
+    tests, baseline = make_tree(tmp_path, {"test_a.py": two})
+    assert run_tree(tests, tmp_path, baseline, "--update").returncode == 0
+
+    (tests / "test_a.py").write_text("import time\n\ndef test_a():\n    time.sleep(1)\n")
+    below = run_tree(tests, tmp_path, baseline)
+    assert below.returncode == 1
+    assert "sleep count 1 is below the baseline 2" in below.stderr
+
+    assert run_tree(tests, tmp_path, baseline, "--update").returncode == 0
+    assert json.loads(baseline.read_text())["files"] == {"backend/tests/test_a.py": {"sleep": 1}}
+    assert run_tree(tests, tmp_path, baseline).returncode == 0
+
+    (tests / "test_a.py").write_text(two)
+    raised = run_tree(tests, tmp_path, baseline, "--update")
+    assert raised.returncode == 1
+    assert "never raises" in raised.stderr
+    assert json.loads(baseline.read_text())["files"] == {"backend/tests/test_a.py": {"sleep": 1}}
+
+
+def test_deleted_file_with_baseline_entry_fails_until_lowered(tmp_path: Path) -> None:
+    tests, baseline = make_tree(tmp_path, {"test_a.py": "import time\ntime.sleep(1)\n"})
+    assert run_tree(tests, tmp_path, baseline, "--update").returncode == 0
+    (tests / "test_a.py").unlink()
+    result = run_tree(tests, tmp_path, baseline)
+    assert result.returncode == 1
+    assert "backend/tests/test_a.py: sleep count 0 is below the baseline 1" in result.stderr
+
+
+def test_sleep_rules(tmp_path: Path) -> None:
+    found = counts(tmp_path, {"test_a.py": """
+        import asyncio
+        import time
+        from time import sleep as nap
+        from asyncio import sleep
+
+        async def test_a(delay):
+            await asyncio.sleep(0)
+            await asyncio.sleep(0.0)
+            await asyncio.sleep(0.01)
+            await asyncio.sleep(delay)
+            await sleep(1)
+            time.sleep(0)
+            nap(1)
+            script = "import time; time.sleep(5)"
+    """})
+    # Both literal-zero asyncio yields and the child-script string are not counted.
+    assert found == {"backend/tests/test_a.py": {"sleep": 5}}
+
+
+def test_clock_compare_follows_names_in_scope(tmp_path: Path) -> None:
+    found = counts(tmp_path, {"test_a.py": """
+        import asyncio
+        import time
+        from time import monotonic
+
+        def test_elapsed():
+            started = time.perf_counter()
+            elapsed = time.perf_counter() - started
+            assert elapsed < 0.5
+            assert round(elapsed, 2) <= 1
+
+        def test_deadline():
+            deadline = monotonic() + 5
+            while monotonic() < deadline:
+                break
+
+        async def test_loop():
+            loop_deadline = asyncio.get_running_loop().time() + 1
+            assert asyncio.get_running_loop().time() < loop_deadline
+
+        def test_not_clock():
+            started = time.monotonic()
+            record = {"started": started}
+            assert record == {"started": started}
+            assert len([1]) == 1
+    """})
+    # record == {...} receives a clock value but is not a clock comparison.
+    assert found == {"backend/tests/test_a.py": {"clock-compare": 4}}
+
+
+def test_isolation_and_process_rules(tmp_path: Path) -> None:
+    found = counts(tmp_path, {
+        "test_a.py": """
+            import os
+            import subprocess
+            import pytest
+            from subprocess import Popen
+            from unittest.mock import patch
+            from src.config.settings import settings
+
+            def test_a(monkeypatch):
+                settings.workspace_dir = "/x"
+                os.environ["X"] = "1"
+                monkeypatch.setenv("Y", "1")
+                monkeypatch.setattr(settings, "workspace_dir", "/y")
+                monkeypatch.setattr(module, "get_session", object())
+                with patch("src.api.mail.get_session"):
+                    pass
+                subprocess.Popen(["true"])
+                Popen(["true"])
+                subprocess.run(["true"])
+                try:
+                    subprocess.run(["true"], timeout=1)
+                except subprocess.TimeoutExpired:
+                    pytest.skip("slow host")
+                except ValueError:
+                    pytest.skip("not a timeout")
+        """,
+        "support/spawned.py": """
+            import subprocess
+            from unittest.mock import patch
+
+            def spawn():
+                patch("src.api.mail.get_session")
+                return subprocess.Popen(["true"])
+        """,
+    })
+    assert found == {
+        "backend/tests/test_a.py": {
+            "timeout-skip": 1,
+            "settings-assign": 1,
+            "environ-assign": 1,
+            "get-session-patch": 2,
+            "popen": 2,
+        }
+    }
+
+
+def test_realtime_marker_with_reason_is_the_only_exemption(tmp_path: Path) -> None:
+    found = counts(tmp_path, {
+        "test_a.py": """
+            import time
+            import pytest
+
+            @pytest.mark.realtime(reason="kernel signal delivery")
+            def test_exempt():
+                time.sleep(1)
+
+            @pytest.mark.realtime(reason="real browser")
+            class TestExempt:
+                def test_inner(self):
+                    time.sleep(1)
+
+            @pytest.mark.slow
+            def test_other_marker_is_not_an_exemption():
+                time.sleep(1)
+        """,
+        "test_b.py": """
+            import time
+            import pytest
+
+            pytestmark = [pytest.mark.asyncio, pytest.mark.realtime(reason="SQLite busy handler")]
+
+            def test_module_exempt():
+                time.sleep(1)
+        """,
+    })
+    assert found == {"backend/tests/test_a.py": {"sleep": 1}}
+
+
+def test_realtime_marker_without_reason_is_an_error(tmp_path: Path) -> None:
+    tests, baseline = make_tree(tmp_path, {"test_a.py": """
+        import time
+        import pytest
+
+        @pytest.mark.realtime
+        def test_a():
+            time.sleep(1)
+
+        @pytest.mark.realtime(reason="  ")
+        def test_b():
+            time.sleep(1)
+    """})
+    result = checker.scan(tests, tmp_path)
+    assert len(result.errors) == 2
+    assert all("requires a non-empty reason" in error for error in result.errors)
+    assert result.counts() == {"backend/tests/test_a.py": {"sleep": 2}}
+    baseline.write_text(json.dumps({"files": {"backend/tests/test_a.py": {"sleep": 2}}}))
+    assert run_tree(tests, tmp_path, baseline).returncode == 1
+
+
+def test_realtime_marker_is_registered_for_strict_markers() -> None:
+    pyproject = (ROOT / "backend/pyproject.toml").read_text(encoding="utf-8")
+    assert '"realtime(reason):' in pyproject
+    assert "--strict-markers" in pyproject
+
+
+def test_unittest_and_isclose_elapsed_asserts_count_but_identity_checks_do_not(tmp_path: Path) -> None:
+    found = counts(tmp_path, {"test_a.py": """
+        import math
+        import time
+        import unittest
+
+        class TestA(unittest.TestCase):
+            def test_a(self):
+                started = time.monotonic()
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertGreaterEqual(started, 0)
+                self.assertEqual(started, started)
+                assert math.isclose(time.monotonic() - started, 0, abs_tol=1)
+                assert started is not None
+                self.assertLess(1, 2)
+    """})
+    # assertLess, assertGreaterEqual and isclose read the clock; assertEqual,
+    # ``is not None`` and a constant assertLess do not.
+    assert found == {"backend/tests/test_a.py": {"clock-compare": 3}}
+
+
+def test_ambient_state_mutators_count(tmp_path: Path) -> None:
+    found = counts(tmp_path, {"test_a.py": """
+        import os
+        from unittest.mock import patch
+        from config.settings import settings as cfg
+
+        MODULE = "src.api.mail"
+
+        def test_a(monkeypatch):
+            os.environ.update({"A": "1"})
+            os.environ.setdefault("B", "1")
+            os.environ.pop("A", None)
+            del os.environ["B"]
+            os.environ |= {"C": "1"}
+            os.getenv("A")
+            setattr(cfg, "workspace_dir", "/x")
+            cfg.workspace_dir = "/y"
+            monkeypatch.setattr(cfg, "workspace_dir", "/z")
+            with patch(f"{MODULE}.get_session"):
+                pass
+    """})
+    assert found == {"backend/tests/test_a.py": {
+        "settings-assign": 2, "environ-assign": 5, "get-session-patch": 1}}
+
+
+def test_update_refuses_to_write_while_a_file_fails_to_scan(tmp_path: Path) -> None:
+    tests, baseline = make_tree(tmp_path, {"test_a.py": "import time\ntime.sleep(1)\n"})
+    assert run_tree(tests, tmp_path, baseline, "--update").returncode == 0
+    before = baseline.read_text()
+    (tests / "test_broken.py").write_text("def broken(:\n")
+    result = run_tree(tests, tmp_path, baseline, "--update")
+    assert result.returncode == 1
+    assert "refuses to write" in result.stderr
+    assert baseline.read_text() == before
+
+
+def test_snippet_lines_follow_ast_line_numbers(tmp_path: Path) -> None:
+    tests, _ = make_tree(tmp_path, {"test_a.py": "x = ' '\nimport time\ntime.sleep(1)\n"})
+    result = checker.scan(tests, tmp_path)
+    assert [(finding.line, finding.snippet) for finding in result.findings] == [(3, "time.sleep(1)")]

@@ -82,7 +82,8 @@ def test_ci_retirement_cli_forwards_fixed_policy_and_preserves_arguments():
     assert shard.call_args.kwargs == {"shard_count": 10, "shard_index": 2}
     assert run.call_args.args[1] == ["tests/test_alpha.py"]
     assert run.call_args.kwargs == {"pytest_args": ["-x"], "file_timeout_seconds": 900,
-                                    "exclude_cancelled_eval_harness": True, "keep_going": False}
+                                    "exclude_cancelled_eval_harness": True, "keep_going": False,
+                                    "junit_dir": None}
 
 
 def test_cli_forwards_keep_going():
@@ -91,6 +92,54 @@ def test_cli_forwards_keep_going():
     ), patch("scripts.run_backend_test_shard.run_shard_files", return_value=0) as run:
         assert main() == 0
     assert run.call_args.kwargs["keep_going"] is True
+
+
+def test_cli_forwards_absolute_junit_dir(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch.object(sys, "argv", ["runner", "--shard-count", "10", "--shard-index", "2",
+                                   "--junit-dir", "reports"]), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ), patch("scripts.run_backend_test_shard.run_shard_files", return_value=0) as run:
+        assert main() == 0
+    assert run.call_args.kwargs["junit_dir"] == tmp_path.resolve() / "reports"
+
+
+def test_junit_dir_adds_one_report_per_invocation(tmp_path: Path):
+    files = ["tests/test_alpha.py", "tests/test_workflows.py"]
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
+        assert run_shard_files(tmp_path, files, junit_dir=tmp_path / "junit") == 0
+    reports = []
+    for call in mock_run.call_args_list:
+        command = call.args[0]
+        junit = [arg for arg in command if arg.startswith("--junitxml=")]
+        assert len(junit) == 1
+        reports.append(junit[0].removeprefix("--junitxml="))
+        assert command[command.index("-o", command.index(junit[0])) + 1].startswith("junit_suite_name=")
+    assert len(reports) == len(set(reports)) == len(mock_run.call_args_list)
+    assert all(Path(report).parent == tmp_path / "junit" for report in reports)
+    assert (tmp_path / "junit").is_dir()
+
+
+def test_junit_dir_records_runner_timeout_as_error(tmp_path: Path):
+    import xml.etree.ElementTree as ElementTree
+
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               side_effect=TimeoutExpired(cmd=["pytest"], timeout=900)):
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py"], file_timeout_seconds=900,
+                               junit_dir=tmp_path / "junit") == 124
+    suite = ElementTree.parse(tmp_path / "junit" / "tests_test_alpha.py.xml").getroot().find("testsuite")
+    assert suite.get("name") == "tests/test_alpha.py"
+    assert suite.get("errors") == "1"
+    error = suite.find("testcase/error")
+    assert error is not None and "900s" in error.get("message")
+
+
+def test_run_shard_files_writes_no_junit_without_dir(tmp_path: Path):
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py"]) == 0
+    assert not any(arg.startswith("--junitxml") for arg in mock_run.call_args.args[0])
 
 
 def test_run_shard_files_executes_each_file_in_isolation(tmp_path: Path):
@@ -848,3 +897,27 @@ def test_ci_retirement_does_not_swallow_no_tests_exit_code(tmp_path):
         run.return_value = CompletedProcess(args=["pytest"], returncode=5)
         assert run_shard_files(tmp_path, ["tests/test_operator_api.py", "tests/test_alpha.py"], exclude_cancelled_eval_harness=True) == 5
     run.assert_called_once()
+
+
+def test_junit_dir_records_a_crash_that_left_no_report(tmp_path: Path):
+    import xml.etree.ElementTree as ElementTree
+
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=-9)):
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py"], junit_dir=tmp_path / "junit") == -9
+    case = ElementTree.parse(tmp_path / "junit" / "tests_test_alpha.py.xml").getroot().find("testsuite/testcase")
+    assert case.get("name") == "invocation-crashed"
+    assert "exited -9 without writing a report" in case.find("error").get("message")
+
+
+def test_junit_dir_keeps_pytests_own_report_for_an_ordinary_failure(tmp_path: Path):
+    report = tmp_path / "junit" / "tests_test_alpha.py.xml"
+
+    def failing_run(command, **_kwargs):
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("<testsuites><testsuite name='pytest'/></testsuites>")
+        return CompletedProcess(args=command, returncode=1)
+
+    with patch("scripts.run_backend_test_shard.subprocess.run", side_effect=failing_run):
+        assert run_shard_files(tmp_path, ["tests/test_alpha.py"], junit_dir=tmp_path / "junit") == 1
+    assert report.read_text() == "<testsuites><testsuite name='pytest'/></testsuites>"

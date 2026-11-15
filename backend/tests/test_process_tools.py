@@ -1320,7 +1320,7 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monk
     assert not worker_root.exists()
 
 
-def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatch):
+def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatch, request):
     script_name = _write_script(
         "wave_process_stale_identity.py",
         """
@@ -1331,6 +1331,15 @@ def test_stop_process_rejects_stale_leader_identity_without_signaling(monkeypatc
     started = start_process(command="python3", args_json=f'["{script_name}"]')
     process_id = started.split("process=")[1].split(",")[0]
     managed = process_runtime_manager._processes[process_id]
+
+    def reap_refused_child() -> None:
+        # The refused stop deliberately leaves the child running; reap it so
+        # no live Popen outlives the test (#1218). Popen.kill uses os.kill,
+        # not the patched killpg.
+        managed.popen.kill()
+        managed.popen.wait()
+
+    request.addfinalizer(reap_refused_child)
     assert managed.leader_identity is not None
     stale_identity = _ProcessLeaderIdentity(
         pid=managed.leader_identity.pid,
@@ -1762,3 +1771,16 @@ def test_process_output_logs_live_outside_the_workspace():
     assert payload["worker_disposable"] is True
     assert payload["trust_partition"] == "session_disposable_worker"
     assert not str(payload["worker_root"]).startswith(str(Path(settings.workspace_dir).resolve()))
+
+
+def test_bounded_pipe_capture_closes_its_pipe_after_draining_to_eof():
+    """The drain owns the pipe: once it reads EOF the file object is closed (#1218)."""
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    capture = process_tools_module._BoundedPipeCapture(stream)
+    os.write(write_fd, b"drained output")
+    os.close(write_fd)
+    capture.finish(timeout=5.0)
+    assert capture.done
+    assert stream.closed
+    assert capture.text() == "drained output"

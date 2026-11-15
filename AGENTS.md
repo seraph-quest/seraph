@@ -127,12 +127,33 @@ These commands are grounded in `manage.sh`, package manifests and
 | Docs ownership and claim checks | Repository root | `python3 scripts/check_docs_contract.py` and `python3 scripts/check_strategy_claims.py` |
 | Docs typecheck and build/link check | `docs/` | `npm run typecheck` and `npm run build` |
 | Diff whitespace check | Repository root | `git diff --check` |
+| Test determinism ratchet | Repository root | `python3 scripts/check_test_determinism.py` (Python 3.12+); after removing a hazard, lower the baseline with `--update` |
 
 There is no dedicated frontend lint script or configured backend lint/typecheck
 command in these manifests. Do not invent one or claim a build is a lint pass.
 Use focused tests first; native/browser suites have additional profile-specific
 requirements documented by their owners. Never weaken assertions, deadlines or
 fixtures to make a check pass. Do not run tests against an operator workspace.
+
+Backend tests are held to a determinism ratchet (#1217, #1218).
+`scripts/check_test_determinism.py` counts sleeps, elapsed-time comparisons,
+skips on timeout, direct `settings`/`os.environ` assignment, `get_session`
+patches and raw `Popen` per file. Each count must equal
+`scripts/test_determinism_baseline.json`, so counts only go down. Synchronise
+on a cause (an event, gate or notification) instead. The only exemption is
+`@pytest.mark.realtime(reason=...)` for real kernel, SQLite or browser timing;
+it covers sleeps and clock comparisons only, and each marker is itself counted,
+so adding one is a reviewed baseline edit. Use `--rename OLD NEW` for a renamed
+test file.
+Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
+never-awaited coroutines are errors. A per-test watchdog dumps stacks after
+240 s and fails the test after 420 s. Any `filterwarnings` exception must be
+narrow and name its issue. Until #1235, `tests/test_repo_repair_executors.py`
+leaks an unreaped child at session end (`TRACKED_LEAK_FILES` in
+`backend/scripts/run_backend_test_shard.py`) and gets its exception as `-W`
+from the shard runner only; run it with
+`uv run python scripts/run_backend_test_shard.py --files tests/test_repo_repair_executors.py`,
+since plain `uv run pytest` on it fails on the leak.
 
 Core startup does not require a provider key. Inference requires explicit
 configuration, consent, verified capability and budget; a configured route is

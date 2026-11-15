@@ -7226,6 +7226,12 @@ class TestWorkflowSurfaces:
         assert not isinstance(workflow_runner.tools[0], ApprovalTool)
 
 
+def _discard_state_write(coro, **_kwargs):
+    """Stand in for a durable write without leaving its coroutine unawaited (#1218)."""
+    coro.close()
+    return None
+
+
 def test_workflow_checkpoint_restore_fails_closed_without_durable_authority():
     """A caller-supplied parent identity cannot restore checkpoint state by lookup alone."""
     workflow = Workflow(
@@ -7256,8 +7262,8 @@ def test_workflow_checkpoint_restore_fails_closed_without_durable_authority():
             "src.workflows.manager._load_workflow_checkpoint_payload",
             AsyncMock(return_value=checkpoint_payload),
         ),
-        patch("src.workflows.manager._run_required_durable_state_write", return_value=None),
-        patch("src.workflows.manager._run_durable_state_write", return_value=None),
+        patch("src.workflows.manager._run_required_durable_state_write", side_effect=_discard_state_write),
+        patch("src.workflows.manager._run_durable_state_write", side_effect=_discard_state_write),
         pytest.raises(RuntimeError, match="authenticated session-bound principal"),
     ):
         workflow_tool(

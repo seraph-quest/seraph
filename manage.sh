@@ -77,7 +77,7 @@ function display_help() {
     echo "  build   Build or rebuild services."
     echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
     echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. No dependency installation."
-    echo "  composition dump  Read-only, secret-free dump of bundles, domain owners, epochs, digests and pins (dev only)."
+    echo "  composition dump  Read-only, secret-free dump of the profile, bundles, patch rows, domain owners, epochs, digests and pins (dev only)."
     echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
@@ -1033,7 +1033,9 @@ fi
 
 # ADR-036 §6 (#1198): read-only, secret-free composition dump. It opens the
 # workspace database read-only, never starts the Cordis child, and runs keyless
-# (env -i): only the workspace path and an optional --node are passed in.
+# (env -i): only the workspace path, the non-secret profile selection
+# (COMPOSITION_PROFILE, DEPLOYMENT_ENVIRONMENT; #1204) and an optional --node
+# are passed in.
 if [ "$COMMAND" = "composition" ]; then
     if [ "$ENV" != "dev" ]; then
         error_exit "'composition' is supported only with '-e dev'; in production read /api/runtime/status.composition."
@@ -1044,7 +1046,8 @@ if [ "$COMMAND" = "composition" ]; then
     shift
     exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
         "$(cordis_cli_python)" -B -m src.runtime_plugins.composition_dump dump \
-        --workspace "$LOCAL_WORKSPACE_DIR" "$@"
+        --workspace "$LOCAL_WORKSPACE_DIR" --profile "${COMPOSITION_PROFILE:-}" \
+        --deployment-environment "${DEPLOYMENT_ENVIRONMENT:-development}" "$@"
 fi
 
 if [ "$COMMAND" = "local" ]; then

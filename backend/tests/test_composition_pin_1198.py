@@ -187,7 +187,11 @@ async def test_the_dump_matches_the_actual_domain_rows(accounting_db):  # noqa: 
             assert entry["pinned"] is (domain in PINNED_DOMAINS)
         assert domains[TASKS]["state"] == "draining"
         assert dump["pinned_domains"] == sorted(PINNED_DOMAINS)
-        assert dump["effective_patch"] == [] and dump["profile"] is None
+        # #1204: no patch file, so no row is patched; only the offline dump resolves a
+        # profile here (the live one reports the profile this process booted, none in this test).
+        assert dump["effective_patch"] == []
+        assert (dump["profile"] is None) if dump["source"] == "live" else (
+            dump["profile"]["profile_id"] == "local" and dump["profile"]["state"] == "valid")
         assert [bundle["bundle"] for bundle in dump["bundles"] if bundle["pinned"]] == ["seraph-trust"]
     assert (await live_composition_dump(CordisHost()))["source"] == "live"
 

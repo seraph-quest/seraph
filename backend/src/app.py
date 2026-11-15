@@ -577,6 +577,24 @@ def _augment_near_tee_readiness(route_status: dict[str, object], fabric_status: 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from src.runtime_plugins.profiles import CompositionProfileInvalid, boot_profile, recovery_text, release_profile
+
+    # ADR-036 §3/§6 (#1204): validate the named profile and its patch layers
+    # before any provider activates; a refused composition never boots.
+    try:
+        boot_profile()
+    except CompositionProfileInvalid as exc:
+        logging.getLogger(__name__).error(recovery_text(exc))
+        raise
+    try:
+        async with _provider_worker_lifespan(app):
+            yield
+    finally:
+        release_profile()
+
+
+@asynccontextmanager
+async def _provider_worker_lifespan(app: FastAPI):
     # Python hosts the mandatory providers (#1024): the worker takes the
     # workspace owner lease (production: the container preflight proves the
     # /app/data bind, and the same lock inode is held for the whole backend
@@ -854,8 +872,9 @@ async def _lifespan_services(app: FastAPI):
                     init_scheduler()
                     await sync_scheduled_jobs()
                     from src.runtime_plugins.lifecycle import runtime_lifecycle
+                    from src.runtime_plugins.profiles import scheduler_enabled as profile_scheduler_enabled
                     for status in await runtime_lifecycle.start(cordis_host,
-                                                                scheduler_enabled=bool(settings.scheduler_enabled)):
+                                                                scheduler_enabled=profile_scheduler_enabled()):
                         if status.get("state") != "active":
                             logging.getLogger(__name__).warning("Runtime lifecycle %s: %s (%s)", status["domain"],
                                                                 status["state"], status.get("reason"))

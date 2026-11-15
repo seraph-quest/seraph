@@ -4,8 +4,8 @@ The dump shows the composition as currently known: the declared bundles with
 their runtime domains, each domain's owner row (owner, epoch, state, owner
 digest), the reviewed Cordis provider digest and, for the live dump, the
 plugin state the running child reports; which domains and trust services are
-pinned; and the effective patch, which is empty because no profile or patch
-layer exists yet.
+pinned; the validated named profile (ADR-036 §6, #1204) with the bundles it
+selects; and the effective patch rows its layers set.
 
 It is built only from an allow-list of non-secret fields: reason codes,
 digests, epochs and fixed names. It never reads settings, environment values,
@@ -25,7 +25,8 @@ import sys
 from types import SimpleNamespace
 from typing import Any
 
-from .trust import DOMAIN_BUNDLES, PINNED_DOMAINS, TRUST_BUNDLE, TRUST_SERVICES, is_pinned_domain
+from .profiles import BUNDLES, PATCH_ROWS, ComposedProfile, CompositionProfileInvalid, booted_profile, compose_profile, load_operator_patch
+from .trust import PINNED_DOMAINS, TRUST_BUNDLE, TRUST_SERVICES, is_pinned_domain
 
 DUMP_SCHEMA = "seraph-composition-dump.v1"
 _CODE = re.compile(r"[A-Za-z0-9_.:-]{1,96}\Z")
@@ -44,26 +45,28 @@ def _digest(value: Any) -> str | None:
     return value if type(value) is str and _SHA.fullmatch(value) else None
 
 
-def _bundle_order() -> list[str]:
-    order: list[str] = []
-    for bundle in DOMAIN_BUNDLES.values():
-        if bundle not in order:
-            order.append(bundle)
-    return order
+def _profile_payload(profile: ComposedProfile | CompositionProfileInvalid | None) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    if isinstance(profile, CompositionProfileInvalid):
+        # Only a catalogued row id is echoed; free text from the operator's patch file never is.
+        row_id = profile.row_id if profile.row_id in PATCH_ROWS else (None if profile.row_id is None else "redacted")
+        return {"state": "invalid", "reason": _code(profile.reason), "row_id": row_id}
+    return profile.payload()
 
 
 def build_composition_dump(rows: dict[str, Any] | None, *, inventory_state: str, inventory_reason: str | None,
                            cordis: dict[str, Any], plugins: dict[str, dict[str, Any]] | None,
-                           source: str) -> dict[str, Any]:
+                           source: str,
+                           profile: ComposedProfile | CompositionProfileInvalid | None = None) -> dict[str, Any]:
     """Assemble the dump from owner rows and Cordis facts; only allow-listed fields pass."""
-    from .ownership import DOMAINS
     provider_digests = cordis.get("plugin_digests") or {}
+    selected = set(profile.profile.bundles) if isinstance(profile, ComposedProfile) else None
     bundles = []
-    for bundle in _bundle_order():
+    for item in BUNDLES:
+        bundle = item.name
         domains = []
-        for domain in DOMAINS:
-            if DOMAIN_BUNDLES.get(domain) != bundle:
-                continue
+        for domain in item.domains:
             row = (rows or {}).get(domain)
             plugin = None if plugins is None else plugins.get(domain)
             domains.append({
@@ -78,7 +81,8 @@ def build_composition_dump(rows: dict[str, Any] | None, *, inventory_state: str,
                     "state": _code(plugin.get("state")), "reason": _code(plugin.get("reason")),
                     "digest": _digest(plugin.get("digest"))},
             })
-        bundles.append({"bundle": bundle, "pinned": bundle == TRUST_BUNDLE, "status": "declared",
+        status = "declared" if selected is None else ("selected" if bundle in selected else "not_selected")
+        bundles.append({"bundle": bundle, "kind": item.kind, "pinned": bundle == TRUST_BUNDLE, "status": status,
                         "domains": domains})
     return {
         "schema": DUMP_SCHEMA,
@@ -92,9 +96,9 @@ def build_composition_dump(rows: dict[str, Any] | None, *, inventory_state: str,
         "bundles": bundles,
         "pinned_domains": sorted(PINNED_DOMAINS),
         "trust_services": [service.payload() for service in TRUST_SERVICES],
-        # No profile launcher or patch layer exists yet (ADR-036 §6 is a later slice).
-        "profile": None,
-        "effective_patch": [],
+        # ADR-036 §6 (#1204): the validated profile and the rows its patch layers set.
+        "profile": _profile_payload(profile),
+        "effective_patch": profile.effective_patch if isinstance(profile, ComposedProfile) else [],
     }
 
 
@@ -139,10 +143,22 @@ async def live_composition_dump(host) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - the dump reports the gap, never fails status
         rows, state, reason = None, "unavailable", "composition_inventory_unavailable"
     return build_composition_dump(rows, inventory_state=state, inventory_reason=reason, cordis=facts,
-                                  plugins=plugins, source="live")
+                                  plugins=plugins, source="live", profile=booted_profile())
 
 
-def offline_composition_dump(workspace: Path, *, node_path: Path | None = None) -> dict[str, Any]:
+def offline_profile(workspace: Path, *, requested: str | None,
+                    deployment_environment: str) -> ComposedProfile | CompositionProfileInvalid:
+    """The profile this workspace would boot with, validated exactly as boot validates it."""
+    try:
+        # Offline the dump never reads the no-login switch; production refuses it at startup.
+        return compose_profile(requested, deployment_environment=deployment_environment, local_no_login=False,
+                               operator_patch=load_operator_patch(workspace))
+    except CompositionProfileInvalid as exc:
+        return exc
+
+
+def offline_composition_dump(workspace: Path, *, node_path: Path | None = None, profile: str | None = None,
+                             deployment_environment: str = "development") -> dict[str, Any]:
     """The same dump from a stopped or running workspace, opened read-only; no child is started."""
     from .composition import CORDIS_VERSION, CompositionBlocked, reviewed_composition
     database = workspace / "seraph.db"
@@ -171,7 +187,9 @@ def offline_composition_dump(workspace: Path, *, node_path: Path | None = None) 
     except CompositionBlocked as exc:
         facts.update(state="blocked", reason=exc.reason)
     return build_composition_dump(rows, inventory_state=state, inventory_reason=reason, cordis=facts,
-                                  plugins=None, source="offline")
+                                  plugins=None, source="offline",
+                                  profile=offline_profile(workspace, requested=profile,
+                                                          deployment_environment=deployment_environment))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -179,12 +197,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("dump",))
     parser.add_argument("--workspace", type=Path, required=True, help="workspace directory holding seraph.db")
     parser.add_argument("--node", type=Path, help="explicit reviewed Node executable for the package check")
+    parser.add_argument("--profile", default="", help="COMPOSITION_PROFILE as the launcher reads it (empty derives it)")
+    parser.add_argument("--deployment-environment", default="development",
+                        help="DEPLOYMENT_ENVIRONMENT as the launcher reads it")
     args = parser.parse_args(argv)
     if not args.workspace.is_absolute() or (args.node is not None and not args.node.is_absolute()):
         parser.error("--workspace and --node must be absolute paths")
-    dump = offline_composition_dump(args.workspace, node_path=args.node)
+    dump = offline_composition_dump(args.workspace, node_path=args.node, profile=args.profile,
+                                    deployment_environment=args.deployment_environment)
     print(json.dumps(dump, indent=2, sort_keys=True))
-    return 0 if dump["inventory"]["state"] == "ok" else 1
+    return 0 if dump["inventory"]["state"] == "ok" and dump["profile"]["state"] == "valid" else 1
 
 
 if __name__ == "__main__":

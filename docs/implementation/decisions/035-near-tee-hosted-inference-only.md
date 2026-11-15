@@ -197,6 +197,28 @@ failing. Therefore:
   readback, Unknown liability, cost bound, consent and the serial lane.
   ADR-036 is unaffected.
 
+**Amendment 2026-11-15 ([#1184](https://github.com/seraph-quest/seraph/issues/1184)).**
+Repository repair (`repo_repair_source`), the last vertical without a NEAR
+TEE path, runs on the text slot serving `strategist_agent`:
+
+- The operator consents to the exact NEAR TEE request body (the body the
+  text-slot adapter sends for those messages: canonical model id, slot
+  output bound and temperature, structured output schema; nothing else).
+  The route digest binds the fixed NEAR base, the slot profile and its
+  complete contract hash, the model and `x-no-aliasing`.
+- Code-egress consent names `near_tee` and states that the NEAR gateway
+  receives the selected source and diagnostics as plaintext, that
+  attestation is not verified by Seraph and that there is no end-to-end
+  encryption.
+- Before admission, and again in the precontact guard, a repository
+  iteration's NEAR call must carry exactly the consented body and target;
+  otherwise it is refused (`repository_iteration_final_transport_changed`)
+  with nothing reserved or sent. OpenRouter is never a repository target.
+- The iteration reserves the slot's request cost bound. Every other gate
+  is unchanged (model echo, `x-no-aliasing`, billing readback, Unknown
+  liability, cost bound, consent, serial lane); no time-based guard is added.
+  `near_tee_route_unsupported` is no longer produced.
+
 ### Capability proofs kept
 
 The existing manual capability proof endpoint (`POST /api/settings/model-fabric/canary`,

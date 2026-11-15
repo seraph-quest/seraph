@@ -43,7 +43,8 @@ def test_frozen_domain_and_manifest_tables():
     assert STATE_DOMAIN not in PRE_STATE_DOMAINS and STATE_DOMAIN not in DOMAIN_INTRODUCTIONS
     assert DISPATCH_DOMAIN not in PRE_DISPATCH_DOMAINS and DISPATCH_DOMAIN not in DOMAIN_INTRODUCTIONS
     assert set(DOMAIN_INTRODUCTIONS) < set(PRE_STATE_DOMAINS)
-    assert PYTHON_HOSTED_DOMAINS == {STATE_DOMAIN, "seraph.authority.v1", "seraph.audit.v1"}
+    # #1198 pins the tasks ledger with them (ADR-036 §3).
+    assert PYTHON_HOSTED_DOMAINS == {STATE_DOMAIN, "seraph.authority.v1", "seraph.audit.v1", "seraph.tasks.v1"}
     assert MANIFEST_VERSION == "runtime-service-methods.v2" and MANIFEST_VERSION_V1 == "runtime-service-methods.v1"
     assert BINDING_SCHEMA == 3
 

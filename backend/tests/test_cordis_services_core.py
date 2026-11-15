@@ -236,6 +236,10 @@ def _boot_host(digests, *, admitting=True, plugin_state="ready"):
     return host
 
 
+# A transferable domain: the pinned tasks ledger never changes owner (#1198).
+_RACE_DOMAIN = "seraph.memory.v1"
+
+
 def _race(db_path: Path, digest: str, barrier: threading.Barrier, outcomes: list):
     async def run():
         engine = _engine(db_path)
@@ -245,9 +249,9 @@ def _race(db_path: Path, digest: str, barrier: threading.Barrier, outcomes: list
                 async with get_session() as db:
                     barrier.wait(timeout=10)
                     async with composition_writer(db):
-                        expected = CompositionDependency("seraph.tasks.v1", "legacy", 1,
-                                                         legacy_composition_digest("seraph.tasks.v1"))
-                        await transition_owner(db, runtime_domain="seraph.tasks.v1", expected=expected,
+                        expected = CompositionDependency(_RACE_DOMAIN, "legacy", 1,
+                                                         legacy_composition_digest(_RACE_DOMAIN))
+                        await transition_owner(db, runtime_domain=_RACE_DOMAIN, expected=expected,
                                                expected_state="draining", owner_kind="cordis", epoch=2,
                                                composition_digest=digest, state="blocked")
             outcomes.append(("won", digest))
@@ -263,9 +267,9 @@ async def test_racing_cutovers_on_two_connections_yield_exactly_one_owner(servic
     with lifecycle_fence_marker():
         async with get_session() as db:
             async with composition_writer(db):
-                expected = CompositionDependency("seraph.tasks.v1", "legacy", 1,
-                                                 legacy_composition_digest("seraph.tasks.v1"))
-                await transition_owner(db, runtime_domain="seraph.tasks.v1", expected=expected,
+                expected = CompositionDependency(_RACE_DOMAIN, "legacy", 1,
+                                                 legacy_composition_digest(_RACE_DOMAIN))
+                await transition_owner(db, runtime_domain=_RACE_DOMAIN, expected=expected,
                                        expected_state="ready", owner_kind="legacy", epoch=1,
                                        composition_digest=expected.composition_digest, state="draining")
     for _round in range(3):
@@ -283,7 +287,7 @@ async def test_racing_cutovers_on_two_connections_yield_exactly_one_owner(servic
             winner_digest = winners[0][1]
         else:  # Later racers against the stale expectation all lose.
             assert winners == [] and len(outcomes) == 2
-    current, state = await _row("seraph.tasks.v1")
+    current, state = await _row(_RACE_DOMAIN)
     assert (current.owner_kind, current.epoch, current.composition_digest, state) == ("cordis", 2, winner_digest, "blocked")
     async with get_session() as db:
         count = await db.scalar(select(func.count()).select_from(AuditEvent).where(

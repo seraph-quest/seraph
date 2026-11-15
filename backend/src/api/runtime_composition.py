@@ -54,17 +54,29 @@ async def list_domains(request: Request):
     return {"domains": await _domains()}
 
 
+@router.get("/runtime/composition/dump")
+async def composition_dump(request: Request):
+    """Read-only, secret-free dump of the booted composition (ADR-036 §6, #1198)."""
+    from src.runtime_plugins.bridge import cordis_host
+    from src.runtime_plugins.composition_dump import live_composition_dump
+    _operator(request)
+    return await live_composition_dump(cordis_host)
+
+
 @router.post("/runtime/composition/domains/{domain}/owner")
 async def transition_domain_owner(request: Request, domain: str, body: OwnerTransition):
     from src.runtime_plugins.bridge import cordis_host
     from src.runtime_plugins.cutover import cutover_manifest, transition_domain
     from src.runtime_plugins.ownership import CompositionBindingError
+    from src.runtime_plugins.trust import is_pinned_domain
     operator = _operator(request)
     if operator.ownership_continuity != "stable":
         # A rotated or recovering Root may read the owners but not move them.
         raise HTTPException(status_code=403, detail={"code": "operator_ownership_recovery_required",
                                                      "recovery_action": "complete_ownership_recovery"})
-    if domain not in {entry.domain for entry in cutover_manifest()}:
+    # A pinned trust domain (ADR-036 §3) reaches ``transition_domain``, which
+    # audits the refusal and answers ``composition_owner_not_transferable`` (409).
+    if domain not in {entry.domain for entry in cutover_manifest()} and not is_pinned_domain(domain):
         raise HTTPException(status_code=404, detail={"code": "composition_cutover_domain_invalid",
                                                      "recovery_action": None})
     if body.confirm_domain != domain:

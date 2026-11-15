@@ -49,11 +49,55 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
     "httpx>=0.28.0",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-addopts = "--cov=src --cov-report=term-missing"
+addopts = "--cov=src --cov-report=term-missing --strict-markers"
 markers = [
     "openrouter_legacy: explicitly re-enable retired OpenRouter (ADR-035) to pin historical mechanics; never production behavior",
+    "realtime(reason): the test genuinely depends on real elapsed time (kernel signals, SQLite busy handler, a real browser); reason= is required. The only exemption in scripts/check_test_determinism.py (#1218)",
 ]
+# Determinism visibility (#1218). Leaked resources, unraisable exceptions and
+# never-awaited coroutines fail the test that produced them. Any narrower
+# exception below must name its tracking issue; never add a broad ignore.
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+    "error:coroutine .* was never awaited:RuntimeWarning",
+    # Narrow, tracked exceptions. Later entries take precedence over the
+    # errors above. Delete each one with the change that removes its cause.
+    #
+    # #1224: repo worker and supervisor paths in repo_worker/repo_node/
+    # repo_sandbox/tool_package_runner leave anonymous child pipes (buffered or
+    # raw, name=<fd>) and killed-but-unreaped children (#1212) to the garbage
+    # collector. These entries are suite-wide because those objects are also
+    # collected in pytest's session-end gc pass, outside any test, where a
+    # module or test mark cannot apply (seen for test_repo_repair_executors).
+    # Files opened by path still fail.
+    "ignore:unclosed file <_io\\.(BufferedReader|FileIO) name=\\d+[ >]:ResourceWarning",
+    "ignore:subprocess \\d+ is still running:ResourceWarning",
+    # #1223: pytest-asyncio 1.3.0 asks asyncio.get_event_loop() for the "old"
+    # loop when it builds a scoped runner (plugin.py _temporary_event_loop_policy).
+    # On a fresh main thread that implicitly creates a loop nobody closes; the
+    # loop and its self-pipe socketpair (AF_UNIX, no address) are collected
+    # later. An application loop leaked the same way would match too, so the
+    # #1223 leak checks replace these two; sockets with an address still fail.
+    "ignore:unclosed event loop <_UnixSelectorEventLoop running=False closed=False debug=False>:ResourceWarning",
+    "ignore:unclosed <socket.socket fd=\\d+, family=1, type=1, proto=0>:ResourceWarning",
+    # #1222: seen in test_cordis_governed_services under the per-file
+    # accounting_db engine. Per-file engines are also reached through sync
+    # bridges that run asyncio.run() on a helper thread, so a pooled aiosqlite
+    # connection can outlive its loop. The single database seam removes the
+    # per-file engines; this entry goes with them.
+    "ignore:<aiosqlite.core.Connection object at 0x[0-9a-f]+> was deleted before being closed:ResourceWarning",
+]
+# Liveness watchdogs, not bounds (#1218): a test still running after
+# faulthandler_timeout dumps every thread's stack and keeps going; one still
+# running after `timeout` fails with its node id and stack, and the file
+# continues. Both sit far above any healthy test and below the shard runner's
+# per-file kill, so a hang reports where it is instead of exiting 124 blind.
+faulthandler_timeout = 240
+timeout = 420
+timeout_method = "signal"

@@ -393,4 +393,4 @@ def background_inference_status() -> dict[str, object]:
 def _scheduler_enabled() -> bool:
     # The effective value after ADR-036 patch layers (#1204).
     from src.runtime_plugins.profiles import scheduler_enabled
-    return scheduler_enabled()
+    return scheduler_enabled(settings.scheduler_enabled)

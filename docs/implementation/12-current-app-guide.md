@@ -1189,7 +1189,7 @@ catalogues:
 
   | Profile | Bundles | `DEPLOYMENT_ENVIRONMENT` | Env file |
   | --- | --- | --- | --- |
-  | `local` | all but `seraph-headless` | `development` (or the `test` process) | `.env.dev` |
+  | `local` | all but `seraph-headless` | any non-production value (as auth and the worker accept) | `.env.dev` |
   | `prod` | all but `seraph-headless` | `production` | `.env.prod` |
   | `headless` | trust, core, `seraph-channels`, `seraph-headless` | either | either |
 
@@ -1209,8 +1209,12 @@ patch `<workspace>/composition.patch.json`, which looks like this:
  "rows": [{"id": "seraph.scheduler.v1#enabled", "value": false}]}
 ```
 
-The file must be a regular file, not a symlink, owned by the service user or
-root, and not group- or world-writable. It must be 16 KiB or smaller, and it is
+The file must be a regular file (never a symlink, FIFO or device) owned by the
+service user, root or the workspace directory's owner (a host-written file in
+a container bind mount), and must not be group- or world-writable. Agent file
+and process tools are denied it (`_AGENT_DENIED_RUNTIME_PATHS`), so a model
+cannot write the operator layer. It is not yet a declared workspace state path,
+so backup and restore do not carry it. It must be 16 KiB or smaller, and it is
 parsed as closed JSON that refuses duplicate keys.
 
 **Refusal.** Any refusal raises `CompositionProfileInvalid`, so nothing boots: no
@@ -1236,7 +1240,8 @@ Patch reasons:
 - `operator_patch_unsafe`, `operator_patch_invalid`, `operator_patch_too_large`.
 
 Recovery: fix or remove the patch file, or correct `COMPOSITION_PROFILE`, then
-restart.
+restart. The logged fix names a row only when it is catalogued; any other row
+id from the file is `redacted`.
 
 **Effective values.** `profiles.scheduler_enabled()` returns the last patch
 layer's value for a row, or the live `SCHEDULER_ENABLED` setting when no layer

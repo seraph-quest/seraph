@@ -118,7 +118,10 @@ _ROW_ID = re.compile(r"(seraph\.[a-z0-9-]+\.v[0-9]+)#([a-z][a-z0-9_]{0,63})\Z")
 class Profile:
     profile_id: str
     bundles: tuple[str, ...]
-    deployment_environments: frozenset[str]
+    # Which DEPLOYMENT_ENVIRONMENT values it accepts: "production" (prod/production),
+    # "non_production" (anything else, matching what operator authentication and
+    # the worker already accept) or "any".
+    environments: str
     # The environment file the managed launcher reads; None means either.
     env_file: str | None
     patch: tuple[dict[str, Any], ...] = ()
@@ -126,10 +129,10 @@ class Profile:
 
 _ALL = BUNDLE_NAMES[:BUNDLE_NAMES.index("seraph-headless")]
 PROFILES: dict[str, Profile] = {
-    "local": Profile("local", _ALL, frozenset({"development", "test"}), ".env.dev"),
-    "prod": Profile("prod", _ALL, PRODUCTION_ENVIRONMENTS, ".env.prod"),
+    "local": Profile("local", _ALL, "non_production", ".env.dev"),
+    "prod": Profile("prod", _ALL, "production", ".env.prod"),
     "headless": Profile("headless", (TRUST_BUNDLE, *CORE_BUNDLES, "seraph-channels", "seraph-headless"),
-                        frozenset({"development", "test", *PRODUCTION_ENVIRONMENTS}), None),
+                        "any", None),
 }
 
 
@@ -248,16 +251,25 @@ def load_operator_patch(workspace: Path) -> list[Any] | None:
     """Read ``<workspace>/composition.patch.json`` safely; ``None`` when absent."""
     path = Path(workspace) / OPERATOR_PATCH_FILE
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        before = os.lstat(path)
     except FileNotFoundError:
         return None
     except OSError as exc:
-        # A symlink (ELOOP) or an unreadable file.
+        raise CompositionProfileInvalid("operator_patch_unsafe") from exc
+    if not stat.S_ISREG(before.st_mode):
+        # Never open a symlink, FIFO or device node.
+        raise CompositionProfileInvalid("operator_patch_unsafe")
+    try:
+        # The service user, root, or whoever owns the workspace directory (a
+        # host-written file in a container bind mount).
+        owners = {os.getuid(), 0, os.stat(workspace).st_uid}
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
         raise CompositionProfileInvalid("operator_patch_unsafe") from exc
     try:
         metadata = os.fstat(descriptor)
-        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-                or metadata.st_uid not in {os.getuid(), 0}):
+        if (not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (before.st_dev, before.st_ino)
+                or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH) or metadata.st_uid not in owners):
             raise CompositionProfileInvalid("operator_patch_unsafe")
         if metadata.st_size > MAX_PATCH_BYTES:
             raise CompositionProfileInvalid("operator_patch_too_large")
@@ -285,7 +297,10 @@ def compose_profile(requested: str | None, *, deployment_environment: str, local
     if profile is None:
         raise CompositionProfileInvalid("profile_unknown")
     environment = _environment(deployment_environment)
-    if environment not in profile.deployment_environments:
+    production = environment in PRODUCTION_ENVIRONMENTS
+    if profile.environments not in {"production", "non_production", "any"} or (
+            profile.environments == "production" and not production) or (
+            profile.environments == "non_production" and production):
         raise CompositionProfileInvalid("profile_environment_mismatch")
     if local_no_login and environment in PRODUCTION_ENVIRONMENTS:
         # Startup validation already refuses this; a profile never carries it either.
@@ -322,25 +337,35 @@ def booted_profile() -> ComposedProfile | None:
     return _booted
 
 
-def effective_row(row_id: str) -> Any:
-    """A catalogued row's effective value: the last patch layer, else its live environment setting."""
+_UNSET = object()
+
+
+def effective_row(row_id: str, base: Any = _UNSET) -> Any:
+    """A catalogued row's effective value: the last patch layer, else its environment base.
+
+    ``base`` is the caller's own reading of the environment setting; without it
+    the live ``settings`` attribute is read.
+    """
     spec = PATCH_ROWS[row_id]
     if _booted is not None:
         set_by_patch, value = _booted.value(row_id)
         if set_by_patch:
             return value
+    if base is not _UNSET:
+        return base
     from config.settings import settings
     return getattr(settings, spec.env_setting)
 
 
-def scheduler_enabled() -> bool:
-    return bool(effective_row("seraph.scheduler.v1#enabled"))
+def scheduler_enabled(base: Any = _UNSET) -> bool:
+    return bool(effective_row("seraph.scheduler.v1#enabled", base))
 
 
 def recovery_text(error: CompositionProfileInvalid) -> str:
     """Operator-facing fix for a refused composition; names files and settings, never values."""
     if error.reason.startswith("operator_patch") or error.reason.startswith("patch_"):
-        where = f" (row {error.row_id})" if error.row_id else ""
+        # Only a catalogued row id is echoed; operator file text never reaches the log.
+        where = "" if error.row_id is None else f" (row {error.row_id if error.row_id in PATCH_ROWS else 'redacted'})"
         return (f"Composition refused: {error.reason}{where}. Fix or remove <workspace>/{OPERATOR_PATCH_FILE} "
                 "(rows: " + ", ".join(sorted(PATCH_ROWS)) + "), then restart.")
     return (f"Composition refused: {error.reason}. Set COMPOSITION_PROFILE to one of "

@@ -1047,7 +1047,7 @@ if [ "$COMMAND" = "composition" ]; then
     exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
         "$(cordis_cli_python)" -B -m src.runtime_plugins.composition_dump dump \
         --workspace "$LOCAL_WORKSPACE_DIR" --profile "${COMPOSITION_PROFILE:-}" \
-        --deployment-environment "${DEPLOYMENT_ENVIRONMENT:-development}" "$@"
+        --deployment-environment "${DEPLOYMENT_ENVIRONMENT-development}" "$@"
 fi
 
 if [ "$COMMAND" = "local" ]; then

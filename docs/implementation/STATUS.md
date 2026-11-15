@@ -295,7 +295,8 @@ activation (the engine, the lifecycle domain and the status/digest gates). The
 composition dump's `profile` (id, source, bundles, digest, patch presence) and
 `effective_patch` are now real, live and offline (`./manage.sh -e dev
 composition dump` passes the non-secret selection). Bundles are marked
-`selected`/`not_selected`, and an invalid patch row id is never echoed.
+`selected`/`not_selected`. An uncatalogued patch row id is never echoed in the
+dump or the boot log. Agent file and process tools are denied the patch file.
 
 Partial because:
 - bundles select no code: the Cordis plugin set is still the one fixed reviewed
@@ -305,6 +306,8 @@ Partial because:
   [#1208](https://github.com/seraph-quest/seraph/issues/1208);
 - no catalogued row adds a reviewed alternative provider (such rows are refused
   `patch_provider_unreviewed`);
+- the patch file is not a declared workspace state path, so backup and restore
+  do not carry it;
 - the other composition env flags move in
   [#1206](https://github.com/seraph-quest/seraph/issues/1206).
 

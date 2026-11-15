@@ -155,7 +155,7 @@ def init_scheduler() -> AsyncIOScheduler | None:
     global _scheduler, _scheduler_loop
 
     from src.runtime_plugins.profiles import scheduler_enabled
-    if not scheduler_enabled():
+    if not scheduler_enabled(settings.scheduler_enabled):
         logger.info("Scheduler disabled (SCHEDULER_ENABLED=false or seraph.scheduler.v1#enabled patch row)")
         return None
 

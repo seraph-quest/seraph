@@ -874,7 +874,7 @@ async def _lifespan_services(app: FastAPI):
                     from src.runtime_plugins.lifecycle import runtime_lifecycle
                     from src.runtime_plugins.profiles import scheduler_enabled as profile_scheduler_enabled
                     for status in await runtime_lifecycle.start(cordis_host,
-                                                                scheduler_enabled=profile_scheduler_enabled()):
+                                                                scheduler_enabled=profile_scheduler_enabled(settings.scheduler_enabled)):
                         if status.get("state") != "active":
                             logging.getLogger(__name__).warning("Runtime lifecycle %s: %s (%s)", status["domain"],
                                                                 status["state"], status.get("reason"))

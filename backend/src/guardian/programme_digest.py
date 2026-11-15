@@ -503,7 +503,7 @@ def source_schedule(programme, history, remaining_allowance, now):
     if remaining_allowance <= 0:
         return unavailable("programme_allowance_exhausted")
     from src.runtime_plugins.profiles import scheduler_enabled
-    if not scheduler_enabled():
+    if not scheduler_enabled(settings.scheduler_enabled):
         return unavailable("scheduler_disabled")
     scheduler = get_scheduler()
     if scheduler is None or not scheduler.running:

@@ -74,7 +74,9 @@ def test_the_bundle_catalogue_is_the_adr_table_and_every_domain_has_one_bundle()
 
 
 @pytest.mark.parametrize(("environment", "expected"), [
-    ("development", "local"), ("test", "local"), ("production", "prod"), (" Prod ", "prod")])
+    ("development", "local"), ("test", "local"), ("production", "prod"), (" Prod ", "prod"),
+    # Auth and the worker accept any non-production value; so does the derived profile.
+    ("", "local"), ("staging", "local"), ("Development ", "local")])
 def test_an_existing_install_derives_its_profile_from_the_deployment_environment(environment, expected):
     composed = _compose(None, environment=environment)
     assert (composed.profile.profile_id, composed.source) == (expected, "deployment_environment")
@@ -94,6 +96,8 @@ def test_profile_selection_refusals():
     _refused("profile_environment_mismatch", requested="local", environment="production")
     _refused("profile_environment_mismatch", requested="prod", environment="development")
     _refused("profile_environment_mismatch", requested="prod", environment="")
+    _refused("profile_environment_mismatch", requested="prod", environment="staging")
+    assert _compose("local", environment="staging").profile.profile_id == "local"
     # Startup validation already refuses no-login outside development; a profile never carries it.
     _refused("profile_no_login_forbidden", environment="production", no_login=True)
     _refused("profile_no_login_forbidden", requested="headless", environment="production", no_login=True)
@@ -108,7 +112,7 @@ def test_profile_selection_refusals():
     (("seraph-trust", *CORE_BUNDLES, "seraph-trust"), "profile_bundle_duplicate"),
 ])
 def test_a_profile_that_omits_or_reorders_the_pinned_trust_bundle_is_refused(bundles, reason):
-    catalogue = {"local": Profile("local", bundles, frozenset({"development"}), ".env.dev")}
+    catalogue = {"local": Profile("local", bundles, "non_production", ".env.dev")}
     _refused(reason, requested="local", catalogue=catalogue)
 
 
@@ -149,13 +153,13 @@ def test_patch_shape_refusals():
 
 
 def test_a_profile_patch_is_validated_by_the_same_rules():
-    pinned = {"local": Profile("local", PROFILES["local"].bundles, frozenset({"development"}), ".env.dev",
+    pinned = {"local": Profile("local", PROFILES["local"].bundles, "non_production", ".env.dev",
                                ({"id": "seraph.tasks.v1#enabled", "value": False},))}
     _refused("patch_row_pinned", requested="local", catalogue=pinned)
 
 
 def test_layers_apply_in_order_and_the_operator_layer_wins():
-    catalogue = {"local": Profile("local", PROFILES["local"].bundles, frozenset({"development"}), ".env.dev",
+    catalogue = {"local": Profile("local", PROFILES["local"].bundles, "non_production", ".env.dev",
                                   ({"id": SCHEDULER_ROW, "value": False},))}
     profile_only = _compose("local", catalogue=catalogue)
     assert profile_only.effective_patch == [{"id": SCHEDULER_ROW, "value": False, "layer": "profile"}]
@@ -186,6 +190,11 @@ def test_the_operator_patch_file_is_read_safely(tmp_path):
         load_operator_patch(tmp_path)
     assert linked.value.reason == "operator_patch_unsafe"
     (tmp_path / OPERATOR_PATCH_FILE).unlink()
+    os.mkfifo(tmp_path / OPERATOR_PATCH_FILE)
+    with pytest.raises(CompositionProfileInvalid) as fifo:
+        load_operator_patch(tmp_path)
+    assert fifo.value.reason == "operator_patch_unsafe"
+    (tmp_path / OPERATOR_PATCH_FILE).unlink()
     for body, reason in ((b"{", "operator_patch_invalid"),
                          (b'{"schema": "seraph-composition-patch.v1", "rows": [], "rows": []}',
                           "operator_patch_invalid"),
@@ -212,6 +221,12 @@ async def test_a_patch_row_changes_the_actual_scheduler_activation(tmp_path, mon
     assert boot_profile().effective_patch == [] and scheduler_enabled() is True
     monkeypatch.setattr(settings, "scheduler_enabled", False)
     assert scheduler_enabled() is False
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+    monkeypatch.setattr(settings, "scheduler_enabled", False)
+    _write_patch(tmp_path, [{"id": SCHEDULER_ROW, "value": True}])
+    assert boot_profile().value(SCHEDULER_ROW) == (True, True)
+    # The patch row wins over the environment base layer, in every reader.
+    assert scheduler_enabled() is True and scheduler_enabled(False) is True
     monkeypatch.setattr(settings, "scheduler_enabled", True)
     _write_patch(tmp_path, [{"id": SCHEDULER_ROW, "value": False}])
     composed = boot_profile()
@@ -324,3 +339,20 @@ async def test_manage_sh_composition_dump_passes_the_profile_selection(accountin
                              cwd=launcher, env=env, capture_output=True, text=True, timeout=120, check=False)
     assert refused.returncode == 1
     assert json.loads(refused.stdout)["profile"]["reason"] == "profile_environment_mismatch"
+
+
+def test_the_operator_patch_file_is_not_agent_writable(tmp_path, monkeypatch):
+    from config.settings import settings
+    from src.workspace.state_registry import AgentWorkspaceAccess, canonical_agent_workspace_access
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    _write_patch(tmp_path, [{"id": SCHEDULER_ROW, "value": False}])
+    assert canonical_agent_workspace_access(tmp_path, tmp_path / OPERATOR_PATCH_FILE) is AgentWorkspaceAccess.DENIED
+
+
+def test_recovery_text_never_echoes_uncatalogued_operator_text():
+    secret = "ghp_1204_in_a_row_id\nforged log line"
+    refused = _refused("patch_row_invalid", patch=[{"id": secret, "value": True}])
+    text = profiles.recovery_text(refused)
+    assert "ghp_1204" not in text and "forged" not in text and "redacted" in text
+    pinned = _refused("patch_row_pinned", patch=[{"id": "seraph.tasks.v1#enabled", "value": False}])
+    assert "redacted" in profiles.recovery_text(pinned)

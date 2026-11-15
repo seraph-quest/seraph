@@ -222,13 +222,14 @@ async def prepare_repository_near_route(monkeypatch, *, gateway=None, jobs=None,
     The repository repair iteration (and the planner) runs on it; when the
     suite configured another route first, this is the next policy revision.
     Text and
-    structured output capability proofs, the write-only key, a real
+    structured output capability proofs, a fresh broker, the write-only key, a real
     catalog-check receipt and (unless ``configure_accounting`` is False, for
     contact-free unit stores) the durable accounting ceiling. Returns the
     installed ``repository_near_gateway`` (OpenRouter and every other host
     fail the test).
     """
     gateway = gateway or repository_near_gateway()
+    install_isolated_broker(monkeypatch)
     if egress_revision is None:
         # A reviewed policy change on the same workspace and accounting lane
         # as any route the suite configured first (never an in-place rewrite).
@@ -237,6 +238,22 @@ async def prepare_repository_near_route(monkeypatch, *, gateway=None, jobs=None,
     return await prepare_near_tee_vertical(monkeypatch, near=gateway, jobs=jobs, egress_revision=egress_revision,
         ceiling_microusd=ceiling_microusd, request_cost_bound_microusd=request_cost_bound_microusd,
         max_input_tokens=REPOSITORY_MAX_INPUT_TOKENS, configure_accounting=configure_accounting)
+
+
+def install_isolated_broker(monkeypatch):
+    """A fresh process-local broker for this test (as test_near_tee_text_slot's
+    ``isolated_broker``): an Unknown NEAR cost keeps its serial lease blocked
+    by design, which must never leak into later tests in the same process."""
+    from src import llm_runtime
+    from src.api import model_fabric_settings as api
+    from src.model_fabric import execution, probe, remote_inference_admission
+    broker = remote_inference_admission.RemoteInferenceAdmissionBroker(durable_accounting=True)
+    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", broker)
+    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", broker)
+    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    monkeypatch.setattr(probe, "remote_inference_admission_broker", broker)
+    monkeypatch.setattr(api, "remote_inference_admission_broker", broker)
+    return broker
 
 
 def near_completion_requests(near):

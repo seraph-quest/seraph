@@ -132,14 +132,6 @@
    "category": "capability_owned",
    "count": 1
   },
-  "api/workflows.py::_repo_repair_route_metadata::build_model_kwargs:strategist_agent": {
-   "category": "capability_owned",
-   "count": 1
-  },
-  "api/workflows.py::grant_repo_repair_code_egress_consent::build_model_kwargs:strategist_agent": {
-   "category": "capability_owned",
-   "count": 1
-  },
   "evals/harness.py::_eval_provider_fallback_chain::completion_with_fallback_sync": {
    "category": "eval_facade",
    "count": 1
@@ -324,7 +316,11 @@
    "category": "capability_owned",
    "count": 1
   },
-  "workflows/repo_repair.py::RepoRepairService.resolve_proposal::build_model_kwargs": {
+  "workflows/repo_repair.py::single_shot_transport::FallbackLiteLLMModel": {
+   "category": "capability_owned",
+   "count": 1
+  },
+  "workflows/repo_repair.py::single_shot_transport::build_model_kwargs": {
    "category": "capability_owned",
    "count": 1
   },
@@ -333,10 +329,6 @@
    "count": 1
   },
   "workflows/repo_repair_source.py::grant_repository_iteration_consent::build_model_kwargs:strategist_agent": {
-   "category": "capability_owned",
-   "count": 1
-  },
-  "workflows/repo_repair_source.py::repository_source_preview::build_model_kwargs:strategist_agent": {
    "category": "capability_owned",
    "count": 1
   },

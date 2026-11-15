@@ -61,9 +61,10 @@ jobs:
               # The whole shard in one pytest process, to expose cross-file leaks.
               uv run python scripts/run_backend_test_shard.py "${common[@]}" --single-process --single-process-timeout-seconds 3900 ;;
             timezone)
-              # One pass under UTC+14, far from the runner's UTC.
-              export TZ=Pacific/Kiritimati
-              echo "timezone: $TZ ($(date +%z))" | tee -a "$GITHUB_STEP_SUMMARY"
+              # One pass under UTC+14, far from the runner's UTC. The root
+              # conftest pins tests to UTC unless SERAPH_TEST_TZ opts in.
+              export SERAPH_TEST_TZ=Pacific/Kiritimati
+              echo "timezone: $SERAPH_TEST_TZ ($(TZ=$SERAPH_TEST_TZ date +%z))" | tee -a "$GITHUB_STEP_SUMMARY"
               uv run python scripts/run_backend_test_shard.py "${common[@]}" --file-timeout-seconds 900 --keep-going ;;
           esac
 

@@ -45,6 +45,10 @@ _READ_ONLY_PATHS = (
     "near-tee-catalog-receipts.json",
     "near-tee-catalog-observations.json",
     "near-tee-credential-binding.json",
+    # Their crash-left atomic staging files (#1186).
+    ".near-tee-catalog-receipts.json.4242.tmp",
+    ".near-tee-catalog-observations.json.4242.tmp",
+    ".near-tee-credential-binding.json.4242.tmp",
     "local-runtime-profile-receipts/receipt.json",
     ".seraph-extension-snapshots/pack.json",
     "cache/entry.txt",

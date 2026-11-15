@@ -284,6 +284,26 @@ def test_runtime_registry_binds_existing_persistence_roots_without_scanning(tmp_
     assert calendar_spec.required is False
 
 
+def test_runtime_registry_declares_the_near_tee_atomic_staging_files(tmp_path):
+    """#1186: a crash-left ``.<name>.<pid>.tmp`` of a NEAR TEE writer is optional cache."""
+    registry = canonical_workspace_registry(tmp_path)
+    for name in ("near-tee-catalog-receipts.json", "near-tee-catalog-observations.json",
+                 "near-tee-credential-binding.json"):
+        staging = f".{name}.4242.tmp"
+        assert registry.classify_path(staging) is WorkspaceStateClass.CACHE
+        assert registry.path_spec(staging).required is False
+        assert registry.agent_workspace_access(staging) is AgentWorkspaceAccess.READ_ONLY
+    # Only the declared targets and only the exact ``.<name>.<pid>.tmp`` shape.
+    for unknown in (".model-fabric-settings.json.4242.tmp", ".near-tee-catalog-receipts.json.tmp",
+                    ".near-tee-catalog-receipts.json.42a.tmp", "near-tee-catalog-receipts.json.4242.tmp",
+                    "projects/.near-tee-catalog-receipts.json.4242.tmp"):
+        with pytest.raises(UnknownWorkspacePathError):
+            registry.classify_path(unknown)
+    with pytest.raises(WorkspaceStateError):
+        WorkspaceConfig(identity=registry.config.identity, declared_paths=registry.config.declared_paths,
+                        atomic_staging_targets=("not-declared.json",))
+
+
 @pytest.mark.parametrize(
     ("logical_path", "expected"),
     [

@@ -311,11 +311,11 @@ async def test_unavailable_route_fails_closed_before_contact(accounting_db, real
             await execute_native_inference(operator=env["operator"], purpose="background", messages=_messages("cordis-noroute"),
                                            max_tokens=64, idempotency_key="inf-noroute", host=env["host"])
         # ADR-035: with the NEAR TEE slot's egress revoked no route remains;
-        # the service names the stable no-route cause before any contact.
-        assert unavailable.value.reason_code == "openrouter_retired"
+        # the service names the revocation (not a provider retirement) before any contact.
+        assert unavailable.value.reason_code == "provider_policy_revoked"
         assert env["model"].calls == []
         job = (await _governed_jobs(env["jobs"]))[-1]
-        assert job["status"] == "blocked" and job["failure_reason"] == "openrouter_retired"
+        assert job["status"] == "blocked" and job["failure_reason"] == "provider_policy_revoked"
 
 
 async def _governed_jobs(jobs):
@@ -591,13 +591,19 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
             await execute_native_inference(operator=env["operator"], purpose="background", messages=_messages("lane-burst-2"),
                                            max_tokens=64, idempotency_key="burst-2", host=env["host"])
         assert burst.value.reason_code == "cordis_inference_capacity" and "lane-burst-2" not in model.calls
-        chats_before = len([row for row in (await jobs.inference_accounting_snapshot())["operations"]
-                            if row["runtime_path"] == "chat_agent"])
+        chat_ids_before = {row["operation_id"] for row in (await jobs.inference_accounting_snapshot())["operations"]
+                           if row["runtime_path"] == "chat_agent"}
         chat = _chat(env, "chat-during-burst")
-        assert await _until(lambda: _chat_rows(jobs, chats_before + 1))  # Admitted, not refused for capacity.
+        assert await _until(lambda: _chat_rows(jobs, len(chat_ids_before) + 1))  # Admitted, not refused for capacity.
         model.gates["lane-burst-1"].set()
         assert (await first)["job"]["status"] == "succeeded"
         assert (await chat) == "Answer for chat-during-burst"
+        # The chat's usage settled from NEAR billing evidence (2_000 nano-USD = 2 micro-USD).
+        from src.model_fabric.accounting import is_near_operation
+        chat_usage = [row for row in (await jobs.inference_accounting_snapshot())["operations"]
+                      if row["runtime_path"] == "chat_agent" and row["operation_id"] not in chat_ids_before]
+        assert [(row["state"], row["actual_cost_microusd"]) for row in chat_usage] == [("settled", 2)], chat_usage
+        assert is_near_operation(chat_usage[0]["runtime_path"], chat_usage[0]["profile_id"]), chat_usage
         monkeypatch.setattr(governed_services, "CORDIS_INFERENCE_PER_OWNER", 4)
 
         # Unknown cost: by broker design an uncertain provider result keeps the serial slot

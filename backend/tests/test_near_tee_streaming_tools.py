@@ -546,10 +546,11 @@ async def test_cordis_inference_request_reaches_near_tee_and_blocks_without_it(c
     from src.auth.service import authenticate_session
     operator = await authenticate_session(owner["session_id"], touch=False)
     jobs, run, candidate = await _governed_run(operator, purpose="background")
-    # No NEAR TEE slot: the stable OpenRouter-retired block, no contact.
+    # No NEAR TEE slot and no retained OpenRouter setup: the shared route
+    # precedence names no_active_provider (#1186), with no contact.
     with pytest.raises(NativeServiceBlocked) as blocked:
         await _request_inference(jobs, run, candidate)
-    assert blocked.value.reason_code == "openrouter_retired"
+    assert blocked.value.reason_code == "no_active_provider"
 
     near, operator = await _ready(client, monkeypatch, prove=("streaming",))
     jobs, run, candidate = await _governed_run(operator, purpose="interactive")

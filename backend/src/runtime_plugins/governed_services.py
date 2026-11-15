@@ -342,14 +342,17 @@ async def _request_inference(jobs, run, candidate) -> dict:
         # The slot is taken inside the try and always released in its finally.
         _cordis_inflight[owner] = _cordis_inflight.get(owner, 0) + 1
         tokens = set_runtime_context(run.session_id, mode, trust_principal=principal)
-        from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, openrouter_retired
+        from src.model_fabric.retirement import OPENROUTER_RETIRED_REASON, inactive_route_reason, openrouter_retired
         from src.llm_runtime import _near_tee_runtime_controls
         # ADR-035: a usable NEAR TEE text slot serves both purposes through the
         # same broker and ledger; provider identity is not part of the contract.
         near_controls = _near_tee_runtime_controls(route)
         if near_controls is None and openrouter_retired():
-            # No NEAR TEE route: name the stable cause instead of a generic block.
-            raise NativeServiceBlocked(OPENROUTER_RETIRED_REASON)
+            # No NEAR TEE route: name the stable cause instead of a generic
+            # block, with the same precedence Settings and verticals use
+            # (revoked egress -> ``provider_policy_revoked``, then the slot's
+            # own reason, then ``openrouter_retired``/``no_active_provider``).
+            raise NativeServiceBlocked(inactive_route_reason(route) or OPENROUTER_RETIRED_REASON)
         if near_controls is not None and candidate["max_tokens"] > near_controls["output_limit"]:
             # Named, not a generic route block: the request asks for more
             # output than the operator's NEAR TEE slot allows.

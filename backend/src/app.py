@@ -431,6 +431,58 @@ def _near_tee_chat_route_status(vlm_status: dict[str, object]) -> dict[str, obje
     }
 
 
+NO_ACTIVE_CHAT_MODEL_LABEL = "not configured"
+
+
+def _adr035_chat_identity(
+    runtime: dict[str, str],
+    route_status: dict[str, object],
+) -> tuple[dict[str, str], dict[str, object]]:
+    """ADR-035 (#1189): report the model that actually serves chat.
+
+    Under the NEAR TEE-only policy the top-level ``provider``/``model`` name
+    the active NEAR TEE text slot, never the environment default model. With
+    OpenRouter retired and no active slot, chat has no model: both the
+    top-level identity and the effective route say "not configured" instead
+    of the stale retired default. Readiness and reasons are left untouched.
+    """
+    policy = route_status.get("active_provider_policy")
+    if policy not in {"near_tee_only", "none_openrouter_retired"}:
+        return runtime, route_status
+    model = str(route_status.get("model") or "") if policy == "near_tee_only" else ""
+    if model:
+        return {
+            **runtime,
+            "provider": str(route_status.get("provider") or ""),
+            "model": model,
+            "model_label": str(route_status.get("model_label") or _runtime_model_label(model)),
+            "api_base": str(route_status.get("api_base") or ""),
+            "active_profile": str(route_status.get("active_profile") or ""),
+        }, route_status
+    reported = {
+        **runtime,
+        "provider": "none",
+        "model": "",
+        "model_label": NO_ACTIVE_CHAT_MODEL_LABEL,
+        "api_base": "",
+        "active_profile": "",
+    }
+    if policy == "none_openrouter_retired":
+        route_status = {
+            **route_status,
+            "active_profile": "",
+            "provider": "none",
+            "provider_label": "none",
+            "model": "",
+            "model_label": "",
+            "mode": "blocked",
+            "route_label": NO_ACTIVE_CHAT_MODEL_LABEL,
+            "summary_label": f"{NO_ACTIVE_CHAT_MODEL_LABEL} · no active inference provider",
+            "api_base": "",
+        }
+    return reported, route_status
+
+
 def _augment_inference_readiness(
     route_status: dict[str, object],
     fabric_status: dict[str, object],
@@ -922,6 +974,7 @@ def create_app() -> FastAPI:
             _effective_runtime_route_status(runtime, vlm_status),
             fabric_status,
         )
+        runtime, effective_runtime = _adr035_chat_identity(runtime, effective_runtime)
         return {
             "version": app.version,
             "build_id": f"SERAPH_PRIME_v{app.version}",

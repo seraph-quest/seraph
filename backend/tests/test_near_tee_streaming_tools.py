@@ -470,11 +470,22 @@ async def test_chat_rest_and_stream_effective_route_and_runtime_status(client, m
     from src.approval.runtime import reset_runtime_context
 
     # Not configured: chat_agent reports the honest blocked reason.
-    blocked = (await client.get("/api/runtime/status")).json()["effective_runtime"]
+    blocked_payload = (await client.get("/api/runtime/status")).json()
+    blocked = blocked_payload["effective_runtime"]
     assert blocked["inference_ready"] is False and "openrouter_retired" in blocked["inference_readiness"]["reasons"]
+    # #1189: no slot, so the top-level identity is "not configured", never the env default.
+    assert blocked_payload["provider"] == "none" and blocked_payload["model"] == ""
+    assert blocked_payload["model_label"] == "not configured" and blocked["model"] == ""
 
     near, operator = await _ready(client, monkeypatch, prove=("streaming", "tool_use"))
-    status = (await client.get("/api/runtime/status")).json()["effective_runtime"]
+    payload = (await client.get("/api/runtime/status")).json()
+    status = payload["effective_runtime"]
+    # #1189: the top-level identity is the NEAR TEE text slot that serves chat.
+    assert payload["provider"] == "near_tee" and payload["model"] == TEXT_MODEL
+    assert payload["model_label"] == TEXT_MODEL.split("/")[-1] and payload["active_profile"] == "near_tee.text"
+    assert payload["model"] != payload["default_model"]
+    posture = (await client.get("/api/operator/control-plane")).json()["runtime_posture"]["runtime"]
+    assert posture["provider"] == "near_tee" and posture["model"] == TEXT_MODEL
     assert status["provider"] == "near_tee" and status["model"] == TEXT_MODEL
     assert status["active_profile"] == "near_tee.text" and status["inference_ready"] is True, status
     assert status["tee_hosting_label"].startswith("TEE-hosted per NEAR catalog as of ")

@@ -880,7 +880,10 @@ JSON rejected) and calls to tools that were not offered fail closed. Streaming
 and tool turns each need their own fresh `streaming` / `tool_use` capability
 check. `/api/runtime/status` `chat_agent` reports the NEAR TEE route, model and
 dated catalog label when the slot is the active provider, otherwise the slot's
-blocked reason with no provider. Chat-turn result adoption authenticates the
+blocked reason with no provider. Its top-level `provider`/`model` (and the
+operator posture's runtime) name that same serving slot, or `none` / "not
+configured" when no slot serves chat; the environment default model appears
+only as `default_model` (#1189). Chat-turn result adoption authenticates the
 operator root session captured at admission behind a conversation-scoped chat
 principal (a revoked root or a different owner is not adopted; the cost still
 settles). Cordis requests above the slot's output limit are refused with

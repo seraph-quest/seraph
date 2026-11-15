@@ -155,7 +155,8 @@ def _assert_cockpit_answered(results, baseline, label: str) -> None:
     # Accounting may be blocked in a test workspace, but the effective
     # provider path must still be reported rather than collapsing to unknown.
     assert runtime["provider"] and runtime["provider"] != "unknown", runtime
-    assert runtime["model"], runtime
+    # No NEAR TEE slot in this workspace: "not configured", never the env default (#1189).
+    assert runtime["model"] or runtime["model_label"] == "not configured", runtime
 
 
 async def _writer_free_baseline(client):

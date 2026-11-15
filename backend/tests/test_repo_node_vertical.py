@@ -198,7 +198,9 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         elif failure!="nested_timeout":
             stopped=failure=="cleanup_deadline"
             assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGSTOP if stopped else signal.SIGKILL)
+        signalled_at=time.monotonic()
         await native._wait_for_task_set(dispatch,timeout=15,description="Actual Node lifecycle dispatch did not settle")
+        settled_after=time.monotonic()-signalled_at
         job=await durable_job_repository.get_job(job_id)
         assert job["status"] in {"cancelled","unknown_external_effect","failed"},job
         if failure in {"supervisor_death","cleanup_deadline"}:
@@ -206,7 +208,9 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         if failure=="nested_timeout":assert job["status"]=="failed",job
         authority={"job_id":job_id,"authority_digest":marker["authority_digest"],"attempt_id":marker["attempt_id"],"fencing_token":marker["fencing_token"]}
         if stopped:
-            assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT)
+            assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT),{"settled_after_seconds":round(settled_after,2),
+                "checkpoints":[{key:item.get(key) for key in ("checkpoint_id","state")} for item in job["checkpoints"][-8:]],
+                "failure_reason":job.get("failure_reason")}
             stopped=False
             await asyncio.to_thread(os.waitpid,owned_pid,0)
         await asyncio.sleep(2.2)

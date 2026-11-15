@@ -1132,6 +1132,45 @@ or `cost_liability` jobs and never replays their effects. Backup and restore
 stay with the host CLI against a stopped backend; there is no in-process
 maintenance handoff.
 
+### Pinned trust domains and composition dump (#1198)
+
+ADR-036 §3 pins the `seraph-trust` services. `runtime_plugins/trust.py` is the
+one code copy of that table (`TRUST_SERVICES`) and of the §5 domain-to-bundle
+map (`DOMAIN_BUNDLES`). Four domains have frozen owner rows today
+(`PINNED_DOMAINS`): `seraph.state.v1`, `seraph.authority.v1`, `seraph.audit.v1`
+(#1024) and `seraph.tasks.v1` (#1198). `seraph.inference.v1`, the execution
+guard, operator authentication and the credential vault are listed with
+`owner_row_frozen: false`: named as pinned targets, not yet enforced.
+`ownership.PYTHON_HOSTED_DOMAINS` is the same set.
+
+`is_pinned_domain` is the one predicate. A pinned row is always the legacy
+owner with the fixed legacy digest: `register_cutover_domain` refuses a pinned
+domain, `transition_domain` and `POST
+/api/runtime/composition/domains/{domain}/owner` refuse it with
+`composition_owner_not_transferable` (HTTP 409) and first write a
+`runtime_composition_pin_refused` audit event (domain, target, path, reason)
+in its own transaction, and `transition_owner` refuses any owner or digest
+change before writing. A legacy-to-legacy epoch fence (draining, blocked at a
+higher epoch, ready) is not a transfer and still works, so an epoch change
+still blocks unstarted jobs bound to the old tasks epoch. An inventory whose
+tasks row names any other owner fails closed (`composition_inventory_invalid`).
+
+The composition dump (`runtime_plugins/composition_dump.py`, schema
+`seraph-composition-dump.v1`) is read-only. It lists each declared bundle with
+its domains; per domain the owner kind, epoch, state, owner digest, the
+reviewed Cordis provider digest and, live, the plugin state the child reports;
+the Cordis kernel facts (version, profile id, package and composition digests);
+the pinned domains and trust services; `profile: null` and `effective_patch:
+[]`, since no profile or patch layer exists yet. Only reason codes, digests,
+epochs and fixed names pass through; it reads no settings, environment values
+or vault content. The live dump is `composition` in `/api/runtime/status` and
+`GET /api/runtime/composition/dump` (authenticated). `./manage.sh -e dev
+composition dump [--node /absolute/node]` prints the offline dump: it runs
+keyless (`env -i`), opens the managed local workspace's `seraph.db` read-only,
+checks the reviewed Cordis package without starting the child, and exits
+non-zero unless the inventory decodes. It is dev-only; production reads the
+status route.
+
 ### Scheduler and dispatcher lifecycle (#1025)
 
 Two runtime domains own a lifecycle, not a store: `seraph.scheduler.v1` (the

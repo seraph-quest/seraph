@@ -33,9 +33,10 @@ import hashlib
 import json
 import logging
 
-from .ownership import (DOMAINS, PRESETS_DOMAIN, PYTHON_HOSTED_DOMAINS, RECOVERY_EVENT, CompositionBindingError,
+from .ownership import (DOMAINS, PRESETS_DOMAIN, RECOVERY_EVENT, CompositionBindingError,
                         CompositionDependency, _checked_row, composition_writer, inventory,
                         legacy_composition_digest, transition_owner)
+from .trust import PIN_REFUSED_REASON, is_pinned_domain, record_pin_refusal
 
 logger = logging.getLogger(__name__)
 CUTOVER_EVENT = "runtime_composition_domain_cutover"
@@ -61,7 +62,10 @@ def register_cutover_domain(domain: str, *, prerequisites: tuple[str, ...] = ())
     cutover order. Registering the same domain twice is refused.
     """
     known = {entry.domain for entry in _MANIFEST}
-    if domain not in DOMAINS or domain in known or domain in PYTHON_HOSTED_DOMAINS:
+    if is_pinned_domain(domain):
+        # ADR-036 §3: a pinned trust domain is never in the cutover manifest.
+        raise CompositionBindingError(PIN_REFUSED_REASON)
+    if domain not in DOMAINS or domain in known:
         raise CompositionBindingError("composition_cutover_domain_invalid")
     if any(item not in known for item in prerequisites):
         raise CompositionBindingError("composition_cutover_prerequisite_unknown")
@@ -229,6 +233,10 @@ async def transition_domain(domain: str, target: str, *, host, actor: str, expec
     """Move one manifest domain to ``target`` at a higher epoch; returns the new row."""
     from src.db.engine import get_session
     from src.workspace.lifecycle import lifecycle_fence_marker
+    if is_pinned_domain(domain):
+        # Refused before any writer opens, so the audit row commits on its own.
+        await record_pin_refusal(domain, target=target, actor=actor, path="transition_domain")
+        raise CompositionBindingError(PIN_REFUSED_REASON)
     if domain not in {entry.domain for entry in _MANIFEST} or target not in TARGETS:
         raise CompositionBindingError("composition_cutover_domain_invalid")
     _require_owner_lease()

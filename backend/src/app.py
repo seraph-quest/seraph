@@ -70,6 +70,17 @@ async def _runtime_domains_or_unavailable() -> list[dict]:
 from src.runtime_plugins.bridge import cordis_host
 
 
+async def _composition_dump_or_unavailable() -> dict:
+    """The read-only, secret-free composition dump (ADR-036, #1198); never fails the status read."""
+    try:
+        from src.runtime_plugins.composition_dump import live_composition_dump
+        return await live_composition_dump(cordis_host)
+    except Exception:
+        logging.getLogger(__name__).warning("Composition dump unavailable", exc_info=True)
+        return {"schema": "seraph-composition-dump.v1", "source": "live",
+                "inventory": {"state": "unavailable", "reason": "composition_dump_unavailable"}}
+
+
 async def _lifecycle_runtime_or_unavailable(domain: str) -> dict:
     """Scheduler/dispatch lifecycle owner and state (#1025); never fails the status read."""
     try:
@@ -1001,6 +1012,8 @@ def create_app() -> FastAPI:
             # Which owner runs scheduled work and WorkBoard dispatch, and why not (#1025).
             "scheduler_runtime": await _lifecycle_runtime_or_unavailable("seraph.scheduler.v1"),
             "dispatch_runtime": await _lifecycle_runtime_or_unavailable("seraph.dispatch.v1"),
+            # Bundles, owners, epochs, provider digests and pins as booted (ADR-036, #1198).
+            "composition": await _composition_dump_or_unavailable(),
             # Keep the historical key for API consumers while exposing the
             # active resource class explicitly.  No GPU service is contacted.
             "gpu_admission": remote_inference_admission,

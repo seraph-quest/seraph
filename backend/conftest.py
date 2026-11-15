@@ -13,8 +13,10 @@ from pathlib import Path
 # file construct ``Settings(_env_file=...)`` themselves.
 os.environ["SERAPH_SETTINGS_ENV_FILE"] = ""
 # Production derives behaviour from the local hour and date. Pin the zone so
-# a run's result does not depend on the host's timezone setting.
-os.environ["TZ"] = "UTC"
+# a run's result does not depend on the host's timezone setting. The only
+# override is an explicit SERAPH_TEST_TZ, which the scheduled timezone lane
+# sets on purpose (#1220); an ambient TZ never selects the zone.
+os.environ["TZ"] = os.environ.get("SERAPH_TEST_TZ") or "UTC"
 time.tzset()
 
 # Settings fields read from the process environment as well. A shell that

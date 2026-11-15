@@ -126,9 +126,15 @@ def test_test_process_loads_no_env_file_and_runs_in_utc():
     assert os.environ[SETTINGS_ENV_FILE_ENV] == ""
     assert Settings.model_config["env_file"] is None
     assert settings_module.Settings is Settings
-    assert os.environ["TZ"] == "UTC"
-    assert time.strftime("%Z", time.localtime(0)) in {"UTC", "GMT"}
-    assert time.timezone == 0
+    # The scheduled timezone lane (#1220) opts in to another zone explicitly;
+    # every other run is pinned to UTC.
+    expected_tz = os.environ.get("SERAPH_TEST_TZ") or "UTC"
+    assert os.environ["TZ"] == expected_tz
+    if expected_tz == "UTC":
+        assert time.strftime("%Z", time.localtime(0)) in {"UTC", "GMT"}
+        assert time.timezone == 0
+    else:
+        assert time.timezone != 0
     # No ambient settings variable reaches a test, beyond the allowlist and
     # the values the root conftest sets itself.
     assert os.environ["DEPLOYMENT_ENVIRONMENT"] == "test"

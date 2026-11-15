@@ -671,6 +671,7 @@ def run_shard_files(
     exclude_cancelled_eval_harness: bool = False,
     keep_going: bool = False,
     junit_dir: Path | None = None,
+    no_tests_ok: bool = False,
 ) -> int:
     """Run each file in its own pytest process.
 
@@ -736,6 +737,11 @@ def run_shard_files(
                 f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)"
                 f"{f' timeout={timeout_seconds}s' if timeout_seconds is not None else ''}"
             )
+            if completed.returncode == 5 and no_tests_ok:
+                # The quarantine lane selects only quarantined tests; a -k split
+                # with none of them collects nothing, which is not a failure.
+                print(f"[backend-shard] {label}: no test selected in this invocation")
+                continue
             if completed.returncode != 0 and report_path is not None and not report_path.exists():
                 # A crash, OOM kill or os._exit leaves pytest no chance to write XML.
                 write_synthetic_junit(
@@ -752,6 +758,72 @@ def run_shard_files(
             print(f"[backend-shard] FAILED {label} -> {code}")
         return failures[0][1]
     return 0
+
+
+def lane_pytest_args(*, quarantine: str | None = None, shuffle_seed: int | None = None) -> list[str]:
+    """Plugin arguments for the quarantine and random-order lanes (#1220)."""
+    args: list[str] = []
+    if quarantine is not None:
+        args += ["-p", "scripts.pytest_quarantine", f"--quarantine={quarantine}"]
+    if shuffle_seed is not None:
+        print(f"[backend-shard] shuffle seed {shuffle_seed} (replay: --shuffle-seed={shuffle_seed})")
+        args += ["-p", "scripts.pytest_shuffle", f"--shuffle-seed={shuffle_seed}"]
+    return args
+
+
+def run_shard_single_process(
+    root: Path,
+    files: list[str],
+    *,
+    pytest_args: list[str] | None = None,
+    exclude_cancelled_eval_harness: bool = False,
+    junit_dir: Path | None = None,
+    timeout_seconds: int | None = None,
+) -> int:
+    """Run every assigned file in one pytest process (#1220).
+
+    CI normally gives each file its own process, which hides state one file
+    leaks into the next. This lane exposes it. The specialized ``-k`` splits
+    are not applied: each file runs whole. Retirement matches the per-file
+    runner because every node of a fully retired invocation is also listed
+    in ``CANCELLED_EVAL_CONSUMER_NODES`` (pinned by a test) and deselected.
+    ``timeout_seconds`` kills the process in time to leave a synthetic JUnit
+    error (as does a crash without a report), so the job still uploads one.
+    """
+    selected = [path for path in files
+                if not (exclude_cancelled_eval_harness and path == "tests/test_eval_harness.py")]
+    if not selected:
+        print("No backend tests assigned to this shard.")
+        return 0
+    extra_args = list(pytest_args or [])
+    if "--no-cov" not in extra_args and not any(arg.startswith("--cov") for arg in extra_args):
+        extra_args.append("--no-cov")
+    deselect = [f"--deselect={node}" for path in selected
+                for node in (CANCELLED_EVAL_CONSUMER_NODES.get(path, []) if exclude_cancelled_eval_harness else [])]
+    # One process: if the #1235-tracked file is in the shard, its leak filters
+    # apply to the whole run (scheduled lane only).
+    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect,
+               *tracked_warning_args(selected)]
+    report = junit_dir / "single-process.xml" if junit_dir is not None else None
+    if report is not None:
+        junit_dir.mkdir(parents=True, exist_ok=True)
+        command += [f"--junitxml={report}", "-o", "junit_suite_name=single-process"]
+    print(f"[backend-shard] single process: {len(selected)} file(s)")
+    started_at = time.perf_counter()
+    try:
+        completed = subprocess.run(command, cwd=root, check=False, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        duration_s = time.perf_counter() - started_at
+        print(f"[backend-shard] single-process -> 124 ({duration_s:.2f}s) timed out after {timeout_seconds}s")
+        if report is not None:
+            write_timeout_junit(report, "single-process", timeout_seconds, duration_s)
+        return 124
+    duration_s = time.perf_counter() - started_at
+    print(f"[backend-shard] single-process -> {completed.returncode} ({duration_s:.2f}s)")
+    if completed.returncode != 0 and report is not None and not report.exists():
+        write_synthetic_junit(report, "single-process", "invocation-crashed",
+                              f"pytest exited {completed.returncode} without writing a report", duration_s)
+    return completed.returncode
 
 
 def main() -> int:
@@ -776,6 +848,23 @@ def main() -> int:
         "--junit-dir", type=Path, default=None,
         help="write one JUnit XML report per pytest invocation into this directory",
     )
+    parser.add_argument(
+        "--quarantine", choices=("exclude", "only"), default=None,
+        help="exclude: skip tests marked quarantine(issue=...) (blocking lanes); only: run nothing else "
+             "(the non-blocking quarantine lane) (#1220)",
+    )
+    parser.add_argument(
+        "--shuffle-seed", type=int, default=None,
+        help="run each invocation's tests in this seeded random order (printed; #1220)",
+    )
+    parser.add_argument(
+        "--single-process-timeout-seconds", type=int, default=None,
+        help="kill a --single-process run after this long and record a synthetic JUnit error",
+    )
+    parser.add_argument(
+        "--single-process", action="store_true",
+        help="run the whole shard as one pytest process to expose cross-file leaks (#1220)",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     # Progress lines must reach the job log as each file ends, not at exit:
@@ -792,6 +881,16 @@ def main() -> int:
     extra_args = list(args.pytest_args)
     if extra_args[:1] == ["--"]:
         extra_args = extra_args[1:]
+    extra_args = lane_pytest_args(quarantine=args.quarantine, shuffle_seed=args.shuffle_seed) + extra_args
+    if args.single_process:
+        return run_shard_single_process(
+            root,
+            files,
+            pytest_args=extra_args,
+            exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
+            junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
+            timeout_seconds=args.single_process_timeout_seconds,
+        )
     return run_shard_files(
         root,
         files,
@@ -800,6 +899,7 @@ def main() -> int:
         exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
         keep_going=args.keep_going,
         junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
+        no_tests_ok=args.quarantine == "only",
     )
 
 

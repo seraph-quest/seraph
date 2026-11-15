@@ -32,6 +32,14 @@ code inside child-script strings is not counted) and counts these hazards:
     too: adding one takes a reviewed hand edit of the baseline (``--update``
     only lowers counts).
 
+Quarantine (#1220): ``@pytest.mark.quarantine(issue=NNNN)`` must name an issue
+number and decorate a single test function (other placements are errors), and
+at most ``QUARANTINE_CAP`` quarantine markers may exist. A
+quarantined test still runs, in the non-blocking quarantine lane; it leaves
+quarantine only through a fix that removes the marker after a 50-of-50 stress
+pass. There is no calendar expiry. ``--quarantined-files`` and
+``--realtime-files`` list the files those lanes run.
+
 The per-file, per-category counts must equal the baseline exactly. A count
 above the baseline fails, and so does a count below it until the baseline is
 lowered with ``--update``, so the numbers only go down. ``--update`` never
@@ -49,9 +57,10 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -110,6 +119,8 @@ COMPARE_METHODS = frozenset(
      "assertAlmostEqual", "assertNotAlmostEqual"}
 )
 ENVIRON_MUTATORS = frozenset({"update", "setdefault", "pop", "popitem", "clear"})
+QUARANTINE_CAP = 10
+ISSUE_REFERENCE = re.compile(r"#?[1-9][0-9]*")
 
 
 @dataclass(frozen=True)
@@ -160,10 +171,13 @@ def is_zero(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and not isinstance(node.value, bool) and node.value == 0
 
 
-def realtime_reason(decorator: ast.AST) -> str | None | bool:
-    """Return the reason for a realtime marker, ``False`` if not one, ``None`` if reasonless."""
+def realtime_reason(decorator: ast.AST, resolve=lambda name: name) -> str | None | bool:
+    """Return the reason for a realtime marker, ``False`` if not one, ``None`` if reasonless.
+
+    ``resolve`` maps import aliases (``import pytest as pt``, ``from pytest import mark``).
+    """
     target = decorator.func if isinstance(decorator, ast.Call) else decorator
-    if dotted(target) not in {"pytest.mark.realtime", "mark.realtime"}:
+    if resolve(dotted(target)) not in {"pytest.mark.realtime", "mark.realtime"}:
         return False
     if not isinstance(decorator, ast.Call):
         return None
@@ -173,6 +187,25 @@ def realtime_reason(decorator: ast.AST) -> str | None | bool:
             if isinstance(value, str) and value.strip():
                 return value
     return None
+
+
+def quarantine_issue(decorator: ast.AST, resolve=lambda name: name) -> str | None | bool:
+    """Return the issue for a quarantine marker, ``False`` if not one, ``None`` if it names none."""
+    target = decorator.func if isinstance(decorator, ast.Call) else decorator
+    if resolve(dotted(target)) not in {"pytest.mark.quarantine", "mark.quarantine"}:
+        return False
+    if not isinstance(decorator, ast.Call):
+        return None
+    values = [keyword.value for keyword in decorator.keywords if keyword.arg == "issue"]
+    if not values and len(decorator.args) == 1:
+        values = list(decorator.args)
+    if len(values) != 1 or not isinstance(values[0], ast.Constant):
+        return None
+    value = values[0].value
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    text = str(value).strip()
+    return text.lstrip("#") if ISSUE_REFERENCE.fullmatch(text) else None
 
 
 class Scanner(ast.NodeVisitor):
@@ -187,13 +220,47 @@ class Scanner(ast.NodeVisitor):
         self.errors: list[str] = []
         self.exempt_depth = 0
         self.module_exempt = False
+        self.quarantined: list[tuple[int, str]] = []
+        self.accepted_quarantine: set[int] = set()
+        self.realtime_markers = 0
         self.handler_stack: list[bool] = []
         self.tainted_stack: list[set[str]] = [self._tainted(tree.body)]
         self.module_exempt = self._module_exempt(tree)
 
     # -- exemption -----------------------------------------------------------------
+    def _check_quarantine(self, node: ast.AST, decorator: ast.AST) -> None:
+        issue = quarantine_issue(decorator, self.imports.resolve)
+        if issue is False:
+            return
+        self.accepted_quarantine.add(id(decorator.func if isinstance(decorator, ast.Call) else decorator))
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            self.errors.append(
+                f"{self.display_path}:{node.lineno}: quarantine one test function at a time, "
+                "not a class or module, so the cap counts tests"
+            )
+            return
+        if issue is None:
+            self.errors.append(
+                f"{self.display_path}:{node.lineno}: pytest.mark.quarantine requires issue=<issue number>"
+            )
+            return
+        self.quarantined.append((node.lineno, issue))
+
+    def check_stray_quarantine(self, tree: ast.Module) -> None:
+        """A quarantine marker anywhere but a test-function decorator escapes the
+        issue check, the cap and the quarantine lane, so it is an error."""
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute)
+                    and self.imports.resolve(dotted(node)) in {"pytest.mark.quarantine", "mark.quarantine"}
+                    and id(node) not in self.accepted_quarantine):
+                self.errors.append(
+                    f"{self.display_path}:{node.lineno}: pytest.mark.quarantine is only supported as a "
+                    "decorator on a test function (not pytest.param marks, an alias or an annotated pytestmark)"
+                )
+
     def _check_marker(self, node: ast.AST, decorator: ast.AST) -> bool:
-        reason = realtime_reason(decorator)
+        self._check_quarantine(node, decorator)
+        reason = realtime_reason(decorator, self.imports.resolve)
         if reason is False:
             return False
         if reason is None:
@@ -202,6 +269,7 @@ class Scanner(ast.NodeVisitor):
             )
             return False
         self.record(node, "realtime")
+        self.realtime_markers += 1
         return True
 
     def _module_exempt(self, tree: ast.Module) -> bool:
@@ -211,6 +279,7 @@ class Scanner(ast.NodeVisitor):
             if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
                 continue
             values = node.value.elts if isinstance(node.value, (ast.List, ast.Tuple)) else [node.value]
+            # Evaluate every marker (no short-circuit) so each one is validated.
             if any([self._check_marker(node, value) for value in values]):
                 return True
         return False
@@ -422,6 +491,8 @@ class ScanResult:
     findings: list[Finding]
     exempt: list[Finding]
     errors: list[str]
+    quarantined: list[tuple[str, int, str]] = field(default_factory=list)
+    realtime_files: list[str] = field(default_factory=list)
 
     def counts(self) -> dict[str, dict[str, int]]:
         table: dict[str, Counter[str]] = {}
@@ -437,6 +508,8 @@ def scan(tests_dir: Path, root: Path) -> ScanResult:
     findings: list[Finding] = []
     exempt: list[Finding] = []
     errors: list[str] = []
+    quarantined: list[tuple[str, int, str]] = []
+    realtime_files: list[str] = []
     for path in sorted(tests_dir.rglob("*.py")):
         display_path = path.relative_to(root).as_posix()
         relative = path.relative_to(tests_dir).parts
@@ -448,10 +521,19 @@ def scan(tests_dir: Path, root: Path) -> ScanResult:
             continue
         scanner = Scanner(display_path, tree, source, support=relative[:1] == (SUPPORT_PACKAGE,))
         scanner.visit(tree)
+        scanner.check_stray_quarantine(tree)
         findings.extend(scanner.findings)
         exempt.extend(scanner.exempt)
         errors.extend(scanner.errors)
-    return ScanResult(findings, exempt, errors)
+        quarantined.extend((display_path, line, issue) for line, issue in scanner.quarantined)
+        if scanner.realtime_markers:
+            realtime_files.append(display_path)
+    if len(quarantined) > QUARANTINE_CAP:
+        errors.append(
+            f"{len(quarantined)} quarantine markers exceed the cap of {QUARANTINE_CAP}; "
+            "fix a quarantined test (50-of-50 stress pass) before quarantining another"
+        )
+    return ScanResult(findings, exempt, errors, quarantined, realtime_files)
 
 
 def load_baseline(path: Path) -> dict[str, dict[str, int]]:
@@ -512,6 +594,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--rename", nargs=2, metavar=("OLD", "NEW"), action="append", default=[],
         help="move a renamed file's baseline entry (repo-relative paths, e.g. backend/tests/test_a.py); repeatable",
     )
+    parser.add_argument(
+        "--quarantined-files", action="store_true",
+        help="print backend-relative test files that hold a quarantine marker, one per line, and exit",
+    )
+    parser.add_argument(
+        "--realtime-files", action="store_true",
+        help="print backend-relative test files that hold a realtime marker, one per line, and exit",
+    )
     return parser.parse_args(argv)
 
 
@@ -525,6 +615,12 @@ def main(argv: list[str]) -> int:
     for error in result.errors:
         print(error, file=sys.stderr)
     current = result.counts()
+
+    if args.quarantined_files or args.realtime_files:
+        listed = sorted({path for path, _, _ in result.quarantined}) if args.quarantined_files else result.realtime_files
+        for path in listed:
+            print(Path(path).relative_to("backend").as_posix() if path.startswith("backend/") else path)
+        return 1 if result.errors else 0
 
     if args.list:
         for finding in result.findings:
@@ -604,7 +700,10 @@ def main(argv: list[str]) -> int:
         return 1
     totals = Counter(finding.category for finding in result.findings)
     summary = ", ".join(f"{category}={totals[category]}" for category in CATEGORIES)
-    print(f"test determinism: ok ({summary}; realtime-exempt={len(result.exempt)})")
+    print(
+        f"test determinism: ok ({summary}; realtime-exempt={len(result.exempt)}; "
+        f"quarantined={len(result.quarantined)}/{QUARANTINE_CAP})"
+    )
     return 0
 
 

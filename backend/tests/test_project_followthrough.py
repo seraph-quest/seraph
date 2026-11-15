@@ -12,11 +12,9 @@ import json
 import subprocess
 import uuid
 
-from cryptography.fernet import Fernet
 import httpx
 import pytest
 
-from config.settings import settings
 from src.approval.repository import approval_repository, approval_decision_digest
 from src.extensions.github_consent import GitHubConsentRequest, PUBLICATION_ACTIONS
 from src.extensions.github_followthrough import GitHubFollowthroughService
@@ -32,9 +30,6 @@ from tests.test_general_task_planner import accounting_db, forbid_external_infer
 from tests.test_project_source import REPOSITORY, IssuesFixture, github_item
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 from tests.test_repository_work_natural_intent import _scripted_planner
-
-# ADR-035: pins project follow-through whose model step runs over the intercepted historical OpenRouter route
-pytestmark = pytest.mark.openrouter_legacy
 
 BUG = "calculator.add(1, 2) returns -1 instead of 3; please fix calculator.py."
 
@@ -58,8 +53,9 @@ class ProjectGitHub:
 
 async def _issue_task(factory, owner, service, literal, monkeypatch, github, state):
     """Operator flow: connect, sync, propose the finding, review and accept it."""
-    monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
-    monkeypatch.setattr("src.vault.crypto._fernet", None)
+    # The workspace vault key stays: the NEAR TEE route's write-only key is
+    # already stored under it (#1184), and rotating it would make secret
+    # redaction fail closed.
     await vault_repository.store("project-fixture", "fixture-token", owner_principal_id=owner.principal_id)
     async def resolver(_host, _port):
         return ["93.184.216.34"]
@@ -73,15 +69,16 @@ async def _issue_task(factory, owner, service, literal, monkeypatch, github, sta
         scope=ProjectSourceScope(connection_id=connection["id"], repository_id=REPOSITORY))
     ref = ProjectSourceRef.model_validate(synced["items"][0]["source_ref"])
     work = literal.plan.steps[0]
-    with monkeypatch.context() as planning:
-        _scripted_planner(planning, {"schema_version": 1, "revision": 1, "steps": [{"step_id": "repair",
-            "tool_id": "repository_work", "input": work.input, "depends_on": [],
-            "output_contract": work.output_contract}]}, [])
-        service.planner = GeneralTaskPlanner()
-        finding = await source.propose_task(owner=owner, general_task_service=service, source_ref=ref,
-            goal_id="goal:fixture", goal_revision=1, kind="change", idempotency_key="issue-42",
-            requested_output=literal.input.requested_output, limits=literal.input.limits,
-            task_sessions=factory.accounting_sessions)
+    # #1184: the planner answers at the intercepted NEAR TEE gateway; the
+    # repository iteration later scripts its own answer there.
+    _scripted_planner(factory.repository_near_gateway, {"schema_version": 1, "revision": 1, "steps": [{"step_id": "repair",
+        "tool_id": "repository_work", "input": work.input, "depends_on": [],
+        "output_contract": work.output_contract}]}, [])
+    service.planner = GeneralTaskPlanner()
+    finding = await source.propose_task(owner=owner, general_task_service=service, source_ref=ref,
+        goal_id="goal:fixture", goal_revision=1, kind="change", idempotency_key="issue-42",
+        requested_output=literal.input.requested_output, limits=literal.input.limits,
+        task_sessions=factory.accounting_sessions)
     task_id = finding.task_proposal["task_id"]
     async with factory.accounting_sessions() as db:
         task = await service.repository.get_task(db, owner, task_id)

@@ -14,7 +14,6 @@ import shutil
 import signal
 import subprocess
 import time
-from types import SimpleNamespace
 
 import pytest
 from config.settings import RepoSandboxSettings
@@ -24,9 +23,6 @@ from src.workflows.repair_capacity import try_acquire_repo_repair_capacity, _QUA
 from src.workflows.job_runtime import durable_job_repository
 from tests import test_repo_repair_local_vertical as native
 from tests.test_repo_node import make_fixture, NODE, PROFILE
-
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
 
 
 PROOF_ROOT=Path(os.environ.get("SERAPH_TEST_EVIDENCE_ROOT") or str(Path(__file__).resolve().parents[2]/".agent-evidence/912"))/f"integrated-{os.getpid()}"
@@ -48,15 +44,23 @@ def _prepare_accounting_fixture(tmp_path,monkeypatch):
             return _retained(original_path(args[0]).name)
         return original_path(*args,**kwargs)
     monkeypatch.setattr(native,"Path",retained_native_path)
-    original_configuration=native._configure_openrouter
-    def configure():
+    original_configuration=native._configure_near_route
+    async def configure(patch):
+        # #1184: the intercepted NEAR TEE strategist route on this deployment witness.
         prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(native.settings.workspace_dir)))
-        persist=original_configuration()
-        async def finish():
-            await durable_job_repository.configure_inference_accounting(25_000)
-            await persist()
-        return finish
-    monkeypatch.setattr(native,"_configure_openrouter",configure)
+        return await original_configuration(patch)
+    monkeypatch.setattr(native,"_configure_near_route",configure)
+
+
+def _one_microusd_answer(original_factory):
+    """The Python fixture's answer, billed 1 micro-USD by the NEAR gateway (#1184)."""
+    def factory(calls,*,runtime_paths,near):
+        answer=original_factory(calls,runtime_paths=runtime_paths,near=near)
+        def complete(body):
+            near.cost_nano=1_000
+            return answer(body)
+        return complete
+    return factory
 
 
 async def _prepare_node_flow(client,async_db,tmp_path,monkeypatch,*,typescript=False,script=None,wall_seconds=180,low_due=False):
@@ -71,31 +75,30 @@ async def _prepare_node_flow(client,async_db,tmp_path,monkeypatch,*,typescript=F
         return repository,native._tree_receipt(repository),native._tree_receipt(repository/".git")
     def selected_settings(**kwargs):
         return RepoSandboxSettings(**kwargs,profile=PROFILE,node_runtime_path=NODE,max_wall_seconds=wall_seconds)
-    def transport_factory(calls):
-        def transport(**kwargs):
-            body=kwargs["body"];base=None
+    def transport_factory(calls,*,runtime_paths,near):
+        # #1184: the intercepted NEAR TEE gateway answers; NEAR bills 1 micro-USD.
+        def answer(body):
+            near.cost_nano=1_000;base=None
             for message in body["messages"]:
                 with suppress(ValueError,TypeError):
                     decoded=json.loads(message.get("content",""))
                     if isinstance(decoded,dict) and isinstance(decoded.get("source_packet"),dict):base=decoded["source_packet"]["base_snapshot_sha256"]
             assert isinstance(base,str) and len(base)==64
-            calls.append({"endpoint":"https://openrouter.ai/api/v1/chat/completions","runtime_path":kwargs["context"].runtime_path})
+            calls.append({"endpoint":"https://cloud-api.near.ai/v1/chat/completions","runtime_path":runtime_paths[-1]})
             output={"summary":"Fix the approved fixture value.","base_snapshot_sha256":base,"patch_unified_diff":fixture_job.patch_bytes.decode(),"allowed_paths":list(fixture_job.allowed_paths),"test_args":list(fixture_job.test_args),"expected_outcome":"Actual selected tests/build pass."}
-            content=json.dumps(output)
-            response=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(role="assistant",content=content))])
-            return response,{"id":"gen-node-fixture", "choices":[{"message":{"role":"assistant","content":content}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":"0.000001"}}
-        return transport
+            return json.dumps(output)
+        return answer
     monkeypatch.setattr(native,"_init_repository",init_repository)
     monkeypatch.setattr(native,"_repair_input",lambda:request)
     monkeypatch.setattr(native,"RepoSandboxSettings",selected_settings)
-    monkeypatch.setattr(native,"_model_transport",transport_factory)
+    monkeypatch.setattr(native,"_model_answer",transport_factory)
     flow=await native._prepare_native_flow(client,async_db,tmp_path,monkeypatch,low_due=low_due)
     return flow
 
 
 async def _approve_node_flow(client,flow,*,typescript=False):
     job_id=flow["job_id"];packet=flow["packet"]
-    consent=await client.post(f"/api/workflows/repo-repair/{job_id}/code-egress-consent",json={"expected_job_revision":flow["job"]["revision"],"source_packet_digest":packet.artifact_sha256,"expected_source_manifest_digest":packet.source_manifest_digest,"expected_profile_id":"openrouter","acknowledged_selected_source":True,"idempotency_key":"node-egress-"+job_id},headers={"Origin":"http://localhost:3001"})
+    consent=await client.post(f"/api/workflows/repo-repair/{job_id}/code-egress-consent",json={"expected_job_revision":flow["job"]["revision"],"source_packet_digest":packet.artifact_sha256,"expected_source_manifest_digest":packet.source_manifest_digest,"expected_profile_id":"near_tee.text","acknowledged_selected_source":True,"idempotency_key":"node-egress-"+job_id},headers={"Origin":"http://localhost:3001"})
     assert consent.status_code==200,consent.text
     await flow["dispatcher"].run_pass()
     pending=await client.get(f"/api/workflows/repo-repair/{job_id}")
@@ -175,6 +178,17 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
     await _approve_node_flow(client,flow)
     job_id=flow["job_id"]
     fresh=NodeRepoRepairExecutor(workspace_dir=flow["workspace"])
+    # The executor SIGKILLs a supervisor that misses its deadline and leaves
+    # the zombie for its owner; this test is that owner (SIGCONT, waitpid
+    # below). Popen.__del__ reaps a dead child when garbage collection drops
+    # the executor's handle, so keep every handle alive until the test has
+    # reaped it; otherwise the outcome depends on collector timing (#1184).
+    retained_processes=[]
+    class RetainedPopen(subprocess.Popen):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs)
+            retained_processes.append(self)
+    monkeypatch.setattr(subprocess,"Popen",RetainedPopen)
     dispatch=asyncio.create_task(flow["dispatcher"].run_pass())
     owned_pid=None;owned_start=None;stopped=False
     try:
@@ -314,14 +328,7 @@ async def test_authenticated_node_missing_recorded_preflight_blocks_display(clie
 @pytest.mark.parametrize("async_db",["file"],indirect=True)
 async def test_integrated_original_python_native_vertical(client,async_db,tmp_path,monkeypatch):
     _prepare_accounting_fixture(tmp_path,monkeypatch)
-    original_factory=native._model_transport
-    def factory(calls):
-        original_transport=original_factory(calls)
-        def transport(**kwargs):
-            response,raw=original_transport(**kwargs)
-            return response,{**raw,"id":"gen-python-fixture","usage":{**raw.get("usage",{}),"cost":"0.000001"}}
-        return transport
-    monkeypatch.setattr(native,"_model_transport",factory)
+    monkeypatch.setattr(native,"_model_answer",_one_microusd_answer(native._model_answer))
     await native.test_local_native_repo_repair_api_vertical(client,async_db,tmp_path,monkeypatch)
 
 
@@ -511,12 +518,5 @@ async def test_cancelled_node_physical_cleanup_recovery_and_fresh_job(client,asy
 @pytest.mark.parametrize("async_db",["file"],indirect=True)
 async def test_default_python_authenticated_journey_without_node_dependency(client,async_db,tmp_path,monkeypatch):
     _prepare_accounting_fixture(tmp_path,monkeypatch)
-    original_transport=native._model_transport
-    def costed_transport(calls):
-        original=original_transport(calls)
-        def transport(**kwargs):
-            response,metadata=original(**kwargs)
-            return response,{**metadata,"id":"gen-python-fixture","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":"0.000001"}}
-        return transport
-    monkeypatch.setattr(native,"_model_transport",costed_transport)
+    monkeypatch.setattr(native,"_model_answer",_one_microusd_answer(native._model_answer))
     await native.test_local_native_repo_repair_api_vertical(client,async_db,tmp_path,monkeypatch)

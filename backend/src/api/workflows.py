@@ -8106,21 +8106,22 @@ async def _repo_repair_rows(
         return packet, consent, proposal
 
 
+def _repo_repair_output_tokens() -> int:
+    from src.model_fabric.near_tee_vertical import repository_repair_output_tokens
+    try:
+        return repository_repair_output_tokens(4096)
+    except Exception:
+        return 4096
+
+
 def _repo_repair_route_metadata() -> tuple[str | None, str | None]:
     """Read the effective governed route without contacting a provider."""
 
     try:
-        from src.llm_runtime import build_model_kwargs
+        from src.workflows.repo_repair import repo_repair_effective_route
 
-        kwargs = build_model_kwargs(
-            temperature=0.2,
-            max_tokens=4096,
-            runtime_path="strategist_agent",
-        )
-        profile = str(kwargs.get("runtime_profile") or "").strip() or None
-        base = str(kwargs.get("api_base") or "").strip().rstrip("/")
-        upstream = "openrouter" if "openrouter.ai/api/v1" in base else (base or None)
-        return profile, upstream
+        # #1184: the NEAR TEE text slot serving strategist_agent, or none.
+        return repo_repair_effective_route()
     except Exception:
         return None, None
 
@@ -8526,7 +8527,8 @@ async def get_repo_repair_source_preview(job_id: str, request: Request):
             "effective_profile_id": consent.effective_profile_id if consent is not None else profile,
             "effective_upstream": consent.effective_upstream if consent is not None else upstream,
             "maximum_input_bytes": 64 * 1024,
-            "maximum_output_tokens": 4096,
+            # #1184: the NEAR TEE slot's output bound (the body never asks for more).
+            "maximum_output_tokens": _repo_repair_output_tokens(),
             "expires_at": consent.expires_at.isoformat() if consent is not None else None,
         },
         "provider_contacted": proposal is not None,
@@ -8616,23 +8618,16 @@ async def grant_repo_repair_code_egress_consent(
             raise HTTPException(status_code=409, detail={"code": "repair_source_packet_unavailable", "recovery_action": "reconcile_source_packet"})
         if req.source_packet_digest != str(packet.artifact_sha256) or req.expected_source_manifest_digest != str(packet.source_manifest_digest):
             raise HTTPException(status_code=409, detail={"code": "repair_source_packet_binding_changed", "recovery_action": "refresh_source_preview"})
-        from src.llm_runtime import build_model_kwargs
         from src.workflows.repo_repair import (
             REPO_REPAIR_MAX_CONSENT_TTL,
             RepoRepairService,
         )
 
-        route = build_model_kwargs(
-            temperature=0.2,
-            max_tokens=4096,
-            runtime_path="strategist_agent",
-            profile=req.expected_profile_id,
-        )
-        observed_profile = str(route.get("runtime_profile") or "").strip()
-        base = str(route.get("api_base") or "").strip().rstrip("/")
-        observed_upstream = "openrouter" if "openrouter.ai/api/v1" in base else base
-        if observed_profile != req.expected_profile_id or observed_upstream != "openrouter":
-            raise HTTPException(status_code=409, detail={"code": "repair_model_route_blocked", "recovery_action": "restore_openrouter_route"})
+        # #1184: code egress is consented only to the governed NEAR TEE text
+        # slot serving strategist_agent (NEAR receives the source as plaintext).
+        observed_profile, observed_upstream = _repo_repair_route_metadata()
+        if observed_profile is None or observed_profile != req.expected_profile_id or observed_upstream != "near_tee":
+            raise HTTPException(status_code=409, detail={"code": "repair_model_route_blocked", "recovery_action": "configure_near_tee_route"})
         authority = job.get("declared_authority") if isinstance(job.get("declared_authority"), Mapping) else {}
         task_id = str(authority.get("task_id") or "")
         attempt_id = str(authority.get("attempt_id") or "")

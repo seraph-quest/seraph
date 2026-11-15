@@ -112,7 +112,6 @@ def _model_patch(path, section):
     return text + SECTIONS[section].replace("test_a.py", path)
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: patch-section validation follows a planner call over the intercepted historical OpenRouter route
 @pytest.mark.asyncio
 @pytest.mark.parametrize("section", _PROPOSAL_SECTIONS)
 async def test_single_shot_proposal_rejects_unsupported_patch_sections(async_db, tmp_path, monkeypatch, section):
@@ -124,6 +123,7 @@ async def test_single_shot_proposal_rejects_unsupported_patch_sections(async_db,
     from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
     from src.work_board.contracts import WorkBoardOwner
     from src.workflows.repo_repair import RepoRepairError, RepoRepairService
+    from tests.near_tee_support import prepare_repository_near_route
     from tests.test_repo_repair import _repair_input, _seed_canonical_repair
     workspace = tmp_path / "workspace"
     (workspace / "repo" / "src").mkdir(parents=True)
@@ -131,6 +131,11 @@ async def test_single_shot_proposal_rejects_unsupported_patch_sections(async_db,
     (workspace / "repo" / "src" / "app.py").write_text("VALUE = 1\n")
     (workspace / "repo" / "tests" / "test_app.py").write_text("def test_value():\n    assert True\n")
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    # #1184: the consented strategist route is the intercepted NEAR TEE slot.
+    from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
+    monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
+    prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
+    await prepare_repository_near_route(monkeypatch, configure_accounting=False)
     now = datetime.now(timezone.utc)
     sandbox = RootlessDockerRepoSandbox()
     sandbox.preflight = lambda: SimpleNamespace(ok=True, status="verified", reason="",
@@ -156,7 +161,7 @@ async def test_single_shot_proposal_rejects_unsupported_patch_sections(async_db,
         await db.commit()
         consent = await service.grant_egress_consent(owner=owner, work_board_task_id="task:patch-boundary",
             work_board_attempt_id="attempt:patch-boundary", workflow_run_id="job:patch-boundary", packet=packet,
-            effective_profile_id="openrouter", effective_upstream="openrouter", request_key="request:patch-boundary",
+            effective_profile_id="near_tee.text", effective_upstream="near_tee", request_key="request:patch-boundary",
             expires_at=now + timedelta(minutes=5), db=db)
         await db.commit()
         principal = TrustPrincipal(principal_id=owner.principal_id, principal_type=PrincipalType.OPERATOR,
@@ -168,17 +173,16 @@ async def test_single_shot_proposal_rejects_unsupported_patch_sections(async_db,
     assert rejected.value.code == "model_patch_invalid"
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 @pytest.mark.asyncio
 @pytest.mark.parametrize("section", _PROPOSAL_SECTIONS)
 async def test_iterative_proposal_rejects_unsupported_patch_sections(accounting_db, monkeypatch,
         repository_admission_signer, section):
     import json
-    import httpx
     from sqlalchemy import select
     from src.api.workflows import RepoRepairEgressConsentRequest
     from src.db.models import ApprovalRequest, RepoRepairProposal
     from src.workflows.repo_repair_source import grant_repository_iteration_consent, repository_source_preview
+    from tests.near_tee_support import script_repository_iteration
     from tests.test_repository_work_lane_release import _original
     flow = await _original(accounting_db, monkeypatch)
     service, jobs, owner, root_id = flow["service"], flow["jobs"], flow["owner"], flow["root_id"]
@@ -189,11 +193,7 @@ async def test_iterative_proposal_rejects_unsupported_patch_sections(accounting_
         "patch_unified_diff": _model_patch("calculator.py", section),
         "allowed_paths": ["calculator.py", "tests/test_calculator.py"],
         "test_args": ["pytest", "-q", "tests/test_calculator.py"], "expected_outcome": "Checks run"}
-    real_client = httpx.Client
-    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs: real_client(*args, **kwargs,
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"id": "scripted-boundary",
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": "0"},
-            "choices": [{"message": {"role": "assistant", "content": json.dumps(output)}}]}))))
+    script_repository_iteration(flow["factory"].repository_near_gateway, egress, output)
     with pytest.raises(Exception) as rejected:
         await grant_repository_iteration_consent(service.repository_source_service, jobs, job_id=root_id,
             owner=owner, request=RepoRepairEgressConsentRequest(expected_job_revision=preview["revision"],
@@ -262,7 +262,6 @@ def _hostile_calculator(action):
             % (len(lines), body))
 
 
-@pytest.mark.openrouter_legacy  # ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["commit", "textconv"])
 async def test_exported_diff_must_match_the_tested_tree(accounting_db, monkeypatch, repository_admission_signer, action):

@@ -79,7 +79,8 @@ def _repository_work_block_reason(mode):
     }:
         return "repository_executor_unsupported"
     from src.model_fabric.near_tee_vertical import repository_repair_route_block
-    # #1159: the iteration model step has no NEAR TEE adapter; never offer it.
+    # #1184: the iteration model step needs the NEAR TEE text slot serving
+    # strategist_agent; never offer it without one.
     return repository_repair_route_block()
 
 

@@ -1580,13 +1580,13 @@ Actual CPU/Linux receipts do not establish native macOS execution.
 > settleable through Inference accounting. Work verticals move to the NEAR
 > TEE text slot (#1159, **Partial**): general-task and specialist planning,
 > Work Board card proposals, guardian opportunity assessment and plans,
-> research dossiers, Mail reply drafts, Calendar meeting prep and
-> communication preparation run there, settling from NEAR billing with no
-> fallback. Repository work (repair) stays blocked on NEAR TEE: its tool is
-> not offered, and an explicit repository plan or admitted repository child
-> is refused with `near_tee_route_unsupported` before any contact. A
-> repository-worded request without that tool is planned (and charged) as
-> ordinary NEAR planning.
+> research dossiers, Mail reply drafts, Calendar meeting prep,
+> communication preparation and repository repair (#1184) run there,
+> settling from NEAR billing with no fallback. Repository repair's
+> code-egress review shows the exact NEAR request body and names NEAR
+> (`near_tee.text via near_tee`): the NEAR gateway receives the selected
+> source and diagnostics as plaintext, attestation is not verified by
+> Seraph, and only that consented body can be sent.
 > Without a ready slot each vertical blocks with its stable reason, which the
 > Work Board explains. The OpenRouter sections below
 > describe the retained configuration and historical mechanics, not a live route.

@@ -560,6 +560,21 @@ def _source_digest(value):
     return canonical_digest(value)
 
 
+def _repository_route_identity(*, required=True):
+    """``(profile_id, upstream)`` the iteration's code-egress consent names (#1184).
+
+    The NEAR TEE text slot serving ``strategist_agent``: the consent names
+    NEAR (``near_tee``), which receives the consented source and diagnostics
+    as plaintext. None (or a lease error when ``required``) without one.
+    """
+    from src.model_fabric.near_tee_vertical import repository_repair_route_identity
+    from src.workflows.job_runtime import DurableJobLeaseError
+    identity = repository_repair_route_identity()
+    if identity is None and required:
+        raise DurableJobLeaseError("original repository NEAR TEE route unavailable")
+    return identity
+
+
 def _repository_policy_limits():
     """Stage the same canonical route bound used by the accounting owner.
 
@@ -569,9 +584,28 @@ def _repository_policy_limits():
     from src.model_fabric.accounting import _policy_for_runtime
     from src.model_fabric.configuration import OPENROUTER_SETUP_V2_SCHEMA_VERSION, route_slot_for_task_class
     from src.model_fabric.caller_context import canonical_route_spec
+    from src.model_fabric.near_tee_vertical import near_tee_vertical_route
     from src.workflows.job_runtime import DurableJobLeaseError
+    if (near_route := near_tee_vertical_route("strategist_agent")) is not None:
+        # #1184: the NEAR TEE text slot serves the iteration; its accounting
+        # reserves exactly the slot's request cost bound under its policy.
+        from src.model_fabric.effective_policy import current_near_tee_policy
+        try:
+            _configured, digest = current_near_tee_policy("text")
+        except PermissionError as exc:
+            raise DurableJobLeaseError("original repository text route unavailable") from exc
+        bound = near_route.request_cost_bound_microusd
+        if type(bound) is not int or bound <= 0 or not _SHA.fullmatch(digest):
+            raise DurableJobLeaseError("original repository server bound required")
+        return digest, bound
+    from src.model_fabric.retirement import openrouter_retired
+    if openrouter_retired():
+        # No NEAR TEE slot serves the iteration: repository repair has no route.
+        raise DurableJobLeaseError("original repository text route unavailable")
     configured, digest = _policy_for_runtime("strategist_agent")
     setup = configured.openrouter_setup
+    if setup is None:
+        raise DurableJobLeaseError("original repository text route unavailable")
     bound = setup.request_cost_bound_microusd or setup.spend_ceiling_microusd
     if setup.schema_version == OPENROUTER_SETUP_V2_SCHEMA_VERSION:
         slot = route_slot_for_task_class(canonical_route_spec("strategist_agent").task_class)
@@ -1744,8 +1778,7 @@ async def repository_source_preview(service, jobs, *, job_id, owner):
             raise DurableJobLeaseError("original repository diagnostics changed")
         async with jobs._session() as db:
             remaining = await _repository_remaining(db, context)
-        from src.llm_runtime import build_model_kwargs
-        kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path="strategist_agent")
+        profile_id, upstream = _repository_route_identity()
         return {"job_id": job_id, "status": context["run"].status, "revision": context["run"].revision,
             "recovery_action": "review_code_egress" if projection["contact_state"] == "not_started" else "refresh_repair_status",
             "repository_review": {key: value for key, value in projection.items() if key not in
@@ -1755,8 +1788,10 @@ async def repository_source_preview(service, jobs, *, job_id, owner):
                 "source_manifest_sha256": prepared["source_manifest_digest"],
                 "artifact_sha256": prepared["source_packet_artifact_digest"],
                 "selected_files": envelope["source_packet"]["files"], "omissions": []},
-            "egress": {"runtime_path": "strategist_agent", "effective_profile_id": kwargs.get("runtime_profile"),
-                "effective_upstream": "openrouter", "maximum_input_bytes": 65536, "maximum_output_tokens": 4096,
+            "egress": {"runtime_path": "strategist_agent", "effective_profile_id": profile_id,
+                "effective_upstream": upstream, "maximum_input_bytes": 65536,
+                # #1184: the exact consented NEAR body's output bound (the slot's).
+                "maximum_output_tokens": int(body["max_tokens"]),
                 "request_body": body, "request_body_digest": prepared["request_body_digest"],
                 "request_route_digest": prepared["request_route_digest"],
                 "egress_envelope_digest": prepared["egress_envelope_digest"],
@@ -2033,13 +2068,14 @@ async def grant_repository_iteration_consent(service, jobs, *, job_id, owner, re
         kwargs = build_model_kwargs(temperature=0.2, max_tokens=4096, runtime_path="strategist_agent")
         model = source.model_factory(**kwargs)
         finalized = source.finalize_iteration_egress(candidate, model=model, response_format=body["response_format"])
+        route_identity = _repository_route_identity(required=False)
         import asyncio
         preflight = await asyncio.to_thread(_iterative_executor_preflight, source, context["compiled"])
         if (finalized["serialized_request_sha256"] != prepared["request_body_digest"]
                 or finalized["request_route_digest"] != prepared["request_route_digest"]
                 or finalized["redaction_version"] != prepared["redaction_version"]
                 or len(_canonical_bytes(body)) != prepared["combined_input_bytes"]
-                or str(kwargs.get("runtime_profile") or "") != request.expected_profile_id
+                or route_identity is None or route_identity[0] != request.expected_profile_id
                 or _source_digest(config.model_dump(mode="json")) != prepared["executor_profile_digest"]
                 or not preflight.ok or preflight.posture_digest != prepared["executor_posture_digest"]):
             raise RepoRepairError("repository_finalized_request_changed", "Source, diagnostics, route or finalized model request changed")
@@ -2068,11 +2104,12 @@ async def grant_repository_iteration_consent(service, jobs, *, job_id, owner, re
                 workflow_run_id=job_id, source_packet_id=prepared["source_packet_id"],
                 source_digest=prepared["source_manifest_digest"], source_manifest_digest=prepared["source_manifest_digest"],
                 goal_id=run.goal_id, goal_revision=run.goal_revision, input_digest=run.input_digest,
-                effective_profile_id=request.expected_profile_id, effective_upstream="openrouter", runtime_path="strategist_agent",
+                effective_profile_id=request.expected_profile_id, effective_upstream=route_identity[1], runtime_path="strategist_agent",
                 iteration_id=prepared["iteration_id"], egress_envelope_schema="seraph.repo_iteration_egress.v1",
                 egress_envelope_artifact_ref=prepared["egress_envelope_artifact_ref"], egress_envelope_sha256=prepared["egress_envelope_digest"],
                 diagnostics_sha256=prepared["diagnostics_digest"], redaction_version=prepared["redaction_version"],
-                serialized_request_sha256=prepared["request_body_digest"], combined_input_bytes=prepared["combined_input_bytes"],
+                serialized_request_sha256=prepared["request_body_digest"], request_route_digest=prepared["request_route_digest"],
+                combined_input_bytes=prepared["combined_input_bytes"],
                 diagnostics_acknowledged=True, maximum_input_bytes=65536, maximum_output_tokens=4096, expires_at=expiry,
                 consent_digest=_source_digest(digest_payload), request_key=request.idempotency_key,
                 request_digest=_source_digest(request.model_dump(mode="json")))
@@ -2127,6 +2164,7 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
     from src.work_board.repository import _begin_sqlite_immediate
     from src.db.models import InferenceCostReservation, RepoRepairProposal
     from src.model_fabric.accounting import bind_repository_iteration_accounting
+    from src.model_fabric.near_tee_egress import bind_near_tee_egress
     from src.model_fabric import bind_remote_inference_receipt
     from src.model_fabric.caller_context import build_canonical_inference_context
     from src.approval.runtime import set_runtime_context, reset_runtime_context, get_current_approval_mode
@@ -2187,7 +2225,8 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
         runtime_path="strategist_agent"))
     scoped_principal = replace(principal, job_id=ticket.job_id)
     inference_context = build_canonical_inference_context("strategist_agent", payload=body["messages"],
-        output_tokens=4096, timeout_seconds=min(120.0, phase_timeout), principal=scoped_principal,
+        # #1184: exactly the consented NEAR body's output bound.
+        output_tokens=int(body["max_tokens"]), timeout_seconds=min(120.0, phase_timeout), principal=scoped_principal,
         session_id=scoped_principal.session_id, job_id=ticket.job_id,
         transformation_digest=_source_digest({"preparation": prepared["preparation_digest"], "consent": ticket.consent_id}),
         redaction_applied=True)
@@ -2197,7 +2236,11 @@ async def run_repository_iteration(service, *, jobs, binding, descriptor, inputs
     try:
         with bind_remote_inference_receipt(repository=jobs, job_id=ticket.job_id,
                 owner=run.lease_owner, fencing_token=run.fencing_token, repository_iteration_witness=witness), \
-                bind_repository_iteration_accounting(witness):
+                bind_repository_iteration_accounting(witness), \
+                bind_near_tee_egress(runtime_path="strategist_agent",
+                    body_digest=prepared["request_body_digest"], route_digest=prepared["request_route_digest"],
+                    refusal_code="repository_iteration_final_transport_changed"):
+            # #1184: only the consented exact NEAR body and target may leave.
             callback = asyncio.create_task(asyncio.to_thread(model.generate, body["messages"],
                 response_format=body["response_format"], request_context=inference_context))
             service._iterative_model_callbacks[ticket.iteration_id] = callback
@@ -4521,28 +4564,64 @@ def assert_repository_iteration_witness(witness) -> None:
 
 
 def repository_transport_route_digest(target: dict, runtime_path: str) -> str:
-    from src.security.trust_contract import canonical_digest
-    return canonical_digest({"runtime_path": runtime_path, "source": target.get("source"),
-        "endpoint": str(target.get("api_base") or "").rstrip("/"),
-        "profile": target.get("profile"), "model_id": target.get("model_id"),
-        "options": target.get("options")})
+    from src.model_fabric.near_tee_egress import transport_route_digest
+    return transport_route_digest(target, runtime_path)
 
 
 def verify_repository_iteration_transport_body(body, *, target, runtime_path) -> None:
-    """Only a genuine source context can require the fixed iteration body."""
+    """Only a genuine source context can require the fixed iteration body.
+
+    #1184: the only target a repository iteration may reach is the NEAR TEE
+    text slot it consented to (fixed NEAR base, ``near_tee`` provider kind,
+    profile, contract hash and model in the route digest); OpenRouter is
+    never accepted.
+    """
     from src.model_fabric.accounting import current_repository_iteration_accounting_witness
+    from src.model_fabric.near_tee_egress import is_near_tee_target
     from src.security.trust_contract import canonical_digest
     from src.workflows.inference_accounting import InferenceAccountingError
     witness = current_repository_iteration_accounting_witness()
     if witness is None:
         return
     assert_repository_iteration_witness(witness)
-    if (runtime_path != "strategist_agent" or target.get("source") != "primary"
-            or str(target.get("api_base") or "").rstrip("/") != "https://openrouter.ai/api/v1"
+    if (runtime_path != "strategist_agent" or not is_near_tee_target(target)
             or witness._request_body_digest is None or witness._request_route_digest is None
             or canonical_digest(body) != witness._request_body_digest
             or repository_transport_route_digest(target, runtime_path) != witness._request_route_digest):
         raise InferenceAccountingError("repository_iteration_final_transport_changed")
+
+
+def verify_repository_iteration_near_call(call, *, runtime_path) -> None:
+    """The prepared NEAR TEE call is the consented repository iteration (#1184).
+
+    No-op without a repository iteration witness. Otherwise the call must be
+    the plain text-slot request (no stream, tools or stop) carrying
+    ``x-no-aliasing``, whose exact body and NEAR target digests equal the
+    consented ones; raises ``InferenceAccountingError`` before contact.
+    """
+    from src.model_fabric.accounting import current_repository_iteration_accounting_witness
+    from src.model_fabric.near_client import NO_ALIASING_HEADER
+    from src.model_fabric.near_tee_vertical import repository_repair_near_target
+    from src.workflows.inference_accounting import InferenceAccountingError
+    from src.model_fabric.near_tee_egress import current_near_tee_egress_binding
+    if current_repository_iteration_accounting_witness() is None:
+        return
+    if current_near_tee_egress_binding() is None:
+        # The witness alone never authorizes contact; the consented exact
+        # NEAR body/target binding must be in force too.
+        raise InferenceAccountingError("repository_iteration_final_transport_changed")
+    profile = getattr(getattr(getattr(call, "decision", None), "selected", None), "profile", None)
+    body = getattr(call, "body", None)
+    headers = {str(key).lower(): value for key, value in dict(getattr(call, "headers", {}) or {}).items()}
+    if (profile is None or not isinstance(body, dict) or getattr(call, "slot_name", None) != "text"
+            or getattr(call, "stream", True) is not False or getattr(call, "tool_names", ()) != ()
+            or headers.get(NO_ALIASING_HEADER.lower()) != "true"
+            or getattr(call.context, "runtime_path", None) != runtime_path
+            or profile.model != body.get("model")):
+        raise InferenceAccountingError("repository_iteration_final_transport_changed")
+    target = repository_repair_near_target(profile_id=profile.id, profile_contract_hash=profile.contract_hash,
+        model_id=str(body.get("model")))
+    verify_repository_iteration_transport_body(body, target=target, runtime_path=runtime_path)
 
 
 async def _validate_recovered_repository_accounting_source(db, source, witness, run, *, rows,

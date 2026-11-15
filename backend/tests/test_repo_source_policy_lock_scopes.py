@@ -26,9 +26,6 @@ from tests.repository_admission_lifecycle import repository_admission_signer
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.test_repo_work_task_publication import _actual_source_callback_journey
 
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
-
 
 async def _wait_for_provider_or_original_journey(returned, journey):
     """Surface original early failures/results within the same 45-second bound."""
@@ -196,8 +193,13 @@ async def test_original_policy_change_after_transport_denies_before_response_art
         async def change_current_policy():
             async with effective_policy.configuration_mutation_lock:
                 current = read_model_fabric_configuration()
-                write_model_fabric_configuration(replace(current,
-                    egress_revision=current.egress_revision + 1),
+                # #1184: a new reviewed NEAR TEE policy revision (the slot's
+                # purpose consent re-published), so the route stays usable
+                # and only the original policy binding changes.
+                revision = current.egress_revision + 1
+                slot = replace(current.near_tee.slots["text"], purpose_consent_revision=revision)
+                write_model_fabric_configuration(replace(current, egress_revision=revision,
+                    near_tee=replace(current.near_tee, slots={**current.near_tee.slots, "text": slot})),
                     expected_revision=current.egress_revision)
         await asyncio.wait_for(change_current_policy(), 5)
         release.set()

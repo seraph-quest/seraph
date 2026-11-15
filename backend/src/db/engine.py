@@ -1354,6 +1354,7 @@ async def _ensure_repo_repair_columns(conn) -> None:
             "diagnostics_sha256": "VARCHAR",
             "redaction_version": "VARCHAR",
             "serialized_request_sha256": "VARCHAR",
+            "request_route_digest": "VARCHAR",
             "combined_input_bytes": "INTEGER",
             "diagnostics_acknowledged": "BOOLEAN DEFAULT 0",
             "expires_at": "DATETIME",

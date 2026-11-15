@@ -19,9 +19,7 @@ import subprocess
 import sys
 import time
 import threading
-from types import SimpleNamespace
 from typing import Any
-import uuid
 
 import pytest
 import pytest_asyncio
@@ -34,17 +32,6 @@ from src.execution.repo_sandbox import LocalRepoRepairExecutor, RepoSandboxJob, 
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
 from src.model_fabric import remote_inference_admission_broker
-from src.model_fabric.configuration import (
-    ModelFabricConfiguration,
-    OpenRouterSetup,
-    openrouter_profile_for_setup,
-    write_model_fabric_configuration,
-)
-from src.model_fabric.contracts import EndpointClass
-from src.model_fabric.proofs import build_model_route_proof
-from src.model_fabric.receipts import RouteReceipt
-from src.model_fabric.repository import model_fabric_repository
-from src.security.trust_contract import EgressClass
 from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardOwner, WorkBoardTaskCreate
 from src.work_board.dispatcher import WorkBoardDispatcher, registered_executor_id
 from src.work_board.input_artifacts import prepare_input_artifact
@@ -52,9 +39,6 @@ from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import durable_job_repository
 from tests.conftest import _PATCH_TARGETS
 from tests.test_inference_accounting import accounting_db
-
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
 
 
 CAPABILITY = "engineering.repo-repair.v1"
@@ -69,78 +53,6 @@ async def async_db(accounting_db, monkeypatch):
     for target in (*_PATCH_TARGETS, "src.workflows.repo_repair.get_session"):
         monkeypatch.setattr(target, sessions)
     yield sessions
-
-
-def _configure_openrouter() -> Any:
-    """Persist the real route contract and its bounded capability evidence."""
-
-    setup = OpenRouterSetup(
-        model_ids=("openrouter/anthropic/claude-sonnet-4",),
-        capabilities=("text", "structured_output"),
-        allowed_upstreams=("anthropic",),
-        egress_class=EgressClass.CLOUD_ALLOWED_FULL,
-        cloud_egress_acknowledged=True,
-        spend_ceiling_microusd=25_000,
-        request_cost_bound_microusd=100,
-        credential_ref="env:OPENROUTER_API_KEY",
-    )
-    write_model_fabric_configuration(
-        ModelFabricConfiguration(
-            profiles=(openrouter_profile_for_setup(setup),),
-            openrouter_setup=setup,
-            status="ready",
-        )
-    )
-    from src.llm_runtime import _provider_profile
-
-    profile = _provider_profile("openrouter")
-    assert profile is not None
-    checked_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-    probe_started = checked_at - timedelta(seconds=1)
-    receipt = RouteReceipt(
-        receipt_id=f"native-repair-probe-{uuid.uuid4().hex}",
-        request_id=f"native-repair-request-{uuid.uuid4().hex}",
-        route_decision_id=f"native-repair-decision-{uuid.uuid4().hex}",
-        runtime_path="strategist_agent",
-        workload="background",
-        outcome="succeeded",
-        egress_class=setup.egress_class.value,
-        started_at=probe_started,
-        finished_at=probe_started + timedelta(milliseconds=100),
-        latency_ms=100,
-        actual_profile_id=profile.id,
-        actual_model=profile.model,
-        actual_adapter=profile.transport_adapter,
-        destination_class="remote",
-        trust_decision_id=f"native-repair-trust-{uuid.uuid4().hex}",
-    )
-
-    async def persist_proofs() -> None:
-        persisted = await model_fabric_repository.persist_route_receipt(receipt)
-        assert persisted.persisted is True
-        for capability, proven_value in (
-            ("text", "present"),
-            ("structured_output", "json"),
-            ("health", "healthy"),
-            ("latency_ms", 100),
-        ):
-            proof = build_model_route_proof(
-                profile=profile,
-                endpoint_class=EndpointClass.REMOTE,
-                adapter=profile.transport_adapter,
-                capability=capability,
-                canary_version="native-repair-v1",
-                outcome="passed",
-                checked_at=checked_at.timestamp(),
-                expires_at=checked_at.timestamp() + 3600,
-                probe_receipt_id=receipt.receipt_id,
-                probe_receipt_hash=receipt.receipt_hash,
-                proven_value=proven_value,
-            )
-            persisted_proof = await model_fabric_repository.persist_capability_proof(proof)
-            assert persisted_proof.persisted is True
-
-    return persist_proofs
 
 
 def _repair_input() -> dict[str, Any]:
@@ -367,8 +279,34 @@ def _init_repository(
     return repository, before_source, before_git
 
 
-def _model_transport(transport_calls: list[dict[str, Any]]):
-    """Return one deterministic response at the governed transport seam."""
+async def _configure_near_route(monkeypatch):
+    """The intercepted NEAR TEE strategist route and its 25,000 micro-USD lane (#1184)."""
+    from tests.near_tee_support import prepare_repository_near_route
+    return await prepare_repository_near_route(monkeypatch, ceiling_microusd=25_000)
+
+
+def _install_model_transport(monkeypatch, near, transport_calls: list[dict[str, Any]]) -> None:
+    """One deterministic answer at the intercepted NEAR TEE gateway (#1184).
+
+    ``_model_answer(transport_calls)`` scripts the answer; the gateway bills
+    ``near.cost_nano`` (2 micro-USD unless the answer factory set another).
+    """
+    import src.llm_runtime as llm_runtime
+
+    runtime_paths: list[str] = []
+    real_completion = llm_runtime._near_tee_completion_sync
+
+    def observed_completion(**kwargs: Any):
+        runtime_paths.append(str(kwargs.get("runtime_path") or ""))
+        return real_completion(**kwargs)
+
+    monkeypatch.setattr(llm_runtime, "_near_tee_completion_sync", observed_completion)
+    near.cost_nano = 2_000
+    near.script = _model_answer(transport_calls, runtime_paths=runtime_paths, near=near)
+
+
+def _model_answer(transport_calls: list[dict[str, Any]], *, runtime_paths: list[str], near):
+    """The NEAR gateway's deterministic repair proposal for the consented body."""
 
     def proposal(base_digest: str) -> dict[str, Any]:
         return {
@@ -386,10 +324,7 @@ def _model_transport(transport_calls: list[dict[str, Any]]):
             "expected_outcome": "The focused test passes.",
         }
 
-    def transport(**kwargs: Any):
-        body = kwargs.get("body")
-        if not isinstance(body, dict):
-            raise AssertionError("governed model transport did not receive an OpenAI-compatible body")
+    def answer(body: dict[str, Any]) -> str:
         messages = body.get("messages")
         base_digest = None
         if isinstance(messages, list):
@@ -406,19 +341,16 @@ def _model_transport(transport_calls: list[dict[str, Any]]):
             raise AssertionError("governed repair transport did not receive the canonical source packet")
         transport_calls.append(
             {
-                "endpoint": str(getattr(getattr(kwargs.get("decision"), "selected", None), "endpoint", "")),
-                "runtime_path": str(getattr(kwargs.get("context"), "runtime_path", "")),
+                # The gateway only answers the pinned NEAR host.
+                "endpoint": "https://cloud-api.near.ai/v1/chat/completions",
+                "runtime_path": runtime_paths[-1] if runtime_paths else "",
                 "model": str(body.get("model") or ""),
                 "messages": len(messages) if isinstance(messages, list) else 0,
             }
         )
-        content = json.dumps(proposal(base_digest), sort_keys=True)
-        response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(role="assistant", content=content))]
-        )
-        return response, {"choices": [{"message": {"role": "assistant", "content": content}}], "usage": {"cost": "0.000002"}}
+        return json.dumps(proposal(base_digest), sort_keys=True)
 
-    return transport
+    return answer
 
 
 async def _create_goal_task(
@@ -856,13 +788,9 @@ async def _prepare_native_flow(
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "native-vertical-auth-secret")
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
-    monkeypatch.setattr(settings, "openrouter_api_key", "test-key")
-    monkeypatch.setattr(settings, "openrouter_provider_only", True)
-    monkeypatch.setattr(settings, "openrouter_allowed_upstreams", "anthropic")
-    monkeypatch.setattr(settings, "default_model", "openrouter/anthropic/claude-sonnet-4")
-    persist_proofs = _configure_openrouter()
-    await persist_proofs()
-    await durable_job_repository.configure_inference_accounting(25_000)
+    # #1184: the strategist route is the intercepted NEAR TEE text slot
+    # (catalog receipt, capability proofs, key and accounting ceiling).
+    near = await _configure_near_route(monkeypatch)
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
@@ -970,7 +898,7 @@ async def _prepare_native_flow(
         scheduled_at=None if low_due else now + timedelta(hours=1),
     )
     transport_calls: list[dict[str, Any]] = []
-    monkeypatch.setattr("src.llm_runtime._governed_openai_chat_completion", _model_transport(transport_calls))
+    _install_model_transport(monkeypatch, near, transport_calls)
 
     dispatcher = WorkBoardDispatcher(repository=repository, session_provider=async_db)
     first = await dispatcher.run_pass()
@@ -1056,7 +984,7 @@ async def test_local_native_repo_repair_api_vertical(client, async_db, tmp_path:
             "expected_job_revision": int(flow["job"]["revision"]),
             "source_packet_digest": packet.artifact_sha256,
             "expected_source_manifest_digest": packet.source_manifest_digest,
-            "expected_profile_id": "openrouter",
+            "expected_profile_id": "near_tee.text",
             "acknowledged_selected_source": True,
             "idempotency_key": "native-egress-consent",
         },
@@ -1067,7 +995,7 @@ async def test_local_native_repo_repair_api_vertical(client, async_db, tmp_path:
     assert resumed["claimed"] == 0
     assert len(transport_calls) == 1
     assert transport_calls[0]["runtime_path"] == "strategist_agent"
-    assert transport_calls[0]["endpoint"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert transport_calls[0]["endpoint"] == "https://cloud-api.near.ai/v1/chat/completions"
 
     pending = await client.get(f"/api/workflows/repo-repair/{job_id}")
     assert pending.status_code == 200, pending.text
@@ -1241,7 +1169,7 @@ async def test_local_native_two_goals_share_one_worker(
                 "expected_job_revision": int(job["revision"]),
                 "source_packet_digest": packet.artifact_sha256,
                 "expected_source_manifest_digest": packet.source_manifest_digest,
-                "expected_profile_id": "openrouter",
+                "expected_profile_id": "near_tee.text",
                 "acknowledged_selected_source": True,
                 "idempotency_key": key,
             },
@@ -1403,7 +1331,7 @@ async def test_local_native_api_cancel_reconciles_same_job(
             "expected_job_revision": int(flow["job"]["revision"]),
             "source_packet_digest": packet.artifact_sha256,
             "expected_source_manifest_digest": packet.source_manifest_digest,
-            "expected_profile_id": "openrouter",
+            "expected_profile_id": "near_tee.text",
             "acknowledged_selected_source": True,
             "idempotency_key": "native-cancel-egress-consent",
         },

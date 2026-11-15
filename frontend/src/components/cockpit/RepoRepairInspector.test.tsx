@@ -66,7 +66,7 @@ function sourcePreviewPayload(text = "VALUE = 1", overrides: Record<string, unkn
     status: "paused",
     recovery_action: "review_code_egress",
     source_packet: { ...packet, selected_files: [{ path: "src/app.py", size_bytes: text.length, sha256: "1".repeat(64), text }], omissions: [] },
-    egress: { runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
+    egress: { runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
     provider_contacted: false,
     operator_visible: true,
     ...overrides,
@@ -283,12 +283,12 @@ describe("RepoRepairInspector", () => {
         status: "paused",
         recovery_action: "review_code_egress",
         source_packet: { ...packet, selected_files: [{ path: "src/app.py", size_bytes: "VALUE = 1".length, sha256: "1".repeat(64), text: "VALUE = 1" }], omissions: [] },
-        egress: { runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
+        egress: { runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
         provider_contacted: false,
         operator_visible: true,
       }))
       .mockResolvedValueOnce(response({ job_id: "job-1", status: "running", consent_id: "consent-1", consent_revision: 1, expires_at: "2030-01-01T00:00:00Z", recovery_action: "dispatcher_will_resume_same_root", operator_visible: true }))
-      .mockResolvedValueOnce(response({ ...projection(), status: "running", egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" } }));
+      .mockResolvedValueOnce(response({ ...projection(), status: "running", egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" } }));
 
     render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
     expect(await screen.findByText(/Private source stays local/)).toBeInTheDocument();
@@ -309,14 +309,17 @@ describe("RepoRepairInspector", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(projection({
       status: "awaiting_approval",
       source_packet: null,
-      egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" },
-      proposal: { proposal_id: "proposal-1", status: "awaiting_approval", revision: 2, base_snapshot_digest: "a".repeat(64), source_digest: "b".repeat(64), model_profile_id: "openrouter/repair", patch_sha256: "c".repeat(64), approval_id: "approval-1", expires_at: "2030-01-01T00:00:00Z", safe_metadata: {} },
+      egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" },
+      proposal: { proposal_id: "proposal-1", status: "awaiting_approval", revision: 2, base_snapshot_digest: "a".repeat(64), source_digest: "b".repeat(64), model_profile_id: "near_tee.text", patch_sha256: "c".repeat(64), approval_id: "approval-1", expires_at: "2030-01-01T00:00:00Z", safe_metadata: {} },
       approval: { approval_id: "approval-1", status: "pending", tool_name: "engineering.repo-repair.v1", action: "repo_repair.resolve", expires_at: "2030-01-01T00:00:00Z" },
       recovery_action: "review_repo_repair_proposal",
     }))));
 
     render(<RepoRepairInspector {...inspectorProps} jobId="job-1" onOpenApprovals={onOpenApprovals} />);
     expect(await screen.findByText(/Patch digest/)).toBeInTheDocument();
+    // #1184: the consent names NEAR and says it receives the source as plaintext.
+    expect(screen.getByText(/near_tee\.text via near_tee/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(/NEAR gateway receives this exact source and these diagnostics as plaintext; attestation is not verified by Seraph; no end-to-end encryption/);
     fireEvent.click(screen.getByRole("button", { name: "Review exact approval" }));
     expect(onOpenApprovals).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/No verified readback receipt/)).toBeInTheDocument();
@@ -344,8 +347,8 @@ describe("RepoRepairInspector", () => {
       local_host_execution_required: true,
       preparation_ready: true,
       execution_ready: false,
-      egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" },
-      proposal: { proposal_id: "proposal-1", status: "awaiting_approval", revision: 2, base_snapshot_digest: "a".repeat(64), source_digest: "b".repeat(64), model_profile_id: "openrouter/repair", patch_sha256: "c".repeat(64), approval_id: "approval-1", expires_at: "2030-01-01T00:00:00Z", safe_metadata: {} },
+      egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" },
+      proposal: { proposal_id: "proposal-1", status: "awaiting_approval", revision: 2, base_snapshot_digest: "a".repeat(64), source_digest: "b".repeat(64), model_profile_id: "near_tee.text", patch_sha256: "c".repeat(64), approval_id: "approval-1", expires_at: "2030-01-01T00:00:00Z", safe_metadata: {} },
       approval: { approval_id: "approval-1", status: "pending", tool_name: "engineering.repo-repair.v1", action: "repo_repair.resolve", expires_at: "2030-01-01T00:00:00Z" },
       recovery_action: "review_repo_repair_proposal",
     }))));
@@ -487,7 +490,7 @@ describe("RepoRepairInspector", () => {
       status: "paused",
       recovery_action: "review_code_egress",
       source_packet: { ...packet, selected_files: [{ path: "src/app.py", size_bytes: 12, sha256: "1".repeat(64), text: "STALE PRIVATE SOURCE" }], omissions: [] },
-      egress: { runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
+      egress: { runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
       provider_contacted: false,
       operator_visible: true,
     }));
@@ -639,7 +642,7 @@ describe("RepoRepairInspector", () => {
           revision: 2,
           base_snapshot_digest: "a".repeat(64),
           source_digest: "b".repeat(64),
-          model_profile_id: "openrouter/repair",
+          model_profile_id: "near_tee.text",
           patch_sha256: "c".repeat(64),
           approval_id: "approval-1",
           expires_at: "2030-01-01T00:00:00Z",
@@ -660,7 +663,7 @@ describe("RepoRepairInspector", () => {
       .mockResolvedValueOnce(response(projection()))
       .mockResolvedValueOnce(response(sourcePreviewPayload()))
       .mockResolvedValueOnce(response(consentReceipt()))
-      .mockResolvedValueOnce(response(projection({ status: "running", egress: { consent_id: "other-consent", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" } })));
+      .mockResolvedValueOnce(response(projection({ status: "running", egress: { consent_id: "other-consent", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" } })));
     render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
     await screen.findByText(/Private source stays local/);
     fireEvent.click(screen.getByRole("button", { name: "Inspect selected source" }));
@@ -693,7 +696,7 @@ describe("RepoRepairInspector", () => {
       status: "paused",
       recovery_action: "review_code_egress",
       source_packet: { ...packet, selected_files: [{ path: "src/app.py", size_bytes: "VALUE = 1".length, sha256: "1".repeat(64), text: "VALUE = 1" }], omissions: [] },
-      egress: { runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
+      egress: { runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: null },
       provider_contacted: false,
       operator_visible: true,
     };
@@ -713,7 +716,7 @@ describe("RepoRepairInspector", () => {
       .mockResolvedValueOnce(response(projection()))
       .mockResolvedValueOnce(response(source))
       .mockResolvedValueOnce(response({ job_id: "job-1", status: "running", consent_id: "consent-1", consent_revision: 1, expires_at: "2030-01-01T00:00:00Z", recovery_action: "dispatcher_will_resume_same_root", operator_visible: true }))
-      .mockResolvedValueOnce(response(projection({ status: "running", egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "openrouter/repair", effective_upstream: "openrouter", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" } })));
+      .mockResolvedValueOnce(response(projection({ status: "running", egress: { consent_id: "consent-1", revision: 1, runtime_path: "strategist_agent", effective_profile_id: "near_tee.text", effective_upstream: "near_tee", maximum_input_bytes: 65536, maximum_output_tokens: 4096, expires_at: "2030-01-01T00:00:00Z", state: "active" } })));
     render(<RepoRepairInspector {...inspectorProps} jobId="job-1" />);
     await screen.findByText(/Private source stays local/);
     fireEvent.click(screen.getByRole("button", { name: "Inspect selected source" }));

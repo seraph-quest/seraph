@@ -671,8 +671,8 @@ class GeneralTaskService:
             from src.model_fabric.near_tee_vertical import repository_repair_route_block
             from src.model_fabric.retirement import inactive_route_label
             if reason := repository_repair_route_block():
-                # #1159: no NEAR TEE adapter for the repair model step; no
-                # inspection, artifact, job, reservation or contact.
+                # #1184: no usable NEAR TEE route for the repair model step;
+                # no inspection, artifact, job, reservation or contact.
                 raise BoardError(reason, inactive_route_label(reason), status_code=409, reason_code=reason,
                     route_block=True, provider_contact="not_started")
         if request.input.communication_selection is not None and request.plan is None:

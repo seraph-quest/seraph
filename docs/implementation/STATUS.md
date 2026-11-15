@@ -749,15 +749,22 @@ and settles from NEAR billing inside its broker lease, with no fallback. On
 NEAR TEE now: general-task and specialist planning, Work Board card
 proposals, guardian opportunity assessment and plan generation, research
 dossiers (child synthesis and programme discovery requests), Mail reply
-drafts, Calendar meeting prep and communication preparation. Repository work
-stays blocked on NEAR TEE: its repair iteration model step
-(`repo_repair_source`, whose consented exact request body and code-egress
-consent are bound to the retired OpenRouter target) has no NEAR TEE adapter,
-so the `repository_work` tool is never offered. A frozen tool set or explicit
-plan naming it, and an admitted repository child (including on resume), is
-refused with `near_tee_route_unsupported` before any planning, reservation or
-contact. A repository-worded intent submitted without that tool is ordinary
-NEAR planning (charged) and cannot produce a repository step. A NEAR TEE answer that is not adopted (for
+drafts, Calendar meeting prep, communication preparation and, since #1184,
+repository repair (`repo_repair_source`, **Partial**): its iteration consents
+to the exact NEAR TEE body (`finalize_iteration_egress` builds the body the
+text slot sends), its route digest names the NEAR target (fixed base, slot
+profile and contract hash, model, `x-no-aliasing`), its code-egress consent
+names `near_tee` and says the NEAR gateway receives the source and
+diagnostics as plaintext. While the call runs, a model-fabric egress binding
+lets the NEAR TEE adapter send only that exact request: any other body or
+target is refused in `prepare_near_tee_call`, before any reservation, and
+again at the precontact guard. The single-shot repair consent pins the same
+exact body and route digests. A repository-sized slot at real NEAR prices
+costs about 2.7k micro-USD per request, so the slot bound and Task/Goal limits
+must allow that (availability only). Every per-request gate (model echo,
+`x-no-aliasing`, billing readback, Unknown liability, cost bound) is
+unchanged; `near_tee_route_unsupported` is no longer produced and stays only
+as a label for Tasks already blocked with it. A NEAR TEE answer that is not adopted (for
 example `near_tee_output_truncated` for a JSON draft cut at the slot's output
 bound) settles its NEAR cost and blocks the Mail or Calendar card with that
 code. Every vertical blocks

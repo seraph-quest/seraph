@@ -15,9 +15,6 @@ from src.vault.repository import vault_repository
 from tests import test_repo_repair_local_vertical as native
 from tests.repo_publication_support import GitDataTransport
 
-# ADR-035: repository repair has no NEAR TEE route yet (#1184); pins the intercepted historical OpenRouter step
-pytestmark = pytest.mark.openrouter_legacy
-
 ORIGIN = {"Origin": "http://localhost:3001"}
 
 
@@ -37,28 +34,24 @@ async def _actual_repair(client, async_db, tmp_path, monkeypatch):
     monkeypatch.setattr(native, "create_session", default_login)
     monkeypatch.setattr(native, "RepoSandboxSettings", lambda **values: RepoSandboxSettings(profile=PROFILE, **values))
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
-    original_configuration = native._configure_openrouter
-    def managed_configuration():
+    original_configuration = native._configure_near_route
+    async def managed_configuration(patch):
+        # #1184: the intercepted NEAR TEE strategist route on this deployment witness.
         from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
         prepare_lifecycle_directory(ProductionWorkspace(host_root=Path(settings.workspace_dir)))
-        persist_proofs = original_configuration()
-        async def finish_configuration():
-            from src.workflows.job_runtime import durable_job_repository
-            await durable_job_repository.configure_inference_accounting(25_000)
-            await persist_proofs()
-        return finish_configuration
-    monkeypatch.setattr(native, "_configure_openrouter", managed_configuration)
-    original_transport = native._model_transport
-    def costed_fixture_transport(calls):
-        transport = original_transport(calls)
-        def complete(**values):
-            response, body = transport(**values)
-            return response, {**body, "id": "fixture-publication-proposal", "usage": {"cost": "0.000001"}}
+        return await original_configuration(patch)
+    monkeypatch.setattr(native, "_configure_near_route", managed_configuration)
+    original_answer = native._model_answer
+    def costed_fixture_answer(calls, *, runtime_paths, near):
+        answer = original_answer(calls, runtime_paths=runtime_paths, near=near)
+        def complete(body):
+            near.cost_nano = 1_000  # NEAR bills 1 micro-USD for the proposal.
+            return answer(body)
         return complete
-    monkeypatch.setattr(native, "_model_transport", costed_fixture_transport)
+    monkeypatch.setattr(native, "_model_answer", costed_fixture_answer)
     flow = await native._prepare_native_flow(client, async_db, tmp_path, monkeypatch, test_sleep_seconds=0.01)
     job_id, packet = flow["job_id"], flow["packet"]
-    response = await client.post(f"/api/workflows/repo-repair/{job_id}/code-egress-consent", json={"expected_job_revision": flow["job"]["revision"], "source_packet_digest": packet.artifact_sha256, "expected_source_manifest_digest": packet.source_manifest_digest, "expected_profile_id": "openrouter", "acknowledged_selected_source": True, "idempotency_key": "publication-native-egress"}, headers=ORIGIN)
+    response = await client.post(f"/api/workflows/repo-repair/{job_id}/code-egress-consent", json={"expected_job_revision": flow["job"]["revision"], "source_packet_digest": packet.artifact_sha256, "expected_source_manifest_digest": packet.source_manifest_digest, "expected_profile_id": "near_tee.text", "acknowledged_selected_source": True, "idempotency_key": "publication-native-egress"}, headers=ORIGIN)
     assert response.status_code == 200, response.text
     await flow["dispatcher"].run_pass()
     pending = await client.get(f"/api/workflows/repo-repair/{job_id}")

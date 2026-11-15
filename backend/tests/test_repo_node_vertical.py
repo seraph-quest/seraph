@@ -209,7 +209,9 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         authority={"job_id":job_id,"authority_digest":marker["authority_digest"],"attempt_id":marker["attempt_id"],"fencing_token":marker["fencing_token"]}
         if stopped:
             assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT),{"settled_after_seconds":round(settled_after,2),
-                "checkpoints":[{key:item.get(key) for key in ("checkpoint_id","state")} for item in job["checkpoints"][-8:]],
+                "checkpoints":[{"id":item.get("checkpoint_id"),"payload":{k:v for k,v in (item.get("payload") or {}).items()
+                    if any(word in k for word in ("deadline","expires","reason","status","phase","cleanup"))}} for item in job["checkpoints"][-10:]],
+                "job_deadline_at":job.get("deadline_at"),"lease":job.get("lease"),
                 "failure_reason":job.get("failure_reason")}
             stopped=False
             await asyncio.to_thread(os.waitpid,owned_pid,0)

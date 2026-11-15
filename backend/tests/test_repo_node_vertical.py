@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import signal
 import subprocess
@@ -23,6 +24,27 @@ from src.workflows.repair_capacity import try_acquire_repo_repair_capacity, _QUA
 from src.workflows.job_runtime import durable_job_repository
 from tests import test_repo_repair_local_vertical as native
 from tests.test_repo_node import make_fixture, NODE, PROFILE
+
+
+pytestmark=[pytest.mark.filterwarnings("error::ResourceWarning"),
+            pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")]
+
+# Liveness watchdog for an exit the test awaits, never the synchronisation
+# itself. It stays below the nested_timeout grandchild's 20 s sentinel delay.
+EXIT_WATCHDOG_SECONDS=15
+
+
+def _await_exit(pid):
+    """Block on the process's pidfd until it exits (Linux; no /proc polling)."""
+    try:
+        descriptor=os.pidfd_open(pid)
+    except ProcessLookupError:
+        return
+    try:
+        readable,_,_=select.select([descriptor],[],[],EXIT_WATCHDOG_SECONDS)
+        assert readable,f"process {pid} still running after the {EXIT_WATCHDOG_SECONDS} s liveness watchdog"
+    finally:
+        os.close(descriptor)
 
 
 PROOF_ROOT=Path(os.environ.get("SERAPH_TEST_EVIDENCE_ROOT") or str(Path(__file__).resolve().parents[2]/".agent-evidence/912"))/f"integrated-{os.getpid()}"
@@ -178,17 +200,6 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
     await _approve_node_flow(client,flow)
     job_id=flow["job_id"]
     fresh=NodeRepoRepairExecutor(workspace_dir=flow["workspace"])
-    # The executor SIGKILLs a supervisor that misses its deadline and leaves
-    # the zombie for its owner; this test is that owner (SIGCONT, waitpid
-    # below). Popen.__del__ reaps a dead child when garbage collection drops
-    # the executor's handle, so keep every handle alive until the test has
-    # reaped it; otherwise the outcome depends on collector timing (#1184).
-    retained_processes=[]
-    class RetainedPopen(subprocess.Popen):
-        def __init__(self,*args,**kwargs):
-            super().__init__(*args,**kwargs)
-            retained_processes.append(self)
-    monkeypatch.setattr(subprocess,"Popen",RetainedPopen)
     dispatch=asyncio.create_task(flow["dispatcher"].run_pass())
     owned_pid=None;owned_start=None;stopped=False
     try:
@@ -217,10 +228,15 @@ async def test_durable_node_lifecycle_and_retained_slot(client,async_db,tmp_path
         if failure=="nested_timeout":assert job["status"]=="failed",job
         authority={"job_id":job_id,"authority_digest":marker["authority_digest"],"attempt_id":marker["attempt_id"],"fencing_token":marker["fencing_token"]}
         if stopped:
-            assert supervisor.exact_signal(owned_pid,owned_start,signal.SIGCONT)
+            # The executor SIGKILLed the stopped supervisor at its deadline
+            # and, as its owner, reaped it (#1212): read the typed outcome.
+            reap=fresh._read_job_marker(job_id)["supervisor_reap"]
+            assert reap["pid"]==owned_pid and reap["status"]=="killed_and_reaped",reap
+            assert reap["kill_delivered"] is True and reap["reaped"] is True
+            assert reap["returncode"]==-signal.SIGKILL
             stopped=False
-            await asyncio.to_thread(os.waitpid,owned_pid,0)
-        await asyncio.sleep(2.2)
+            with pytest.raises(ChildProcessError):os.waitpid(owned_pid,os.WNOHANG)
+        await asyncio.to_thread(_await_exit,child_pid)
         assert not native._pid_is_running(child_pid)
         assert not sentinel.exists()
         reconciled=fresh.reconcile(authority)

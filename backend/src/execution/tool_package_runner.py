@@ -12,9 +12,69 @@ import subprocess
 import sys
 import time
 
+from src.execution.process_reap import (ProcessReapError, ReapOutcome, kill_then_reap,
+    terminate_then_reap)
 from src.execution.tool_package_profile import (MAX_SECONDS, MAX_STREAM, PROFILE,
     ToolPackageBlocked, canonical, digest, expected_output, inspect_runtime,
     read_private, source_package)
+
+# Cleanup time granted to a signalled supervisor before SIGKILL. It admits no
+# renewed package work.
+CLEANUP_GRACE_SECONDS = .5
+
+
+def _supervisor_sender(process: subprocess.Popen, pid_start: str | None):
+    """Signal only the exact recorded supervisor; no identity, no signal."""
+    from src.execution import repo_supervisor
+
+    def send(signum: int) -> bool:
+        return bool(pid_start) and repo_supervisor.exact_signal(process.pid, pid_start, signum)
+    return send
+
+
+def kill_and_reap_supervisor(process: subprocess.Popen, pid_start: str | None) -> ReapOutcome:
+    """SIGKILL the exact supervisor past its cleanup deadline and reap it (#1212)."""
+    try:
+        return kill_then_reap(process, send_signal=_supervisor_sender(process, pid_start))
+    except ProcessReapError as exc:
+        return exc.outcome
+
+
+def terminate_and_reap_supervisor(process: subprocess.Popen, pid_start: str | None, *,
+                                  kill_at: float) -> ReapOutcome:
+    """SIGTERM the exact supervisor, SIGKILL it at ``kill_at`` if still running, and reap it.
+
+    ``kill_at`` is the moment the deadline path would kill it
+    (``deadline_at`` plus the cleanup grace), so a failure grants the
+    supervisor's own SIGTERM cleanup exactly the time it already had and adds
+    no new bound. The wait is blocking; async callers run it in a thread.
+    """
+    try:
+        return terminate_then_reap(process, send_signal=_supervisor_sender(process, pid_start),
+                                   grace_seconds=max(0.0, kill_at-time.time()))
+    except ProcessReapError as exc:
+        return exc.outcome
+
+
+async def _reap_in_owner(reap, *args, **kwargs) -> tuple[ReapOutcome, bool]:
+    """Run a blocking reap helper in a thread and return only once it finished.
+
+    The event loop is not blocked while the killed supervisor is collected. A
+    cancellation that arrives meanwhile is remembered, not obeyed, so the owner
+    never abandons its child. The wait is bounded: by the kill moment the
+    helper already uses, then by ``KILL_REAP_LIVENESS_SECONDS`` after SIGKILL
+    (an unreapable child yields ``kill_delivered_unreaped``, so cleanup stays
+    unproven). Returns the outcome and whether a cancel arrived.
+    """
+    reaping = asyncio.ensure_future(asyncio.to_thread(reap, *args, **kwargs))
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(reaping), cancelled
+        except asyncio.CancelledError:
+            cancelled = True
+            if reaping.done():
+                return reaping.result(), cancelled
 
 
 def private_write(root: Path, name: str, raw: bytes):
@@ -93,6 +153,7 @@ async def execute(stage: Path, request: dict, *, before_dispatch):
     cancellation = False
     admission_failed = False
     reason = None
+    reap: ReapOutcome | None = None
     try:
         while process.poll() is None or selector.get_map():
             if not released and not admission_failed and process.poll() is None:
@@ -132,10 +193,13 @@ async def execute(stage: Path, request: dict, *, before_dispatch):
                 if pid_start:
                     exact_signal(process.pid, pid_start, signal.SIGTERM)
                 # This is cleanup time only; it admits no renewed package work.
-                deadline = min(deadline+.5, time.time()+.5)
-                if request["deadline_at"]+.5 <= time.time():
-                    if pid_start:
-                        exact_signal(process.pid, pid_start, signal.SIGKILL)
+                deadline = min(deadline+CLEANUP_GRACE_SECONDS, time.time()+CLEANUP_GRACE_SECONDS)
+                if request["deadline_at"]+CLEANUP_GRACE_SECONDS <= time.time():
+                    # The owner reaps the supervisor it kills (#1212).
+                    reap, cancelled_during_reap = await _reap_in_owner(
+                        kill_and_reap_supervisor, process, pid_start)
+                    if cancelled_during_reap:
+                        cancellation = True
                     break
             for event, _ in selector.select(timeout=0):
                 chunk = os.read(event.fileobj.fileno(), 4096)
@@ -156,9 +220,11 @@ async def execute(stage: Path, request: dict, *, before_dispatch):
                 reason = "tool_package_cancel_requested"
                 if pid_start:
                     exact_signal(process.pid, pid_start, signal.SIGTERM)
-        if process.poll() is None:
-            # Never infer quiescence from the controller leaving its loop.
-            return {"status": "unknown", "reason": "tool_package_cleanup_unproven", "cleanup_proven": False}
+        if process.poll() is None or (reap is not None and reap.status != "exited_before_kill"):
+            # Never infer quiescence from the controller leaving its loop, nor
+            # from a supervisor that was killed before its own cleanup readback.
+            return {"status": "unknown", "reason": "tool_package_cleanup_unproven", "cleanup_proven": False,
+                    "supervisor_reap": reap.as_record() if reap is not None else None}
         process.wait()
         try:
             result = json.loads(read_private(stage, "out/supervisor-result.json", 32768))
@@ -169,12 +235,62 @@ async def execute(stage: Path, request: dict, *, before_dispatch):
             raise ToolPackageBlocked("tool_package_process_result_changed")
         if reason:
             result["reason"] = reason
+        if reap is not None:
+            # exited_before_kill: the supervisor finished its own readback.
+            result["supervisor_reap"] = reap.as_record()
         result["status"] = ("cancelled" if cancellation else
             "succeeded" if result.get("exit_code") == 0 and not result.get("reason") else "failed") if result.get("cleanup_proven") else "unknown"
         result["no_learning"] = True
         return result
+    except (Exception, asyncio.CancelledError) as exc:
+        if process.poll() is None:
+            # The owner terminates and reaps its supervisor on every failure
+            # (#1212), killing it no later than the deadline path would. No
+            # package work can be released once stdin is closed.
+            if not process.stdin.closed:
+                process.stdin.close()
+            # Keep reading (and discarding) the supervisor's output while it
+            # cleans up, so a full pipe never turns its clean exit into a kill.
+            loop = asyncio.get_running_loop()
+            drained = []
+            try:
+                for key in list(selector.get_map().values()):
+                    descriptor = key.fileobj.fileno()
+
+                    def discard(descriptor=descriptor):
+                        try:
+                            chunk = os.read(descriptor, 65536)
+                        except BlockingIOError:
+                            return
+                        except OSError:
+                            chunk = b""
+                        if not chunk:
+                            loop.remove_reader(descriptor)
+                    try:
+                        loop.add_reader(descriptor, discard)
+                    except (NotImplementedError, OSError, ValueError):
+                        continue  # no drain for this stream; the reap still runs
+                    drained.append(descriptor)
+                failed, cancel_requested = await _reap_in_owner(
+                    terminate_and_reap_supervisor, process, pid_start,
+                    kill_at=request["deadline_at"]+CLEANUP_GRACE_SECONDS)
+            except Exception as reap_error:
+                # The original failure stays the error; the reap error rides along.
+                exc.supervisor_reap = {"status": "reap_error", "error": repr(reap_error)}
+                raise exc
+            finally:
+                for descriptor in drained:
+                    loop.remove_reader(descriptor)
+            exc.supervisor_reap = failed.as_record()
+            if cancel_requested:
+                # A cancel that arrived during the reap is recorded; the typed
+                # failure still reaches the caller, as it did before the reap.
+                exc.cancel_requested = True
+        raise
     finally:
         if process.poll() is None and pid_start:
+            # Paths that bypass the reap above (e.g. GeneratorExit when the
+            # coroutine is closed) still ask the supervisor to clean up.
             exact_signal(process.pid, pid_start, signal.SIGTERM)
         selector.close()
         if not process.stdin.closed:

@@ -241,8 +241,8 @@ provider digests, live plugin states, pins, an empty effective patch) is in
 `/api/runtime/status` as `composition`, at `GET /api/runtime/composition/dump`,
 and offline through `./manage.sh -e dev composition dump`. It is built from an
 allow-list of codes and digests and holds no secrets (tested against a
-vault-seeded workspace). Partial because bundles are only declared (no bundle
-loader, profile or patch layer exists yet), the inference, execution guard and
+vault-seeded workspace). Partial because bundles select no code (the named
+profiles and patch layer arrived in #1204, below), the inference, execution guard and
 operator authentication pins are still targets, and the offline dump reports
 no live plugin state. See the
 [guide section](./12-current-app-guide.md#pinned-trust-domains-and-composition-dump-1198).
@@ -266,10 +266,55 @@ the dump, status, provider reports or logs). Partial because there is still no
 `seraph.vault.v1` service seam: vault consumers call the existing
 `src/vault` repository directly rather than through the provider, and a failed
 vault recheck after startup reports the provider `failed` but does not block
-those direct calls. The composition-time validator of §3 waits for the profile
-layer. Forward-only: an older binary rejects the extra row with
+those direct calls. The composition-time validator of §3 (#1204) now refuses any
+profile or patch row on the vault domain. Forward-only: an older binary rejects the extra row with
 `composition_inventory_invalid`. See the
 [guide section](./12-current-app-guide.md#pinned-credential-vault-1199).
+
+**Bundles, named profiles and the patch layer** from
+[#1204](https://github.com/seraph-quest/seraph/issues/1204) (A3.3 slice 1 of
+[#1026](https://github.com/seraph-quest/seraph/issues/1026), ADR-036 §4/§6) is
+**Partial**: `runtime_plugins/profiles.py` holds the reviewed bundle catalogue
+(the ten ADR-036 bundles: `seraph-trust`, five core bundles carrying today's
+domain rows, four app bundles), the named profiles `local`, `prod` and
+`headless`, and a closed patch-row catalogue. Before any provider activates, the
+lifespan validates the profile selected by `COMPOSITION_PROFILE` (empty derives
+it from `DEPLOYMENT_ENVIRONMENT`, so existing installs boot unchanged as `local`
+or `prod`). It also validates the layers in their fixed order (profile bundles,
+profile patch, operator patch `<workspace>/composition.patch.json`). It refuses
+to boot with a typed reason and a logged fix when one of these holds:
+- a profile omits or reorders `seraph-trust`, or drops a core bundle;
+- a patch row touches a pinned trust domain, names a security switch (no-login,
+  auth, bind host, deployment environment) or carries a non-catalogued or
+  non-boolean value;
+- `prod` meets no-login.
+
+The first composition flag is a row: `seraph.scheduler.v1#enabled`, with
+`SCHEDULER_ENABLED` as its base layer. A patch value changes actual scheduler
+activation (the engine, the lifecycle domain and the status/digest gates). The
+composition dump's `profile` (id, source, bundles, digest, patch presence) and
+`effective_patch` are now real, live and offline (`./manage.sh -e dev
+composition dump` passes the non-secret selection). Bundles are marked
+`selected`/`not_selected`. An uncatalogued patch row id is never echoed in the
+dump or the boot log. Agent file tools and process-tool path arguments are
+denied the patch file; a script the agent runs through the process runtime is
+not (the same boundary as `mcp-servers.json`, tracked in #1216).
+
+Partial because:
+- bundles select no code: the Cordis plugin set is still the one fixed reviewed
+  `profile.json`;
+- `headless` excludes `seraph-cockpit` only in the validated tree, since HTTP/WS
+  and the web cockpit are not plugin-owned until
+  [#1208](https://github.com/seraph-quest/seraph/issues/1208);
+- no catalogued row adds a reviewed alternative provider (such rows are refused
+  `patch_provider_unreviewed`);
+- the patch file is not a declared workspace state path, so backup and restore
+  do not carry it;
+- the other composition env flags move in
+  [#1206](https://github.com/seraph-quest/seraph/issues/1206).
+
+See the
+[guide section](./12-current-app-guide.md#bundles-named-profiles-and-the-patch-layer-1204).
 
 **Scheduler and dispatcher lifecycle** from
 [#1025](https://github.com/seraph-quest/seraph/issues/1025) (A3.2) is

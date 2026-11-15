@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     browser_site_allowlist: str = ""  # comma-separated hostname patterns allowed for browse/search
     # Reviewed Node 22.12+/24 for the Cordis host (goal research); empty uses `node` on PATH.
     cordis_node_path: str = ""
+    # ADR-036 §6 named composition profile (#1204): local, prod or headless.
+    # Empty derives it from DEPLOYMENT_ENVIRONMENT (production -> prod, else local).
+    composition_profile: str = ""
     browser_site_blocklist: str = ""  # comma-separated hostname patterns blocked for browse/search
 
     # Phase 3.5 — Timeouts

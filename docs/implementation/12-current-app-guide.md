@@ -1163,16 +1163,112 @@ The composition dump (`runtime_plugins/composition_dump.py`, schema
 its domains; per domain the owner kind, epoch, state, owner digest, the
 reviewed Cordis provider digest and, live, the plugin state the child reports;
 the Cordis kernel facts (version, profile id, package and composition digests);
-the pinned domains and trust services; `profile: null` and `effective_patch:
-[]`, since no profile or patch layer exists yet. Only reason codes, digests,
+the pinned domains and trust services; and, since #1204, the validated
+`profile` and the `effective_patch` rows (see below; the live dump reports
+`profile: null` only in a process that never booted through the lifespan). Only reason codes, digests,
 epochs and fixed names pass through; it reads no settings, environment values
 or vault content. The live dump is `composition` in `/api/runtime/status` and
 `GET /api/runtime/composition/dump` (authenticated). `./manage.sh -e dev
 composition dump [--node /absolute/node]` prints the offline dump: it runs
 keyless (`env -i`), opens the managed local workspace's `seraph.db` read-only,
 checks the reviewed Cordis package without starting the child, and exits
-non-zero unless the inventory decodes. It is dev-only; production reads the
+non-zero unless the inventory decodes and the profile validates. It is dev-only; production reads the
 status route.
+
+### Bundles, named profiles and the patch layer (#1204)
+
+This is A3.3 slice 1 (#1026) of ADR-036 §4/§6. It is part of the composition
+bootstrap, not a plugin. `runtime_plugins/profiles.py` holds three reviewed
+catalogues:
+- **Bundles** (`BUNDLES`): `seraph-trust` (pinned), then the core bundles
+  `seraph-agent`, `seraph-models`, `seraph-capabilities`, `seraph-domains` and
+  `seraph-lifecycle`, which carry today's domain rows (`trust.DOMAIN_BUNDLES`).
+  Last come the app bundles `seraph-cockpit`, `seraph-channels`, `seraph-edge` and
+  `seraph-headless`, which have no domain rows yet.
+- **Profiles** (`PROFILES`):
+
+  | Profile | Bundles | `DEPLOYMENT_ENVIRONMENT` | Env file |
+  | --- | --- | --- | --- |
+  | `local` | all but `seraph-headless` | any non-production value (as auth and the worker accept) | `.env.dev` |
+  | `prod` | all but `seraph-headless` | `production` | `.env.prod` |
+  | `headless` | trust, core, `seraph-channels`, `seraph-headless` | either | either |
+
+  `COMPOSITION_PROFILE` selects one. Empty derives it: `production` gives
+  `prod`, and anything else gives `local`. So an install that never sets it boots
+  exactly as before. `test` is not a profile.
+- **Patch rows** (`PATCH_ROWS`): today only `seraph.scheduler.v1#enabled`
+  (boolean). Its base layer is the `SCHEDULER_ENABLED` environment flag.
+
+**Boot order.** The lifespan calls `boot_profile()` before the provider worker
+takes the workspace lock. That function applies the layers in a fixed order:
+profile bundles, then the profile's own patch, then the optional operator
+patch `<workspace>/composition.patch.json`, which looks like this:
+
+```json
+{"schema": "seraph-composition-patch.v1",
+ "rows": [{"id": "seraph.scheduler.v1#enabled", "value": false}]}
+```
+
+The file must be a regular file (never a symlink, FIFO or device) owned by the
+service user, root or the workspace directory's owner (a host-written file in
+a container bind mount), and must not be group- or world-writable. Agent file
+tools and process-tool path arguments are denied it
+(`_AGENT_DENIED_RUNTIME_PATHS`). A script the agent writes and runs through the
+process runtime (`python`/`node` with a workspace script) can still write it,
+as it can `mcp-servers.json`; the worst result is a refused boot or a flipped
+scheduler row, tracked in #1216. It is not yet a declared workspace state path,
+so backup and restore do not carry it. It must be 16 KiB or smaller, and it is
+parsed as closed JSON that refuses duplicate keys.
+
+**Refusal.** Any refusal raises `CompositionProfileInvalid`, so nothing boots: no
+lock, no database, no provider. The fix is logged (`Composition refused:
+<reason> …`). Profile reasons:
+- `profile_unknown`;
+- `profile_environment_mismatch`: for example `prod` in development, or `local`
+  in production;
+- `profile_no_login_forbidden`;
+- `profile_trust_bundle_missing`: `seraph-trust` is absent or not first;
+- `profile_core_bundle_missing`, `profile_bundle_unknown`,
+  `profile_bundle_duplicate`.
+
+Patch reasons:
+- `patch_row_pinned`: any row on a `seraph-trust` domain, including inference
+  and the vault;
+- `patch_row_security_setting`: `operator_auth_*`, deployment environment, bind
+  host, journal secrets, vault key;
+- `patch_provider_unreviewed`: no alternative provider is catalogued;
+- `patch_row_unknown`, `patch_value_invalid` (non-boolean, so no string can carry
+  a credential), `patch_row_duplicate`, `patch_row_invalid`, `patch_invalid`,
+  `patch_too_large`;
+- `operator_patch_unsafe`, `operator_patch_invalid`, `operator_patch_too_large`.
+
+Recovery: fix or remove the patch file, or correct `COMPOSITION_PROFILE`, then
+restart. The logged fix names a row only when it is catalogued; any other row
+id from the file is `redacted`.
+
+**Effective values.** `profiles.scheduler_enabled()` returns the last patch
+layer's value for a row, or the live `SCHEDULER_ENABLED` setting when no layer
+set it. The scheduler engine (`init_scheduler`), the runtime lifecycle's
+scheduler domain, the background-inference status and the programme digest gate
+all read it. The composition dump shows two fields:
+- `profile`: `state`, `profile_id`, `source` (`explicit` or
+  `deployment_environment`), `env_file`, `bundles`, `operator_patch`
+  (`present` or `absent`) and `digest`. When the profile is invalid it shows
+  `state: invalid`, `reason`, and `row_id` only when the row is catalogued
+  (otherwise `redacted`).
+- `effective_patch`: the rows that patch layers set, with their layer.
+
+Each bundle also carries `kind` and a `status` of `selected` or `not_selected`.
+The status is `declared` when no profile booted. `./manage.sh -e dev
+composition dump` passes only `COMPOSITION_PROFILE` and `DEPLOYMENT_ENVIRONMENT`
+into its keyless run.
+
+**Not yet built:**
+- Bundles select no code: the Cordis plugin set is still the one reviewed
+  `runtime/cordis/profile.json`.
+- `headless` drops `seraph-cockpit` from the validated tree only. The HTTP/WS API
+  and the web cockpit still run until they become plugin-owned (#1208).
+- The remaining composition environment flags move in #1206.
 
 ### Pinned credential vault (#1199)
 

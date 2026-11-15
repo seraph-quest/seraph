@@ -1681,7 +1681,9 @@ _RUNTIME_ATOMIC_STAGING_TARGETS = (
 # server and stdio proxy settings (inline credentials are possible, and an
 # edit reconfigures tool egress outside the Settings consent flow) and private
 # mail artifacts, which are readable only through mail read consent.
-_AGENT_DENIED_RUNTIME_PATHS = frozenset({"mcp-servers.json", "stdio-proxies.json", MAIL_PRIVATE_ARTIFACT_ROOT})
+# composition.patch.json is the operator patch layer (ADR-036 §6, #1204): never agent-writable.
+_AGENT_DENIED_RUNTIME_PATHS = frozenset({"mcp-servers.json", "stdio-proxies.json", "composition.patch.json",
+                                         MAIL_PRIVATE_ARTIFACT_ROOT})
 # Canonical runtime state owned by a settings or install API.  Agents may
 # inspect it, but a direct file edit would bypass that owner's validation and
 # consent path (extension enablement, starter packs, model routes, screen

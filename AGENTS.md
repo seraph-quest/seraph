@@ -141,7 +141,10 @@ skips on timeout, direct `settings`/`os.environ` assignment, `get_session`
 patches and raw `Popen` per file. Each count must equal
 `scripts/test_determinism_baseline.json`, so counts only go down. Synchronise
 on a cause (an event, gate or notification) instead. The only exemption is
-`@pytest.mark.realtime(reason=...)` for real kernel, SQLite or browser timing.
+`@pytest.mark.realtime(reason=...)` for real kernel, SQLite or browser timing;
+it covers sleeps and clock comparisons only, and each marker is itself counted,
+so adding one is a reviewed baseline edit. Use `--rename OLD NEW` for a renamed
+test file.
 Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
 never-awaited coroutines are errors. A per-test watchdog dumps stacks after
 240 s and fails the test after 420 s. Any `filterwarnings` exception must be

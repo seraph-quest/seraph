@@ -110,6 +110,10 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # It contains only live server asyncio tasks; it is not persisted or exposed
 # to operators.
 _ACTIVE_WORKER_TASKS: dict[tuple[str, str], asyncio.Task[Any]] = {}
+# How long an operator research cancel waits for the cancelled worker's actual
+# completion before answering ``cancellation_pending``. Unchanged at 5s; named
+# so a test can select the completed branch without racing wall-clock load.
+_RESEARCH_CANCEL_WORKER_WAIT_SECONDS: float | None = 5
 from src.runtime_plugins.lifecycle import LifecycleBlocked  # noqa: E402 - import-time side-effect free
 _GOAL_SNAPSHOT_PREFLIGHT_ERRORS = frozenset(
     {
@@ -6084,7 +6088,7 @@ class WorkBoardDispatcher:
         if worker is not None and not worker.done():
             worker.cancel()
             try:
-                await asyncio.wait_for(asyncio.shield(worker), timeout=5)
+                await asyncio.wait_for(asyncio.shield(worker), timeout=_RESEARCH_CANCEL_WORKER_WAIT_SECONDS)
             except asyncio.TimeoutError:
                 return {"completed": False, "cancellation_pending": True, "reason": "actual_worker_completion_required"}
             except asyncio.CancelledError:

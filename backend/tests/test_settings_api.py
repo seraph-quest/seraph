@@ -3,6 +3,7 @@
 import asyncio
 import json
 import stat
+import threading
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -609,28 +610,50 @@ async def test_artifact_storage_returns_partial_status_when_screenshot_summaries
     screenshot_root.mkdir()
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(screenshot_root))
 
+    # Both summaries block until the test releases them, so they cannot
+    # finish while the request is in flight. A partial response proves the
+    # endpoint answered from its timeout fallbacks instead of waiting for the
+    # slow work, with no wall-clock bound to race on a loaded runner (#1191).
+    release_folder_summary = threading.Event()
+    folder_summary_finished = threading.Event()
+    pipeline_events = {"started": 0, "cancelled": 0, "completed": 0}
+
     def slow_folder_summary(_root):
-        time.sleep(2)
-        return {}
+        try:
+            release_folder_summary.wait()
+            return {}
+        finally:
+            folder_summary_finished.set()
 
     async def slow_pipeline_summary(root=None):
-        await asyncio.sleep(2)
+        pipeline_events["started"] += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pipeline_events["cancelled"] += 1
+            raise
+        pipeline_events["completed"] += 1
         return {}
 
-    with (
-        patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
-        patch.object(settings, "screen_analysis_provider", "local-vlm"),
-        patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
-        patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
-        patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
-        patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
-    ):
-        started_at = time.monotonic()
-        resp = await client.get("/api/settings/artifact-storage")
-        elapsed = time.monotonic() - started_at
+    try:
+        with (
+            patch.object(settings, "workspace_dir", str(tmp_path / "workspace")),
+            patch.object(settings, "screen_analysis_provider", "local-vlm"),
+            patch("src.api.settings._SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S", 0.01),
+            patch("src.api.settings._SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S", 0.01),
+            patch("src.api.settings._screenshot_folder_summary", slow_folder_summary),
+            patch("src.api.settings._screenshot_folder_pipeline_summary", slow_pipeline_summary),
+        ):
+            resp = await client.get("/api/settings/artifact-storage")
+            # The response is complete while the filesystem summary is still
+            # blocked and the pipeline summary was abandoned, not awaited.
+            assert not folder_summary_finished.is_set()
+            assert pipeline_events == {"started": 1, "cancelled": 1, "completed": 0}
+    finally:
+        # Let the abandoned worker thread return instead of outliving the test.
+        release_folder_summary.set()
 
     assert resp.status_code == 200
-    assert elapsed < 0.5
     data = resp.json()
     assert data["screenshot_folder"]["summary_status"] == "partial"
     assert data["screenshot_folder"]["summary_failure"] == "summary_timeout"

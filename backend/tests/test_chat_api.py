@@ -10,6 +10,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.api.chat import _bind_chat_principal
 from src.audit.repository import audit_repository
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
+from src.utils.background import drain_tracked_tasks
 from src.vault.repository import vault_repository
 from src.model_fabric import NoCompliantModelRouteError
 
@@ -360,6 +361,13 @@ class TestChatAPI:
 
         first = await client.post("/api/chat", json=payload)
         assert first.status_code == 200
+        # The accepted turn schedules post-response memory consolidation as a
+        # tracked background task. The in-memory test database is one shared
+        # StaticPool connection, so that task's session checkin (a pool reset
+        # rollback) could interleave with the duplicate request and silently
+        # discard its flushed but uncommitted audit row (#1197). Settle the
+        # first turn's background work before sending the retry.
+        await drain_tracked_tasks()
         payload["session_id"] = first.json()["session_id"]
         second = await client.post("/api/chat", json=payload)
 

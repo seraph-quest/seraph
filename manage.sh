@@ -17,6 +17,7 @@
 #   ./manage.sh -e [dev|prod] build     - Build or rebuild Docker services.
 #   ./manage.sh -e dev local up|down|status|logs|run - Manage the direct local frontend/backend stack.
 #   ./manage.sh -e dev cordis status|build|probe [--node /absolute/node] - Reviewed Cordis host (goal research).
+#   ./manage.sh -e dev composition dump [--node /absolute/node] - Read-only, secret-free composition dump.
 #   ./manage.sh -e prod health --format json - Emit a redacted Epic #736 health receipt.
 #   ./manage.sh -e [dev|prod] daemon start|stop|status|logs - Manage screen daemon.
 #   ./manage.sh -e [dev|prod] proxy start|stop|status|logs  - Manage stdio MCP proxy.
@@ -76,6 +77,7 @@ function display_help() {
     echo "  build   Build or rebuild services."
     echo "  local   Manage the direct local frontend/backend stack (dev only): up, down, status, logs, run."
     echo "  cordis  Reviewed lifecycle host: status, build, probe; optional --node /absolute/node. No dependency installation."
+    echo "  composition dump  Read-only, secret-free dump of bundles, domain owners, epochs, digests and pins (dev only)."
     echo "  health  Emit the redacted Epic #736 health receipt (prod only)."
     echo "  daemon  Manage screen daemon: start, stop, status, logs."
     echo "  proxy   Manage stdio-to-HTTP MCP proxy: start, stop, status, logs."
@@ -995,7 +997,8 @@ fi
 LOCAL_BACKEND_PORT="${LOCAL_BACKEND_PORT:-8004}"
 LOCAL_FRONTEND_PORT="${LOCAL_FRONTEND_PORT:-3001}"
 SERAPH_DEFAULT_TMP_ROOT="$(default_tmp_root /tmp)"
-if [ "$COMMAND" = "local" ]; then
+if [ "$COMMAND" = "local" ] || [ "$COMMAND" = "composition" ]; then
+    # `composition dump` reads the same workspace the managed local stack uses.
     LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}"
 else
     LOCAL_WORKSPACE_DIR="${LOCAL_WORKSPACE_DIR:-${BACKEND_DATA_PATH_DEV:-$SERAPH_DEFAULT_TMP_ROOT/seraph-dev-data}}"
@@ -1027,6 +1030,22 @@ if [ "$COMMAND" = "health" ]; then
 fi
 
 # --- Execution ---
+
+# ADR-036 §6 (#1198): read-only, secret-free composition dump. It opens the
+# workspace database read-only, never starts the Cordis child, and runs keyless
+# (env -i): only the workspace path and an optional --node are passed in.
+if [ "$COMMAND" = "composition" ]; then
+    if [ "$ENV" != "dev" ]; then
+        error_exit "'composition' is supported only with '-e dev'; in production read /api/runtime/status.composition."
+    fi
+    if [ "${1:-}" != "dump" ]; then
+        error_exit "Unknown composition subcommand '${1:-}'. Use: dump"
+    fi
+    shift
+    exec env -i PATH="$PATH" PYTHONPATH="$SCRIPT_DIR/backend" LANG=C.UTF-8 TZ=UTC \
+        "$(cordis_cli_python)" -B -m src.runtime_plugins.composition_dump dump \
+        --workspace "$LOCAL_WORKSPACE_DIR" "$@"
+fi
 
 if [ "$COMMAND" = "local" ]; then
     LOCAL_SUB="${1:-}"

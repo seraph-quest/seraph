@@ -11,6 +11,12 @@ import type {
   WorkBoardRepoRepairProcessCleanup,
 } from "../../types";
 
+// #1184 / ADR-035: repository code egress on NEAR TEE. NEAR's gateway reads
+// the consented source and diagnostics as plaintext; the TEE label is NEAR's
+// catalog claim, not Seraph-verified confidentiality.
+const NEAR_TEE_CODE_EGRESS_DISCLOSURE =
+  "Sent to NEAR AI (TEE-hosted per NEAR catalog). The NEAR gateway receives this exact source and these diagnostics as plaintext; attestation is not verified by Seraph; no end-to-end encryption.";
+
 interface RepoRepairInspectorProps {
   jobId: string;
   onOpenApprovals?: () => void;
@@ -1329,6 +1335,7 @@ export function RepoRepairInspector({
       {canInspect && <button type="button" disabled={busy || loading || sourceLoading} onClick={() => void inspectRepositorySource()}>Inspect exact source and diagnostics</button>}
       {canInspect && preview && <div>
         <div>{preview.egress.effective_profile_id} via {preview.egress.effective_upstream} · {preview.egress.combined_input_bytes} / {preview.egress.maximum_input_bytes} input bytes · {preview.egress.maximum_output_tokens} output tokens</div>
+        {preview.egress.effective_upstream === "near_tee" && <div role="note">{NEAR_TEE_CODE_EGRESS_DISCLOSURE}</div>}
         <div>Original cutoff: {new Date(preview.egress.original_deadline_at).toLocaleString()} · {preview.egress.remaining_inference_calls} calls remaining</div>
         <div>Redaction: {preview.egress.redaction_version}</div>
         {preview.source_packet.selected_files.map((file) => <details key={file.path}><summary>{file.path} · {file.size_bytes} bytes · {safeDigest(file.sha256)}</summary><pre className="whitespace-pre-wrap break-all">{file.text}</pre></details>)}
@@ -1446,6 +1453,7 @@ export function RepoRepairInspector({
         <div className="mt-3 rounded border border-emerald-500/30 p-2">
           <div className="font-semibold">Governed model consent</div>
           <div className="mt-1">{projectionForRender.egress.effective_profile_id} via {projectionForRender.egress.effective_upstream} · expires {new Date(projectionForRender.egress.expires_at).toLocaleString()}</div>
+          {projectionForRender.egress.effective_upstream === "near_tee" && <div className="mt-1 text-[10px]" role="note">{NEAR_TEE_CODE_EGRESS_DISCLOSURE}</div>}
           <div className="text-[10px] opacity-75">Input bound to {projectionForRender.egress.maximum_input_bytes} bytes and {projectionForRender.egress.maximum_output_tokens} output tokens.</div>
         </div>
       )}

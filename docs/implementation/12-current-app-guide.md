@@ -2277,8 +2277,9 @@ or detached child-process launches are not the supported lifecycle path.
 The backend settings object also reads the repository `.env.dev` directly
 unless `SERAPH_SETTINGS_ENV_FILE` names another file (empty means none).
 `manage.sh` and the compose files never set it. The backend test suite sets it
-empty and runs in `TZ=UTC`, so a checkout's `.env.dev` cannot change a test
-result.
+empty, removes settings variables other than `WORKSPACE_DIR` from its
+environment, and runs in `TZ=UTC`, so neither a checkout's `.env.dev` nor a
+shell that sourced it can change a test result.
 
 Useful probes:
 

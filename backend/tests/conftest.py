@@ -96,6 +96,9 @@ def snapshot_settings() -> dict:
 
 def restore_settings(snapshot: dict) -> None:
     """Return the shared settings object to ``snapshot``, in place."""
+    # The top-level ``__pydantic_fields_set__`` is not restored: nothing reads
+    # ``settings.model_fields_set``. Nested models such as ``repo_sandbox`` are
+    # restored whole, so their own fields-set (which src does read) comes back.
     current = settings.__dict__
     for name in [name for name in current if name not in snapshot]:
         del current[name]

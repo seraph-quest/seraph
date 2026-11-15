@@ -47,7 +47,7 @@ TRUST_SERVICES: tuple[TrustService, ...] = (
     TrustService("inference_policy", "seraph.inference.v1", "seraph.inference.v1", False, "target (ADR-036 §5)"),
     TrustService("execution_guard", "seraph.authority.v1", None, False, "target (part of authority)"),
     TrustService("operator_authentication", "seraph.authority.v1", None, False, "target (part of authority)"),
-    TrustService("credential_vault", "seraph.vault", None, False, "target (no domain row yet)"),
+    TrustService("credential_vault", "seraph.vault.v1", "seraph.vault.v1", True, "#1199"),
 )
 
 PINNED_DOMAINS = frozenset(item.runtime_domain for item in TRUST_SERVICES
@@ -59,11 +59,12 @@ def is_pinned_domain(runtime_domain: str) -> bool:
     return runtime_domain in PINNED_DOMAINS
 
 
-# ADR-036 §5: the bundle each of the 20 runtime domains ends up in. Bundles are
-# declared here only; no bundle loader or profile exists yet.
+# ADR-036 §5: the bundle each runtime domain ends up in (its 20, plus the
+# vault row #1199 added under §3). Bundles are declared here only; no bundle
+# loader or profile exists yet.
 DOMAIN_BUNDLES = {
     "seraph.state.v1": TRUST_BUNDLE, "seraph.authority.v1": TRUST_BUNDLE, "seraph.audit.v1": TRUST_BUNDLE,
-    "seraph.tasks.v1": TRUST_BUNDLE, "seraph.inference.v1": TRUST_BUNDLE,
+    "seraph.tasks.v1": TRUST_BUNDLE, "seraph.inference.v1": TRUST_BUNDLE, "seraph.vault.v1": TRUST_BUNDLE,
     "seraph.agent-presets.v1": "seraph-agent", "seraph.agent-loop.v1": "seraph-agent",
     "seraph.guardian.v1": "seraph-agent", "seraph.delegation.v1": "seraph-agent",
     "seraph.board-workers.v1": "seraph-agent", "seraph.capabilities.v1": "seraph-agent",

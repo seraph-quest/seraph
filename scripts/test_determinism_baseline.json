@@ -231,6 +231,9 @@
     "backend/tests/test_guardian_policy_metadata.py": {
       "get-session-patch": 1
     },
+    "backend/tests/test_hermetic_test_inputs.py": {
+      "settings-assign": 5
+    },
     "backend/tests/test_home_attention.py": {
       "get-session-patch": 2
     },
@@ -384,12 +387,12 @@
       "popen": 4
     },
     "backend/tests/test_repo_node.py": {
-      "sleep": 7,
-      "clock-compare": 4,
-      "popen": 2
+      "sleep": 6,
+      "clock-compare": 3,
+      "popen": 1
     },
     "backend/tests/test_repo_node_vertical.py": {
-      "sleep": 5,
+      "sleep": 4,
       "clock-compare": 4
     },
     "backend/tests/test_repo_original_producer.py": {
@@ -412,8 +415,8 @@
       "get-session-patch": 4
     },
     "backend/tests/test_repo_repair_executors.py": {
-      "sleep": 4,
-      "clock-compare": 4,
+      "sleep": 3,
+      "clock-compare": 3,
       "popen": 1
     },
     "backend/tests/test_repo_repair_local_vertical.py": {
@@ -472,10 +475,6 @@
     },
     "backend/tests/test_session.py": {
       "get-session-patch": 1
-    },
-    "backend/tests/test_settings_api.py": {
-      "sleep": 5,
-      "clock-compare": 4
     },
     "backend/tests/test_source_watch.py": {
       "sleep": 1,

@@ -136,12 +136,12 @@ FULLY_RETIRED_EVAL_INVOCATIONS = {
 }
 
 
-# #1224 (#1212), tracked exception to the warnings-as-errors policy (#1218).
-# These files exercise repo worker / supervisor paths that still leave
-# anonymous child pipes and killed-but-unreaped children to the garbage
-# collector, sometimes in pytest's session-end gc pass where no test-level mark
-# applies. The filters are passed as -W to these files' invocations only, so
-# the same leak anywhere else still fails. Delete with #1224 (PR #1228).
+# #1235 (#1224 follow-up), tracked exception to the warnings-as-errors policy
+# (#1218). After #1228, one file still leaves an unreaped child and its raw
+# pipes to pytest's session-end gc pass, where no test-level mark applies: CI
+# on develop 05cb3164 failed only here once the per-file exceptions were
+# removed. The filters are passed as -W to this file's invocations only, so
+# the same leak anywhere else still fails. Delete with #1235.
 # pytest treats a -W message as a literal prefix (re.escape), not a regex, so
 # "anonymous pipe" is spelled as one prefix per leading fd digit: a file opened
 # by path has a quoted name and never matches.
@@ -150,22 +150,13 @@ TRACKED_LEAK_FILTERS: tuple[str, ...] = (
       for kind in ("BufferedReader", "FileIO") for digit in "123456789"),
     *(f"ignore:subprocess {digit}:ResourceWarning" for digit in "123456789"),
 )
-# The files whose runs failed without the filters (throwaway PR #1233).
 TRACKED_LEAK_FILES: frozenset[str] = frozenset({
-    "tests/test_repo_isolation_integration.py",
-    "tests/test_repo_node_vertical.py",
-    "tests/test_repo_publication_prefix_vertical.py",
-    "tests/test_repo_publication_process_vertical.py",
-    "tests/test_repo_publication_runtime.py",
-    "tests/test_repo_publication_vertical.py",
-    "tests/test_repo_repair.py",
     "tests/test_repo_repair_executors.py",
-    "tests/test_repo_repair_local_vertical.py",
 })
 
 
 def tracked_warning_args(paths: list[str] | tuple[str, ...]) -> list[str]:
-    """``-W`` filters for invocations that include a #1224-tracked file."""
+    """``-W`` filters for invocations that include a #1235-tracked file."""
     if not TRACKED_LEAK_FILES.intersection(paths):
         return []
     return [f"-W{entry}" for entry in TRACKED_LEAK_FILTERS]
@@ -770,7 +761,7 @@ def main() -> int:
     parser.add_argument(
         "--files", nargs="+", default=None,
         help="run these test files (relative to backend/) instead of a shard, with the same per-file "
-             "handling, e.g. the #1224 leak exceptions for TRACKED_LEAK_FILES",
+             "handling, e.g. the #1235 leak exception for TRACKED_LEAK_FILES",
     )
     parser.add_argument("--file-timeout-seconds", type=int, default=None)
     parser.add_argument(

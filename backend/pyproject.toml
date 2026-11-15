@@ -69,9 +69,9 @@ filterwarnings = [
     # Narrow, tracked exceptions. Later entries take precedence over the
     # errors above. Delete each one with the change that removes its cause.
     #
-    # #1224: the repo worker / supervisor pipe and unreaped-child leaks are
-    # excepted only for the files that exercise them, as -W in
-    # scripts/run_backend_test_shard.py (TRACKED_LEAK_FILES).
+    # #1235 (#1224 follow-up): the one file that still leaks an unreaped
+    # child and its pipes gets its exception as -W in
+    # scripts/run_backend_test_shard.py (TRACKED_LEAK_FILES), not here.
     #
     # #1223: pytest-asyncio 1.3.0 asks asyncio.get_event_loop() for the "old"
     # loop when it builds a scoped runner (plugin.py _temporary_event_loop_policy).

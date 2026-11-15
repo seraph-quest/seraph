@@ -450,3 +450,31 @@ def test_lane_file_listings(tmp_path: Path) -> None:
 def test_quarantine_marker_is_registered_for_strict_markers() -> None:
     pyproject = (ROOT / "backend/pyproject.toml").read_text(encoding="utf-8")
     assert '"quarantine(issue):' in pyproject
+
+
+def test_marker_aliases_are_resolved(tmp_path: Path) -> None:
+    tests, _ = make_tree(tmp_path, {"test_a.py": """
+        import time
+        import pytest as pt
+        from pytest import mark
+
+        @pt.mark.quarantine(issue=12)
+        def test_alias():
+            pass
+
+        @mark.quarantine
+        def test_bare_from_import():
+            pass
+
+        held = pt.mark.quarantine(issue=13)
+
+        @mark.realtime(reason="real browser")
+        def test_realtime_alias():
+            time.sleep(1)
+    """})
+    result = checker.scan(tests, tmp_path)
+    assert [issue for _, _, issue in result.quarantined] == ["12"]
+    assert sum("requires issue=" in error for error in result.errors) == 1
+    assert sum("only supported as a decorator on a test function" in error for error in result.errors) == 1
+    assert result.counts() == {"backend/tests/test_a.py": {"realtime": 1}}
+    assert result.realtime_files == ["backend/tests/test_a.py"]

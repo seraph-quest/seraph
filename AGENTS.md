@@ -158,7 +158,9 @@ since plain `uv run pytest` on it fails on the leak.
 
 Determinism lanes (#1220) never retry a test to turn a job green. A pull
 request's changed backend test files run 20 times under CPU contention in
-printed random orders (`stress-changed-tests`). A failed node is rerun alone
+printed random orders (`stress-changed-tests`), with watchdogs scaled to the
+contention. Files that do not fit its time budget, or runs cut by its hard
+deadline, are named in the job summary as not stressed. A failed node is rerun alone
 only to classify it, as "deterministic" or "intermittent, k of N"; the job
 stays red. A daily scheduled workflow runs random order, one process per
 shard, a non-UTC timezone and the realtime files under contention.

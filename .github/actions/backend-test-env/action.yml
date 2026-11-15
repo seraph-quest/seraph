@@ -4,6 +4,8 @@ description: >-
   runtime, uv dependencies, the reviewed Cordis build, native Node, Chromium
   and bubblewrap. Shared by the per-PR shards, the changed-test stress job and
   the scheduled determinism lanes so they test the same environment.
+# Composite steps cannot carry timeout-minutes, so each command is bounded with
+# coreutils `timeout` at the per-step limits the inline steps used to have.
 runs:
   using: composite
   steps:
@@ -20,13 +22,13 @@ runs:
       shell: bash
       working-directory: backend
       run: |
-        /usr/bin/python3 -I -S -B scripts/prepare_ci_python_loader.py
-        "${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_shared_python.py
+        timeout 180 /usr/bin/python3 -I -S -B scripts/prepare_ci_python_loader.py
+        timeout 180 "${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_shared_python.py
 
     - name: Install dependencies
       shell: bash
       working-directory: backend
-      run: uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system
+      run: timeout 600 uv sync --group dev --python "${pythonLocation}/bin/python3.12" --python-preference only-system
 
     - name: Install reviewed Node 24.13.1 (npm 11.8.0) for the Cordis runtime
       uses: actions/setup-node@v4
@@ -38,10 +40,10 @@ runs:
       working-directory: runtime/cordis
       run: |
         # runtime/cordis/scripts/toolchain.mjs gates on exactly npm 11.8.0.
-        if [ "$(npm --version)" != "11.8.0" ]; then npm install -g npm@11.8.0; fi
+        if [ "$(npm --version)" != "11.8.0" ]; then timeout 120 npm install -g npm@11.8.0; fi
         test "$(npm --version)" = "11.8.0"
-        npm ci --ignore-scripts
-        npm run build
+        timeout 180 npm ci --ignore-scripts
+        timeout 120 npm run build
         echo "SERAPH_CORDIS_TEST_NODE=$(command -v node)" >> "$GITHUB_ENV"
 
     - name: Install Node 24.21.0 for native repository tests
@@ -52,25 +54,25 @@ runs:
     - name: Install locked TypeScript fixture dependencies
       shell: bash
       working-directory: frontend
-      run: npm ci --ignore-scripts
+      run: timeout 300 npm ci --ignore-scripts
 
     - name: Select and verify native Node test dependencies
       shell: bash
       working-directory: backend
-      run: '"${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_node_runtime.py'
+      run: 'timeout 180 "${pythonLocation}/bin/python3.12" -I -S -B scripts/prepare_ci_node_runtime.py'
 
     - name: Install Chromium and system dependencies
       shell: bash
       working-directory: backend
       run: |
-        sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
-        uv run playwright install --with-deps chromium
+        timeout 120 sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,ImageOS /usr/bin/python3 -I -S -B scripts/prepare_ci_apt_mirrors.py
+        timeout 480 uv run playwright install --with-deps chromium
 
     - name: Enable bubblewrap for repository isolation tests (#1065)
       shell: bash
       working-directory: backend
       run: |
-        sudo apt-get install -y --no-install-recommends bubblewrap || { sudo apt-get update -q && sudo apt-get install -y --no-install-recommends bubblewrap; }
+        timeout 90 sudo apt-get install -y --no-install-recommends bubblewrap || { timeout 60 sudo apt-get update -q && timeout 90 sudo apt-get install -y --no-install-recommends bubblewrap; }
         probe() { bwrap --unshare-all --unshare-user --die-with-parent --ro-bind /usr /usr --symlink usr/lib /lib --symlink usr/lib64 /lib64 --symlink usr/bin /bin --proc /proc --dev /dev /usr/bin/true; }
         if ! probe; then
           # Ubuntu runners may restrict unprivileged user namespaces via

@@ -227,11 +227,11 @@ def test_cpu_contention_starts_and_stops_its_busy_processes() -> None:
 
 def test_stress_budget_accounts_for_contention_and_reports_skipped_files(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(lanes, "load_measured_durations", lambda: {"tests/test_a.py": 30.0, "tests/test_b.py": 30.0})
-    monkeypatch.setattr(lanes, "invocations_for", lambda files: [(path, [path]) for path in files])
+    monkeypatch.setattr(lanes, "invocations_for", lambda files, **_: [(path, [path]) for path in files])
     monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: 0)
     summary_file = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
-    # 30 s x 20 runs x (2 + 1) = 30 minutes per file: the second exceeds a 45-minute budget.
+    # (30 s x (2 + 1) + 8 s start-up) x 20 runs = 33 minutes per file: the second exceeds 45.
     code = lanes.main(["stress", "--files", "tests/test_a.py", "tests/test_b.py", "--budget-minutes", "45",
                        "--contention", "2", "--seed", "1", "--junit-dir", str(tmp_path / "j")])
     output = capsys.readouterr().out
@@ -259,12 +259,95 @@ def test_every_node_of_a_fully_retired_invocation_is_individually_retired() -> N
 def test_stress_budget_stresses_the_cheapest_files_first(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(lanes, "load_measured_durations",
                         lambda: {"tests/test_heavy.py": 600.0, "tests/test_light.py": 5.0, "tests/test_mid.py": 10.0})
-    monkeypatch.setattr(lanes, "invocations_for", lambda files: [(path, [path]) for path in files])
+    monkeypatch.setattr(lanes, "invocations_for", lambda files, **_: [(path, [path]) for path in files])
     monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: 0)
     code = lanes.main(["stress", "--files", "tests/test_heavy.py", "tests/test_light.py", "tests/test_unmeasured.py",
                        "--budget-minutes", "60", "--contention", "2", "--seed", "1", "--junit-dir", str(tmp_path)])
     output = capsys.readouterr().out
     assert code == 0
-    # light: 5 s x 20 x 3 = 5 min; unmeasured uses the median (10 s): 10 min; heavy would be 600 min.
+    # light: (5 x 3 + 8) x 20 = 8 min; unmeasured uses the median (10 s): 13 min; heavy: 600 min.
     assert "stressing 2 file(s)" in output and "tests/test_light.py, tests/test_unmeasured.py" in output
     assert "NOT STRESSED tests/test_heavy.py" in output
+
+
+def test_a_file_bigger_than_the_whole_budget_is_never_admitted_even_first(monkeypatch) -> None:
+    monkeypatch.setattr(lanes, "invocations_for", lambda files, **_: [(path, [path]) for path in files])
+    selected, skipped, estimate = lanes.plan_stress(
+        ["tests/test_repo_work_task_publication.py"], runs=20, contention=2, budget_seconds=50 * 60,
+        durations={"tests/test_repo_work_task_publication.py": 410.0},
+    )
+    assert selected == [] and estimate == 0.0
+    assert skipped == [("tests/test_repo_work_task_publication.py", (410.0 * 3 + 8.0) * 20)]
+
+
+def test_start_up_is_charged_per_invocation(monkeypatch) -> None:
+    monkeypatch.setattr(lanes, "invocations_for",
+                        lambda files, **_: [(f"{path}::{part}", [path]) for path in files for part in "abc"])
+    _, _, estimate = lanes.plan_stress(["tests/test_a.py"], runs=20, contention=2, budget_seconds=10**6,
+                                       durations={"tests/test_a.py": 10.0})
+    assert estimate == (10.0 * 3 + 3 * 8.0) * 20
+
+
+def test_stress_stops_at_the_wall_clock_limit_and_says_what_did_not_run(tmp_path: Path, monkeypatch, capsys) -> None:
+    clock = iter(range(0, 10**6, 1000))  # every reading is 1000 s later
+    monkeypatch.setattr(lanes.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: 0)
+    code = lanes.main(["stress", "--files", "tests/test_check_test_determinism.py", "--runs", "20",
+                       "--contention", "0", "--seed", "1", "--deadline-minutes", "95",
+                       "--classify-reserve-minutes", "20", "--junit-dir", str(tmp_path)])
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "::warning::STRESS STOPPED at the 75-minute limit" in output
+    assert "this is not a full stress pass" in output
+    assert "stress ok" not in output
+
+
+def test_stress_treats_no_tests_collected_as_not_a_failure(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: lanes.NO_TESTS_COLLECTED)
+    code = lanes.main(["stress", "--files", "tests/test_check_test_determinism.py", "--runs", "2",
+                       "--contention", "0", "--seed", "1", "--junit-dir", str(tmp_path)])
+    assert code == 0
+    assert "no test ran (all quarantined or none selected)" in capsys.readouterr().out
+
+
+def test_stress_scales_the_watchdogs_with_contention(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple[list[str], float]] = []
+    monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: calls.append((command, timeout)) or 0)
+    monkeypatch.setattr(lanes, "cpu_contention", lambda factor: __import__("contextlib").nullcontext(0))
+    lanes.main(["stress", "--files", "tests/test_check_test_determinism.py", "--runs", "1",
+                "--contention", "2", "--seed", "1", "--junit-dir", str(tmp_path)])
+    [(command, timeout)] = calls
+    assert command[command.index("-o") + 1] == "timeout=1260"
+    assert "faulthandler_timeout=720" in command
+    assert timeout >= 1260 + 60 or timeout < 1260  # either the scaled bound or the remaining deadline
+
+
+def test_classification_stops_at_its_deadline_and_says_so(monkeypatch) -> None:
+    clock = iter([0, 10**6])  # one reading per attempt
+    monkeypatch.setattr(lanes.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(lanes, "run_pytest", lambda command, *, timeout: 1)
+    [result] = lanes.classify_nodes(["tests/test_a.py::test_a"], runs=20, timeout=60, deadline=600)
+    assert result.runs == 1
+    assert result.verdict == "deterministic (1 of 1 failed alone without added load) (stopped at the job deadline after 1 of 20 runs)"
+
+
+def test_summarize_lists_each_node_and_flags_a_lane_that_reported_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
+    summary_file = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
+    empty = tmp_path / "empty"
+    assert lanes.main(["summarize", "--junit-dir", str(empty), "--title", "Quarantine lane"]) == 0
+    assert "No test case was reported" in summary_file.read_text()
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "q.xml").write_text(
+        '<testsuites><testsuite name="s">'
+        '<testcase classname="tests.test_chat_api" name="test_a"><failure message="x"/></testcase>'
+        '<testcase classname="tests.test_chat_api" name="test_b"/>'
+        '<testcase classname="" name="tests.test_chat_api"><error message="collection"/></testcase>'
+        "</testsuite></testsuites>", encoding="utf-8")
+    assert lanes.main(["summarize", "--junit-dir", str(reports), "--title", "Quarantine lane"]) == 0
+    text = summary_file.read_text()
+    assert "| `tests/test_chat_api.py::test_a` | failure |" in text
+    assert "| `tests/test_chat_api.py::test_b` | passed |" in text
+    assert "| `tests/test_chat_api.py` | error |" in text

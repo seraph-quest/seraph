@@ -11,6 +11,9 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: test-determinism-scheduled
   cancel-in-progress: false
@@ -18,7 +21,8 @@ concurrency:
 jobs:
   lanes:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # Setup (~15 min) + lane step (70) + classification (30), with margin.
+    timeout-minutes: 130
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +41,9 @@ jobs:
         uses: ./.github/actions/backend-test-env
 
       - name: Run the ${{ matrix.lane }} lane
+        # Below the job timeout, so a slow lane fails this step and the
+        # JUnit upload still runs.
+        timeout-minutes: 70
         env:
           OPENROUTER_API_KEY: test-key
           LANE: ${{ matrix.lane }}
@@ -52,7 +59,7 @@ jobs:
               uv run python scripts/run_backend_test_shard.py "${common[@]}" --file-timeout-seconds 900 --keep-going --shuffle-seed "$seed" ;;
             single-process)
               # The whole shard in one pytest process, to expose cross-file leaks.
-              uv run python scripts/run_backend_test_shard.py "${common[@]}" --single-process ;;
+              uv run python scripts/run_backend_test_shard.py "${common[@]}" --single-process --single-process-timeout-seconds 3900 ;;
             timezone)
               # One pass under UTC+14, far from the runner's UTC.
               export TZ=Pacific/Kiritimati
@@ -73,8 +80,8 @@ jobs:
         if: failure()
         env:
           OPENROUTER_API_KEY: test-key
-        timeout-minutes: 40
-        run: uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 5 --run-timeout-seconds 450
+        timeout-minutes: 30
+        run: uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 5 --run-timeout-seconds 450 --deadline-minutes 25
 
   realtime-under-contention:
     runs-on: ubuntu-24.04
@@ -102,7 +109,7 @@ jobs:
             exit 0
           fi
           # shellcheck disable=SC2086
-          uv run python scripts/determinism_lanes.py stress --files $files --runs 10 --seed "$RUN_ID" --budget-minutes 90 --junit-dir test-results/junit
+          uv run python scripts/determinism_lanes.py stress --files $files --runs 10 --seed "$RUN_ID" --budget-minutes 60 --deadline-minutes 95 --junit-dir test-results/junit
 
       - name: Upload JUnit report
         if: always()

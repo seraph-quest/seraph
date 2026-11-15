@@ -171,10 +171,13 @@ def is_zero(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and not isinstance(node.value, bool) and node.value == 0
 
 
-def realtime_reason(decorator: ast.AST) -> str | None | bool:
-    """Return the reason for a realtime marker, ``False`` if not one, ``None`` if reasonless."""
+def realtime_reason(decorator: ast.AST, resolve=lambda name: name) -> str | None | bool:
+    """Return the reason for a realtime marker, ``False`` if not one, ``None`` if reasonless.
+
+    ``resolve`` maps import aliases (``import pytest as pt``, ``from pytest import mark``).
+    """
     target = decorator.func if isinstance(decorator, ast.Call) else decorator
-    if dotted(target) not in {"pytest.mark.realtime", "mark.realtime"}:
+    if resolve(dotted(target)) not in {"pytest.mark.realtime", "mark.realtime"}:
         return False
     if not isinstance(decorator, ast.Call):
         return None
@@ -186,10 +189,10 @@ def realtime_reason(decorator: ast.AST) -> str | None | bool:
     return None
 
 
-def quarantine_issue(decorator: ast.AST) -> str | None | bool:
+def quarantine_issue(decorator: ast.AST, resolve=lambda name: name) -> str | None | bool:
     """Return the issue for a quarantine marker, ``False`` if not one, ``None`` if it names none."""
     target = decorator.func if isinstance(decorator, ast.Call) else decorator
-    if dotted(target) not in {"pytest.mark.quarantine", "mark.quarantine"}:
+    if resolve(dotted(target)) not in {"pytest.mark.quarantine", "mark.quarantine"}:
         return False
     if not isinstance(decorator, ast.Call):
         return None
@@ -226,7 +229,7 @@ class Scanner(ast.NodeVisitor):
 
     # -- exemption -----------------------------------------------------------------
     def _check_quarantine(self, node: ast.AST, decorator: ast.AST) -> None:
-        issue = quarantine_issue(decorator)
+        issue = quarantine_issue(decorator, self.imports.resolve)
         if issue is False:
             return
         self.accepted_quarantine.add(id(decorator.func if isinstance(decorator, ast.Call) else decorator))
@@ -247,7 +250,8 @@ class Scanner(ast.NodeVisitor):
         """A quarantine marker anywhere but a test-function decorator escapes the
         issue check, the cap and the quarantine lane, so it is an error."""
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Attribute) and dotted(node) in {"pytest.mark.quarantine", "mark.quarantine"}
+            if (isinstance(node, ast.Attribute)
+                    and self.imports.resolve(dotted(node)) in {"pytest.mark.quarantine", "mark.quarantine"}
                     and id(node) not in self.accepted_quarantine):
                 self.errors.append(
                     f"{self.display_path}:{node.lineno}: pytest.mark.quarantine is only supported as a "
@@ -256,7 +260,7 @@ class Scanner(ast.NodeVisitor):
 
     def _check_marker(self, node: ast.AST, decorator: ast.AST) -> bool:
         self._check_quarantine(node, decorator)
-        reason = realtime_reason(decorator)
+        reason = realtime_reason(decorator, self.imports.resolve)
         if reason is False:
             return False
         if reason is None:

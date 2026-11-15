@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [develop, main, feat/seraph-native-guardian-epic, feat/864-operator-work-board]
 
+permissions:
+  contents: read
+
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
@@ -96,7 +99,7 @@ jobs:
         env:
           OPENROUTER_API_KEY: test-key
         timeout-minutes: 30
-        run: uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 3 --run-timeout-seconds 450
+        run: uv run python scripts/determinism_lanes.py classify --junit-dir test-results/junit --expect-failure --max-nodes 3 --run-timeout-seconds 450 --deadline-minutes 25
 
   # Changed-test stress (#1220): the backend test files this pull request adds
   # or modifies run 20 times under 2x-core CPU contention, each run in a new
@@ -105,6 +108,8 @@ jobs:
   stress-changed-tests:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    # Setup (~15 min) + the lane's own 95-minute hard deadline (runs stop at
+    # 75 and classification uses the rest), with margin.
     timeout-minutes: 120
     defaults:
       run:
@@ -156,6 +161,10 @@ jobs:
           QUARANTINED_FILES: ${{ needs.test-determinism.outputs.quarantined_files }}
         # shellcheck disable=SC2086 # intentional word splitting of the file list
         run: uv run python -m pytest -q --no-cov -p scripts.pytest_quarantine --quarantine=only --junitxml=test-results/quarantine/quarantine.xml $QUARANTINED_FILES
+
+      - name: Summarise quarantined nodes
+        if: always()
+        run: uv run python scripts/determinism_lanes.py summarize --junit-dir test-results/quarantine --title "Quarantine lane (non-blocking)"
 
       - name: Upload quarantine report
         if: always()

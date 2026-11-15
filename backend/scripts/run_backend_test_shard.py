@@ -772,6 +772,7 @@ def run_shard_single_process(
     pytest_args: list[str] | None = None,
     exclude_cancelled_eval_harness: bool = False,
     junit_dir: Path | None = None,
+    timeout_seconds: int | None = None,
 ) -> int:
     """Run every assigned file in one pytest process (#1220).
 
@@ -779,8 +780,9 @@ def run_shard_single_process(
     leaks into the next. This lane exposes it. The specialized ``-k`` splits
     are not applied: each file runs whole. Retirement matches the per-file
     runner because every node of a fully retired invocation is also listed
-    in ``CANCELLED_EVAL_CONSUMER_NODES`` (pinned by a test) and deselected. No runner timeout applies; the per-test watchdog in
-    ``pyproject.toml`` and the job timeout bound a hang.
+    in ``CANCELLED_EVAL_CONSUMER_NODES`` (pinned by a test) and deselected.
+    ``timeout_seconds`` kills the process in time to leave a synthetic JUnit
+    error (as does a crash without a report), so the job still uploads one.
     """
     selected = [path for path in files
                 if not (exclude_cancelled_eval_harness and path == "tests/test_eval_harness.py")]
@@ -793,13 +795,25 @@ def run_shard_single_process(
     deselect = [f"--deselect={node}" for path in selected
                 for node in (CANCELLED_EVAL_CONSUMER_NODES.get(path, []) if exclude_cancelled_eval_harness else [])]
     command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect]
-    if junit_dir is not None:
+    report = junit_dir / "single-process.xml" if junit_dir is not None else None
+    if report is not None:
         junit_dir.mkdir(parents=True, exist_ok=True)
-        command += [f"--junitxml={junit_dir / 'single-process.xml'}", "-o", "junit_suite_name=single-process"]
+        command += [f"--junitxml={report}", "-o", "junit_suite_name=single-process"]
     print(f"[backend-shard] single process: {len(selected)} file(s)")
     started_at = time.perf_counter()
-    completed = subprocess.run(command, cwd=root, check=False)
-    print(f"[backend-shard] single-process -> {completed.returncode} ({time.perf_counter() - started_at:.2f}s)")
+    try:
+        completed = subprocess.run(command, cwd=root, check=False, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        duration_s = time.perf_counter() - started_at
+        print(f"[backend-shard] single-process -> 124 ({duration_s:.2f}s) timed out after {timeout_seconds}s")
+        if report is not None:
+            write_timeout_junit(report, "single-process", timeout_seconds, duration_s)
+        return 124
+    duration_s = time.perf_counter() - started_at
+    print(f"[backend-shard] single-process -> {completed.returncode} ({duration_s:.2f}s)")
+    if completed.returncode != 0 and report is not None and not report.exists():
+        write_synthetic_junit(report, "single-process", "invocation-crashed",
+                              f"pytest exited {completed.returncode} without writing a report", duration_s)
     return completed.returncode
 
 
@@ -834,6 +848,10 @@ def main() -> int:
         help="run each invocation's tests in this seeded random order (printed; #1220)",
     )
     parser.add_argument(
+        "--single-process-timeout-seconds", type=int, default=None,
+        help="kill a --single-process run after this long and record a synthetic JUnit error",
+    )
+    parser.add_argument(
         "--single-process", action="store_true",
         help="run the whole shard as one pytest process to expose cross-file leaks (#1220)",
     )
@@ -861,6 +879,7 @@ def main() -> int:
             pytest_args=extra_args,
             exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
             junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
+            timeout_seconds=args.single_process_timeout_seconds,
         )
     return run_shard_files(
         root,

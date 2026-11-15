@@ -1004,3 +1004,14 @@ def test_single_process_command_keeps_retirement_and_writes_one_report(tmp_path:
     assert "--no-cov" in command
     assert any(arg.startswith("--deselect=tests/test_operator_api.py::") for arg in command)
     assert f"--junitxml={tmp_path / 'junit' / 'single-process.xml'}" in command
+
+
+def test_single_process_timeout_leaves_a_synthetic_report(tmp_path: Path):
+    import xml.etree.ElementTree as ElementTree
+
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               side_effect=TimeoutExpired(cmd=["pytest"], timeout=60)):
+        assert run_shard_single_process(tmp_path, ["tests/test_alpha.py"], junit_dir=tmp_path / "junit",
+                                        timeout_seconds=60) == 124
+    case = ElementTree.parse(tmp_path / "junit" / "single-process.xml").getroot().find("testsuite/testcase")
+    assert case.get("name") == "shard-runner-timeout"

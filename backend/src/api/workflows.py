@@ -8106,6 +8106,14 @@ async def _repo_repair_rows(
         return packet, consent, proposal
 
 
+def _repo_repair_output_tokens() -> int:
+    from src.model_fabric.near_tee_vertical import repository_repair_output_tokens
+    try:
+        return repository_repair_output_tokens(4096)
+    except Exception:
+        return 4096
+
+
 def _repo_repair_route_metadata() -> tuple[str | None, str | None]:
     """Read the effective governed route without contacting a provider."""
 
@@ -8519,7 +8527,8 @@ async def get_repo_repair_source_preview(job_id: str, request: Request):
             "effective_profile_id": consent.effective_profile_id if consent is not None else profile,
             "effective_upstream": consent.effective_upstream if consent is not None else upstream,
             "maximum_input_bytes": 64 * 1024,
-            "maximum_output_tokens": 4096,
+            # #1184: the NEAR TEE slot's output bound (the body never asks for more).
+            "maximum_output_tokens": _repo_repair_output_tokens(),
             "expires_at": consent.expires_at.isoformat() if consent is not None else None,
         },
         "provider_contacted": proposal is not None,

@@ -1631,6 +1631,10 @@ class RepoRepairEgressConsent(SQLModel, table=True):
     diagnostics_sha256: Optional[str] = Field(default=None, max_length=64)
     redaction_version: Optional[str] = Field(default=None, max_length=128)
     serialized_request_sha256: Optional[str] = Field(default=None, max_length=64)
+    # #1184: digest of the consented NEAR TEE target (base, slot profile and
+    # contract hash, model, x-no-aliasing); with serialized_request_sha256 it
+    # binds the one exact request this consent allows.
+    request_route_digest: Optional[str] = Field(default=None, max_length=64)
     combined_input_bytes: Optional[int] = Field(default=None)
     diagnostics_acknowledged: bool = Field(default=False)
     expires_at: datetime = Field(index=True)

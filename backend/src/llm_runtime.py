@@ -4153,6 +4153,11 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
                 response_format=_transport_json_value(response_format) if response_format is not None else None,
                 agent=True,
             )
+        from src.model_fabric.near_tee_egress import current_near_tee_egress_binding
+        if (egress_binding := current_near_tee_egress_binding()) is not None:
+            # #1184: consented code egress goes only to its exact NEAR TEE
+            # request; no other provider target may carry it.
+            raise PermissionError(egress_binding.refusal_code)
         primary_target = {
             "model_id": primary_model,
             "api_base": self.api_base,

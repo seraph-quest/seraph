@@ -185,16 +185,9 @@ def repository_repair_output_tokens(maximum: int) -> int:
 
 
 def repository_repair_near_target(*, profile_id: str, profile_contract_hash: str, model_id: str) -> dict[str, Any]:
-    """The NEAR TEE target a repository iteration route digest binds (#1184).
-
-    The fixed NEAR base, the slot profile and its complete contract hash
-    (model and slot settings, cost bound included), the canonical model id
-    and ``x-no-aliasing``. A changed slot is a changed route.
-    """
-    from .configuration import NEAR_TEE_API_BASE
-    return {"source": "primary", "api_base": NEAR_TEE_API_BASE, "profile": profile_id, "model_id": model_id,
-        "options": {"provider_kind": NEAR_TEE_PROVIDER_KIND, "profile_contract_hash": profile_contract_hash,
-            "x-no-aliasing": True}}
+    """The NEAR TEE target a repository repair route digest binds (#1184)."""
+    from .near_tee_egress import near_tee_target
+    return near_tee_target(profile_id=profile_id, profile_contract_hash=profile_contract_hash, model_id=model_id)
 
 
 def repository_iteration_near_transport(messages: list[dict[str, Any]], *, temperature: float, max_tokens: int,
@@ -209,7 +202,7 @@ def repository_iteration_near_transport(messages: list[dict[str, Any]], *, tempe
     """
     from .configuration import near_tee_slot, read_model_fabric_configuration
     from .near_tee import NearTeeDenied, near_tee_text_body
-    from src.workflows.repo_repair_source import repository_transport_route_digest
+    from .near_tee_egress import transport_route_digest
     configured = read_model_fabric_configuration()
     route = near_tee_vertical_route(REPOSITORY_REPAIR_RUNTIME_PATH, configured)
     if route is None or configured.egress_revoked:
@@ -222,7 +215,7 @@ def repository_iteration_near_transport(messages: list[dict[str, Any]], *, tempe
         raise PermissionError(denied.code) from None
     target = repository_repair_near_target(profile_id=route.profile_id,
         profile_contract_hash=route.profile_contract_hash, model_id=slot.model_id)
-    return {"body": body, "route_digest": repository_transport_route_digest(target, REPOSITORY_REPAIR_RUNTIME_PATH),
+    return {"body": body, "route_digest": transport_route_digest(target, REPOSITORY_REPAIR_RUNTIME_PATH),
         "profile_id": route.profile_id, "request_cost_bound_microusd": route.request_cost_bound_microusd}
 
 

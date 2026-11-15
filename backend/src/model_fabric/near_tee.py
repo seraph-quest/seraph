@@ -463,17 +463,23 @@ async def prepare_near_tee_call(
         reason = next((item.reason_code for item in decision.rejections), "no_compliant_route")
         raise NearTeeDenied(reason, decision)
     headers = near_request_headers(key=key, no_aliasing=True, json_body=True)
-    return NearTeeCall(context=bound, decision=decision, proof_hashes=decision.proof_hashes, body=body,
+    call = NearTeeCall(context=bound, decision=decision, proof_hashes=decision.proof_hashes, body=body,
         key=key, slot_name=slot_name, request_cost_bound_microusd=slot.request_cost_bound_microusd,
         inference_timeout_seconds=inference_timeout, headers=headers, stream=bool(stream),
         tool_names=tool_names, tool_choice=tool_choice)
+    from .near_tee_egress import near_tee_egress_reason
+    if reason := near_tee_egress_reason(call):
+        # #1184: a consented code-egress request is only its exact body and
+        # NEAR target; refused before any admission or reservation.
+        raise NearTeeDenied(reason, decision)
+    return call
 
 
 def near_tee_precontact_reason(call: NearTeeCall, *, now: float | None = None) -> str | None:
-    # #1184: under a repository iteration witness only the consented exact
-    # body and NEAR target may leave (every NEAR text path runs this guard).
-    from src.workflows.repo_repair_source import repository_iteration_near_call_reason
-    if reason := repository_iteration_near_call_reason(call):
+    # #1184: under a consented code-egress binding only that exact body and
+    # NEAR target may leave (every NEAR text path runs this guard).
+    from .near_tee_egress import near_tee_egress_reason
+    if reason := near_tee_egress_reason(call):
         return reason
     return precontact_reason(headers=call.headers, deadline_at=call.context.deadline_at,
         inference_timeout_seconds=call.inference_timeout_seconds, now=now)

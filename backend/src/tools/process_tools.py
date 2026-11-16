@@ -6,6 +6,7 @@ import contextvars
 import json
 import logging
 import os
+import selectors
 import shlex
 import signal
 import subprocess
@@ -1712,7 +1713,19 @@ def _termination_cleanup_status(
 
 
 class _BoundedPipeCapture:
-    """Drain one child pipe while retaining only a bounded prefix."""
+    """Drain one child pipe while retaining only a bounded prefix.
+
+    The drain reads the pipe's raw descriptor with ``os.read`` after a
+    selector reports it readable, and it also watches a private wake pipe.
+    ``finish`` stops a drain that has not reached EOF by writing to the wake
+    pipe; it never closes the child pipe itself. Closing the ``Popen``
+    ``BufferedReader`` from another thread would take the buffer lock that a
+    blocked ``read`` holds, and closing a raw descriptor does not interrupt a
+    ``read`` already blocked on it on Linux, so either would wait for a
+    descendant that still holds the write end (#1234). The drain thread is
+    the only user of the child pipe and the wake pipe, and it closes all of
+    them when it ends.
+    """
 
     def __init__(self, stream: Any, *, limit: int = _PROCESS_OUTPUT_BYTES) -> None:
         self._stream = stream
@@ -1720,51 +1733,82 @@ class _BoundedPipeCapture:
         self._buffer = bytearray()
         self.truncated = False
         self._done = threading.Event()
+        # Guards the wake pipe's lifetime: ``finish`` writes to it only while
+        # the drain has not closed it, so a recycled descriptor is never hit.
+        self._wake_lock = threading.Lock()
+        self._wake_closed = False
         if stream is None:
             self._thread: threading.Thread | None = None
             self._done.set()
             return
+        self._wake_read, self._wake_write = os.pipe()
+        os.set_blocking(self._wake_write, False)
         self._thread = threading.Thread(target=self._drain, daemon=True)
         self._thread.start()
 
     def _drain(self) -> None:
+        selector = None
         try:
+            fd = self._stream.fileno()
+            selector = selectors.DefaultSelector()
+            selector.register(fd, selectors.EVENT_READ)
+            selector.register(self._wake_read, selectors.EVENT_READ)
             while True:
-                chunk = self._stream.read(_PROCESS_PIPE_CHUNK_BYTES)
+                ready = {key.fd for key, _ in selector.select()}
+                if self._wake_read in ready:
+                    # ``finish`` stopped a drain that a descendant-held pipe
+                    # kept from reaching EOF; keep the prefix read so far.
+                    return
+                if fd not in ready:
+                    continue
+                # The selector reported the pipe readable, so this read
+                # returns at once: data, or EOF once every writer is gone.
+                chunk = os.read(fd, _PROCESS_PIPE_CHUNK_BYTES)
                 if not chunk:
                     return
-                if isinstance(chunk, str):
-                    chunk = chunk.encode("utf-8", errors="replace")
                 remaining = self._limit - len(self._buffer)
                 if remaining > 0:
                     self._buffer.extend(chunk[:remaining])
                 if len(chunk) > max(0, remaining):
                     self.truncated = True
         except (OSError, ValueError):
-            # The parent closes a descendant-held pipe after bounded cleanup.
             return
         finally:
-            # The drain owns the pipe: release it once it is read to EOF (or
-            # the parent closed it), so no file object outlives the capture.
+            if selector is not None:
+                selector.close()
+            # The drain owns the pipe: release it once it is read to EOF or
+            # stopped, so no file object outlives the capture. No other
+            # thread reads it, so this close takes no contended lock.
             try:
                 self._stream.close()
             except (OSError, ValueError):
                 pass
+            with self._wake_lock:
+                self._wake_closed = True
+                os.close(self._wake_read)
+                os.close(self._wake_write)
             self._done.set()
 
     @property
     def done(self) -> bool:
         return self._done.is_set()
 
+    def _stop(self) -> None:
+        with self._wake_lock:
+            if self._wake_closed:
+                return
+            try:
+                os.write(self._wake_write, b"\0")
+            except BlockingIOError:
+                # The wake pipe already holds an unread stop byte.
+                pass
+
     def finish(self, *, timeout: float = 1.0) -> None:
         if self._thread is None:
             return
         self._thread.join(timeout=max(0.0, timeout))
         if self._thread.is_alive():
-            try:
-                self._stream.close()
-            except (OSError, ValueError):
-                pass
+            self._stop()
             self._thread.join(timeout=0.05)
 
     def text(self) -> str:

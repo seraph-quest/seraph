@@ -948,7 +948,10 @@ def _observed_run_fixed(tmp_path: Path, script: str, observer=None):
                 observer(process)
 
     with pytest.raises(BaseException) as error:
+        # The production call shape: a deadline bounds every cleanup wait, so
+        # a regression fails here instead of at the per-test watchdog.
         repo_worker._run_fixed(["/bin/sh", "-c", script], cwd=tmp_path, timeout=300,
+                               deadline_at=time.monotonic() + 120,
                                allowed_executables=("/bin/sh",), process_observer=observe)
     [process] = seen
     return error.value, process

@@ -383,6 +383,15 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
     return ctx
 
 
+def _late_model_callbacks() -> list[asyncio.Task]:
+    """Pending tracked tasks the dispatcher created for a timed-out model call."""
+
+    from src.utils import background
+
+    return [task for task in tuple(background._tasks)
+            if task.get_name() == "calendar_late_model_call" and not task.done()]
+
+
 async def _finish_background_model(ctx: SimpleNamespace) -> None:
     """Release a deliberately blocked model thread and await its late work.
 
@@ -523,6 +532,10 @@ async def test_calendar_real_vertical_model_timeout_keeps_root_liability_without
         assert await timers_pending(fake_clock, what="the dispatcher parks on its model wait") == [1.0]
         fake_clock.advance(1)
         result = await within(admission, what="the timed-out admission returns")
+        # The model is still parked, so the dispatcher must own its late
+        # callback as a tracked task rather than an orphaned thread future.
+        late_callbacks = _late_model_callbacks()
+        assert [task.done() for task in late_callbacks] == [False]
         async with async_db() as db:
             root = (
                 await db.execute(
@@ -533,11 +546,13 @@ async def test_calendar_real_vertical_model_timeout_keeps_root_liability_without
                 )
             ).scalar_one()
     finally:
-        await _finish_background_model(ctx)
         if not admission.done():
             admission.cancel()
             await asyncio.gather(admission, return_exceptions=True)
+        await _finish_background_model(ctx)
 
+    assert all(task.done() for task in late_callbacks)
+    assert _late_model_callbacks() == []
     assert result["admitted"] is True
     assert result["completed"] is False
     assert result["blocked"] is True

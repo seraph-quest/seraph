@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from functools import partial
 import logging
 import math
 from pathlib import Path
@@ -746,7 +747,7 @@ async def _await_communication_model_call(call, *, timeout: float) -> Any:
         raise
 
 
-async def _await_bounded_model_call(call, *, timeout: float, name: str = "work_board_late_model_call") -> Any:
+async def _await_bounded_model_call(call, *, timeout: float, name: str) -> Any:
     """Bound the wait for a model call, and own the callback it cannot stop.
 
     ``to_thread`` cannot stop the provider callback. When the wait ends first
@@ -767,7 +768,12 @@ async def _await_bounded_model_call(call, *, timeout: float, name: str = "work_b
 
 
 async def _settle_late_model_call(worker: asyncio.Future) -> None:
-    await worker
+    try:
+        await worker
+    except Exception as exc:
+        # The caller already raised its own timeout or cancellation; a late
+        # provider failure is recorded by the callback's own receipt path.
+        logger.warning("Late model call failed after its wait ended: %s", type(exc).__name__)
 
 
 def _now() -> datetime:
@@ -8312,7 +8318,7 @@ class WorkBoardDispatcher:
                         await current_context()
                         mark_provider_contact()
                         try:
-                            raw = await (_await_communication_model_call if communication_binding is not None else _await_bounded_model_call)(
+                            raw = await (_await_communication_model_call if communication_binding is not None else partial(_await_bounded_model_call, name="mail_reply_late_model_call"))(
                                 asyncio.to_thread(model.generate, messages, response_format={"type": "json_object"}, request_context=copy(context), max_tokens=2048),
                                 timeout=timeout,
                             )
@@ -9074,7 +9080,7 @@ class WorkBoardDispatcher:
                         # fresh, retry-safe precontact failure.
                         mark_provider_contact()
                         try:
-                            raw = await (_await_communication_model_call if communication_binding is not None else _await_bounded_model_call)(
+                            raw = await (_await_communication_model_call if communication_binding is not None else partial(_await_bounded_model_call, name="calendar_late_model_call"))(
                                 asyncio.to_thread(
                                     model.generate,
                                     messages,

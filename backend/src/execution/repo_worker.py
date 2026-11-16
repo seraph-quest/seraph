@@ -790,14 +790,20 @@ def _run_fixed(
                 return 5.0
             return max(0.0, min(5.0, float(deadline_at) - time.monotonic()))
 
+        nonlocal writer_outlived_group
         stdout_thread.join(timeout=_remaining())
         stderr_thread.join(timeout=_remaining())
         if stdout_thread.is_alive() or stderr_thread.is_alive():
+            # Only reached after the group was proven empty, so a writer that
+            # left the group (setsid) still holds a pipe: never wait for it.
+            writer_outlived_group = True
             raise WorkerInputError("worker output cleanup exceeded the wall deadline")
 
     # True once the direct child is reaped and its group proven empty: no
     # writer is left, so the drain threads reach EOF promptly.
     writers_gone = False
+    # True when the drain outlived an empty group: some writer escaped it.
+    writer_outlived_group = False
     # True once this owner has delivered SIGKILL and tried to reap; a failed
     # attempt is not repeated on the way out.
     reap_attempted = False
@@ -843,11 +849,12 @@ def _run_fixed(
         if process.returncode is None and not reap_attempted:
             try:
                 _terminate_and_reap_process(process, deadline_at=deadline_at)
-            except WorkerInputError:
+            except (WorkerInputError, OSError):
                 pass
         # A reaped child whose group is empty leaves no writer, including on
-        # error paths (a rejected nested process, a deadline after the reap).
-        if (not writers_gone and process.returncode is not None
+        # error paths (a rejected nested process, a deadline after the reap),
+        # unless the drain was already seen outliving that empty group.
+        if (not writers_gone and not writer_outlived_group and process.returncode is not None
                 and (stdout_thread.is_alive() or stderr_thread.is_alive())):
             writers_gone = _process_group_proven_empty(process.pid)
         # After the reap the drain threads may still be reading output the

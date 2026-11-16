@@ -323,8 +323,8 @@
       "popen": 1
     },
     "backend/tests/test_repo_publication_process_vertical.py": {
-      "sleep": 4,
-      "clock-compare": 3
+      "sleep": 3,
+      "clock-compare": 2
     },
     "backend/tests/test_repo_publication_supervisor.py": {
       "sleep": 2,
@@ -369,10 +369,14 @@
       "sleep": 4
     },
     "backend/tests/test_research_http_envelope.py": {
-      "sleep": 2
+      "sleep": 2,
+      "realtime": 1
     },
     "backend/tests/test_routines.py": {
       "get-session-patch": 14
+    },
+    "backend/tests/test_scheduler_lifecycle_1025.py": {
+      "realtime": 1
     },
     "backend/tests/test_screenshot_folder_analysis_job.py": {
       "sleep": 1,

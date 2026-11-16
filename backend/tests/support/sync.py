@@ -202,6 +202,9 @@ def await_chain(task: asyncio.Future) -> list[str]:
 
     chain: list[str] = []
     coro = task.get_coro() if isinstance(task, asyncio.Task) else None
+    if coro is not None and inspect.iscoroutine(coro) and inspect.getcoroutinestate(coro) == inspect.CORO_CREATED:
+        # Not started: it is suspended nowhere yet, so no blocking point holds.
+        return chain
     seen = 0
     while coro is not None and seen < 200:
         seen += 1
@@ -333,7 +336,16 @@ async def wait_until(
                 if notifier is not None:
                     async with notifier:
                         if not await check():
-                            await notifier.wait()
+                            if task is None:
+                                await notifier.wait()
+                            else:
+                                notified = asyncio.ensure_future(notifier.wait())
+                                try:
+                                    await asyncio.wait({notified, task}, return_when=asyncio.FIRST_COMPLETED)
+                                finally:
+                                    if not notified.done():
+                                        notified.cancel()
+                                        await asyncio.gather(notified, return_exceptions=True)
                     continue
                 # The one place a duration appears: how often an un-notified
                 # condition is re-read. It never decides the outcome.
@@ -362,11 +374,13 @@ def wait_until_blocking(
     """Synchronous ``wait_until`` for tests that are not on an event loop.
 
     The bound is an attempt budget (``bound / interval`` re-reads), so a loaded
-    host only makes the watchdog more generous.
+    host or a costly predicate only makes the watchdog more generous; the
+    failure reports the attempts and the time actually spent.
     """
 
     last: Any = None
     attempts = max(1, int(bound / interval))
+    started = time.monotonic()  # diagnostics only; never compared
     for _ in range(attempts):
         value = predicate()
         last = state() if state is not None else value
@@ -378,8 +392,8 @@ def wait_until_blocking(
     if value:
         return value
     raise LivenessTimeout(
-        f"{what} was not reached within the {bound:g} s liveness bound; last state: "
-        f"{_describe(state() if state is not None else last)}"
+        f"{what} was not reached after {attempts} re-reads ({time.monotonic() - started:.1f} s, "
+        f"liveness bound {bound:g} s of polling); last state: {_describe(state() if state is not None else last)}"
     )
 
 

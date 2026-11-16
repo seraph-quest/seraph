@@ -297,6 +297,8 @@ async def test_api_launched_workers_refuse_while_dispatch_is_not_active(service_
 
 # ------------------------------------------------------------------ drain and restart
 
+@pytest.mark.realtime(reason="needs #1225: the 1 s dispatch drain bound is real time in production "
+                             "(src/runtime_plugins/lifecycle.py); the gated quick attempt must finish inside it")
 async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_never_a_bare_cancel(service_db):  # noqa: F811
     registry: dict = {}
     calls: list[tuple] = []

@@ -217,3 +217,33 @@ async def test_unbounded_gate_stays_parked_until_released():
     assert not task.done()
     gate.release()
     await task
+
+
+@pytest.mark.asyncio
+async def test_an_unstarted_task_is_suspended_nowhere():
+    lock = asyncio.Lock()
+    await lock.acquire()
+
+    async def contender():
+        async with lock:
+            pass
+
+    task = asyncio.create_task(contender())
+    assert await_chain(task) == []
+    assert not suspended_in(task, "test_an_unstarted_task_is_suspended_nowhere.<locals>.contender")
+    await wait_until(lambda: suspended_in(task, "Lock.acquire"), what="contender parked on the lock")
+    lock.release()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_wait_until_with_notifier_fails_fast_when_task_dies():
+    condition = asyncio.Condition()
+
+    async def dies():
+        await asyncio.sleep(0)
+        raise RuntimeError("died without notifying")
+
+    task = asyncio.create_task(dies())
+    with pytest.raises(RuntimeError, match="died without notifying"):
+        await wait_until(lambda: False, what="never notified", notifier=condition, task=task, bound=30)

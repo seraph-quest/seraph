@@ -73,6 +73,8 @@ async def test_bounded_research_http_positive_has_one_actual_post(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the research HTTP deadline is computed from time.time() in production; "
+                             "the elapsed bound is the only proof that the absolute deadline, not the stream end, cut it")
 @pytest.mark.parametrize("kind", ["oversized", "compressed", "truncated", "trickle", "drop", "5xx"])
 async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db, monkeypatch, kind):
     setup_configuration()
@@ -99,11 +101,13 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
     # the [trickle] flake, #1180). 1.5s reaches the POST and some body bytes.
     kwargs = arguments(seconds=1.5 if kind == "trickle" else 2)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    # Bounded means it returns (a hang fails at the liveness bound) after one
-    # POST, with the body cut where the assertions below say; no elapsed oracle.
+    # A hang fails at the liveness bound with a diagnostic; the elapsed bound
+    # stays (realtime, needs #1225) because the deadline is a production clock.
+    started = time.monotonic()
     with pytest.raises(GpuAdmissionUncertainError):
         await within(broker.execute(request("response-"+kind), lambda: _governed_research_chat_completion(**kwargs)),
                      what=f"bounded research HTTP failure ({kind}) returning")
+    assert time.monotonic()-started < 3
     assert len(calls) == 1 and stream.closed
     assert stream.yielded <= 64 * 1024 + 8192
     if kind == "compressed":

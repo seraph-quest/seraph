@@ -275,11 +275,23 @@ def test_cleanup_expired_budget_never_claims_proof():
     assert supervisor.cleanup(time.monotonic()-1)["cleanup_proven"] is False
 
 
+def _fifo_writers_gone(read_fd):
+    """True once every process that opened the FIFO for writing has exited."""
+    try:
+        return os.read(read_fd,1)==b""
+    except BlockingIOError:
+        return False
+
+
 @pytest.mark.parametrize("keep_parent",[False,True])
 def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_parent):
-    marker=tmp_path/"detached-pid";sentinel=tmp_path/"late-write";spawned_pid=tmp_path/"spawned-pid"
-    code="import os,time;from pathlib import Path;os.setsid();[os.close(fd) for fd in (0,1,2)];Path("+repr(str(marker))+").write_text(str(os.getpid()));time.sleep(4);Path("+repr(str(sentinel))+").write_text('BAD')"
-    script="const {spawn}=require('node:child_process');const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:'ignore'});require('node:fs').writeFileSync("+json.dumps(str(spawned_pid))+",String(p.pid));p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else "")
+    marker=tmp_path/"detached-pid";sentinel=tmp_path/"late-write";alive=tmp_path/"descendant-alive"
+    # The descendant holds the write end of a FIFO for its whole life, so the
+    # test sees its death as EOF on the read end, whatever pid namespace the
+    # sandbox gives it.
+    os.mkfifo(alive);alive_fd=os.open(alive,os.O_RDONLY|os.O_NONBLOCK)
+    code="import os,time;from pathlib import Path;os.setsid();[os.close(fd) for fd in (0,1,2)];held=open("+repr(str(alive))+",'w');Path("+repr(str(marker))+").write_text(str(os.getpid()));time.sleep(4);Path("+repr(str(sentinel))+").write_text('BAD')"
+    script="const {spawn}=require('node:child_process');const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:'ignore'});p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else "")
     executor,repo,job=make_fixture(tmp_path,script=script)
     job=replace(job,deadline_seconds=3)
     try:
@@ -304,17 +316,21 @@ def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_paren
     else:
         assert result["status"]=="failed"
         assert result["cleanup"]["cleanup_proven"]
-    # The late write can only come from a live descendant. Its pid is known
-    # from the moment node spawned it (and from its own marker), so proving it
-    # is gone proves the sentinel can never appear; no sleep past its timer.
-    for pid_path in (spawned_pid,marker):
-        if pid_path.exists():assert supervisor.start_identity(int(pid_path.read_text())) is None,pid_path.name
+    # The late write can only come from a live descendant. Every holder of
+    # the FIFO's write end is gone (EOF), so the sentinel can never appear;
+    # no sleep past the descendant's timer.
+    try:
+        assert _fifo_writers_gone(alive_fd),"the detached descendant outlived the executor's cleanup"
+    finally:
+        os.close(alive_fd)
     assert not sentinel.exists()
 
 
 def test_abnormal_supervisor_death_preserves_durable_unknown(tmp_path):
     running=tmp_path/"running-node"
-    body="require('node:fs').writeFileSync("+json.dumps(str(running))+",String(process.pid));setTimeout(()=>{},2000);"
+    alive=tmp_path/"node-alive";os.mkfifo(alive);alive_fd=os.open(alive,os.O_RDONLY|os.O_NONBLOCK)
+    body=("const fs=require('node:fs');const held=fs.openSync("+json.dumps(str(alive))+",'w');"
+          "fs.writeFileSync("+json.dumps(str(running))+",String(process.pid));setTimeout(()=>{},2000);")
     executor,repo,job=make_fixture(tmp_path,script=body)
     errors=[]
     def run():
@@ -333,9 +349,11 @@ def test_abnormal_supervisor_death_preserves_durable_unknown(tmp_path):
     with pytest.raises(RepoSandboxError):fresh.execute_job(job)
     # This deliberately owned fixture self-exits in 2 seconds. No unrelated
     # host PID is killed to manufacture a restart cleanup receipt; the test
-    # waits for that exit instead of sleeping past it.
-    node_pid=int(running.read_text())
-    wait_until_blocking(lambda:supervisor.start_identity(node_pid) is None,what="owned node fixture exiting by itself")
+    # waits for that exit (EOF on the FIFO it holds) instead of sleeping past it.
+    try:
+        wait_until_blocking(lambda:_fifo_writers_gone(alive_fd),what="owned node fixture exiting by itself")
+    finally:
+        os.close(alive_fd)
 
 
 def test_restart_missing_or_reused_identity_never_signals_unrelated(tmp_path):

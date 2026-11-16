@@ -211,7 +211,6 @@ def test_actual_selected_profile_fresh_cancel_after_worker_start_has_no_adoption
             outcome["error"] = exc
     thread = threading.Thread(target=run)
     thread.start()
-    deadline = time.monotonic() + 30
     try:
         # Wait for the actual selected Python child and its durable PID/start
         # marker, not the earlier Git materialization process.

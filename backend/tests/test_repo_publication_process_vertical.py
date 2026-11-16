@@ -25,6 +25,7 @@ from src.execution.repo_supervisor import start_identity, exact_signal
 from src.workflows.job_runtime import durable_job_repository as jobs
 from tests.test_repo_publication_vertical import actual_repair, selected_connection, request_for, ORIGIN
 from tests.repo_publication_support import GitDataTransport
+from tests.support.sync import wait_until_blocking
 
 
 def _canonical_request_process(database_url, job_id, principal, root, observed_path, continue_path, result_path):
@@ -69,9 +70,9 @@ def _canonical_request_process(database_url, job_id, principal, root, observed_p
                 descriptor = os.open(observed_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(descriptor, "wb") as output:
                     output.write(raw); output.flush(); os.fsync(output.fileno())
-                until = time.monotonic()+6
-                while time.monotonic() < until and not Path(continue_path).exists():
-                    time.sleep(.01)
+                # Parked until the test lets the notification continue (or kills
+                # this parent); never falls through on a timer.
+                wait_until_blocking(Path(continue_path).exists, what="test allowing the paused notification to continue")
         def observed_run(admission, authority):
             return original_run(admission, authority, process_observer=observe)
         # A request parent must have no HTTP contact before local production.

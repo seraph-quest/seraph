@@ -54,10 +54,21 @@ def _is_detached_audit_retry() -> bool:
 
 
 def assert_only_bounded_writes(writes, statements=None):
-    """Every writer-lock attempt during contention ran under a bounded busy wait."""
+    """Every writer-lock attempt during contention ran under a bounded busy wait,
+    and together they could not queue as long as one standard busy wait.
+
+    The second clause rules out a retry loop of bounded attempts that would
+    still make the read wait out the writer.
+    """
+    from src.db.engine import _SQLITE_BUSY_TIMEOUT_MS
+
     unbounded = [(statement, wait) for statement, wait in writes
                  if wait is None or wait > _BOUNDED_WAIT_CAP_MS]
     assert not unbounded, (unbounded, statements)
+    total = sum(wait for _, wait in writes)
+    assert total < _SQLITE_BUSY_TIMEOUT_MS, (
+        f"{len(writes)} bounded writer-lock attempts could wait {total} ms in total, "
+        f"no less than one standard {_SQLITE_BUSY_TIMEOUT_MS} ms busy wait", writes, statements)
 
 
 @contextmanager

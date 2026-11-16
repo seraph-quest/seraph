@@ -54,9 +54,6 @@
     "backend/tests/test_calendar_api_contract.py": {
       "sleep": 2
     },
-    "backend/tests/test_calendar_manual_negatives.py": {
-      "sleep": 1
-    },
     "backend/tests/test_capability_host_integration.py": {
       "settings-assign": 1,
       "get-session-patch": 2

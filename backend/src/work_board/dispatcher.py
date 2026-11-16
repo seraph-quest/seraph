@@ -32,6 +32,7 @@ from src.approval.runtime import reset_runtime_context, set_runtime_context
 from src.artifacts.registry import artifact_id_for
 from src.auth.service import AuthFailure, authenticate_session
 from src.db.engine import get_session
+from src.utils.background import track_task
 from src.utils.clock import get_clock
 from src.db.models import (
     CalendarPrepReceipt,
@@ -743,6 +744,30 @@ async def _await_communication_model_call(call, *, timeout: float) -> Any:
         if not worker.cancelled():
             worker.exception()  # Consume a late failure without adopting its output.
         raise
+
+
+async def _await_bounded_model_call(call, *, timeout: float, name: str = "work_board_late_model_call") -> Any:
+    """Bound the wait for a model call, and own the callback it cannot stop.
+
+    ``to_thread`` cannot stop the provider callback. When the wait ends first
+    (timeout or cancellation) the callback still runs and later writes its
+    route receipt and accounting, so it is handed to ``track_task`` instead of
+    being left as an orphaned executor future: shutdown and
+    ``drain_tracked_tasks`` wait for that late work before the database it
+    writes to goes away (#1247). The wait itself is unchanged, and the late
+    output is never adopted.
+    """
+    worker = asyncio.ensure_future(call)
+    try:
+        return await get_clock().wait_for(asyncio.shield(worker), timeout=timeout)
+    except BaseException:
+        if not worker.done():
+            track_task(_settle_late_model_call(worker), name=name)
+        raise
+
+
+async def _settle_late_model_call(worker: asyncio.Future) -> None:
+    await worker
 
 
 def _now() -> datetime:
@@ -8287,7 +8312,7 @@ class WorkBoardDispatcher:
                         await current_context()
                         mark_provider_contact()
                         try:
-                            raw = await (_await_communication_model_call if communication_binding is not None else get_clock().wait_for)(
+                            raw = await (_await_communication_model_call if communication_binding is not None else _await_bounded_model_call)(
                                 asyncio.to_thread(model.generate, messages, response_format={"type": "json_object"}, request_context=copy(context), max_tokens=2048),
                                 timeout=timeout,
                             )
@@ -9049,7 +9074,7 @@ class WorkBoardDispatcher:
                         # fresh, retry-safe precontact failure.
                         mark_provider_contact()
                         try:
-                            raw = await (_await_communication_model_call if communication_binding is not None else get_clock().wait_for)(
+                            raw = await (_await_communication_model_call if communication_binding is not None else _await_bounded_model_call)(
                                 asyncio.to_thread(
                                     model.generate,
                                     messages,

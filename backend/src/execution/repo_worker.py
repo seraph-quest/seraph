@@ -763,12 +763,19 @@ def _run_fixed(
     stderr_buffer = bytearray()
 
     def _drain(stream: Any, target: bytearray) -> None:
-        while True:
-            chunk = stream.read(64 * 1024)
-            if not chunk:
-                return
-            if len(target) < MAX_STREAM_BYTES:
-                target.extend(chunk[: MAX_STREAM_BYTES - len(target)])
+        # The drain thread closes its own pipe at EOF. A writer that outlives
+        # the owner (it left the process group) keeps the pipe open until it
+        # exits; the owner then has already returned, and without this the
+        # pipe would be left for garbage collection (#1235).
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    return
+                if len(target) < MAX_STREAM_BYTES:
+                    target.extend(chunk[: MAX_STREAM_BYTES - len(target)])
+        finally:
+            stream.close()
 
     stdout_thread = threading.Thread(target=_drain, args=(process.stdout, stdout_buffer), daemon=True)
     stderr_thread = threading.Thread(target=_drain, args=(process.stderr, stderr_buffer), daemon=True)
@@ -791,10 +798,14 @@ def _run_fixed(
     # True once the direct child is reaped and its group proven empty: no
     # writer is left, so the drain threads reach EOF promptly.
     writers_gone = False
+    # True once this owner has delivered SIGKILL and tried to reap; a failed
+    # attempt is not repeated on the way out.
+    reap_attempted = False
     try:
         if deadline_at is not None:
             remaining = float(deadline_at) - time.monotonic()
             if remaining <= 0:
+                reap_attempted = True
                 _terminate_and_reap_process(process, deadline_at=deadline_at)
                 writers_gone = True
                 raise WorkerInputError("worker wall deadline expired before process completion")
@@ -812,6 +823,7 @@ def _run_fixed(
                 raise WorkerInputError("worker terminal identity observation failed") from exc
         return int(process.returncode or 0), bytes(stdout_buffer), bytes(stderr_buffer), False
     except subprocess.TimeoutExpired:
+        reap_attempted = True
         _terminate_and_reap_process(process, deadline_at=deadline_at)
         writers_gone = True
         _join_output_threads()
@@ -823,17 +835,41 @@ def _run_fixed(
                 raise WorkerInputError("worker terminal identity observation failed") from exc
         return 124, bytes(stdout_buffer), bytes(stderr_buffer), True
     finally:
-        # The owner closes the pipes it opened (#1224). After the deadline kill
-        # the drain threads may still be reading output the reaped group left
-        # buffered; with no writer left they end at EOF, so wait for that under
-        # one shared liveness bound and then close (#1235). When a writer may
-        # survive, nothing waits: the drain thread keeps its stream until EOF.
+        # The owner reaps the child it spawned and closes the pipes it opened
+        # on every path (#1224, #1235). An error that leaves before the direct
+        # child was reaped kills and reaps it here, so nothing is left for
+        # ``Popen.__del__``; if that reap stays unproven, the error already
+        # leaving this frame decides the outcome.
+        if process.returncode is None and not reap_attempted:
+            try:
+                _terminate_and_reap_process(process, deadline_at=deadline_at)
+            except WorkerInputError:
+                pass
+        # A reaped child whose group is empty leaves no writer, including on
+        # error paths (a rejected nested process, a deadline after the reap).
+        if (not writers_gone and process.returncode is not None
+                and (stdout_thread.is_alive() or stderr_thread.is_alive())):
+            writers_gone = _process_group_proven_empty(process.pid)
+        # After the reap the drain threads may still be reading output the
+        # group left buffered; with no writer left they end at EOF, so wait
+        # for that under one shared liveness bound (#1235). When a writer may
+        # survive, nothing waits: the drain thread keeps its stream and
+        # closes it at EOF.
         if writers_gone:
             drained_by = time.monotonic() + OUTPUT_DRAIN_LIVENESS_SECONDS
             for thread in (stdout_thread, stderr_thread):
                 thread.join(max(0.0, drained_by - time.monotonic()))
         if not stdout_thread.is_alive() and not stderr_thread.is_alive():
             _close_child_streams(process)
+
+
+def _process_group_proven_empty(pgid: int) -> bool:
+    """True only when the group is observed empty; unknown counts as not empty."""
+
+    try:
+        return not _process_group_members(pgid)
+    except WorkerInputError:
+        return False
 
 
 def _close_child_streams(process: subprocess.Popen) -> None:

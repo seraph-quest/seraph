@@ -159,12 +159,9 @@ built by the production engine factory, as the default database, so every
 Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
 never-awaited coroutines are errors. A per-test watchdog dumps stacks after
 240 s and fails the test after 420 s. Any `filterwarnings` exception must be
-narrow and name its issue. Until #1235, `tests/test_repo_repair_executors.py`
-leaks an unreaped child at session end (`TRACKED_LEAK_FILES` in
-`backend/scripts/run_backend_test_shard.py`) and gets its exception as `-W`
-from the shard runner only; run it with
-`uv run python scripts/run_backend_test_shard.py --files tests/test_repo_repair_executors.py`,
-since plain `uv run pytest` on it fails on the leak.
+narrow and name its issue. No test file carries a per-file leak exception
+(#1235 removed the last one); an owner that spawns a child reaps it and
+closes its pipes on every path.
 
 Process-global state is registered (#1223). Every module-level mutable in
 `backend/src` has an entry in `backend/tests/support/process_state_registry.py`

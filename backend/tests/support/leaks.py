@@ -104,17 +104,7 @@ class ProcessLifetimeThread:
 
 # One registry for every exception to the leak checks. Keep each entry as
 # narrow as the evidence allows and delete it with the fix of its issue.
-LEAK_EXCEPTIONS: tuple[LeakException, ...] = (
-    LeakException(
-        check="threads",
-        tests=("tests/test_calendar_manual_negatives.py::"
-               "test_calendar_real_vertical_model_timeout_keeps_root_liability_without_retry",),
-        match="_connection_worker_thread",
-        issue=1247,
-        reason="the released late model callback can open an aiosqlite connection after the fixture "
-               "disposed its engine; the test still waits on sleep(0.1) instead of the callback",
-    ),
-)
+LEAK_EXCEPTIONS: tuple[LeakException, ...] = ()
 
 # Third-party packages whose internal async generators a loop finalizer may
 # close after the owning code already closed what it holds (#1244): httpx

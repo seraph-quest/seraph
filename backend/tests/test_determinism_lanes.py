@@ -377,9 +377,9 @@ def test_classification_does_not_count_a_deadline_kill(monkeypatch) -> None:
     assert (result.runs, result.failures) == (1, 1)
 
 
-def test_lanes_carry_the_tracked_leak_filters_for_tracked_files_only() -> None:
-    from scripts.run_backend_test_shard import TRACKED_LEAK_FILES
-    tracked = sorted(TRACKED_LEAK_FILES)[0]
-    [(_, plain)] = lanes.invocations_for(["tests/test_check_test_determinism.py"])
-    assert not any(arg.startswith("-W") for arg in plain)
-    assert all(any(arg.startswith("-W") for arg in args) for _, args in lanes.invocations_for([tracked]))
+def test_lanes_carry_no_leak_warning_exception() -> None:
+    # #1235: the formerly tracked file is stressed and classified like any other.
+    for path in ("tests/test_check_test_determinism.py", "tests/test_repo_repair_executors.py"):
+        invocations = lanes.invocations_for([path])
+        assert invocations
+        assert not any(arg.startswith("-W") for _, args in invocations for arg in args)

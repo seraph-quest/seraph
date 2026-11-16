@@ -112,20 +112,39 @@ def _wait_process_group_quiescent(pgid: int, *, deadline_at: float | None) -> No
         time.sleep(min(0.01, remaining))
 
 
+# This file also runs standalone inside the worker container, so it cannot
+# import src.execution.process_reap; this mirrors its KILL_REAP_LIVENESS_SECONDS
+# (pinned equal by tests/test_repo_repair_executors.py).
+KILL_REAP_LIVENESS_SECONDS = 30.0
+
+# Liveness bound for a drain thread to reach EOF after its process group was
+# killed or exited. It decides nothing on time: a thread that has not ended
+# keeps its stream (#1235).
+OUTPUT_DRAIN_LIVENESS_SECONDS = 30.0
+
+
 def _terminate_and_reap_process(
     process: subprocess.Popen[bytes],
     *,
     deadline_at: float | None,
 ) -> None:
-    """Kill and prove quiescence without adding a fixed post-deadline wait."""
+    """Kill, reap the direct child, and prove group quiescence.
+
+    The reap after a delivered SIGKILL is bounded by the shared kill-reap
+    liveness bound, not by what is left of the deadline: at the deadline that
+    remainder is about zero, and a wait of zero left the killed child
+    unreaped for ``Popen.__del__`` (#1235). A killed child is normally
+    reapable at once; the bound only stops an unkillable child (stuck in
+    uninterruptible sleep) from hanging the owner, and then cleanup stays
+    unproven. Group quiescence keeps the original deadline.
+    """
 
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    remaining = 0.25 if deadline_at is None else max(0.0, min(0.25, float(deadline_at) - time.monotonic()))
     try:
-        process.wait(timeout=remaining)
+        process.wait(timeout=KILL_REAP_LIVENESS_SECONDS)
     except subprocess.TimeoutExpired as exc:
         raise WorkerInputError("worker process cleanup is unproven") from exc
     _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
@@ -799,9 +818,15 @@ def _run_fixed(
                 raise WorkerInputError("worker terminal identity observation failed") from exc
         return 124, bytes(stdout_buffer), bytes(stderr_buffer), True
     finally:
-        # The owner closes the pipes it opened (#1224). A drain thread still
-        # reading (output cleanup exceeded the deadline) keeps its stream; it
-        # ends at EOF once the process group is gone.
+        # The owner closes the pipes it opened (#1224). On an early exit the
+        # drain threads may still be reading the output the killed group left
+        # buffered; they end at EOF once no writer remains, so wait for that
+        # (liveness bound only) and then close. A drain thread still reading
+        # after the bound (a writer survived) keeps its stream, which it owns
+        # until EOF (#1235).
+        for thread in (stdout_thread, stderr_thread):
+            if thread.is_alive():
+                thread.join(OUTPUT_DRAIN_LIVENESS_SECONDS)
         if not stdout_thread.is_alive() and not stderr_thread.is_alive():
             _close_child_streams(process)
 

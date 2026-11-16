@@ -1509,12 +1509,14 @@ async def test_provider_events_and_prep_return_redacted_event_and_exact_seven_fi
     original_create_task = calendar_api.repository.create_task
 
     async def revoke_before_publication(db, owner, task_request, **kwargs):
-        async with async_db() as revoke_db:
-            current_consent = await revoke_db.get(CalendarReadConsent, consent["consent_id"])
-            assert current_consent is not None
-            current_consent.state = "revoked"
-            current_consent.revision += 1
-            await revoke_db.flush()
+        # The route's session holds SQLite's writer lock here, so the revoke
+        # goes through that session: a second connection would wait on the
+        # lock (#1222 gives every session its own connection).
+        current_consent = await db.get(CalendarReadConsent, consent["consent_id"])
+        assert current_consent is not None
+        current_consent.state = "revoked"
+        current_consent.revision += 1
+        await db.flush()
         return await original_create_task(db, owner, task_request, **kwargs)
 
     monkeypatch.setattr(calendar_api.repository, "create_task", revoke_before_publication)

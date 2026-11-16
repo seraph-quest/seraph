@@ -5,9 +5,10 @@ restores the previous clock at teardown. Production code that reads time
 through ``src.utils.clock.get_clock()`` then sees time move only when the
 test calls ``clock.advance(seconds)``.
 
-A test synchronises on the code under test having *parked on its timer*
-(``await timers_pending(clock)``) before it advances, so the advance cannot
-race the code that registers the deadline. Request the fixture by importing
+A test synchronises on the code under test having reached its timer (a
+signal from a fake it calls, or ``await timers_pending(clock)`` when no other
+timer can be pending) before it advances, so the advance cannot race the code
+that registers the deadline. Pending timers are process-wide. Request the fixture by importing
 it into the test module::
 
     from tests.support.clock import fake_clock  # noqa: F401
@@ -50,9 +51,12 @@ async def advance_until_done(clock: FakeClock, task: asyncio.Future, *, what: st
                              bound: float = LIVENESS_SECONDS) -> float:
     """Advance fake time timer by timer until ``task`` finishes; return the fake seconds advanced.
 
-    Each step waits until the task is either done or parked on a fake timer,
-    then moves the clock exactly to the soonest deadline. Real work in
-    between (database I/O, threads) is waited for, never raced.
+    Each step waits until the task is done or *some* fake timer is pending,
+    then moves the clock exactly to the soonest deadline. Pending timers are
+    process-wide, and a timer may be armed around real I/O still in flight
+    (``wait_for(db_io, 5)``), so this does not prove the task is parked only
+    on time. Use it where the remaining work is timer-bound, and assert the
+    returned fake seconds exactly, so a premature advance fails loudly.
     """
     started = clock.elapsed
     while not task.done():

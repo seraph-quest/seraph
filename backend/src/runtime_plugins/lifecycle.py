@@ -45,7 +45,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import timezone
 import json
 import logging
 from typing import Any, Awaitable, Callable

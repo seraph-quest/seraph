@@ -121,5 +121,59 @@ async def test_fake_wait_returns_on_completion_or_fake_timeout(fake_clock):
         await get_clock().wait([], timeout=1)
 
 
-def test_fake_clock_fixture_restores_the_previous_clock():
-    assert isinstance(clock_module.get_clock(), SystemClock)
+def test_fake_clock_fixture_installs_and_restores_the_previous_clock():
+    from tests.support import clock as support
+
+    previous = clock_module.get_clock()
+    generator = support.fake_clock.__wrapped__()
+    installed = next(generator)
+    assert get_clock() is installed and isinstance(installed, FakeClock)
+    with pytest.raises(StopIteration):
+        next(generator)
+    assert get_clock() is previous
+
+
+async def test_chained_timers_fire_exactly_without_rounding_drift(fake_clock):
+    fake_clock.advance(0.1)
+    first = asyncio.ensure_future(get_clock().sleep(0.2))
+    await timers_pending(fake_clock)
+    fake_clock.advance(0.2)
+    await within(first, what="0.2 s sleep after a 0.1 s advance")
+    for _ in range(3):
+        sleeper = asyncio.ensure_future(get_clock().sleep(0.6))
+        await timers_pending(fake_clock)
+        fake_clock.advance(0.6)
+        await within(sleeper, what="0.6 s sleep at its exact deadline")
+    assert fake_clock.pending_deadlines() == []
+
+
+async def test_due_timers_fire_in_deadline_order_in_one_advance(fake_clock):
+    woke: list[float] = []
+
+    async def sleep(delay):
+        await get_clock().sleep(delay)
+        woke.append(delay)
+
+    sleepers = [asyncio.ensure_future(sleep(delay)) for delay in (3.0, 1.0, 2.0)]
+    await timers_pending(fake_clock, 3)
+    fake_clock.advance(5.0)
+    await within(asyncio.gather(*sleepers), what="all due sleepers")
+    assert woke == [1.0, 2.0, 3.0]
+
+
+async def test_non_positive_wait_for_returns_only_a_done_result(fake_clock):
+    async def forever():
+        await asyncio.Event().wait()
+
+    with pytest.raises(TimeoutError):
+        await get_clock().wait_for(forever(), 0)
+    done = asyncio.get_running_loop().create_future()
+    done.set_result("ready")
+    assert await get_clock().wait_for(done, 0) == "ready"
+
+
+async def test_advance_from_another_thread_wakes_the_loop(fake_clock):
+    sleeper = asyncio.ensure_future(get_clock().sleep(1.0, "woke"))
+    await timers_pending(fake_clock)
+    await asyncio.to_thread(fake_clock.advance, 1.0)
+    assert await within(sleeper, what="sleeper woken by a cross-thread advance") == "woke"

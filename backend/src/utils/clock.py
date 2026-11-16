@@ -28,7 +28,7 @@ import threading
 import time as _time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, tzinfo
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Protocol, TypeVar, runtime_checkable
 
 T = TypeVar("T")
@@ -100,7 +100,7 @@ class SystemClock:
 
 @dataclass(order=True)
 class _Timer:
-    deadline: float
+    deadline: float  # in elapsed seconds, the space ``advance`` moves, so no rounding drift
     sequence: int
     loop: asyncio.AbstractEventLoop = field(compare=False)
     callback: Callable[[], None] = field(compare=False)
@@ -163,15 +163,17 @@ class FakeClock:
 
         Fired callbacks run on their own loop (scheduled thread-safely), so a
         test awaits the woken code afterwards, for example with ``settle()``
-        or by awaiting the task.
+        or by awaiting the task. One call is one jump: code woken by a fired
+        timer arms its next timer from the new time, so a chain of timers is
+        stepped one advance at a time (``advance_until_done`` in
+        ``tests/support/clock.py``).
         """
         if seconds < 0:
             raise ValueError("a clock never moves backwards")
         due: list[_Timer] = []
         with self._lock:
             self._elapsed += float(seconds)
-            current = self._monotonic_start + self._elapsed
-            while self._timers and self._timers[0].deadline <= current:
+            while self._timers and self._timers[0].deadline <= self._elapsed:
                 timer = heapq.heappop(self._timers)
                 if not timer.cancelled:
                     due.append(timer)
@@ -181,8 +183,7 @@ class FakeClock:
     def pending_deadlines(self) -> list[float]:
         """Seconds from now until each live timer is due, soonest first."""
         with self._lock:
-            current = self._monotonic_start + self._elapsed
-            return sorted(timer.deadline - current for timer in self._timers if not timer.cancelled)
+            return sorted(timer.deadline - self._elapsed for timer in self._timers if not timer.cancelled)
 
     async def wait_for_timers(self, count: int = 1) -> None:
         """Return once at least ``count`` timers are pending (a test wraps this in a liveness bound)."""
@@ -211,7 +212,7 @@ class FakeClock:
     def _add_timer(self, delay: float, callback: Callable[[], None]) -> _Timer:
         loop = asyncio.get_running_loop()
         with self._lock:
-            deadline = self._monotonic_start + self._elapsed + max(float(delay), 0.0)
+            deadline = self._elapsed + max(float(delay), 0.0)
             timer = _Timer(deadline, next(self._sequence), loop, callback)
             due = delay <= 0
             if not due:
@@ -279,11 +280,12 @@ class FakeClock:
             if future.done():
                 return future.result()
             future.cancel()
+            # Like asyncio's _cancel_and_wait: an outer cancellation propagates.
+            await asyncio.wait([future])
             try:
-                await future
+                return future.result()
             except asyncio.CancelledError as error:
                 raise TimeoutError from error
-            return future.result()
         async with self.timeout(timeout):
             return await aw
 

@@ -534,12 +534,10 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
                             if mode == "goal_pause": goal_row.status = "paused"
                             else: goal_row.revision += 1
                         elif mode == "original_deadline":
-                            from src.work_board import pipelines
+                            # The process clock (which pipelines.now() reads) stands past the original deadline.
+                            from src.utils import clock as clock_module
                             expired_clock = datetime.fromisoformat(original_deadline)+timedelta(seconds=1)
-                            class ExpiredClock(datetime):
-                                @classmethod
-                                def now(cls, tz=None): return expired_clock
-                            monkeypatch.setattr(pipelines, "datetime", ExpiredClock)
+                            monkeypatch.setattr(clock_module, "_clock", clock_module.FakeClock(start=expired_clock))
                     if mode == "late_cancel": asyncio.current_task().cancel()
                     return parsed
                 monkeypatch.setattr(app.state.document_service, "parse", change_after_positive_parse)

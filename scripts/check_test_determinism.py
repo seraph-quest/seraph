@@ -55,8 +55,10 @@ Clock seam (#1225): the production modules in ``CLOCK_SEAM_MODULES`` read time
 and wait on timers only through ``src.utils.clock.get_clock()``. In them, any
 direct ``time.time/monotonic/perf_counter`` (or ``*_ns``), ``datetime.now/
 utcnow/today``, ``date.today``, event-loop ``time()``, ``asyncio.wait_for``,
-``asyncio.timeout``/``timeout_at``, nonzero ``asyncio.sleep`` or
-``asyncio.wait(..., timeout=...)`` is an error. There is no baseline for these:
+``asyncio.timeout``/``timeout_at``, ``time.sleep``, nonzero ``asyncio.sleep``,
+``asyncio.wait(..., timeout=...)`` (or ``**kwargs``), ``asyncio.sleep``/``wait``
+passed as a value, or an event loop's ``time``/``call_later``/``call_at`` is
+an error. There is no baseline for these:
 the count is zero, and a module leaves the list only through a reviewed edit.
 """
 
@@ -151,12 +153,17 @@ CLOCK_SEAM_MODULES = (
     "security/http_transport.py",
     "work_board/dispatcher.py",
     "work_board/pipelines.py",
+    "workflows/repo_repair_source.py",
 )
 CLOCK_SEAM_READS = frozenset(
     {f"time.{name}" for name in CLOCK_FUNCTIONS}
     | {"datetime.datetime.now", "datetime.datetime.utcnow", "datetime.datetime.today", "datetime.date.today"}
 )
-CLOCK_SEAM_TIMERS = frozenset({"asyncio.wait_for", "asyncio.timeout", "asyncio.timeout_at"})
+CLOCK_SEAM_TIMERS = frozenset({"asyncio.wait_for", "asyncio.timeout", "asyncio.timeout_at", "time.sleep",
+                               "asyncio.tasks.wait_for", "asyncio.timeouts.timeout", "asyncio.timeouts.timeout_at"})
+# Referenced without being called (passed as a value), these timers escape the call checks.
+CLOCK_SEAM_TIMER_VALUES = frozenset({"asyncio.sleep", "asyncio.wait"})
+LOOP_TIMER_METHODS = frozenset({"call_later", "call_at"})
 
 
 def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> list[str]:
@@ -207,13 +214,18 @@ def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> li
                         report(node, "asyncio.sleep timer")
                 elif name == "asyncio.wait":
                     calls.add(id(func))
-                    if any(keyword.arg == "timeout" for keyword in node.keywords) or len(node.args) > 1:
+                    if any(keyword.arg in {"timeout", None} for keyword in node.keywords) or len(node.args) > 1:
                         report(node, "asyncio.wait timeout")
                 elif isinstance(func, ast.Attribute) and func.attr == "time" and not node.args and (
                         (isinstance(func.value, ast.Call)
                          and (dotted(func.value.func) or "").rpartition(".")[2] in LOOP_ACCESSORS)
                         or (dotted(func.value) or "").endswith("loop")):
                     report(node, "event-loop clock read")
+                elif isinstance(func, ast.Attribute) and func.attr in LOOP_TIMER_METHODS and (
+                        (isinstance(func.value, ast.Call)
+                         and (dotted(func.value.func) or "").rpartition(".")[2] in LOOP_ACCESSORS)
+                        or (dotted(func.value) or "").endswith("loop")):
+                    report(node, "event-loop timer " + func.attr)
             elif isinstance(node, (ast.Attribute, ast.Name)):
                 if id(node) in calls:
                     continue
@@ -224,6 +236,8 @@ def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> li
                     report(node, "clock read " + name)
                 elif name in CLOCK_SEAM_TIMERS:
                     report(node, "timer " + name)
+                elif name in CLOCK_SEAM_TIMER_VALUES:
+                    report(node, "timer " + name + " used as a value")
         errors.extend(message for _, message in sorted(found))
     return errors
 

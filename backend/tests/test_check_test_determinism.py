@@ -503,9 +503,13 @@ def test_clock_seam_modules_have_no_direct_clock_reads_or_timers(tmp_path: Path)
             async with asyncio.timeout(3):
                 pass
             waiter = asyncio.wait_for
+            await asyncio.wait({task}, **{"timeout": 1})
+            sleeper = asyncio.sleep
+            time.sleep(1)
+            loop.call_later(1, print)
     """), encoding="utf-8")
     errors = checker.scan_clock_seam(tmp_path / "src", tmp_path, modules=("adopted.py",))
-    assert [int(error.split(":")[1]) for error in errors] == [8, 9, 10, 11, 12, 13, 14, 15, 17]
+    assert [int(error.split(":")[1]) for error in errors] == [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21]
     assert all("use src.utils.clock.get_clock()" in error for error in errors)
     missing = checker.scan_clock_seam(tmp_path / "src", tmp_path, modules=("gone.py",))
     assert len(missing) == 1 and "missing" in missing[0]

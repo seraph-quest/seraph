@@ -148,7 +148,7 @@ so adding one is a reviewed baseline edit. Use `--rename OLD NEW` for a renamed
 test file.
 Production time is an input (#1225): modules listed in `CLOCK_SEAM_MODULES` in
 that script read time and arm timers only through `src.utils.clock.get_clock()`
-(any direct read or timer there fails the check). Tests install the explicit-
+(the check fails on the direct reads and asyncio timers it recognises there). Tests install the explicit-
 advance `FakeClock` with the `fake_clock` fixture from `tests/support/clock.py`
 and move time with `advance`, never by waiting.
 A test that touches the database requests the `db` fixture

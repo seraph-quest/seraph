@@ -180,6 +180,8 @@ def test_uninstalled_dependencies_are_named_with_their_install_fix(tmp_path):
 
 
 @needs_cordis
+@pytest.mark.realtime(reason="performance bound: adversarial 256 KiB pages must normalise in bounded CPU time; "
+                             "the elapsed time is the property under test, not synchronisation")
 def test_adversarial_256_kib_pages_normalize_in_bounded_time_in_both_owners():
     import time
     from src.guardian.source_watch import SourceWatchError, normalize_source_text

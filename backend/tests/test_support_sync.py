@@ -180,3 +180,40 @@ async def test_started_or_raise_surfaces_early_task_outcome():
 
     with pytest.raises(PermissionError):
         await started_or_raise(started, asyncio.create_task(denied()))
+
+
+@pytest.mark.asyncio
+async def test_task_timeout_error_is_not_reported_as_liveness():
+    async def times_out():
+        raise TimeoutError("product timeout")
+
+    task = asyncio.create_task(times_out())
+    with pytest.raises(TimeoutError, match="product timeout") as raised:
+        await wait_until(lambda: False, what="never", task=task)
+    assert not isinstance(raised.value, LivenessTimeout)
+    with pytest.raises(TimeoutError, match="product timeout") as raised:
+        await within(times_out(), what="own timeout")
+    assert not isinstance(raised.value, LivenessTimeout)
+
+
+@pytest.mark.asyncio
+async def test_wait_until_accepts_an_async_predicate():
+    reads = []
+
+    async def read():
+        reads.append(1)
+        return len(reads) >= 3 and "ready"
+
+    assert await wait_until(read, what="third read") == "ready"
+
+
+@pytest.mark.asyncio
+async def test_unbounded_gate_stays_parked_until_released():
+    gate = Gate("stuck", bound=None)
+    task = asyncio.create_task(gate.arrive())
+    await assert_blocked(task, at=gate, what="unbounded gate")
+    with pytest.raises(LivenessTimeout):
+        await within(asyncio.shield(task), what="outer bound", bound=0.01)
+    assert not task.done()
+    gate.release()
+    await task

@@ -20,6 +20,7 @@ from src.execution.repo_node import NodeRepoRepairExecutor, PROFILE, execution_p
 from src.execution.repo_sandbox import RepoSandboxError, RepoSandboxJob
 from src.execution import repo_supervisor as supervisor
 from tests.support.processes import spawned  # noqa: F401 - fixture
+from tests.support.sync import wait_until_blocking
 
 pytestmark=[pytest.mark.filterwarnings("error::ResourceWarning"),
             pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")]
@@ -126,9 +127,7 @@ def test_running_command_cancel_uses_owned_supervisor(tmp_path):
         try:result.append(executor.execute_job(job))
         except BaseException as exc:errors.append(exc)
     thread=threading.Thread(target=run);thread.start()
-    deadline=time.monotonic()+10
-    while not marker.exists() and time.monotonic()<deadline:time.sleep(.01)
-    assert marker.exists()
+    wait_until_blocking(marker.exists,what="node command publishing its running marker")
     child=int(marker.read_text());assert supervisor.start_identity(child)
     fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
     cancel=fresh.cancel(job_id=job.job_id,authority={"authority_digest":job.authority_digest})
@@ -162,9 +161,7 @@ def test_late_cancel_preserves_committed_node_echild_terminal(tmp_path,monkeypat
     fresh=NodeRepoRepairExecutor(executor.config,workspace_dir=executor.workspace_dir)
     authority={"job_id":job.job_id,"authority_digest":job.authority_digest}
     try:
-        deadline=time.monotonic()+10
-        while not running.exists() and time.monotonic()<deadline:time.sleep(.01)
-        assert running.exists()
+        wait_until_blocking(running.exists,what="node command publishing its running marker")
         assert fresh.cancel(job_id=job.job_id,authority=authority)["status"]=="cancel_requested"
         assert terminal_committed.wait(10),errors
         assert thread.is_alive(),"owner returned before the terminal/cancel interleave"
@@ -280,9 +277,9 @@ def test_cleanup_expired_budget_never_claims_proof():
 
 @pytest.mark.parametrize("keep_parent",[False,True])
 def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_parent):
-    marker=tmp_path/"detached-pid";sentinel=tmp_path/"late-write"
+    marker=tmp_path/"detached-pid";sentinel=tmp_path/"late-write";spawned_pid=tmp_path/"spawned-pid"
     code="import os,time;from pathlib import Path;os.setsid();[os.close(fd) for fd in (0,1,2)];Path("+repr(str(marker))+").write_text(str(os.getpid()));time.sleep(4);Path("+repr(str(sentinel))+").write_text('BAD')"
-    script="const {spawn}=require('node:child_process');const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:'ignore'});p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else "")
+    script="const {spawn}=require('node:child_process');const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:'ignore'});require('node:fs').writeFileSync("+json.dumps(str(spawned_pid))+",String(p.pid));p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else "")
     executor,repo,job=make_fixture(tmp_path,script=script)
     job=replace(job,deadline_seconds=3)
     try:
@@ -307,8 +304,11 @@ def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_paren
     else:
         assert result["status"]=="failed"
         assert result["cleanup"]["cleanup_proven"]
-    if marker.exists():assert supervisor.start_identity(int(marker.read_text())) is None
-    time.sleep(1.1)
+    # The late write can only come from a live descendant. Its pid is known
+    # from the moment node spawned it (and from its own marker), so proving it
+    # is gone proves the sentinel can never appear; no sleep past its timer.
+    for pid_path in (spawned_pid,marker):
+        if pid_path.exists():assert supervisor.start_identity(int(pid_path.read_text())) is None,pid_path.name
     assert not sentinel.exists()
 
 
@@ -321,9 +321,7 @@ def test_abnormal_supervisor_death_preserves_durable_unknown(tmp_path):
         try:executor.execute_job(job)
         except RepoSandboxError as exc:errors.append(exc)
     thread=threading.Thread(target=run);thread.start()
-    deadline=time.monotonic()+10
-    while not running.exists() and time.monotonic()<deadline:time.sleep(.01)
-    assert running.exists()
+    wait_until_blocking(running.exists,what="node command publishing its running marker")
     marker=executor._read_job_marker(job.job_id)
     assert supervisor.exact_signal(marker["pid"],marker["pid_start_identity"],signal.SIGKILL)
     thread.join(5)
@@ -334,8 +332,10 @@ def test_abnormal_supervisor_death_preserves_durable_unknown(tmp_path):
     assert executor._read_job_marker(job.job_id)["cleanup_proven"] is False
     with pytest.raises(RepoSandboxError):fresh.execute_job(job)
     # This deliberately owned fixture self-exits in 2 seconds. No unrelated
-    # host PID is killed to manufacture a restart cleanup receipt.
-    time.sleep(2.2)
+    # host PID is killed to manufacture a restart cleanup receipt; the test
+    # waits for that exit instead of sleeping past it.
+    node_pid=int(running.read_text())
+    wait_until_blocking(lambda:supervisor.start_identity(node_pid) is None,what="owned node fixture exiting by itself")
 
 
 def test_restart_missing_or_reused_identity_never_signals_unrelated(tmp_path):
@@ -444,7 +444,19 @@ def test_cancellation_check_to_rename_competing_process_is_monotonic(tmp_path,mo
     done=tmp_path/"cancel-done"
     # Readiness by pipe (#1224): the competing child writes one byte just
     # before it calls cancel(), and the test blocks on that read.
-    code="import os;from pathlib import Path;from config.settings import RepoSandboxSettings;from src.execution.repo_node import NodeRepoRepairExecutor,PROFILE;import sys; e=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=Path(sys.argv[1]));os.write(int(sys.argv[2]),b'R');os.close(int(sys.argv[2]));e.cancel(job_id='race');Path(sys.argv[3]).write_text('done')"
+    # A second byte, B, is written the first time the child's marker-lock
+    # attempt finds the lock held: the test then knows the child is parked on
+    # the writer's lock, not merely slow, before asserting it has not committed.
+    code=("import os,errno,fcntl;from pathlib import Path;from config.settings import RepoSandboxSettings;"
+          "from src.execution.repo_node import NodeRepoRepairExecutor,PROFILE;import sys;"
+          "e=NodeRepoRepairExecutor(RepoSandboxSettings(profile=PROFILE),workspace_dir=Path(sys.argv[1]));"
+          "fd=int(sys.argv[2]);real=fcntl.flock;state={'blocked':False}\n"
+          "def flock(descriptor,operation):\n"
+          " try:return real(descriptor,operation)\n"
+          " except OSError as exc:\n"
+          "  if exc.errno in (errno.EAGAIN,errno.EACCES) and not state['blocked']:state['blocked']=True;os.write(fd,b'B');os.close(fd)\n"
+          "  raise\n"
+          "fcntl.flock=flock;os.write(fd,b'R');e.cancel(job_id='race');Path(sys.argv[3]).write_text('done')")
     process=None;rename=os.rename
     def interpose(source,target,**kwargs):
         nonlocal process
@@ -452,7 +464,7 @@ def test_cancellation_check_to_rename_competing_process_is_monotonic(tmp_path,mo
             ready=spawned.ready_pipe()
             process=spawned.popen([sys.executable,"-c",code,str(tmp_path),str(ready.child_fd),str(done)],ready=ready,cwd=Path(__file__).resolve().parents[1],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             assert ready.wait()==b"R"
-            time.sleep(.05)
+            assert ready.wait()==b"B","the competing cancellation never found the writer's marker lock held"
             assert not done.exists(),"Competing cancellation committed while writer held the marker lock"
         return rename(source,target,**kwargs)
     monkeypatch.setattr(os,"rename",interpose)

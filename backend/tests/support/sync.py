@@ -93,7 +93,7 @@ class Signal:
             except RuntimeError:  # the waiting loop already closed
                 pass
 
-    async def wait(self, *, bound: float = LIVENESS_SECONDS, task: asyncio.Future | None = None) -> None:
+    async def wait(self, *, bound: float | None = LIVENESS_SECONDS, task: asyncio.Future | None = None) -> None:
         """Await the flag. With ``task``, fail fast if that task ends first."""
 
         loop = asyncio.get_running_loop()
@@ -109,6 +109,7 @@ class Signal:
                 else:
                     await asyncio.wait({future, task}, return_when=asyncio.FIRST_COMPLETED)
         except TimeoutError:
+            # Only this bound can raise here: neither wait propagates an error.
             raise LivenessTimeout(
                 f"{self.name} was not set within the {bound:g} s liveness bound"
                 + (f"; task state: {_task_state(task)}" if task is not None else "")
@@ -123,7 +124,7 @@ class Signal:
                 task.result()
             raise AssertionError(f"task ended before {self.name} was set: {_task_state(task)}")
 
-    def wait_blocking(self, *, bound: float = LIVENESS_SECONDS) -> None:
+    def wait_blocking(self, *, bound: float | None = LIVENESS_SECONDS) -> None:
         """Block the calling thread until the flag is set."""
 
         if not self._event.wait(bound):
@@ -137,9 +138,14 @@ class Gate:
     ``gate.arrive_blocking()`` (on a worker thread). Arrival sets ``reached``
     and parks until ``release()``. Use ``async with gate:`` or call
     ``release()`` in ``finally`` so a failing test never leaves a fake parked.
+
+    ``bound`` limits how long an arrival stays parked before it fails with
+    ``LivenessTimeout``. A fake that must stay stuck until an outer bound in
+    the test fires (for example a hung tick that a bounded shutdown has to
+    abandon) takes ``bound=None``, so the gate cannot release it first.
     """
 
-    def __init__(self, name: str = "gate", *, bound: float = LIVENESS_SECONDS) -> None:
+    def __init__(self, name: str = "gate", *, bound: float | None = LIVENESS_SECONDS) -> None:
         self.name = name
         self.bound = bound
         self.reached = Signal(f"{name} reached")
@@ -262,12 +268,18 @@ async def settle(*, tracked: bool = False, bound: float = LIVENESS_SECONDS) -> N
 
 
 async def within(awaitable: Awaitable[Any], *, what: str, bound: float = LIVENESS_SECONDS) -> Any:
-    """Await ``awaitable`` under a liveness bound that fails with ``what``."""
+    """Await ``awaitable`` under a liveness bound that fails with ``what``.
+
+    A ``TimeoutError`` raised by the awaitable itself propagates unchanged;
+    only the expiry of this bound becomes ``LivenessTimeout``.
+    """
 
     try:
-        async with asyncio.timeout(bound):
+        async with asyncio.timeout(bound) as scope:
             return await awaitable
     except TimeoutError:
+        if not scope.expired():
+            raise
         raise LivenessTimeout(f"{what} did not happen within the {bound:g} s liveness bound") from None
 
 
@@ -283,48 +295,60 @@ async def wait_until(
 ) -> Any:
     """Wait until ``predicate()`` is truthy and return its value.
 
-    ``notifier`` is an ``asyncio.Condition`` the code under test notifies on a
-    state change; without one the predicate is re-read every ``interval``.
-    ``task``, when given, fails the wait fast if that task finishes first
-    (re-raising its exception). On the liveness bound this raises
-    ``LivenessTimeout`` naming ``what`` and the last ``state()`` (or predicate
-    value) it saw. It never returns without the condition holding.
+    ``predicate`` may be a plain callable or return an awaitable (for example
+    a database read). ``notifier`` is an ``asyncio.Condition`` the code under
+    test notifies on a state change; without one the predicate is re-read
+    every ``interval``. ``task``, when given, fails the wait fast if that task
+    finishes first (re-raising its own exception unchanged). On the liveness
+    bound this raises ``LivenessTimeout`` naming ``what`` and the last
+    ``state()`` (or predicate value) it saw. It never returns without the
+    condition holding.
     """
 
     last: list[Any] = [None]
 
-    def check() -> Any:
+    async def check() -> Any:
         value = predicate()
-        last[0] = state() if state is not None else value
+        if inspect.isawaitable(value):
+            value = await value
+        observed = state() if state is not None else value
+        if inspect.isawaitable(observed):
+            observed = await observed
+        last[0] = observed
         return value
 
+    ended: asyncio.Future | None = None
     try:
-        async with asyncio.timeout(bound):
+        async with asyncio.timeout(bound) as scope:
             while True:
-                value = check()
+                value = await check()
                 if value:
                     return value
                 if task is not None and task.done():
-                    value = check()
+                    value = await check()
                     if value:
                         return value
-                    if not task.cancelled():
-                        task.result()
-                    raise AssertionError(
-                        f"task ended before {what}: {_task_state(task)}; last state: {_describe(last[0])}"
-                    )
+                    ended = task
+                    break
                 if notifier is not None:
                     async with notifier:
-                        if not check():
+                        if not await check():
                             await notifier.wait()
                     continue
                 # The one place a duration appears: how often an un-notified
                 # condition is re-read. It never decides the outcome.
                 await asyncio.sleep(interval)
     except TimeoutError:
+        if not scope.expired():
+            raise
         raise LivenessTimeout(
             f"{what} was not reached within the {bound:g} s liveness bound; last state: {_describe(last[0])}"
         ) from None
+    # Outside the bound, so the task's own TimeoutError is not mistaken for ours.
+    assert ended is not None
+    if not ended.cancelled():
+        ended.result()
+    raise AssertionError(f"task ended before {what}: {_task_state(ended)}; last state: {_describe(last[0])}")
 
 
 def wait_until_blocking(

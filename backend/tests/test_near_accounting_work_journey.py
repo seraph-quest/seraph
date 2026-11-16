@@ -22,6 +22,7 @@ from tests.test_research_native_vertical import real_auth
 from tests.test_near_text_work_journey import create_actual_near_task
 from tests.test_near_text_setup_api import near_payload
 from tests.test_openrouter_setup_api import _v2_setup_payload
+from tests.support.sync import wait_until
 
 
 class Bytes(httpx.AsyncByteStream):
@@ -298,12 +299,14 @@ async def test_actual_or_canaries_and_near_native_share_serial_priority_and_ledg
         second = asyncio.create_task(client.post("/api/settings/model-fabric/canary", json=canary))
         native = asyncio.create_task(drive(dispatcher))
         workers.extend((second, native))
-        for _ in range(100):
-            async with factory.accounting_sessions() as db:
-                queued_rows = list((await db.scalars(select(InferenceCostReservation))).all())
-            if any(row.runtime_path == "near_text_native" for row in queued_rows):
-                break
-            await asyncio.sleep(0.02)
+        def native_queued():
+            from src.model_fabric.remote_inference_admission import remote_inference_admission_broker as broker
+            with broker._condition:
+                return any(broker._operations[item].request.runtime_path == "near_text_native" for item in broker._queue)
+        # The native reservation precedes its enqueue behind the held canary.
+        await wait_until(native_queued, what="native request queued behind the held canary", task=native)
+        async with factory.accounting_sessions() as db:
+            queued_rows = list((await db.scalars(select(InferenceCostReservation))).all())
         async with factory.accounting_sessions() as db:
             observed_task = await db.scalar(select(WorkBoardTask).where(WorkBoardTask.task_id == task_id))
         assert len(queued_rows) == 2, {
@@ -524,15 +527,13 @@ async def test_two_ready_ordinary_or_contenders_and_near_choose_highest_priority
     workers = [held]
     try:
         await asyncio.wait_for(controls['or_started'].wait(), 10)
+        def queued_routes():
+            broker = remote_inference_admission_broker
+            with broker._condition:
+                return [broker._operations[item].request.runtime_path for item in broker._queue]
         async def wait_ready(route, worker):
-            for _ in range(200):
-                if worker.done():
-                    worker.result()
-                status = await remote_inference_admission_broker.status()
-                if any(item['runtime_path'] == route for item in status['queued']):
-                    return
-                await asyncio.sleep(.02)
-            raise AssertionError(('actual_queued_request_missing', route))
+            await wait_until(lambda: route in queued_routes(), what=f'{route} queued in the shared lane',
+                             task=worker, state=queued_routes)
         low = asyncio.create_task(ordinary('session_title_generation', 'ordinary-low'))
         workers.append(low)
         await wait_ready('session_title_generation', low)
@@ -542,17 +543,11 @@ async def test_two_ready_ordinary_or_contenders_and_near_choose_highest_priority
         native = asyncio.create_task(drive(dispatcher))
         workers.append(native)
         await wait_ready('near_text_native', native)
-        for _ in range(200):
-            async with factory.accounting_sessions() as db:
-                rows = list((await db.scalars(select(InferenceCostReservation))).all())
-            pending = [row for row in rows if row.state == 'reserved']
-            if len(pending) == 3:
-                break
-            if low.done():
-                low.result()
-            if high.done():
-                high.result()
-            await asyncio.sleep(.02)
+        # Each durable reservation precedes its enqueue, and all three are
+        # observed queued behind the held contact, so their rows exist now.
+        async with factory.accounting_sessions() as db:
+            rows = list((await db.scalars(select(InferenceCostReservation))).all())
+        pending = [row for row in rows if row.state == 'reserved']
         assert len(pending) == 3, [(row.runtime_path, row.state, row.priority) for row in rows]
         priorities = {row.runtime_path: row.priority for row in pending}
         assert priorities == {'session_title_generation': 2, 'chat_agent': 5, 'near_text_native': 5}

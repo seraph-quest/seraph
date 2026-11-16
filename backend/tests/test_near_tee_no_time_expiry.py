@@ -18,6 +18,7 @@ import pytest
 
 from config.settings import settings
 from tests.near_tee_support import near_inference_requests, near_settled_rows
+from tests.support.sync import wait_until
 from tests.test_near_tee_text_slot import NearFixture, catalog_record
 from tests.test_openrouter_setup_api import keyless_openrouter, model_fabric_workspace  # noqa: F401
 from tests.test_near_tee_vertical_journeys import (  # noqa: F401
@@ -231,10 +232,9 @@ async def test_background_refresher_runs_without_blocking_and_stops(accounting_d
     refresher = NearTeeCatalogRefresher(startup_delay=0)
     refresher.start()
     try:
-        for _ in range(200):
-            if read_catalog_observations().get("text", {}).get("last_attempt_outcome") == "read":
-                break
-            await asyncio.sleep(0.01)
+        await wait_until(lambda: read_catalog_observations().get("text", {}).get("last_attempt_outcome") == "read",
+                         what="background catalog read recorded", task=refresher._task,
+                         state=lambda: read_catalog_observations().get("text"))
         observation = read_catalog_observations()["text"]
         assert observation["last_attempt_outcome"] == "read" and observation["last_read"]["outcome"] == "passed"
         assert observation["last_read"]["basis"] == "background_read"

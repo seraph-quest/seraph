@@ -12,6 +12,7 @@ from src.llm_runtime import _governed_research_chat_completion, ProviderProfileC
 from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
 from src.workflows.job_runtime import DurableJobRepository
+from tests.support.sync import within
 
 # ADR-035: pins the bounded research HTTP envelope over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -98,10 +99,11 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
     # the [trickle] flake, #1180). 1.5s reaches the POST and some body bytes.
     kwargs = arguments(seconds=1.5 if kind == "trickle" else 2)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    started = time.monotonic()
+    # Bounded means it returns (a hang fails at the liveness bound) after one
+    # POST, with the body cut where the assertions below say; no elapsed oracle.
     with pytest.raises(GpuAdmissionUncertainError):
-        await broker.execute(request("response-"+kind), lambda: _governed_research_chat_completion(**kwargs))
-    assert time.monotonic()-started < 3
+        await within(broker.execute(request("response-"+kind), lambda: _governed_research_chat_completion(**kwargs)),
+                     what=f"bounded research HTTP failure ({kind}) returning")
     assert len(calls) == 1 and stream.closed
     assert stream.yielded <= 64 * 1024 + 8192
     if kind == "compressed":

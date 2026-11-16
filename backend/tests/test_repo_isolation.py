@@ -10,12 +10,12 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import time
 import uuid
 
 import pytest
 
 from tests.repo_isolation_support import isolation_unavailable
+from tests.support.sync import wait_until_blocking
 
 from src.execution.repo_isolation import (
     IsolationLimits, IsolationRuntime, IsolationUnavailable, StagePaths, clear_probe_cache, probe, wrap)
@@ -139,13 +139,14 @@ except MemoryError:
 
 def test_cpu_limit_terminates_a_spinning_command(host):
     limits = SMALL
-    started = time.monotonic()
+    # The 60 s wall timeout is only a liveness bound: if it fired, ``run``
+    # would raise TimeoutExpired. The CPU limit is proven by the cause of
+    # death, not by elapsed time.
     result = run(host, "while True:\n    pass\n", limits=limits, timeout=60)
     assert result.returncode != 0
     # bwrap reports a signalled child as 128 + signal number; the kernel sends
     # SIGXCPU at the soft limit and SIGKILL at the (equal) hard limit.
     assert result.returncode in {128 + signal.SIGXCPU, 128 + signal.SIGKILL}
-    assert time.monotonic() - started < 30
 
 
 def test_double_forked_detached_process_does_not_outlive_the_command(host):
@@ -160,13 +161,12 @@ if os.fork() == 0:
 print("parent exiting")
 """)
     assert result.returncode == 0 and result.stdout.strip() == "parent exiting", result.stderr
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        survivors = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True).stdout.split()
-        if not survivors:
-            break
-        time.sleep(0.1)
-    assert survivors == []
+
+    def survivors() -> list[str]:
+        return subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True).stdout.split()
+
+    # Raises with the surviving pids if the detached process outlives the command.
+    wait_until_blocking(lambda: not survivors(), what="detached grandchild exiting with the command", state=survivors)
 
 
 def test_probe_reports_not_isolated_when_bwrap_is_missing(tmp_path, monkeypatch):

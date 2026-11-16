@@ -20,6 +20,9 @@
     "backend/tests/fixtures/connection_sync_process.py": {
       "environ-assign": 3
     },
+    "backend/tests/support/sync.py": {
+      "sleep": 2
+    },
     "backend/tests/test_899_identity_snapshot_evidence.py": {
       "get-session-patch": 2
     },
@@ -49,13 +52,10 @@
       "sleep": 1
     },
     "backend/tests/test_browser_task_lifecycle.py": {
-      "sleep": 2,
-      "clock-compare": 2,
       "popen": 1
     },
     "backend/tests/test_browser_task_runtime.py": {
-      "sleep": 7,
-      "clock-compare": 1
+      "sleep": 5
     },
     "backend/tests/test_browser_tool.py": {
       "settings-assign": 5
@@ -79,29 +79,15 @@
     "backend/tests/test_channel_document_source_write_race.py": {
       "get-session-patch": 1
     },
-    "backend/tests/test_cockpit_db_contention.py": {
-      "clock-compare": 1
-    },
-    "backend/tests/test_communication_source_callbacks.py": {
-      "sleep": 4
-    },
-    "backend/tests/test_configuration_mutation_lock.py": {
-      "sleep": 2
-    },
     "backend/tests/test_connection_sync.py": {
-      "sleep": 1,
-      "clock-compare": 1,
       "get-session-patch": 2
     },
     "backend/tests/test_conversation_identity_outbox.py": {
-      "sleep": 3,
-      "get-session-patch": 6
+      "get-session-patch": 6,
+      "realtime": 3
     },
     "backend/tests/test_cordis_agent_loop.py": {
       "get-session-patch": 2
-    },
-    "backend/tests/test_cordis_agent_loop_chat.py": {
-      "sleep": 5
     },
     "backend/tests/test_cordis_bound_adapters.py": {
       "get-session-patch": 1
@@ -110,44 +96,32 @@
       "sleep": 1
     },
     "backend/tests/test_cordis_governed_services.py": {
-      "sleep": 4
+      "sleep": 2,
+      "realtime": 1
     },
     "backend/tests/test_cordis_guardian_turns.py": {
       "sleep": 1
     },
     "backend/tests/test_cordis_research_parity.py": {
-      "clock-compare": 1
-    },
-    "backend/tests/test_cordis_runtime.py": {
-      "clock-compare": 1
+      "realtime": 1
     },
     "backend/tests/test_cordis_services_bridge.py": {
       "sleep": 1
     },
     "backend/tests/test_db_engine.py": {
-      "sleep": 1,
-      "clock-compare": 1,
       "get-session-patch": 2
     },
     "backend/tests/test_delivery.py": {
       "settings-assign": 12
     },
-    "backend/tests/test_discovery_search_receipts.py": {
-      "sleep": 1,
-      "clock-compare": 2
-    },
     "backend/tests/test_document_build_api_journey.py": {
       "get-session-patch": 1
     },
     "backend/tests/test_document_build_cleanup.py": {
-      "sleep": 2,
-      "get-session-patch": 2
-    },
-    "backend/tests/test_document_build_native_capacity.py": {
-      "clock-compare": 1
+      "get-session-patch": 2,
+      "realtime": 2
     },
     "backend/tests/test_document_build_readback.py": {
-      "clock-compare": 2,
       "popen": 1
     },
     "backend/tests/test_document_build_renderer.py": {
@@ -174,15 +148,8 @@
     "backend/tests/test_evening_review.py": {
       "get-session-patch": 1
     },
-    "backend/tests/test_evolution_api.py": {
-      "sleep": 2
-    },
     "backend/tests/test_extension_governance.py": {
       "settings-assign": 2
-    },
-    "backend/tests/test_extension_metadata_worker.py": {
-      "sleep": 10,
-      "clock-compare": 1
     },
     "backend/tests/test_extensions_api.py": {
       "clock-compare": 1,
@@ -240,18 +207,11 @@
     "backend/tests/test_home_continuation.py": {
       "get-session-patch": 1
     },
-    "backend/tests/test_inference_accounting.py": {
-      "sleep": 3,
-      "clock-compare": 1
-    },
     "backend/tests/test_inference_accounting_continuity.py": {
       "get-session-patch": 1
     },
     "backend/tests/test_inference_accounting_rebind.py": {
       "get-session-patch": 1
-    },
-    "backend/tests/test_inference_contact_atomicity.py": {
-      "sleep": 1
     },
     "backend/tests/test_inference_contact_guard.py": {
       "sleep": 1
@@ -280,25 +240,12 @@
     "backend/tests/test_moltbook_native.py": {
       "environ-assign": 3
     },
-    "backend/tests/test_native_notification_queue.py": {
-      "clock-compare": 1
-    },
-    "backend/tests/test_native_swe_operator_journey.py": {
-      "sleep": 1,
-      "clock-compare": 1
-    },
-    "backend/tests/test_near_accounting_work_journey.py": {
-      "sleep": 3
-    },
     "backend/tests/test_near_policy_lock_order.py": {
       "get-session-patch": 2
     },
-    "backend/tests/test_near_tee_no_time_expiry.py": {
-      "sleep": 1
-    },
     "backend/tests/test_near_tee_streaming_tools.py": {
       "sleep": 1,
-      "clock-compare": 2
+      "realtime": 2
     },
     "backend/tests/test_near_tee_vertical_journeys.py": {
       "get-session-patch": 3
@@ -314,7 +261,6 @@
       "settings-assign": 2
     },
     "backend/tests/test_openrouter_setup_api.py": {
-      "sleep": 2,
       "settings-assign": 4
     },
     "backend/tests/test_operator_api.py": {
@@ -346,8 +292,6 @@
       "get-session-patch": 1
     },
     "backend/tests/test_private_test_workspace.py": {
-      "sleep": 1,
-      "clock-compare": 1,
       "popen": 1
     },
     "backend/tests/test_procedure_recommendation_native.py": {
@@ -355,10 +299,6 @@
     },
     "backend/tests/test_procedure_v2_runtime.py": {
       "get-session-patch": 2
-    },
-    "backend/tests/test_process_tools.py": {
-      "sleep": 13,
-      "clock-compare": 5
     },
     "backend/tests/test_programme_digest.py": {
       "sleep": 1
@@ -368,32 +308,16 @@
       "get-session-patch": 2
     },
     "backend/tests/test_read_path_write_locks.py": {
-      "sleep": 1,
-      "clock-compare": 5
+      "sleep": 1
     },
     "backend/tests/test_remote_admission_restart.py": {
       "get-session-patch": 2
     },
-    "backend/tests/test_repo_isolation.py": {
-      "sleep": 1,
-      "clock-compare": 2
-    },
-    "backend/tests/test_repo_isolation_integration.py": {
-      "clock-compare": 1
-    },
     "backend/tests/test_repo_iteration_process.py": {
-      "sleep": 1,
-      "clock-compare": 1,
       "popen": 4
     },
     "backend/tests/test_repo_node.py": {
-      "sleep": 6,
-      "clock-compare": 3,
       "popen": 1
-    },
-    "backend/tests/test_repo_node_vertical.py": {
-      "sleep": 4,
-      "clock-compare": 4
     },
     "backend/tests/test_repo_original_producer.py": {
       "popen": 1
@@ -402,43 +326,35 @@
       "sleep": 4,
       "clock-compare": 3
     },
-    "backend/tests/test_repo_publication_runtime.py": {
-      "sleep": 1,
-      "clock-compare": 1
-    },
     "backend/tests/test_repo_publication_supervisor.py": {
-      "sleep": 3,
-      "clock-compare": 3,
+      "sleep": 2,
+      "clock-compare": 2,
       "popen": 1
     },
     "backend/tests/test_repo_repair_controlplane_api.py": {
       "get-session-patch": 4
     },
     "backend/tests/test_repo_repair_executors.py": {
-      "sleep": 3,
-      "clock-compare": 3,
+      "sleep": 1,
+      "clock-compare": 1,
       "popen": 1
     },
     "backend/tests/test_repo_repair_local_vertical.py": {
-      "sleep": 5,
-      "clock-compare": 5
+      "sleep": 1,
+      "clock-compare": 1
     },
     "backend/tests/test_repo_source_public_live_pending.py": {
-      "clock-compare": 3,
-      "get-session-patch": 2
+      "get-session-patch": 2,
+      "realtime": 1
     },
     "backend/tests/test_repo_source_public_recovery.py": {
       "get-session-patch": 2
     },
     "backend/tests/test_repo_source_public_recovery_boundaries.py": {
-      "sleep": 1
-    },
-    "backend/tests/test_repo_source_recovery_authority.py": {
-      "sleep": 2,
-      "clock-compare": 1
+      "realtime": 1
     },
     "backend/tests/test_repo_work_original_limits.py": {
-      "sleep": 4
+      "realtime": 3
     },
     "backend/tests/test_repo_work_stop_metadata.py": {
       "get-session-patch": 2
@@ -453,18 +369,10 @@
       "sleep": 4
     },
     "backend/tests/test_research_http_envelope.py": {
-      "sleep": 2,
-      "clock-compare": 1
-    },
-    "backend/tests/test_research_phase_freeze.py": {
       "sleep": 2
     },
     "backend/tests/test_routines.py": {
       "get-session-patch": 14
-    },
-    "backend/tests/test_scheduler_lifecycle_1025.py": {
-      "sleep": 12,
-      "clock-compare": 1
     },
     "backend/tests/test_screenshot_folder_analysis_job.py": {
       "sleep": 1,
@@ -504,9 +412,6 @@
     "backend/tests/test_strategy_correction.py": {
       "get-session-patch": 1
     },
-    "backend/tests/test_sync_gpu_admission.py": {
-      "sleep": 5
-    },
     "backend/tests/test_task_conversation_continuity.py": {
       "get-session-patch": 1
     },
@@ -514,7 +419,6 @@
       "get-session-patch": 3
     },
     "backend/tests/test_task_lessons.py": {
-      "sleep": 2,
       "get-session-patch": 1,
       "popen": 1
     },

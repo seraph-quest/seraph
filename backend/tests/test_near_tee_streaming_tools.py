@@ -230,6 +230,7 @@ async def test_stream_echo_mismatch_mid_stream_keeps_delivered_deltas_and_settle
         reset_runtime_context(tokens)
 
 
+@pytest.mark.realtime(reason="needs #1225: the NEAR stream cut and billing reserve are computed from time.time() deadlines in production")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_stream_is_cut_before_the_billing_window_and_billing_runs_in_deadline(client, model_fabric_workspace,
@@ -714,6 +715,7 @@ async def test_cordis_max_tokens_above_slot_output_is_named(client, model_fabric
     assert len(near.requests) == before
 
 
+@pytest.mark.realtime(reason="needs #1225: the chat turn cap, stream window and billing reserve read time.time() in production")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_chat_turn_deadline_ends_stream_and_billing_before_the_outer_cut(client, model_fabric_workspace,

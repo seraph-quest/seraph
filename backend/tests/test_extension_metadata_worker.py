@@ -2,12 +2,11 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Thread, current_thread
-import time
-
 import pytest
 from fastapi import HTTPException
 
 from src.api import extension_metadata as metadata
+from tests.support.sync import LIVENESS_SECONDS, Gate, settle, wait_until
 
 
 @pytest.fixture(autouse=True)
@@ -19,18 +18,32 @@ def isolated_worker(monkeypatch):
     monkeypatch.setattr(metadata, "CALLER_WAIT_SECONDS", 0.1)
 
 
+def _worker_done() -> bool:
+    return metadata._pending is not None and metadata._pending.worker_done.is_set()
+
+
 @pytest.mark.asyncio
-async def test_worker_preserves_heartbeat_and_returns_fresh_build_each_time():
+async def test_worker_preserves_heartbeat_and_returns_fresh_build_each_time(monkeypatch):
+    # The caller bound is a production liveness bound; this test parks the
+    # build on a gate, so give the caller the shared liveness bound instead.
+    monkeypatch.setattr(metadata, "CALLER_WAIT_SECONDS", LIVENESS_SECONDS)
     names, calls = [], []
+    in_build = Gate("metadata build")
     def build():
         names.append(current_thread().name)
-        time.sleep(0.03)
+        # A build run on the event loop would park the loop here until the
+        # gate's liveness bound fails it: the test could never release it.
+        in_build.arrive_blocking()
         calls.append(1)
         return {"sequence": len(calls)}
-    start = time.monotonic()
     task = asyncio.create_task(metadata.bounded_extension_metadata(build))
-    await asyncio.sleep(0.005)
-    assert time.monotonic() - start < 0.025
+    try:
+        await in_build.wait_reached(task=task)
+        # The loop keeps its heartbeat while the build is parked off-loop.
+        await settle()
+        assert not task.done()
+    finally:
+        in_build.release()
     assert await task == {"sequence": 1}
     assert await metadata.bounded_extension_metadata(build) == {"sequence": 2}
     assert names and all(name != "MainThread" for name in names)
@@ -72,8 +85,7 @@ async def test_abort_and_concurrent_timeout_do_not_submit_another_actual_worker(
             finished.set()
     first = asyncio.create_task(metadata.bounded_extension_metadata(build))
     try:
-        while not started.is_set():
-            await asyncio.sleep(0.001)
+        await wait_until(started.is_set, what="metadata worker started", task=first)
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
@@ -87,7 +99,7 @@ async def test_abort_and_concurrent_timeout_do_not_submit_another_actual_worker(
     finally:
         release.set()
         assert finished.wait(2)
-    await asyncio.sleep(0.01)
+    await wait_until(_worker_done, what="metadata worker marked done")
     assert await metadata.bounded_extension_metadata(lambda: {"recovered": True}) == {"recovered": True}
 
 
@@ -114,7 +126,9 @@ async def test_queued_before_start_abort_retains_actual_thread_completion(monkey
             worker_finished.set()
     caller = asyncio.create_task(metadata.bounded_extension_metadata(build))
     try:
-        await asyncio.sleep(0.005)
+        await wait_until(lambda: metadata._pending is not None and metadata._pending.submitted,
+                         what="metadata build submitted to the executor", task=caller)
+        await settle()
         assert metadata._pending.submitted is True
         assert not worker_started.is_set()
         caller.cancel()
@@ -125,12 +139,11 @@ async def test_queued_before_start_abort_retains_actual_thread_completion(monkey
         assert not metadata._pending.worker_done.is_set()
         assert calls == []
         release_blocker.set()
-        while not worker_started.is_set():
-            await asyncio.sleep(0.001)
+        await wait_until(worker_started.is_set, what="queued metadata worker started")
         assert calls == [1]
         release_worker.set()
         assert worker_finished.wait(2)
-        await asyncio.sleep(0.01)
+        await wait_until(_worker_done, what="metadata worker marked done")
         assert await metadata.bounded_extension_metadata(lambda: {"fresh": True}) == {"fresh": True}
     finally:
         release_blocker.set()
@@ -196,8 +209,7 @@ async def test_same_pending_snapshot_coalesces_finite_get_callers():
     first = asyncio.create_task(metadata.bounded_extension_metadata(build))
     second = asyncio.create_task(metadata.bounded_extension_metadata(build))
     try:
-        while not started.is_set():
-            await asyncio.sleep(0.001)
+        await wait_until(started.is_set, what="coalesced metadata worker started", task=first)
         release.set()
         left, right = await asyncio.gather(first, second)
         assert left == right == {"extensions": [{"id": "one"}]}
@@ -223,8 +235,7 @@ async def test_actual_closed_loop_retains_worker_until_its_real_completion():
         old_loop = asyncio.new_event_loop()
         async def run_and_abort():
             task = asyncio.create_task(metadata.bounded_extension_metadata(build))
-            while not started.is_set():
-                await asyncio.sleep(0.001)
+            await wait_until(started.is_set, what="old-loop metadata worker started", task=task)
             task.cancel()
             try:
                 await task
@@ -238,8 +249,7 @@ async def test_actual_closed_loop_retains_worker_until_its_real_completion():
     thread = Thread(target=old_loop_runner)
     thread.start()
     try:
-        while not loop_closed.is_set():
-            await asyncio.sleep(0.001)
+        await wait_until(loop_closed.is_set, what="old event loop closed")
         assert started.is_set() and not metadata._pending.worker_done.is_set()
         with pytest.raises(HTTPException):
             await metadata.bounded_extension_metadata(lambda: calls.append(1) or {})

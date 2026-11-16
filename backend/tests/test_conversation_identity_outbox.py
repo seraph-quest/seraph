@@ -716,6 +716,8 @@ async def test_pending_approval_expiry_creates_fresh_bounded_request(file_db, mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the attachment quarantine receipt expiry is read from the wall clock "
+                      "in src/conversation/identity.py, so the test waits for the real expiry to pass")
 async def test_approved_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
     get_session, _ = file_db
     monkeypatch.setattr("src.approval.repository.get_session", get_session)
@@ -789,6 +791,8 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the attachment quarantine receipt expiry is read from the wall clock "
+                      "in src/conversation/identity.py, so the test waits for the real expiry to pass")
 async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
     get_session, _ = file_db
     monkeypatch.setattr("src.approval.repository.get_session", get_session)
@@ -885,6 +889,8 @@ async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_d
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the attachment quarantine receipt expiry is read from the wall clock "
+                      "in src/conversation/identity.py, so the test waits for the real expiry to pass")
 async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
     get_session, _ = file_db
     await _add_owner(

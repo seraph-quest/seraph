@@ -31,6 +31,7 @@ from src.browser.task_runner import (
 from src.db.models import Goal
 from src.security.site_policy import SiteAccessDecision
 from src.workflows.job_runtime import DurableJobAdmissionDenied, DurableJobRepository
+from tests.support.sync import LIVENESS_SECONDS, Gate, within
 
 
 def _input(*, query: str = "") -> dict[str, Any]:
@@ -1814,14 +1815,16 @@ async def test_launch_timeout_records_cleanup_verified_and_never_not_needed(tmp_
 
 @pytest.mark.asyncio
 async def test_cleanup_timeout_is_bounded_and_holder_retains_partial_resource(tmp_path: Path) -> None:
+    # The close parks longer than the test's own wait, so a bounded call that
+    # waited for it could never return inside that wait.
+    close_gate = Gate("slow browser close", bound=2 * LIVENESS_SECONDS)
+
     class SlowBrowser:
         def __init__(self) -> None:
-            self.started = asyncio.Event()
             self.closed = False
 
         async def close(self) -> None:
-            self.started.set()
-            await asyncio.sleep(0.15)
+            await close_gate.arrive()
             self.closed = True
 
     browser = SlowBrowser()
@@ -1830,11 +1833,20 @@ async def test_cleanup_timeout_is_bounded_and_holder_retains_partial_resource(tm
         browser=browser,
     )
     runner = BrowserTaskRunner(jobs=FakeJobs(), workspace_root=tmp_path)
-    started = time.monotonic()
-    assert await runner._close_launch_resources_bounded(resources, timeout_seconds=0.01) is False
-    assert time.monotonic() - started < 0.10
-    assert resources.context_not_started is False
-    await asyncio.sleep(0.18)
+    async with close_gate:
+        # The bounded close returns while the slow close is still parked: the
+        # bound, not the close, ended the wait. (Awaited without cancelling it,
+        # since the holder turns a caller cancellation into a False return.)
+        bounded = asyncio.create_task(runner._close_launch_resources_bounded(resources, timeout_seconds=0.01))
+        await asyncio.wait({bounded}, timeout=LIVENESS_SECONDS)
+        assert bounded.done(), "the bounded close waited for the parked close"
+        assert bounded.result() is False
+        assert close_gate.reached.is_set() and not close_gate.released.is_set()
+        assert resources.cleanup_task is not None and not resources.cleanup_task.done()
+        assert browser.closed is False
+        assert resources.context_not_started is False
+    # The holder still owns the partial resource and finishes closing it.
+    await within(resources.cleanup_task, what="retained cleanup task finishing after release")
     assert browser.closed is True
 
 

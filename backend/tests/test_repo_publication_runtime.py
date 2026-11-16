@@ -13,6 +13,7 @@ from config.settings import RepoSandboxSettings
 from src.execution.repo_sandbox import LocalRepoRepairExecutor
 from src.execution.repo_publication_runtime import PROFILE, BOUNDS, RuntimeUnavailable, _read, capture, materialize, verify, resolve_entry, posture_projection
 from tests.test_repo_repair_executors import _repo, _job
+from tests.support.sync import wait_until_blocking
 
 
 @pytest.fixture(scope="module")
@@ -214,15 +215,16 @@ def test_actual_selected_profile_fresh_cancel_after_worker_start_has_no_adoption
     try:
         # Wait for the actual selected Python child and its durable PID/start
         # marker, not the earlier Git materialization process.
-        while time.monotonic() < deadline:
+        def selected_worker_started():
             with runner._active_lock:
                 process = (runner._active.get(job.job_id) or {}).get("process")
             marker = runner._read_job_marker(job.job_id)
-            if process and process.poll() is None and str(process.args[0]).endswith("/python-runtime/bin/python") and marker and marker.get("phase") == "worker_started" and marker.get("pid") == process.pid:
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("selected Python worker never reached durable start barrier")
+            return bool(process and process.poll() is None and str(process.args[0]).endswith("/python-runtime/bin/python")
+                        and marker and marker.get("phase") == "worker_started" and marker.get("pid") == process.pid)
+
+        wait_until_blocking(selected_worker_started, bound=30,
+                            what="selected Python worker reached its durable start barrier",
+                            state=lambda: runner._read_job_marker(job.job_id))
         fresh = LocalRepoRepairExecutor(selected, workspace_dir=workspace)
         cancel = fresh.cancel(job_id=job.job_id, authority={"job_id": job.job_id, "authority_digest": job.authority_digest})
         assert cancel["status"] == "cancel_requested"

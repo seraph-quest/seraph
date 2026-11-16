@@ -16,7 +16,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +37,7 @@ from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
 from src.security.site_policy import SiteAccessDecision
 from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardOwner
+from tests.support.sync import wait_until_blocking
 from src.work_board.input_artifacts import (
     bind_input_artifact,
     consume_input_artifact,
@@ -260,10 +260,7 @@ asyncio.run(main())
     )
     identities: dict[int, tuple[int, int]] = {}
     try:
-        deadline = time.monotonic() + 25
-        while time.monotonic() < deadline and not ready_path.exists():
-            time.sleep(0.05)
-        assert ready_path.exists(), "Chromium worker did not publish its process identity"
+        wait_until_blocking(ready_path.exists, what="Chromium worker publishing its process identity")
         ready = json.loads(ready_path.read_text())
         assert ready["worker_pid"] == child.pid
         before = _proc_snapshot()
@@ -278,20 +275,18 @@ asyncio.run(main())
 
         os.kill(child.pid, signal.SIGKILL)
         child.wait(timeout=5)
-        cleanup_deadline = time.monotonic() + 10
-        while time.monotonic() < cleanup_deadline:
+
+        def survivors() -> list[int]:
             current = _proc_snapshot()
-            if all(
-                pid not in current or current[pid]["start_ticks"] != start_ticks
-                for pid, start_ticks in identities.values()
-            ):
-                break
-            time.sleep(0.1)
-        current = _proc_snapshot()
-        assert all(
-            pid not in current or current[pid]["start_ticks"] != start_ticks
-            for pid, start_ticks in identities.values()
-        ), "a Playwright/Chromium process survived worker death"
+            return [
+                pid for pid, start_ticks in identities.values()
+                if pid in current and current[pid]["start_ticks"] == start_ticks
+            ]
+
+        # Raises with the surviving identities if a Playwright/Chromium process
+        # outlives worker death.
+        wait_until_blocking(lambda: not survivors(), what="Playwright/Chromium processes exiting after worker death",
+                            state=survivors)
     finally:
         if child.poll() is None:
             os.kill(child.pid, signal.SIGKILL)

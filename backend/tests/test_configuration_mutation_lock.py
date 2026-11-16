@@ -12,6 +12,28 @@ import pytest
 
 from src.model_fabric.effective_policy import LoopAgnosticLock
 from src.model_fabric.execution import _run_awaitable_sync
+from tests.support.sync import assert_blocked, suspended_in, wait_until
+
+
+class _RefusalSpy:
+    """Wraps the lock's ``threading.Lock`` and records refused attempts, so a
+    test observes a contender being excluded instead of waiting it out."""
+
+    def __init__(self, inner: threading.Lock) -> None:
+        self._inner = inner
+        self.refused_threads: set[int] = set()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        acquired = self._inner.acquire(blocking, timeout)
+        if not acquired:
+            self.refused_threads.add(threading.get_ident())
+        return acquired
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def locked(self) -> bool:
+        return self._inner.locked()
 
 
 def _sync_path_acquires(lock: LoopAgnosticLock, events: list[str], acquired: threading.Event) -> None:
@@ -29,13 +51,19 @@ def _sync_path_acquires(lock: LoopAgnosticLock, events: list[str], acquired: thr
 @pytest.mark.asyncio
 async def test_sync_path_on_another_thread_waits_for_app_loop_holder_without_error():
     lock = LoopAgnosticLock()
+    spy = lock._lock = _RefusalSpy(lock._lock)
     events: list[str] = []
     acquired = threading.Event()
     async with lock:
         worker = threading.Thread(target=_sync_path_acquires, args=(lock, events, acquired))
         worker.start()
-        # The worker runs its own loop and must be excluded, not error.
-        assert not await asyncio.to_thread(acquired.wait, 0.2)
+        # The worker runs its own loop and must be excluded, not error: it is
+        # observed refused by the held lock before its absence is asserted.
+        await wait_until(lambda: (worker.ident in spy.refused_threads) or acquired.is_set() or not worker.is_alive(),
+                         what="sync-path worker refused by the held lock",
+                         state=lambda: (events, spy.refused_threads, worker.ident))
+        assert worker.ident in spy.refused_threads
+        assert not acquired.is_set() and worker.is_alive()
         events.append("app loop released")
     await asyncio.to_thread(worker.join, 5)
     assert not worker.is_alive()
@@ -59,7 +87,9 @@ async def test_app_loop_waits_for_a_holder_on_another_loop():
     worker.start()
     assert await asyncio.to_thread(held.wait, 5)
     waiter = asyncio.create_task(lock.acquire())
-    await asyncio.sleep(0.1)
+    # Parked in acquire's poll only after the held lock refused it.
+    await assert_blocked(waiter, at=lambda: suspended_in(waiter, "LoopAgnosticLock.acquire"),
+                         what="app-loop waiter excluded by another loop's holder")
     assert not waiter.done()
     release.set()
     assert await asyncio.wait_for(waiter, 5) is True
@@ -121,7 +151,9 @@ async def test_cancelled_waiter_does_not_leave_the_lock_held():
     lock = LoopAgnosticLock()
     await lock.acquire()
     waiter = asyncio.create_task(lock.acquire())
-    await asyncio.sleep(0.02)
+    # Cancel only once the waiter is observed polling the held lock.
+    await wait_until(lambda: suspended_in(waiter, "LoopAgnosticLock.acquire"), what="waiter polling the held lock",
+                     task=waiter)
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter

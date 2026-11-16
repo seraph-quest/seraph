@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import resource
@@ -8,7 +9,6 @@ import signal
 import stat
 import textwrap
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +33,7 @@ from src.tools.process_tools import (
     start_process,
     stop_process,
 )
+from tests.support.sync import wait_until_blocking
 
 
 @pytest.fixture(autouse=True)
@@ -254,84 +255,159 @@ def test_run_command_success():
     assert "guardian process ready" in result
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _release_parked_reader(fifo: Path, pid_file: Path) -> None:
+    """Open and close the write end once the descendant is parked reading.
+
+    Gives up without error when the descendant is already gone (its own
+    liveness alarm fired), so a failing assertion is not masked by a hang.
+    """
+
+    def descendant_gone() -> bool:
+        return pid_file.exists() and pid_file.read_text() != "" and not _pid_alive(int(pid_file.read_text()))
+
+    def open_writer() -> int | bool | None:
+        try:
+            return os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as error:
+            if error.errno == errno.ENXIO:  # no reader: not parked yet, or gone
+                return True if descendant_gone() else None
+            raise
+
+    opened = wait_until_blocking(open_writer, what=f"descendant parked reading {fifo.name}")
+    if opened is not True:
+        os.close(opened)
+
+
+# A descendant that holds the inherited stdout/stderr pipes until the test
+# releases it. ``alarm`` is only its liveness bound: if the test never
+# releases it (a regression that waits for the pipes), it dies after 10 s
+# instead of hanging the run.
+_PARKED_DESCENDANT = (
+    "import os,pathlib,signal,sys; {setsid}"
+    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); signal.alarm(10); "
+    "open(sys.argv[2]).read(); signal.alarm(0); pathlib.Path(sys.argv[3]).write_text('survived')"
+)
+
+
+_PIPE_BOUND_DEFECT = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#1234: _BoundedPipeCapture.finish() closes a pipe another thread is reading, and "
+        "BufferedReader.close() blocks until that read returns, so run_command waits for a "
+        "descendant-held pipe after its timeout. The old elapsed bound (< 4 s) passed only because "
+        "the descendant held the pipe for 2 to 3 s. Remove this marker with the #1234 fix."
+    ),
+)
+
+
+@_PIPE_BOUND_DEFECT
 def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
     # The child intentionally calls setsid and escapes the managed group. This
     # bounds the caller but documents the residual: a general sandbox/tree
     # kill for detached sessions is outside this process-tool contract.
+    workspace = Path(settings.workspace_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+    pid_file, fifo, released = (workspace / name for name in (
+        "orphan-pipe.pid", "orphan-pipe.fifo", "orphan-pipe.released"))
+    for path in (pid_file, fifo, released):
+        path.unlink(missing_ok=True)
+    os.mkfifo(fifo)
+    descendant = _PARKED_DESCENDANT.format(setsid="os.setsid(); ")
     script_name = _write_script(
         "wave_process_orphaned_pipe.py",
-        """
-        import os
+        f"""
         import subprocess
         import sys
         import time
 
         subprocess.Popen(
-            [sys.executable, "-c", "import os,time; os.setsid(); time.sleep(3)"],
+            [sys.executable, "-c", {descendant!r}, {pid_file.name!r}, {fifo.name!r}, {released.name!r}],
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
         time.sleep(30)
         """,
     )
-    started = time.monotonic()
 
-    result = process_runtime_manager.run_command(
-        command="python3",
-        args_json=f'["{script_name}"]',
-        timeout_seconds=1,
-    )
+    try:
+        result = process_runtime_manager.run_command(
+            command="python3",
+            args_json=f'["{script_name}"]',
+            timeout_seconds=1,
+        )
 
-    assert result["timed_out"] is True
-    assert result["cleanup_status"] == "unknown"
-    retained_worker_root = Path(result["worker_root"])
-    assert retained_worker_root.exists()
-    assert time.monotonic() - started < 4
-    time.sleep(2.2)
+        assert result["timed_out"] is True
+        assert result["cleanup_status"] == "unknown"
+        retained_worker_root = Path(result["worker_root"])
+        assert retained_worker_root.exists()
+        # The call returned while the detached descendant still held its pipes:
+        # it is alive and parked until the test releases it.
+        wait_until_blocking(pid_file.exists, what="detached descendant publishing its pid")
+        descendant_pid = int(pid_file.read_text())
+        assert _pid_alive(descendant_pid), "the descendant-held pipe was waited for (descendant already gone)"
+        assert not released.exists()
+    finally:
+        _release_parked_reader(fifo, pid_file)
+    wait_until_blocking(released.exists, what="released descendant finishing")
     assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
 
 
+@_PIPE_BOUND_DEFECT
 def test_run_command_reports_unknown_after_parent_exits_before_cleanup():
     """A vanished leader leaves its descendant group recoverable but unverifiable."""
+    workspace = Path(settings.workspace_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+    survivor_marker = workspace / "same-group-survivor.marker"
+    parent_marker = workspace / "parent-exited.marker"
+    pid_file = workspace / "same-group-survivor.pid"
+    fifo = workspace / "same-group-survivor.fifo"
+    for path in (survivor_marker, parent_marker, pid_file, fifo):
+        path.unlink(missing_ok=True)
+    os.mkfifo(fifo)
+    descendant = _PARKED_DESCENDANT.format(setsid="")
     script_name = _write_script(
         "wave_process_parent_exits_same_group.py",
-        """
+        f"""
         import pathlib
         import subprocess
         import sys
 
         subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "import pathlib,time; time.sleep(2); pathlib.Path('same-group-survivor.marker').write_text('survived')",
-            ],
+            [sys.executable, "-c", {descendant!r}, {pid_file.name!r}, {fifo.name!r}, {survivor_marker.name!r}],
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
         pathlib.Path("parent-exited.marker").write_text("parent-exited")
         """,
     )
-    workspace = Path(settings.workspace_dir)
-    survivor_marker = workspace / "same-group-survivor.marker"
-    parent_marker = workspace / "parent-exited.marker"
-    survivor_marker.unlink(missing_ok=True)
-    parent_marker.unlink(missing_ok=True)
-    started = time.monotonic()
 
-    result = process_runtime_manager.run_command(
-        command="python3",
-        args_json=f'["{script_name}"]',
-        timeout_seconds=1,
-    )
+    try:
+        result = process_runtime_manager.run_command(
+            command="python3",
+            args_json=f'["{script_name}"]',
+            timeout_seconds=1,
+        )
 
-    assert result["timed_out"] is True
-    assert result["cleanup_status"] == "unknown"
-    retained_worker_root = Path(result["worker_root"])
-    assert retained_worker_root.exists()
-    assert parent_marker.is_file()
-    assert time.monotonic() - started < 4
-    time.sleep(2.2)
+        assert result["timed_out"] is True
+        assert result["cleanup_status"] == "unknown"
+        retained_worker_root = Path(result["worker_root"])
+        assert retained_worker_root.exists()
+        assert parent_marker.is_file()
+        # The call returned while the same-group descendant was still parked.
+        wait_until_blocking(pid_file.exists, what="same-group descendant publishing its pid")
+        assert _pid_alive(int(pid_file.read_text()))
+        assert not survivor_marker.exists()
+    finally:
+        _release_parked_reader(fifo, pid_file)
+    wait_until_blocking(survivor_marker.exists, what="same-group survivor writing its marker after release")
     assert survivor_marker.read_text(encoding="utf-8") == "survived"
     assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
 
@@ -362,10 +438,7 @@ def test_run_command_cancel_event_kills_in_flight_process_within_bound(tmp_path,
     worker.start()
     try:
         marker = Path(settings.workspace_dir) / "cancel-child-ready"
-        deadline = time.monotonic() + 3
-        while not marker.is_file() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert marker.is_file(), "the genuine child did not start"
+        wait_until_blocking(marker.is_file, what="the genuine child starting")
         cancel_event.set()
         worker.join(timeout=3)
         assert not worker.is_alive()
@@ -423,12 +496,11 @@ def test_process_bootstrap_preserves_limits_arguments_environment_and_identity(t
     if background:
         result = process_runtime_manager.start_process(command="python3", args_json=json.dumps(args))
         process_id = result["process_id"]
-        deadline = time.monotonic() + 3
-        output = ""
-        while not output.endswith("\n") and time.monotonic() < deadline:
-            output = process_runtime_manager.read_process_output(process_id)["output"]
-            time.sleep(0.01)
-        assert output, "the genuine background target did not report"
+        output = wait_until_blocking(
+            lambda: (lambda text: text if text.endswith("\n") else "")(
+                process_runtime_manager.read_process_output(process_id)["output"]),
+            what="the genuine background target reporting a full line",
+        )
         payload = json.loads(output)
         process, identity = launched[0]
         assert process_tools_module._read_process_identity(process.pid) == identity
@@ -555,11 +627,12 @@ def test_process_bootstrap_exec_failure_is_visible_without_retry(tmp_path, monke
     monkeypatch.setattr(process_tools_module.subprocess, "Popen", observe_launch)
     if background:
         result = process_runtime_manager.start_process(command="python3")
-        deadline = time.monotonic() + 3
-        while result["status"] != "exited" and time.monotonic() < deadline:
-            result = process_runtime_manager.read_process_output(result["process_id"])
-            time.sleep(0.01)
-        result = process_runtime_manager.read_process_output(result["process_id"])
+        process_id = result["process_id"]
+        result = wait_until_blocking(
+            lambda: (lambda read: read if read["status"] == "exited" else None)(
+                process_runtime_manager.read_process_output(process_id)),
+            what="the failed bootstrap target being observed as exited",
+        )
         assert result["status"] == "exited" and result["exit_code"] == 127
         assert result["output"] == "process_target_exec_unavailable\n"
     else:
@@ -1163,13 +1236,7 @@ def test_start_list_read_and_stop_process():
     started = start_process(command="python3", args_json=f'["{script_name}"]')
     process_id = started.split("process=")[1].split(",")[0]
 
-    for _ in range(20):
-        listed = list_processes()
-        if process_id in listed:
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError("process did not appear in list_processes output")
+    wait_until_blocking(lambda: process_id in list_processes(), what="process appearing in list_processes output")
 
     managed_payload = next(
         process
@@ -1179,12 +1246,10 @@ def test_start_list_read_and_stop_process():
     output_path = Path(managed_payload["output_path"])
     worker_root = Path(managed_payload["worker_root"])
 
-    output = ""
-    for _ in range(20):
-        output = read_process_output(process_id=process_id)
-        if "started" in output:
-            break
-        time.sleep(0.05)
+    output = wait_until_blocking(
+        lambda: (lambda text: text if "started" in text else "")(read_process_output(process_id=process_id)),
+        what="the started line in the process output",
+    )
     assert "started" in output
 
     stopped = stop_process(process_id=process_id)
@@ -1263,25 +1328,24 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monk
     started = start_process(command="python3", args_json=f'["{script_name}"]')
     process_id = started.split("process=")[1].split(",")[0]
     managed = process_runtime_manager._processes[process_id]
-    for _ in range(100):
+    def descendant_snapshot_persisted():
         process_runtime_manager.list_processes()
-        if managed.descendant_identities:
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError("live descendant snapshot was not persisted")
+        return managed.descendant_identities
+
+    wait_until_blocking(descendant_snapshot_persisted, what="live descendant snapshot being persisted")
     persisted_descendant = managed.descendant_identities
     assert persisted_descendant
-    for _ in range(100):
+    def parent_exited_listing():
         listed = process_runtime_manager.list_processes()
         if parent_marker.is_file() and any(
             process["process_id"] == process_id and process["status"] == "exited"
             for process in listed
         ):
-            break
-        time.sleep(0.05)
-    else:
-        raise AssertionError("parent did not exit while its descendant remained in the group")
+            return listed
+        return None
+
+    listed = wait_until_blocking(parent_exited_listing,
+                                 what="parent exiting while its descendant remained in the group")
 
     managed_payload = next(process for process in listed if process["process_id"] == process_id)
     output_path = Path(managed_payload["output_path"])
@@ -1304,12 +1368,13 @@ def test_stop_process_reports_unknown_after_parent_exit_and_retains_receipt(monk
     child_identity = persisted_descendant[0]
     assert survivor_marker.read_text(encoding="utf-8") == "survived"
     os.kill(child_identity.pid, signal.SIGKILL)
-    reconciled = None
-    for _ in range(8):
-        time.sleep(0.1)
-        reconciled = process_runtime_manager.stop_process(process_id=process_id)
-        if reconciled is not None and reconciled["cleanup_status"] == "stopped":
-            break
+    # Each attempt re-runs the product's reconciliation; it is idempotent and
+    # waits only for the kernel to retire the killed descendant.
+    def reconcile():
+        result = process_runtime_manager.stop_process(process_id=process_id)
+        return result if result is not None and result["cleanup_status"] == "stopped" else None
+
+    reconciled = wait_until_blocking(reconcile, what="stop_process reconciling after the descendant was killed")
     assert reconciled is not None
     assert reconciled["cleanup_status"] == "stopped"
     assert reconciled["stopped"] is True
@@ -1646,12 +1711,12 @@ def test_start_process_scrubs_ambient_secret_environment(monkeypatch):
 
     started = start_process(command="python3", args_json=f'["{script_name}"]')
     process_id = started.split("process=")[1].split(",")[0]
-    output = ""
-    for _ in range(20):
-        output = read_process_output(process_id=process_id)
-        if "allowlisted" in output:
-            break
-        time.sleep(0.05)
+    # Both lines are printed before the check: the sandbox marker comes after
+    # the (scrubbed) secret line.
+    output = wait_until_blocking(
+        lambda: (lambda text: text if "allowlisted" in text else "")(read_process_output(process_id=process_id)),
+        what="both environment lines in the background output",
+    )
 
     assert "background-secret" not in output
     assert "missing" in output
@@ -1690,20 +1755,13 @@ def test_process_recovery_is_scoped_to_the_starting_session():
 
     owner_tokens = set_runtime_context("owner-session", "high_risk")
     try:
-        for _ in range(20):
-            listed = list_processes()
-            if process_id in listed:
-                break
-            time.sleep(0.05)
-        else:
-            raise AssertionError("process did not appear in owner session list_processes output")
+        wait_until_blocking(lambda: process_id in list_processes(),
+                            what="process appearing in owner session list_processes output")
 
-        output = ""
-        for _ in range(20):
-            output = read_process_output(process_id=process_id)
-            if "scoped" in output:
-                break
-            time.sleep(0.05)
+        output = wait_until_blocking(
+            lambda: (lambda text: text if "scoped" in text else "")(read_process_output(process_id=process_id)),
+            what="the scoped line in the owner session output",
+        )
         assert "scoped" in output
 
         stopped = stop_process(process_id=process_id)

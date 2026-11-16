@@ -18,6 +18,7 @@ from tests.test_document_build_native_capacity import admitted_build, build_admi
 from src.work_board import document_build_storage as storage
 from src.work_board import document_pairs as sources
 from src.work_board.repository import BoardError
+from tests.support.sync import LIVENESS_SECONDS
 
 
 async def test_private_fifo_open_is_bounded_before_decryption(accounting_db, monkeypatch, record_property):
@@ -60,20 +61,25 @@ else:
                 with selectors.DefaultSelector() as selector:
                     selector.register(child.stdout, selectors.EVENT_READ)
                     while b"\n" not in ready:
-                        remaining = 60 - (time.monotonic() - startup_started)
-                        if remaining <= 0 or not selector.select(remaining):
-                            raise subprocess.TimeoutExpired(argv, 60)
+                        # Liveness watchdog per read, not an oracle.
+                        if not selector.select(LIVENESS_SECONDS):
+                            raise subprocess.TimeoutExpired(argv, LIVENESS_SECONDS)
                         chunk = os.read(child.stdout.fileno(), 16)
                         assert chunk, "FIFO child exited before readiness"
                         ready += chunk
                         assert len(ready) <= 16, "Unexpected FIFO readiness output"
                 assert ready == b"READY\n"
                 startup_seconds = time.monotonic() - startup_started
-                # One original three-second window includes GO, entry and exit.
+                # A blocking open of the writerless FIFO never returns, so the
+                # bounded open is proven by the child finishing at all; a hang
+                # fails at the liveness bound instead of an elapsed oracle.
                 operation_started = time.monotonic()
-                stdout, _ = child.communicate(b"GO\n", timeout=3 - (time.monotonic() - operation_started))
+                os.set_blocking(child.stdout.fileno(), True)
+                try:
+                    stdout, _ = child.communicate(b"GO\n", timeout=LIVENESS_SECONDS)
+                except subprocess.TimeoutExpired:
+                    raise AssertionError("the private FIFO read blocked instead of being denied") from None
                 operation_seconds = time.monotonic() - operation_started
-                assert operation_seconds <= 3
                 assert stdout.splitlines() == [b"READ_ENTERED", b"regular-file-denied"]
                 assert child.returncode == 0
                 assert child.wait(timeout=1) == 0
@@ -81,7 +87,7 @@ else:
                     stdout.decode().removeprefix("READ_ENTERED\n")), {
                     "pid": child.pid, "markers": ["READY", "READ_ENTERED", "regular-file-denied"],
                     "startup_seconds": startup_seconds, "operation_seconds": operation_seconds,
-                    "operation_limit_seconds": 3, "returncode": child.returncode, "reaped": True,
+                    "liveness_bound_seconds": LIVENESS_SECONDS, "returncode": child.returncode, "reaped": True,
                 }
             except BaseException as error:
                 stderr.seek(0)

@@ -28,6 +28,7 @@ from src.api import mail
 from src.db.models import CalendarEventBinding, CalendarReadConsent, GoogleServiceConnection, Goal, MailLabelBinding, MailMessageBinding, MailReadConsent, OperatorIdentity, OperatorSession, Session, WorkflowRunState
 from src.integrations import connection_sync as sync
 from src.integrations.gmail_read import GMAIL_READONLY_SCOPE, GoogleGmailReadonlyAdapter, message_key
+from tests.support.sync import within
 from src.integrations.google_calendar import GoogleCalendarReadonlyAdapter, canonical_event_key
 from src.vault import crypto, encrypt, vault_repository
 from src.work_board.contracts import WorkBoardOwner
@@ -643,14 +644,23 @@ async def test_contact_timeout_remains_two_seconds_and_records_unknown(source, a
     runtime, timestamp, db_factory, _ = source
     provider = Provider(timestamp)
     async def respond(req):
-        await asyncio.sleep(3)
+        await asyncio.Event().wait()  # the provider never answers; only the contact timeout ends the wait
         return provider.response(req)
-    install_provider(monkeypatch, provider, transport=httpx.MockTransport(respond))
-    started = asyncio.get_running_loop().time()
+    timeouts = []
+
+    class RecordingAdapter(GoogleGmailReadonlyAdapter):
+        def _contact_timeout(self) -> float:
+            timeouts.append(super()._contact_timeout())
+            return timeouts[-1]
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(sync, "GoogleGmailReadonlyAdapter", lambda connection, **kwargs: RecordingAdapter(
+        connection, transport=transport, resolver=lambda *_: ["8.8.8.8"], **kwargs))
     with pytest.raises(sync.GmailReadError, match="authorization is unavailable"):
-        await runtime.synchronize(OWNER, request(timestamp))
-    elapsed = asyncio.get_running_loop().time() - started
-    assert 1.9 <= elapsed < 5
+        await within(runtime.synchronize(OWNER, request(timestamp)), what="hung provider contact timing out")
+    # The contact that hung was bounded by the two-second contact timeout
+    # (the original deadline is further away), not by an elapsed oracle.
+    assert timeouts and set(timeouts) == {2.0}, timeouts
     status = await runtime.status(OWNER, "connection")
     assert status["state"] == "unknown_external_effect" and status["cursor_revision"] == 0
     async with db_factory() as db:

@@ -159,13 +159,36 @@ async def test_actual_supervisor_cleanup_never_settles_unknown_callback(accounti
                 expected_revision=revision,expected_metadata_digest=metadata_digest)
             assert result["cleanup_proven"] and result["build_revision"] == revision+1
         else:
-            from time import monotonic
-            started = monotonic()
-            with pytest.raises((BoardError,ValueError)):
-                await native.reconcile_reap(restarted_jobs,owner,identifier,operator,
-                    expected_revision=revision,expected_metadata_digest=metadata_digest)
+            # A blocking open of the writerless FIFO witness never returns, so
+            # "rejected before any blocking read" is proven by returning at all.
+            # A watchdog thread unblocks a stuck read at the liveness bound and
+            # records that it had to (the read may block the event loop itself).
+            import os
+            import threading
+            from contextlib import suppress
+            from tests.support.sync import LivenessTimeout, Signal
+            returned, blocked = Signal("reconcile_reap returned"), []
+
+            def unblock_fifo_reader():
+                try:
+                    returned.wait_blocking()
+                except LivenessTimeout:
+                    blocked.append(True)
+                    with suppress(OSError):
+                        os.close(os.open(witness, os.O_WRONLY | os.O_NONBLOCK))
+
+            watchdog = threading.Thread(target=unblock_fifo_reader, daemon=True)
             if case == "witness_fifo":
-                assert monotonic()-started < 2, "FIFO must be rejected before any blocking read"
+                watchdog.start()
+            try:
+                with pytest.raises((BoardError,ValueError)):
+                    await native.reconcile_reap(restarted_jobs,owner,identifier,operator,
+                        expected_revision=revision,expected_metadata_digest=metadata_digest)
+            finally:
+                returned.set()
+                if watchdog.is_alive():
+                    watchdog.join()
+            assert not blocked, "FIFO must be rejected before any blocking read"
         assert await restarted_jobs.get_job(binding.invocation_id) == child_before
         assert await restarted_jobs.get_job(binding.parent_job_id) == parent_before
         async with sessions() as db:

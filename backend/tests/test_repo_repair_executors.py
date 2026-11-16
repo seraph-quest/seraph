@@ -27,6 +27,7 @@ from src.execution.repo_sandbox import (
     load_persisted_repo_sandbox_settings,
     persist_repo_sandbox_settings,
 )
+from tests.support.sync import wait_until_blocking
 
 pytestmark = [
     pytest.mark.filterwarnings("error::ResourceWarning"),
@@ -275,6 +276,20 @@ def test_local_executor_rejects_child_created_output_symlink(tmp_path: Path):
     assert external.read_text(encoding="utf-8") == "keep-this-file"
 
 
+def _worker_started(runner, job_id, *, command_word=None):
+    """The durable worker_started marker and a live selected process, or None."""
+
+    marker = runner._read_job_marker(job_id)
+    with runner._active_lock:
+        active = runner._active.get(job_id)
+        process = active.get("process") if active else None
+    if not (marker and marker.get("phase") == "worker_started" and process is not None and process.poll() is None):
+        return None
+    if command_word is not None and command_word not in " ".join(map(str, process.args)):
+        return None
+    return marker
+
+
 def test_local_cancel_requires_authority_and_reconciles_unknown(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(mode=0o700)
@@ -291,15 +306,10 @@ def test_local_cancel_requires_authority_and_reconciles_unknown(tmp_path: Path):
 
     thread = threading.Thread(target=run)
     thread.start()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        marker = runner._read_job_marker(job.job_id)
-        with runner._active_lock:
-            active = runner._active.get(job.job_id)
-            process = active.get("process") if active else None
-        if marker and marker.get("phase") == "worker_started" and process is not None and process.poll() is None and "pytest" in " ".join(map(str, process.args)):
-            break
-        time.sleep(0.02)
+    # Never falls through: cancelling before the worker started proves nothing.
+    wait_until_blocking(lambda: _worker_started(runner, job.job_id, command_word="pytest"),
+                        what="the selected pytest worker reached its durable start marker",
+                        state=lambda: runner._read_job_marker(job.job_id))
     assert runner.cancel(job_id=job.job_id, authority={"authority_digest": "wrong"})["status"] == "unknown_external_effect"
     cancel = runner.cancel(job_id=job.job_id, authority={"authority_digest": job.authority_digest})
     assert cancel["status"] == "cancel_requested"
@@ -332,15 +342,9 @@ def test_local_fresh_executor_cancel_fences_original_worker_and_cleans_stage(tmp
 
     thread = threading.Thread(target=run)
     thread.start()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        marker = runner._read_job_marker(job.job_id)
-        with runner._active_lock:
-            active = runner._active.get(job.job_id)
-            process = active.get("process") if active else None
-        if marker and marker.get("phase") == "worker_started" and process is not None and process.poll() is None:
-            break
-        time.sleep(0.02)
+    marker = wait_until_blocking(lambda: _worker_started(runner, job.job_id),
+                                 what="the worker reached its durable start marker",
+                                 state=lambda: runner._read_job_marker(job.job_id))
     assert marker and marker.get("phase") == "worker_started", marker
 
     fresh = LocalRepoRepairExecutor(_local_settings(), workspace_dir=workspace)

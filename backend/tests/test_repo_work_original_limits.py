@@ -16,6 +16,7 @@ from src.workflows.repo_repair_source import (
 )
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.repository_admission_lifecycle import repository_admission_signer
+from tests.support.sync import assert_blocked, suspended_in
 from tests.test_repo_work_task_publication import actual_native_source, _actual_source_callback_journey
 
 
@@ -127,7 +128,8 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
     from src.model_fabric.configuration import read_model_fabric_configuration
     # Each pytest case has a different event loop. All real owners import
     # this same configuration lock; no Source authority is replaced.
-    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", asyncio.Lock())
+    mutation_lock = asyncio.Lock()
+    monkeypatch.setattr(effective_policy, "configuration_mutation_lock", mutation_lock)
     factory, owner, service, jobs, binding, _ = await actual_native_source(accounting_db, monkeypatch,
         goal_capacity=2, claim_child=False,
         work_limits={"max_iterations": 3, "max_total_seconds": 900, "max_cost_usd": 0.000050})
@@ -160,9 +162,13 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
         SimpleNamespace(state=SimpleNamespace(operator=operator)),
         SimpleNamespace(grant_id="provider_policy:near_tee", expected_revision=configured.egress_revision,
             idempotency_key="actual-automatic-stop-revoke")))
-    await asyncio.sleep(0.1)
-    assert not mutation.done()
-    release.set()
+    try:
+        # The policy mutation is parked on the configuration mutation lock the
+        # automatic stop writer holds, not merely slow.
+        await assert_blocked(mutation, at=lambda: mutation_lock.locked() and suspended_in(mutation, "Lock.acquire"),
+                             what="policy revoke waits for the automatic stop writer")
+    finally:
+        release.set()
     outcome = await asyncio.wait_for(preparing, timeout=15)
     actual_mutation = await asyncio.wait_for(mutation, timeout=15)
     assert actual_mutation["status"] == "revoked"
@@ -177,6 +183,8 @@ async def test_actual_automatic_stop_fence_blocks_policy_mutation_through_writer
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the original cutoff is read from the wall clock in production, "
+                      "so the test waits for the real deadline to pass")
 @pytest.mark.parametrize("cutoff_kind", ["repository_wall", "c1_wall", "goal_runtime", "goal_due", "goal_period"])
 async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_db, monkeypatch, repository_admission_signer, cutoff_kind):
     from datetime import datetime, timedelta, timezone
@@ -224,6 +232,8 @@ async def test_actual_original_temporal_cutoff_stops_without_renewal(accounting_
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the original cutoff is read from the wall clock in production, "
+                      "so the test waits for the real deadline to pass")
 async def test_actual_later_goal_cutoff_cannot_govern_original_repository_stop(accounting_db, monkeypatch, repository_admission_signer):
     from datetime import datetime, timedelta, timezone
     from src.workflows.repo_repair_stop import stop_repository_root
@@ -288,6 +298,8 @@ async def test_actual_original_zero_allowance_stops_before_contact(accounting_db
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the original cutoff is read from the wall clock in production, "
+                      "so the test waits for the real deadline to pass")
 @pytest.mark.parametrize("drift", ["artifact_metadata", "artifact_ttl", "envelope_group", "envelope_source",
     "wrong_actor", "no_automatic_cause"])
 async def test_actual_expired_cleanup_does_not_grant_from_changed_artifact(accounting_db, monkeypatch, repository_admission_signer, drift):

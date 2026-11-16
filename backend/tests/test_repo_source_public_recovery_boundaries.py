@@ -114,6 +114,8 @@ async def test_public_committed_final_failed_iteration_uses_original_cap_stop(
 
 
 @pytest.mark.asyncio
+@pytest.mark.realtime(reason="needs #1225: the original repository deadline is compared with the wall clock in "
+                      "production, so the test waits for the real cutoff to pass")
 async def test_public_original_deadline_crosses_after_genuine_cleanup_before_stop(
         accounting_db, monkeypatch, repository_admission_signer):
     _original_limits(monkeypatch, iterations=3, seconds=30)

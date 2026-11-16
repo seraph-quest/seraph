@@ -25,6 +25,7 @@ from tests.cordis_research import needs_cordis, research_host
 from tests.test_cordis_services_core import service_db  # noqa: F401
 from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import real_auth  # noqa: F401
+from tests.support.sync import Gate, Signal, assert_blocked, suspended_in, wait_until, within
 
 pytestmark = pytest.mark.asyncio
 BACKEND = Path(__file__).resolve().parents[1]
@@ -296,6 +297,8 @@ async def test_api_launched_workers_refuse_while_dispatch_is_not_active(service_
 
 # ------------------------------------------------------------------ drain and restart
 
+@pytest.mark.realtime(reason="needs #1225: the 1 s dispatch drain bound is real time in production "
+                             "(src/runtime_plugins/lifecycle.py); the gated quick attempt must finish inside it")
 async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_never_a_bare_cancel(service_db):  # noqa: F811
     registry: dict = {}
     calls: list[tuple] = []
@@ -314,16 +317,30 @@ async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_n
     await lifecycle.activate(DISPATCH_DOMAIN)
     finished: list[str] = []
 
+    quick_gate = Gate("quick attempt")
+
     async def quick():
-        await asyncio.sleep(0.05)
+        await quick_gate.arrive()
         finished.append("quick")
 
     async def stuck():
-        await asyncio.sleep(3600)
+        await asyncio.Event().wait()  # never finishes on its own
 
     registry[("t1", "a1")] = asyncio.create_task(quick())
     registry[("t2", "a2")] = asyncio.create_task(stuck())
-    status = await lifecycle.deactivate(DISPATCH_DOMAIN, "dispatch_owner_draining", drain_seconds=0.3)
+    await quick_gate.wait_reached()
+    # The quick attempt is still running when the drain starts and finishes inside it.
+    # The drain bound is real time in production (#1225); it only has to outlast one
+    # loop turn between the drain parking and the gate release.
+    draining = asyncio.create_task(
+        lifecycle.deactivate(DISPATCH_DOMAIN, "dispatch_owner_draining", drain_seconds=1.0))
+    try:
+        await wait_until(lambda: suspended_in(draining, "RuntimeLifecycle._drain"),
+                         what="dispatch drain waits on the live attempts", task=draining)
+        assert finished == []
+    finally:
+        quick_gate.release()
+    status = await draining
     assert finished == ["quick"]
     assert calls == [("t2", "a2", "dispatch_drain_timeout")]  # only the attempt past its bound
     assert status["state"] == "blocked" and lifecycle.current(DISPATCH_DOMAIN) is None
@@ -464,7 +481,7 @@ async def test_an_uncertain_tree_at_the_drain_bound_never_audits_quiescence_or_f
     await lifecycle.activate(DISPATCH_DOMAIN)
 
     async def stuck():
-        await asyncio.sleep(3600)
+        await asyncio.Event().wait()  # never finishes on its own
 
     registry[("t1", "a1")] = asyncio.create_task(stuck())
     with pytest.raises(LifecycleBlocked) as refused:
@@ -485,20 +502,23 @@ async def test_an_uncertain_tree_at_the_drain_bound_never_audits_quiescence_or_f
 async def test_a_scheduler_tick_in_flight_at_deactivation_finishes_within_its_bound(service_db):  # noqa: F811
     lifecycle = _lifecycle()
     await lifecycle.activate(SCHEDULER_DOMAIN)
-    release = asyncio.Event()
+    gate = Gate("scheduler tick")
     done: list[str] = []
 
     async def tick():
-        await release.wait()
+        await gate.arrive()
         done.append("finished")
 
     running = asyncio.create_task(lifecycle.run_gated("goal_check", tick))
-    await asyncio.sleep(0.01)
+    await gate.wait_reached(task=running)
     deactivating = asyncio.create_task(lifecycle.deactivate(SCHEDULER_DOMAIN, "scheduler_owner_draining",
                                                             drain_seconds=5.0))
-    await asyncio.sleep(0.05)
-    assert not deactivating.done() and lifecycle.current(SCHEDULER_DOMAIN) is None
-    release.set()
+    try:
+        await assert_blocked(deactivating, at=lambda: suspended_in(deactivating, "RuntimeLifecycle._drain"),
+                             what="deactivation drains the in-flight tick")
+        assert lifecycle.current(SCHEDULER_DOMAIN) is None
+    finally:
+        gate.release()
     await asyncio.gather(running, deactivating)
     assert done == ["finished"]
     quiesced = [event for event in await _events(QUIESCED_EVENT) if event["domain"] == SCHEDULER_DOMAIN]
@@ -556,26 +576,29 @@ async def test_live_transition_drains_at_e_before_the_flip_and_rollback_takes_a_
     async with research_host(DurableJobRepository()) as host:
         lifecycle = _lifecycle(host=host)
         await lifecycle.activate(SCHEDULER_DOMAIN)
-        release = asyncio.Event()
+        gate = Gate("tick at E")
         observed: list[tuple[int, str]] = []
 
         async def tick():
-            await release.wait()
+            await gate.arrive()
             async with db_engine.get_session() as db:
                 row = (await inventory(db))[SCHEDULER_DOMAIN]
                 observed.append((row.epoch, row.state))
                 await assert_tick_fence(db)  # still the exact ready owner at E: settles at E
 
         running = asyncio.create_task(lifecycle.run_gated("goal_check", tick))
-        await asyncio.sleep(0.01)
+        await gate.wait_reached(task=running)
         moving = asyncio.create_task(lifecycle.transition(SCHEDULER_DOMAIN, "cordis", actor="operator:test",
                                                           expected_epoch=1, reason="test"))
-        await asyncio.sleep(0.05)
-        with pytest.raises(CompositionBindingError) as busy:
-            lifecycle.claim_transition(SCHEDULER_DOMAIN)  # one transition at a time
-        assert busy.value.reason_code == "composition_transition_in_progress"
-        assert not moving.done()
-        release.set()
+        try:
+            await assert_blocked(moving, at=lambda: suspended_in(moving, "RuntimeLifecycle._drain"),
+                                 what="the transition drains at E before the flip")
+            with pytest.raises(CompositionBindingError) as busy:
+                lifecycle.claim_transition(SCHEDULER_DOMAIN)  # one transition at a time
+            assert busy.value.reason_code == "composition_transition_in_progress"
+            assert not moving.done()
+        finally:
+            gate.release()
         await running
         receipt = await moving
         assert observed == [(1, "ready")]
@@ -622,10 +645,9 @@ async def test_operator_api_moves_a_lifecycle_domain_as_one_background_drain_ste
             assert accepted.json()["transition"]["state"] == "draining"
             busy = await client.post(path, json=body)
             assert busy.status_code == 409
-            for _ in range(200):
-                if SCHEDULER_DOMAIN not in lifecycle._transitioning:
-                    break
-                await asyncio.sleep(0.02)
+            await wait_until(lambda: SCHEDULER_DOMAIN not in lifecycle._transitioning,
+                             what="the background owner transition finishes",
+                             state=lambda: lifecycle.status(SCHEDULER_DOMAIN))
             domains = {item["runtime_domain"]: item for item in (
                 await client.get("/api/runtime/composition/domains")).json()["domains"]}
         assert (domains[SCHEDULER_DOMAIN]["owner_kind"], domains[SCHEDULER_DOMAIN]["epoch"]) == ("cordis", 2)
@@ -639,25 +661,26 @@ async def test_shutdown_closes_admission_first_so_no_tick_reactivates_after_the_
     lifecycle = _lifecycle()
     await lifecycle.activate(SCHEDULER_DOMAIN)
     await lifecycle.activate(DISPATCH_DOMAIN)
-    release = asyncio.Event()
+    gate = Gate("in-flight tick")
     ran: list[str] = []
 
     async def slow():
-        await release.wait()
+        await gate.arrive()
 
     async def late():
         ran.append("late")
 
     in_flight = asyncio.create_task(lifecycle.run_gated("goal_check", slow))
-    await asyncio.sleep(0.01)
+    await gate.wait_reached(task=in_flight)
     stopping = asyncio.create_task(lifecycle.stop())
-    await asyncio.sleep(0.01)
+    await wait_until(lambda: suspended_in(stopping, "RuntimeLifecycle._drain"),
+                     what="shutdown drains the in-flight scheduler tick", task=stopping)
     assert lifecycle.closing and lifecycle.current(SCHEDULER_DOMAIN) is None
     lifecycle._last_attempt.clear()  # a tick in the window would otherwise re-evaluate
     await lifecycle.run_gated("calendar_scan", late)
     await lifecycle.run_gated("work_board_dispatch", late)
     assert (await lifecycle.activate(DISPATCH_DOMAIN))["state"] != "active"
-    release.set()
+    gate.release()
     await asyncio.gather(in_flight, stopping)
     assert ran == [] and lifecycle.current(DISPATCH_DOMAIN) is None and not lifecycle.managed
     # Post-stop ticks persist nothing and API launches are refused (not let through).
@@ -673,22 +696,27 @@ async def test_shutdown_during_a_live_transition_is_bounded_and_restart_is_consi
     from src.runtime_plugins import lifecycle as module
     from src.runtime_plugins.ownership import inventory
     monkeypatch.setattr(module, "SHUTDOWN_TRANSITION_SECONDS", 2.0)
+    # The transition's own drain would wait this long; shutdown must not inherit it.
+    monkeypatch.setattr(module, "SCHEDULER_DRAIN_SECONDS", 3600.0)
     lifecycle = _lifecycle()
     await lifecycle.activate(SCHEDULER_DOMAIN)
+    running = Signal("stuck tick running")
     never = asyncio.Event()
 
     async def stuck_tick():
-        await never.wait()
+        running.set()
+        await never.wait()  # outlives every bound: only cancellation ends it
 
     tick = asyncio.create_task(lifecycle.run_gated("goal_check", stuck_tick))
-    await asyncio.sleep(0.01)
+    await running.wait(task=tick)
     moving = asyncio.create_task(lifecycle.transition(SCHEDULER_DOMAIN, "legacy", actor="operator:test",
                                                       expected_epoch=1, reason="test"))
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: suspended_in(moving, "RuntimeLifecycle._drain"),
+                     what="the live transition is draining", task=moving)
     assert lifecycle.status(SCHEDULER_DOMAIN)["transition"] == "draining"
-    started = asyncio.get_running_loop().time()
-    await asyncio.wait_for(lifecycle.stop(), timeout=15)  # not the 120 s scheduler drain bound
-    assert asyncio.get_running_loop().time() - started < 10
+    # Completing under the liveness bound proves shutdown did not wait on the
+    # 3600 s transition drain: it cancels the transition and uses its own bounds.
+    await within(lifecycle.stop(), what="bounded shutdown during a live transition")
     assert moving.done() and moving.cancelled()
     tick.cancel()
     await asyncio.gather(tick, return_exceptions=True)

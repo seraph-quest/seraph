@@ -1116,16 +1116,14 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
         await lock_connection.exec_driver_sql("ROLLBACK")
         lock_released = True
 
+    def _updates_entered() -> int:
+        with counter_lock:
+            return updates_entered
+
     async def _wait_for_update():
-        deadline = asyncio.get_running_loop().time() + 6
-        while True:
-            with counter_lock:
-                observed = updates_entered
-            if observed >= 1:
-                return
-            if asyncio.get_running_loop().time() >= deadline:
-                raise AssertionError(f"expected one blocked auth touch update, observed {observed}")
-            await asyncio.sleep(0.01)
+        from tests.support.sync import wait_until
+        await wait_until(lambda: _updates_entered() >= 1, what="one blocked auth touch update",
+                         state=_updates_entered)
 
     try:
         now = datetime.now(timezone.utc) - timedelta(minutes=1)

@@ -15,6 +15,8 @@ from src.work_board import document_build_storage as storage
 from src.work_board.repository import BoardError
 
 
+@pytest.mark.realtime(reason="needs #1225: the build's original deadline is compared with the wall clock in "
+                      "production, so the test waits for the real cutoff to pass")
 @pytest.mark.parametrize("goal_change", ["corrected", "deleted"])
 async def test_actual_authenticated_cleanup_after_cutoff_and_goal_drift(accounting_db, monkeypatch, goal_change):
     from src.api import documents
@@ -82,6 +84,8 @@ async def test_cleanup_authority_denies_without_tombstone_or_charge_release(acco
         assert value["phase"] == "staged" and "retirement_key" not in value
 
 
+@pytest.mark.realtime(reason="needs #1225: the build's original deadline is compared with the wall clock in "
+                      "production, so the test waits for the real cutoff to pass")
 async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accounting_db, monkeypatch, build_admission_lifecycle):
     import json
     from sqlalchemy import select

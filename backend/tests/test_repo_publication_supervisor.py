@@ -13,6 +13,7 @@ from src.execution.repo_publication import posture
 from src.execution import repo_publication_supervisor as supervisor
 from src.execution.repo_supervisor import start_identity, exact_signal
 from tests.test_repo_publication import fixture_repo
+from tests.support.sync import LIVENESS_SECONDS, wait_until_blocking
 
 
 def binding():
@@ -21,13 +22,9 @@ def binding():
             "input_digest": "b" * 64, "run_fingerprint": "c" * 64, "fence": 1}
 
 
-def wait_file(path, timeout=5):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.is_file():
-            return json.loads(path.read_text())
-        time.sleep(.005)
-    raise AssertionError("actual supervisor file did not appear: " + str(path))
+def wait_file(path, timeout=LIVENESS_SECONDS):
+    wait_until_blocking(path.is_file, bound=timeout, what="actual supervisor file appeared: " + str(path))
+    return json.loads(path.read_text())
 
 
 def recovered_terminal(checkpoint):

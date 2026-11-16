@@ -22,8 +22,8 @@ from src.security.trust_contract import EgressClass
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError, account_charge_microusd
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
-from tests.async_wait_support import started_or_raise
 from tests.support.db import install_database
+from tests.support.sync import Gate, settle, started_or_raise, wait_until, within
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
 # witness mechanics that still settle retained liabilities; retired-route
@@ -230,11 +230,21 @@ async def test_duplicate_concurrent_reservations_execute_at_most_once(accounting
     await DurableJobRepository().configure_inference_accounting(1000)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
     calls = []
+    in_contact = Gate("first contact")
     async def transport():
         calls.append("contact")
-        await asyncio.sleep(0.02)
+        await in_contact.arrive()
         return {"usage": {"cost": "0.000001"}}
-    outcomes = await asyncio.gather(broker.execute(request("concurrent"), transport), broker.execute(request("concurrent"), transport), return_exceptions=True)
+    duplicates = [asyncio.create_task(broker.execute(request("concurrent"), transport)) for _ in range(2)]
+    async with in_contact:
+        # Hold the first contact open until the duplicate has been decided
+        # (refused) or has itself reached the provider.
+        await in_contact.wait_reached()
+        await wait_until(lambda: any(task.done() for task in duplicates) or in_contact.arrivals > 1,
+                         what="duplicate reservation decided while the first contact is open",
+                         state=lambda: (calls, [task.done() for task in duplicates]))
+        assert len(calls) == 1
+    outcomes = await asyncio.gather(*duplicates, return_exceptions=True)
     assert len(calls) == 1, outcomes
     snapshot = await DurableJobRepository().inference_accounting_snapshot()
     assert snapshot["committed_microusd"] == 1
@@ -643,12 +653,14 @@ async def test_shared_sync_async_stream_broker_one_active(accounting_db):
         order.append("async")
         return {"usage": {"cost": "0.000001"}}
     executing = asyncio.create_task(broker.execute(request("mixed-async"), async_provider))
-    for _ in range(50):
-        snapshot = await repository.inference_accounting_snapshot()
-        if len(snapshot.get("operations", [])) == 3:
-            break
-        await asyncio.sleep(0.01)
+    # Both later callers are parked in the one shared admission queue behind
+    # the active stream (their durable reservations precede enqueue).
+    await wait_until(lambda: set(broker._queue) == {"mixed-sync", "mixed-async"},
+                     what="sync and async callers queued behind the stream", task=executing,
+                     state=lambda: (list(broker._queue), order))
+    await settle()
     assert order == ["stream"]
+    assert len((await repository.inference_accounting_snapshot())["operations"]) == 3
     release.set()
     await asyncio.gather(streaming, syncing, executing)
     assert sorted(order) == ["async", "stream", "sync"]
@@ -673,11 +685,9 @@ async def test_cancel_before_and_after_contact_retains_unknown_without_replay(ac
     active = asyncio.create_task(broker.execute(request("cancel-contacted"), contacted))
     await started_or_raise(started, active)
     queued = asyncio.create_task(broker.execute(request("cancel-queued"), forbidden))
-    for _ in range(50):
-        snapshot = await repository.inference_accounting_snapshot()
-        if len(snapshot.get("operations", [])) == 2:
-            break
-        await asyncio.sleep(0.01)
+    await wait_until(lambda: broker._queue == ["cancel-queued"], what="second request queued behind the contact",
+                     task=queued, state=lambda: list(broker._queue))
+    snapshot = await repository.inference_accounting_snapshot()
     assert len(snapshot["operations"]) == 2
     queued.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -734,9 +744,15 @@ async def test_status_snapshot_never_takes_the_writer_lock_but_persists_the_peri
     writer.start()
     assert held.wait(5)
     try:
-        started = time.monotonic()
-        contended = await repository.inference_accounting_snapshot()
-        assert time.monotonic() - started < 1.0
+        statements.clear()
+        # The foreign writer is released only after this read returns, so a
+        # read that queued for the writer lock could never finish here; the
+        # liveness bound turns that into a loud failure, not a timing oracle.
+        contended = await within(repository.inference_accounting_snapshot(),
+                                 what="status snapshot while a foreign writer holds the lock")
+        assert not release.is_set() and writer.is_alive()
+        assert "BEGIN IMMEDIATE" not in statements
+        assert not [item for item in statements if item.split()[0] in {"INSERT", "UPDATE", "DELETE"}]
         assert contended["status"] == "ready" and contended["revision"] == ready["revision"]
     finally:
         release.set()

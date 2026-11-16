@@ -38,6 +38,7 @@ from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import durable_job_repository
 from tests.test_inference_accounting import accounting_db
+from tests.support.sync import wait_until
 
 
 CAPABILITY = "engineering.repo-repair.v1"
@@ -120,10 +121,14 @@ async def _wait_for_task_set(
 
     try:
         ticks = 0
-        deadline = time.monotonic() + timeout
-        while any(not task.done() for task in tasks) and time.monotonic() < deadline:
+
+        def all_done() -> bool:
+            nonlocal ticks
             ticks += 1
-            await asyncio.sleep(0.01)
+            return all(task.done() for task in tasks)
+
+        await wait_until(all_done, what=description, bound=timeout,
+                         state=lambda: [task.get_name() for task in tasks if not task.done()])
         assert all(task.done() for task in tasks), description
         return list(await asyncio.gather(*tasks)), ticks
     finally:
@@ -1365,12 +1370,10 @@ async def test_local_native_api_cancel_reconciles_same_job(
     task_before_payload = None
     cancel_sent = False
     try:
-        deadline = time.monotonic() + 45.0
-        while time.monotonic() < deadline:
-            child_pid = _marker_pid(nested_marker)
-            if child_pid is not None and _pid_is_running(child_pid):
-                break
-            await asyncio.sleep(0.02)
+        child_pid = await wait_until(
+            lambda: (pid := _marker_pid(nested_marker)) is not None and _pid_is_running(pid) and pid,
+            what="the native nested child published its private running marker",
+            task=dispatch_task, bound=45.0)
         assert child_pid is not None, "native nested child did not publish its private running marker"
         assert _pid_is_running(child_pid), "native nested child was not running at the cancel boundary"
 
@@ -1437,9 +1440,8 @@ async def test_local_native_api_cancel_reconciles_same_job(
 
         # The nested child and its staged checkout must be gone before accepting
         # either a terminal cancellation or an explicit unknown-effect recovery.
-        cleanup_deadline = time.monotonic() + 45.0
-        while time.monotonic() < cleanup_deadline and _pid_is_running(child_pid):
-            await asyncio.sleep(0.02)
+        await wait_until(lambda: not _pid_is_running(child_pid), bound=45.0,
+                         what="the nested child exits after cancel (it was cancelled while still active)")
         assert not _pid_is_running(child_pid), "cancel returned while the nested child was still active"
         staging = flow["workspace"] / "artifacts" / "repo-sandbox" / "staging"
         assert not any(staging.iterdir())
@@ -1528,13 +1530,10 @@ async def test_local_native_cancel_and_fresh_instance_reconcile(tmp_path: Path, 
     )
     execution = asyncio.create_task(asyncio.to_thread(executor.execute_job, job))
     try:
-        marker = None
-        deadline = time.monotonic() + 45.0
-        while time.monotonic() < deadline:
-            marker = executor._read_job_marker(job.job_id)
-            if marker and marker.get("phase") == "worker_started":
-                break
-            await asyncio.sleep(0.01)
+        marker = await wait_until(
+            lambda: (found := executor._read_job_marker(job.job_id)) and found.get("phase") == "worker_started" and found,
+            what="the native worker reached its durable start marker", bound=45.0,
+            state=lambda: executor._read_job_marker(job.job_id))
         assert marker and marker.get("phase") == "worker_started", marker
         cancel = await asyncio.to_thread(
             executor.cancel,

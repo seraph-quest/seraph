@@ -16,7 +16,7 @@ from fastapi import HTTPException
 import pytest
 from starlette.requests import Request
 
-from tests.async_wait_support import started_or_raise
+from tests.support.sync import Gate, settle, started_or_raise, wait_until
 from src.approval.runtime import (
     get_current_session_id,
     get_current_trust_principal,
@@ -556,6 +556,7 @@ async def test_evolution_thread_cancellation_waits_for_sync_worker_completion():
 
     started = asyncio.Event()
     finished = asyncio.Event()
+    in_thread = Gate("evolution worker thread")
 
     def persist_receipt():
         finished.set()
@@ -563,13 +564,17 @@ async def test_evolution_thread_cancellation_waits_for_sync_worker_completion():
 
     async def delayed_thread(func, *args, **kwargs):
         started.set()
-        await asyncio.sleep(0.03)
+        await in_thread.arrive()
         return func(*args, **kwargs)
 
     with patch("src.api.evolution.asyncio.to_thread", side_effect=delayed_thread):
         worker = asyncio.create_task(_run_evolution_thread_cancel_safe(persist_receipt))
-        await started_or_raise(started, worker)
-        worker.cancel()
+        async with in_thread:
+            await started_or_raise(started, worker)
+            worker.cancel()
+            # The cancelled request keeps waiting for its still-running worker.
+            await settle()
+            assert not worker.done() and not finished.is_set()
         with pytest.raises(asyncio.CancelledError) as cancellation:
             await worker
     assert cancellation.value.result == "receipt-written"
@@ -640,10 +645,7 @@ async def test_evolution_proposal_cleans_persisted_artifacts_after_worker_cancel
                 _evolution_request(operator),
             )
         )
-        for _ in range(500):
-            if persisted.is_set():
-                break
-            await asyncio.sleep(0.01)
+        await wait_until(persisted.is_set, what="proposal persisted before cancellation", task=task)
         assert persisted.is_set()
         task.cancel()
         release.set()

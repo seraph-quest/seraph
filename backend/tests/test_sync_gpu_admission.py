@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 from config.settings import settings
+from tests.support.sync import Gate, settle, wait_until, wait_until_blocking, within
 from src.llm_runtime import (
     _execute_sync_with_gpu_admission,
     completion_with_fallback_sync,
@@ -37,6 +38,11 @@ from src.model_fabric.remote_inference_admission import (
     reset_remote_inference_receipt_binding,
     set_remote_inference_receipt_binding,
 )
+
+
+def _queued(broker: GpuAdmissionBroker) -> list[str]:
+    with broker._condition:
+        return list(broker._queue)
 
 
 class _Clock:
@@ -133,6 +139,7 @@ def test_execute_sync_serializes_blocking_callbacks_across_worker_threads():
     state_lock = threading.Lock()
     active = 0
     max_active = 0
+    first_inside = Gate("first sync provider")
 
     def run(index: int) -> int:
         nonlocal active, max_active
@@ -142,7 +149,9 @@ def test_execute_sync_serializes_blocking_callbacks_across_worker_threads():
             with state_lock:
                 active += 1
                 max_active = max(max_active, active)
-            time.sleep(0.02)
+            # The first admitted provider parks until the other three are
+            # observed waiting; later providers pass the released gate.
+            first_inside.arrive_blocking()
             with state_lock:
                 active -= 1
             return index
@@ -150,7 +159,14 @@ def test_execute_sync_serializes_blocking_callbacks_across_worker_threads():
         return broker.execute_sync(_request(f"sync-{index}"), provider)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(run, range(4)))
+        with first_inside:
+            mapped = pool.map(run, range(4))
+            first_inside.wait_reached_blocking()
+            wait_until_blocking(lambda: len(_queued(broker)) == 3 or max_active > 1,
+                                what="three sync callers queued behind the first",
+                                state=lambda: (_queued(broker), max_active))
+            assert first_inside.arrivals == 1 and max_active == 1
+        results = list(mapped)
 
     assert sorted(results) == [0, 1, 2, 3]
     assert max_active == 1
@@ -399,22 +415,17 @@ async def test_execute_sync_waits_behind_async_operation_on_shared_gpu_lane():
             _request("sync-waiter"),
             sync_provider,
         )
-        for _ in range(10):
-            if [item["operation_id"] for item in (await broker.status())["queued"]] == [
-                "sync-waiter"
-            ]:
-                break
-            await asyncio.sleep(0)
+        await wait_until(lambda: _queued(broker) == ["sync-waiter"], what="sync caller queued behind async lease",
+                         task=asyncio.wrap_future(sync_future), state=lambda: _queued(broker))
+        await settle()
+        assert [item["operation_id"] for item in (await broker.status())["queued"]] == ["sync-waiter"]
         assert sync_entered.is_set() is False
 
         release_async.set()
         await async_task
         assert sync_entered.wait(timeout=5)
         release_sync.set()
-        for _ in range(100):
-            if sync_future.done():
-                break
-            await asyncio.sleep(0.01)
+        await within(asyncio.wrap_future(sync_future), what="sync caller completes")
         assert sync_future.done()
         sync_future.result()
     assert max_active == 1
@@ -447,10 +458,8 @@ async def test_async_cancel_marks_running_sync_operation_and_blocks_success():
         assert cancelled.cancel_requested is True
         release.set()
 
-        for _ in range(100):
-            if sync_future.done():
-                break
-            await asyncio.sleep(0.01)
+        with pytest.raises(GpuAdmissionCancelledError):
+            await within(asyncio.wrap_future(sync_future), what="cancelled sync caller completes")
         assert sync_future.done()
         with pytest.raises(GpuAdmissionCancelledError):
             sync_future.result()
@@ -487,11 +496,12 @@ def test_late_sync_callback_holds_gpu_until_provider_result_is_reconciled():
             follow_up_request,
             follow_up_callback,
         )
-        for _ in range(50):
-            queued = asyncio.run(broker.status())["queued"]
-            if any(item["operation_id"] == follow_up_request.operation_id for item in queued):
-                break
-            time.sleep(0.01)
+        # The follow-up is observed parked in the admission queue behind the
+        # held lease before its absence of progress is asserted.
+        wait_until_blocking(lambda: follow_up_request.operation_id in _queued(broker) or follow_up.done(),
+                            what="follow-up queued behind the held lease", state=lambda: (_queued(broker), follow_up.done()))
+        assert not follow_up.done(), "follow-up ran while the earlier lease was held"
+        assert follow_up_request.operation_id in _queued(broker)
         assert follow_up_started.is_set() is False
 
         reconciled = asyncio.run(
@@ -556,11 +566,12 @@ def test_active_deadline_watchdog_blocks_before_sync_callback_returns():
             follow_up_request,
             follow_up_provider,
         )
-        for _ in range(50):
-            queued = asyncio.run(broker.status())["queued"]
-            if any(item["operation_id"] == follow_up_request.operation_id for item in queued):
-                break
-            time.sleep(0.01)
+        # The follow-up is observed parked in the admission queue behind the
+        # held lease before its absence of progress is asserted.
+        wait_until_blocking(lambda: follow_up_request.operation_id in _queued(broker) or follow_up.done(),
+                            what="follow-up queued behind the held lease", state=lambda: (_queued(broker), follow_up.done()))
+        assert not follow_up.done(), "follow-up ran while the earlier lease was held"
+        assert follow_up_request.operation_id in _queued(broker)
         assert follow_up_started.is_set() is False
 
         release_callback.set()

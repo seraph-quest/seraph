@@ -21,6 +21,7 @@ import pytest
 
 from tests.cordis_research import needs_cordis, package_variant, research_host
 from tests.test_inference_accounting import accounting_db  # noqa: F401
+from tests.support.sync import assert_blocked
 from tests.test_research_native_vertical import ResponseBytes, real_auth  # noqa: F401
 from src.runtime_plugins.dispatch import NativeServiceBlocked
 from src.workflows.job_runtime import DurableJobRepository
@@ -492,6 +493,7 @@ async def test_secret_runtime_paths_failed_reads_and_policy_changes_never_succee
         assert job["status"] == "blocked" and job["effects"] == []
 
 
+@pytest.mark.realtime(reason="needs #1225: service_jobs.SERVICE_TIMEOUT is a real-time deadline the late handler must outlast")
 async def test_late_and_cancelled_capability_results_are_settled_and_recoverable(accounting_db, real_auth, monkeypatch):  # noqa: F811
     import threading
     from datetime import timedelta
@@ -619,7 +621,12 @@ async def test_outbound_redaction_cordis_lanes_and_unknown_cost_fence(accounting
         after = asyncio.create_task(execute_native_inference(operator=env["operator"], purpose="interactive",
             messages=_messages("lane-after-lost"), max_tokens=64, idempotency_key="lane-after", host=env["host"]))
         assert await _until(lambda: _count_rows(jobs, "remote:cordis-svc:", 6))
-        await asyncio.sleep(0.5)
+        def after_queued():
+            with broker._condition:
+                return [item for item in broker._queue if item.startswith("remote:cordis-svc:")]
+        # Observed parked in the serial admission queue behind the held,
+        # reconciliation-required slot, not merely slow.
+        await assert_blocked(after, at=after_queued, what="request after an unknown-cost result waits for reconcile")
         assert "lane-after-lost" not in model.calls and not after.done()
         await broker.reconcile(held.operation_id, owner_id=held.owner_id, job_id=held.job_id,
                                fencing_token=held.fencing_token, outcome="failed", actual_cost_microusd=2)

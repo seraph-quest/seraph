@@ -16,6 +16,7 @@ from config.settings import RepoSandboxSettings
 from src.execution.repo_sandbox import LocalRepoRepairExecutor, RepoSandboxError, RepoSandboxJob
 from src.execution.repo_supervisor import PYTHON_PROFILE, finish_supervisor, platform_ready
 from src.workflows.repo_repair_source import RepoIterationProcessBinding
+from tests.support.sync import wait_until_blocking
 
 
 def native_platform():
@@ -191,11 +192,9 @@ def test_fixed_python_active_cancel_reaps_actual_original_command(tmp_path):
     try:
         process.stdin.write((token + "\n").encode())
         process.stdin.close()
-        deadline = time.monotonic() + 10
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(.01)
-        assert ready.exists(), "Actual command did not reach its original fixture boundary"
+        wait_until_blocking(ready.exists, what="actual command reaching its original fixture boundary")
         process.send_signal(signal.SIGTERM)
+        deadline = time.monotonic() + 10  # finish_supervisor's own read bound
         receipt = finish_supervisor(process, deadline=deadline, stream_limit=100000)
         result = json.loads(executor._read_private_output(stage / "out", "supervisor-result.json"))
         assert receipt["returncode"] == 0

@@ -6,12 +6,12 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
 
 from config.settings import settings
+from tests.support.sync import wait_until_blocking
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _PROBE_ENV = "SERAPH_TEST_WORKSPACE_PROBE"
@@ -41,10 +41,8 @@ def test_workspace_isolation_probe():
 
     # Hold until every probe has written into its workspace, so the listing
     # below runs while the other session is alive and populated.
-    deadline = time.monotonic() + 60
-    while len(list(probe.parent.glob("*.ready"))) < 2:
-        assert time.monotonic() < deadline, "peer probe never became ready"
-        time.sleep(0.05)
+    wait_until_blocking(lambda: len(list(probe.parent.glob("*.ready"))) >= 2, what="peer probe becoming ready",
+                        state=lambda: sorted(path.name for path in probe.parent.glob("*.ready")))
 
     probe.with_suffix(".json").write_text(
         json.dumps(

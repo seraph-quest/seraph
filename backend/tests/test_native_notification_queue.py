@@ -547,8 +547,8 @@ async def test_reads_never_take_the_writer_lock_and_present_due_expiry_virtually
     """#702: every list() issued UPDATEs, so a foreign writer stalled reads."""
     import sqlite3
     import threading
-    import time
     from sqlalchemy import event
+    from tests.support.sqlite_locks import assert_only_bounded_writes, bounded_write_watch
 
     queue = NativeNotificationQueue()
     expiring = await queue.enqueue(**_enqueue_kwargs(), idempotency_key="native:read-expiry")
@@ -571,12 +571,13 @@ async def test_reads_never_take_the_writer_lock_and_present_due_expiry_virtually
         row = await db.get(NativeNotificationOutbox, expiring.id)
         row.deadline_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     held, release = threading.Event(), threading.Event()
+    released_early = []
 
     def foreign_writer():
         connection = sqlite3.connect(database, isolation_level=None, timeout=30)
         connection.execute("BEGIN IMMEDIATE")
         held.set()
-        release.wait(10)
+        released_early.append(not release.wait(60))
         connection.execute("COMMIT")
         connection.close()
 
@@ -584,16 +585,19 @@ async def test_reads_never_take_the_writer_lock_and_present_due_expiry_virtually
     writer.start()
     assert held.wait(5)
     try:
-        started = time.monotonic()
-        # The due expiry cannot persist, but no read shows it as deliverable.
-        assert [item.id for item in await queue.list()] == [kept.id]
-        assert await queue.count() == 1
-        virtual = await queue.get(expiring.id)
-        assert (virtual.delivery_status, virtual.degraded_state) == ("failed", "delivery_deadline_expired")
-        assert time.monotonic() - started < 2.0
+        # The writer holds its lock until every read has returned, and no read
+        # attempts a write at the standard busy wait (#702: no queueing).
+        with bounded_write_watch(engine) as contended:
+            # The due expiry cannot persist, but no read shows it as deliverable.
+            assert [item.id for item in await queue.list()] == [kept.id]
+            assert await queue.count() == 1
+            virtual = await queue.get(expiring.id)
+            assert (virtual.delivery_status, virtual.degraded_state) == ("failed", "delivery_deadline_expired")
+        assert_only_bounded_writes(contended, "native notification reads")
     finally:
         release.set()
         writer.join(10)
+    assert released_early == [False], "the foreign writer timed out before the reads finished"
 
     async with async_db() as db:
         assert (await db.get(NativeNotificationOutbox, expiring.id)).status == "queued"

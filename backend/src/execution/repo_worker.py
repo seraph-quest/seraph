@@ -813,6 +813,7 @@ def _run_fixed(
         return int(process.returncode or 0), bytes(stdout_buffer), bytes(stderr_buffer), False
     except subprocess.TimeoutExpired:
         _terminate_and_reap_process(process, deadline_at=deadline_at)
+        writers_gone = True
         _join_output_threads()
         _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
         if process_observer is not None:

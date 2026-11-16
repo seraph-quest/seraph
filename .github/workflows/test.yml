@@ -139,48 +139,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-  # TEMPORARY (#1230): hosted 50-run loop of the fixed node under CPU
-  # contention. Removed before merge; results recorded in the PR.
-  loop-1230:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        slice: [0, 1, 2, 3, 4]
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare the backend test environment
-        uses: ./.github/actions/backend-test-env
-      - name: Loop restart_written_outputs 10x under contention
-        env:
-          OPENROUTER_API_KEY: test-key
-          SLICE: ${{ matrix.slice }}
-        run: |
-          cat > /tmp/loop1230.py <<'PY'
-          import os, subprocess, sys
-          sys.path.insert(0, os.getcwd())
-          from scripts.determinism_lanes import cpu_contention, pytest_command
-          NODE = "tests/test_research_native_vertical.py::test_explicit_native_recovery_keeps_original_attempt_deadline_and_call_rows[restart_written_outputs]"
-          def main():
-              base = 1000 + 10 * int(os.environ["SLICE"])
-              fails = 0
-              with cpu_contention(2):
-                  for seed in range(base, base + 10):
-                      rc = subprocess.run(pytest_command([NODE], seed=seed, watchdog_scale=4)).returncode
-                      fails += rc != 0
-                      print(f"LOOP1230 seed={seed} rc={rc}", flush=True)
-              print(f"LOOP1230 RESULT slice={os.environ['SLICE']} failed={fails} of 10", flush=True)
-              sys.exit(1 if fails else 0)
-          if __name__ == "__main__":
-              main()
-          PY
-          uv run python /tmp/loop1230.py
-
   # Quarantined tests still run and report on every change (#1220), but this
   # lane never blocks a merge: a red X here is expected while a quarantined
   # test is still intermittent.

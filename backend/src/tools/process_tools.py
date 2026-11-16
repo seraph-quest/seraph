@@ -1759,19 +1759,28 @@ class _BoundedPipeCapture:
             os.set_blocking(wake[1], False)
             selector.register(self._fd, selectors.EVENT_READ)
             selector.register(wake[0], selectors.EVENT_READ)
-            self._selector = selector
-            self._wake_read, self._wake_write = wake
-            self._wake_closed = False
-            self._thread = threading.Thread(target=self._drain, daemon=True)
-            self._thread.start()
         except BaseException:
-            self._thread = None
-            self._wake_closed = True
-            selector.close()
-            if wake is not None:
-                os.close(wake[0])
-                os.close(wake[1])
+            self._release_setup(selector, wake)
             raise
+        self._selector = selector
+        self._wake_read, self._wake_write = wake
+        self._wake_closed = False
+        thread = threading.Thread(target=self._drain, daemon=True)
+        try:
+            thread.start()
+        except RuntimeError:
+            # The thread never ran, so no drain owns these descriptors.
+            self._wake_closed = True
+            self._release_setup(selector, wake)
+            raise
+        self._thread = thread
+
+    @staticmethod
+    def _release_setup(selector: selectors.BaseSelector, wake: tuple[int, int] | None) -> None:
+        selector.close()
+        if wake is not None:
+            os.close(wake[0])
+            os.close(wake[1])
 
     def _append(self, chunk: bytes) -> None:
         remaining = self._limit - len(self._buffer)

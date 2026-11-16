@@ -48,7 +48,7 @@ async def accounting_db(tmp_path, monkeypatch):
     # Partial (#1222): still its own engine, not create_database_engine, so no
     # foreign keys, WAL or busy-timeout pragmas. Several fixtures seeded on it
     # violate foreign keys, which production pragmas enforce. Tracked as a
-    # follow-up to #1222 (issue number to come).
+    # follow-up to #1222 in #1241.
     engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'seraph.db'}", connect_args={"timeout": 5})
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with engine.begin() as connection:

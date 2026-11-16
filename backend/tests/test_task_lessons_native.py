@@ -67,8 +67,6 @@ async def test_existing_native_formatter_correction_is_private_and_never_activat
     if failure is not None:
         pytest.skip("actual bwrap loopback RTM_NEWADDR denied by host; distinct terminal-failure lesson test covers this receipt")
     root, engine, factory = accounting_db
-    from src.db import engine as db_engine
-    monkeypatch.setattr(db_engine, "get_session", factory.accounting_sessions)
     async with factory.accounting_sessions() as db:
         task = (await db.execute(select(WorkBoardTask))).scalar_one()
         attempt = (await db.execute(select(WorkBoardAttempt))).scalar_one()
@@ -112,8 +110,6 @@ async def test_actual_failed_formatter_authenticated_lesson_has_proven_cleanup_a
     token, failure, contacts = await _actual_formatter(accounting_db, monkeypatch)
     assert failure is not None, "This negative journey requires the actually observed host sandbox failure"
     root, _, factory = accounting_db
-    from src.db import engine as db_engine
-    monkeypatch.setattr(db_engine, "get_session", factory.accounting_sessions)
     async with factory.accounting_sessions() as db:
         task = (await db.execute(select(WorkBoardTask))).scalar_one()
         attempt = (await db.execute(select(WorkBoardAttempt))).scalar_one()

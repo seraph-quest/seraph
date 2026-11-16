@@ -159,7 +159,6 @@ async def test_retired_audio_consent_rows_are_not_effective_grants(client,async_
 @pytest.mark.asyncio
 async def test_connection_cleanup_failure_locally_fences_and_exact_retry_recovers(client,async_db,monkeypatch):
     from src.api import mail
-    monkeypatch.setattr(mail,'get_session',async_db)
     from src.api.mail import GMAIL_SERVICE
     owner=await login(client)
     async with async_db() as db:

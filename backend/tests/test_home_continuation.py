@@ -107,7 +107,6 @@ async def home_setup(accounting_db, monkeypatch, *, enrolled=True):
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost")
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://test")
-    monkeypatch.setattr(home_module, "get_session", accounting_db[2].accounting_sessions)
     token, operator = await create_session()
     if enrolled:
         await enroll(operator)

@@ -7,6 +7,10 @@ import pytest
 
 from src.audit.repository import audit_repository
 from src.tools.mcp_manager import MCPManager
+from src.utils.background import drain_tracked_tasks
+
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
 
 
 @pytest.mark.parametrize("case", ["valid", "missing", "malformed", "duplicate", "sanitized_collision", "sanitized_name", "cross_session", "unguarded", "unsafe_schema", "oversized_schema", "missing_output_schema", "open_input", "unbounded_input", "reference_input"])
@@ -543,7 +547,10 @@ class TestMCPManager:
 
         mgr = MCPManager()
         mgr.connect("svc", "http://svc/mcp")
-        await asyncio.sleep(0)
+        # Inside a running loop the audit write is a tracked background task.
+        # Wait for it, not for one loop turn: on the per-test file database
+        # (#1222) the write takes several turns through aiosqlite's thread.
+        await drain_tracked_tasks()
 
         events = await audit_repository.list_events(limit=10)
         assert any(

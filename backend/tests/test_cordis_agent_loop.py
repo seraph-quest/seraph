@@ -145,7 +145,6 @@ async def test_cancellation_revoked_memory_and_stale_epoch_cannot_continue_or_ad
     from src.db.models import Memory, MemoryKind, RuntimeCompositionState
     from src.memory.control import forget_memory
     deny_sockets(monkeypatch)
-    monkeypatch.setattr("src.memory.repository.get_session", accounting_db[2].accounting_sessions)
     jobs = DurableJobRepository()
     async with agent_loop_host(jobs) as host:
         operator = await _session()
@@ -326,7 +325,6 @@ async def test_memory_marker_is_narrow_skips_direct_and_is_rechecked_at_settleme
     from src.memory.control import forget_memory
     from src.memory.repository import memory_repository
     deny_sockets(monkeypatch)
-    monkeypatch.setattr("src.memory.repository.get_session", accounting_db[2].accounting_sessions)
     jobs = DurableJobRepository()
 
     async def new_memory(text_value):

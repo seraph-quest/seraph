@@ -108,9 +108,7 @@ async def actual_source_response(factory, jobs, service, root_id, monkeypatch):
     from config.settings import settings
     from src.api import workflows as workflows_api, work_board as board_api
     from src.app import create_app
-    monkeypatch.setattr(workflows_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
-    monkeypatch.setattr(board_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(board_api.dispatcher, "general_tasks", service)
     monkeypatch.setattr(board_api.dispatcher, "jobs", jobs)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "localhost,test,127.0.0.1")

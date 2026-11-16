@@ -14,6 +14,9 @@ from src.agent.context_window import (
     _summary_cache,
 )
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def _msg(role: str, content: str) -> dict:
     return {"role": role, "content": content, "created_at": "2025-01-01T00:00:00"}

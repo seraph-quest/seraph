@@ -138,8 +138,6 @@ async def test_actual_capture_current_gate_and_private_plan_retire_without_mutat
     from src.db.models import WorkBoardInputArtifact, InferenceCostReservation
     from src.work_board import input_artifacts as inputs
     from src.work_board import dispatcher as dispatch_module
-    from src.api import documents as document_api
-    monkeypatch.setattr(document_api, 'get_session', async_db)
     adapter, boundary, service, event, owner, raw, contacts = await prepare(client, monkeypatch, async_db, 'csv')
     try:
         captured = await client.post('/api/telegram/updates', json=event)
@@ -205,11 +203,10 @@ async def test_actual_capture_current_gate_and_private_plan_retire_without_mutat
 async def test_actual_original_capture_native_claim_checks_source_before_attempt_mutation(
     client, async_db, setup_workspace, monkeypatch, retire_before_claim,
 ):
-    from src.api import documents as document_api, work_board as board_api
+    from src.api import work_board as board_api
     from src.db.models import WorkBoardInputArtifact, InferenceCostReservation
     from src.work_board.contracts import GeneralTaskPlanUpdate, PlanSpec, GENERAL_TASK_NATIVE_CHILD_KIND
     from src.work_board.dispatcher import WorkBoardDispatcher
-    monkeypatch.setattr(document_api, 'get_session', async_db)
     adapter, boundary, service, event, owner, raw, contacts = await prepare(client, monkeypatch, async_db, 'csv')
     dispatcher = WorkBoardDispatcher(session_provider=async_db, general_tasks=board_api.dispatcher.general_tasks)
     monkeypatch.setattr(board_api, 'dispatcher', dispatcher)

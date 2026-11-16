@@ -35,6 +35,9 @@ from src.tools.process_tools import (
 )
 from tests.support.sync import wait_until_blocking
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 @pytest.fixture(autouse=True)
 def reset_process_runtime():

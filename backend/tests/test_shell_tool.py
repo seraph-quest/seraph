@@ -11,6 +11,9 @@ from src.audit.runtime import reset_integration_timeout_rate_limit_state
 from src.tools.execute_code_tool import execute_code
 from src.tools.shell_tool import shell_execute
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 @pytest.fixture(autouse=True)
 def reset_timeout_rate_limits():

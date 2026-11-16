@@ -273,7 +273,6 @@ async def test_calendar_read_observes_only_with_a_deterministic_cap(accounting_d
     from src.runtime_plugins import bridge
     from src.runtime_plugins.governed_services import execute_native_connection_operation
     root, _engine, factory = accounting_db
-    monkeypatch.setattr(calendar, "get_session", factory.accounting_sessions)
     long_text = "x" * 1200
     now = datetime.now(timezone.utc)
     events = [{"id": f"event-{index}", "etag": f'"etag-{index}"', "updated": "2026-09-30T08:00:00Z", "summary": long_text,

@@ -22,6 +22,7 @@ from src.security.trust_contract import EgressClass
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError, account_charge_microusd
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
+from tests.support.db import install_database
 from tests.support.sync import Gate, settle, started_or_raise, wait_until, within
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
@@ -44,6 +45,10 @@ async def accounting_db(tmp_path, monkeypatch):
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
     from src.workspace.production import prepare_lifecycle_directory
     prepare_lifecycle_directory(ProductionWorkspace(host_root=root))
+    # Partial (#1222): still its own engine, not create_database_engine, so no
+    # foreign keys, WAL or busy-timeout pragmas. Several fixtures seeded on it
+    # violate foreign keys, which production pragmas enforce. Tracked as a
+    # follow-up to #1222 in #1241.
     engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'seraph.db'}", connect_args={"timeout": 5})
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with engine.begin() as connection:
@@ -57,14 +62,8 @@ async def accounting_db(tmp_path, monkeypatch):
             except BaseException:
                 await session.rollback()
                 raise
-    for target in ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",
-                   "src.db.engine.get_session", "src.auth.service.get_session",
-                   "src.model_fabric.repository.get_session", "src.api.settings.get_db",
-                   "src.vault.repository.get_session", "src.audit.repository.get_session",
-                   "src.work_board.dispatcher.get_session", "src.api.work_board.get_session",
-                   "src.api.calendar.get_session", "src.goals.repository.get_session",
-                   "src.agent.session.get_session", "src.approval.repository.get_session"):
-        monkeypatch.setattr(target, sessions)
+    # The single database seam (#1222): every get_session caller uses this file.
+    install_database(monkeypatch, engine)
     factory.accounting_sessions = sessions
     yield root, engine, factory
     await engine.dispose()

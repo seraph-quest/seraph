@@ -28,6 +28,9 @@ from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 _KEY_ID = "seraph-root-2026"
 

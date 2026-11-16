@@ -37,7 +37,6 @@ from src.work_board.dispatcher import WorkBoardDispatcher, registered_executor_i
 from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import durable_job_repository
-from tests.conftest import _PATCH_TARGETS
 from tests.test_inference_accounting import accounting_db
 from tests.support.sync import wait_until
 
@@ -50,10 +49,7 @@ async def async_db(accounting_db, monkeypatch):
     """Route native APIs and workers to the existing canonical ledger fixture."""
 
     _root, _engine, factory = accounting_db
-    sessions = factory.accounting_sessions
-    for target in (*_PATCH_TARGETS, "src.workflows.repo_repair.get_session"):
-        monkeypatch.setattr(target, sessions)
-    yield sessions
+    yield factory.accounting_sessions
 
 
 def _repair_input() -> dict[str, Any]:

@@ -4,14 +4,7 @@ from pathlib import Path
 import shutil
 import asyncio
 import json
-from contextlib import asynccontextmanager
-from unittest.mock import patch
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from sqlalchemy import event
-from sqlmodel import SQLModel
-from tests.conftest import _PATCH_TARGETS
 
 import httpx
 import pytest
@@ -25,37 +18,6 @@ from src.workflows.manager import workflow_manager
 from src.skills.manager import skill_manager
 from src.scheduler.scheduled_jobs import execute_scheduled_job
 from src.api.auth import _reset_login_throttle_for_tests
-
-
-@pytest_asyncio.fixture
-async def async_db(tmp_path, request):
-    # Separate connections and a real SQLite file expose cross-tab write races.
-    if "cross_tab" in request.node.name:
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'setup.db'}", connect_args={"timeout": 20})
-    else:
-        engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    from src.db.engine import _configure_sqlite_connection
-    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
-    @asynccontextmanager
-    async def get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-    patches = [patch(target, get_session) for target in _PATCH_TARGETS]
-    for patched in patches: patched.start()
-    get_session.engine = engine
-    try:
-        yield get_session
-    finally:
-        for patched in reversed(patches): patched.stop()
-        await engine.dispose()
 
 
 @pytest_asyncio.fixture(autouse=True)

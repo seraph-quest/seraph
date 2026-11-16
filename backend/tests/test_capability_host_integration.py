@@ -36,6 +36,9 @@ from src.tools.approval import wrap_tools_for_approval
 from src.tools.filesystem_tool import read_file, write_file
 from src.tools.process_tools import run_command
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def _request(**overrides) -> CapabilityExecutionRequest:
     payload = {

@@ -11,8 +11,6 @@ async def synchronized_related_source(async_db, monkeypatch, owner, operator, go
     from src.auth.ownership import enroll
     await enroll(operator)
     timestamp = datetime.now(timezone.utc)
-    from src.integrations import connection_sync
-    monkeypatch.setattr(connection_sync, 'get_session', async_db)
     connection_id = 'related-source-connection'
     async with async_db() as db:
         db.add(GoogleServiceConnection(connection_id=connection_id, owner_principal_id=owner.principal_id, owner_session_id=owner.session_id, service='gmail_readonly', setup_idempotency_key='related-source-setup', vault_secret_key='related-source-secret', credential_fingerprint='related-fingerprint', state='active', revision=1, declared_scopes_json=json.dumps([GMAIL_READONLY_SCOPE])))

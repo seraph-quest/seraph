@@ -49,6 +49,9 @@ from src.work_board.repository import BoardMutation, BoardError, WorkBoardReposi
 from src.work_board import review as review_service
 from src.workflows.job_runtime import DurableJobError, DurableJobLeaseError, DurableJobRepository
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 OWNER = WorkBoardOwner(principal_id="operator:dispatcher", session_id="dispatcher-session")
 
@@ -3117,6 +3120,9 @@ async def test_stale_fence_cannot_attach_output(async_db, tmp_path: Path, monkey
                 "idempotency_key": spec.identity.idempotency_key,
             },
         )
+        # Release the writer lock before the job repository's own sessions
+        # write: each session has its own connection on the file database (#1222).
+        await db.commit()
         readback = await jobs.record_effect(
             job_id,
             effect_type="board_child_readback",

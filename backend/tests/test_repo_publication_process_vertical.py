@@ -5,7 +5,6 @@ connection, producer/helper/Git processes, SQLite and marker bytes are real.
 Only the admitted lease is shortened and a child-start notification paused.
 No observer supplies terminal or quiescence proof.
 """
-from contextlib import asynccontextmanager
 import asyncio
 import json
 import multiprocessing
@@ -36,7 +35,7 @@ def _canonical_request_process(database_url, job_id, principal, root, observed_p
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
     from src.db.engine import _configure_sqlite_connection
-    from tests.conftest import _PATCH_TARGETS
+    import src.db.engine as db_engine
     from src.workflows.repo_publication import RepoPublicationService
 
     async def run():
@@ -44,16 +43,9 @@ def _canonical_request_process(database_url, job_id, principal, root, observed_p
             pool_size=4, max_overflow=0, pool_timeout=3)
         event.listen(physical.sync_engine, "connect", _configure_sqlite_connection)
         factory = sessionmaker(physical, class_=AsyncSession, expire_on_commit=False)
-        @asynccontextmanager
-        async def session():
-            async with factory() as db:
-                try:
-                    yield db
-                    await db.commit()
-                except BaseException:
-                    await db.rollback()
-                    raise
-        patches = [patch(target, session) for target in _PATCH_TARGETS]
+        # The child's own pool becomes the default database (#1222 seam).
+        patches = [patch.object(db_engine, "engine", physical),
+                   patch.object(db_engine, "async_session_factory", factory)]
         for item in patches: item.start()
         original_claim = jobs.claim_job
         async def shortened_claim(*args, **kwargs):

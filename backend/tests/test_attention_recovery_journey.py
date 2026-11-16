@@ -3,24 +3,17 @@
 Only the external transports and the test operator's server-side external grant
 are substituted. Capability execution, approvals, storage and readback are real.
 """
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-from unittest.mock import patch
 
 import httpx
 import asyncio
 import pytest
-import pytest_asyncio
-from sqlalchemy import delete, event, select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlmodel import SQLModel
+from sqlalchemy import delete, select
 
 from config.settings import settings
-from tests.conftest import _PATCH_TARGETS
 from tests.test_first_result_setup import authenticated_setup_operator, setup_workspace, progress, run_task
 from src.auth import service as auth_service
 from src.approval.repository import approval_repository
@@ -31,32 +24,6 @@ from src.vault.repository import vault_repository
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.work_board.repository import BoardError
 from src.workflows.job_runtime import durable_job_repository
-
-
-@pytest_asyncio.fixture
-async def async_db(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'attention.sqlite'}", connect_args={"timeout": 20})
-    from src.db.engine import _configure_sqlite_connection
-    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with engine.begin() as connection:
-        await connection.run_sync(SQLModel.metadata.create_all)
-    @asynccontextmanager
-    async def get_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-    patches = [patch(target, get_session) for target in _PATCH_TARGETS]
-    for target in patches: target.start()
-    get_session.engine = engine
-    try: yield get_session
-    finally:
-        for target in reversed(patches): target.stop()
-        await engine.dispose()
 
 
 @pytest.fixture(autouse=True)

@@ -297,6 +297,9 @@ async def test_retired_denial_on_every_broker_entry_leaves_no_waiter_or_lease(ac
 
 from tests.test_inference_accounting import accounting_db  # noqa: E402,F401
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 # ── Lane configuration migration ─────────────────────────────────
 

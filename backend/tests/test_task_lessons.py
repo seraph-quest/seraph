@@ -45,7 +45,6 @@ async def failed_local_task(async_db, monkeypatch, tmp_path):
     root.mkdir(mode=0o700)
     monkeypatch.setattr(settings, "workspace_dir", str(root))
     monkeypatch.setattr(settings, "operator_auth_secret", "isolated-lesson-test")
-    monkeypatch.setattr("src.memory.m5.get_session", async_db)
     _, operator = await create_session()
     now = datetime.now(timezone.utc)
     async with async_db() as db:

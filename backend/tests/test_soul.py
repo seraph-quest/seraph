@@ -17,6 +17,9 @@ from src.profile.service import (
 )
 from src.audit.repository import audit_repository
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 @pytest.fixture
 def soul_dir(tmp_path, monkeypatch):

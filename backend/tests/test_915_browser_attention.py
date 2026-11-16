@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.test_attention_recovery_journey import (
-    async_db, authenticated_setup_operator, setup_workspace,
+    authenticated_setup_operator, setup_workspace,
     explicit_test_external_permission, forbid_unintercepted_http,
     _prepare_actual_github_task,
 )
@@ -39,7 +39,6 @@ async def test_rendered_attention_actual_persisted_task(client, async_db, setup_
     RECEIPTS.mkdir(exist_ok=True)
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", FRONTEND + ",http://localhost:3001")
-    monkeypatch.setattr("src.memory.m5.get_session", async_db)
     app = create_app()
     remote, external, api, websocket = {}, [], [], []
     fail_readback = [True]

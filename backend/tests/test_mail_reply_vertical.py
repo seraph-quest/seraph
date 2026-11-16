@@ -97,7 +97,6 @@ def _request(body: dict[str, object]) -> Request:
 
 
 async def _seed(async_db, monkeypatch, *, model_allowed: bool = True):
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     monkeypatch.setattr(settings, "deployment_environment", "test")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)
     monkeypatch.setattr(settings, "operator_auth_secret", "mail-reply-vertical-auth")

@@ -18,6 +18,9 @@ from src.model_fabric.remote_inference_admission import current_remote_inference
 from tests.near_tee_support import write_near_tee_text_configuration
 from tests.test_openrouter_setup_api import model_fabric_workspace  # noqa: F401
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 # ── parse_strategist_response tests ──────────────────────
 

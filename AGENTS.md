@@ -146,6 +146,11 @@ on a cause (an event, gate or notification) instead. The only exemption is
 it covers sleeps and clock comparisons only, and each marker is itself counted,
 so adding one is a reviewed baseline edit. Use `--rename OLD NEW` for a renamed
 test file.
+A test that touches the database requests the `db` fixture
+(`backend/tests/support/db.py`, #1222). It installs a per-test SQLite file,
+built by the production engine factory, as the default database, so every
+`get_session` caller reaches it through the real gated path. Do not patch
+`get_session`. A test that connects to the canonical engine fails.
 Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
 never-awaited coroutines are errors. A per-test watchdog dumps stacks after
 240 s and fails the test after 420 s. Any `filterwarnings` exception must be

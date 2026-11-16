@@ -7,6 +7,9 @@ import pytest
 from src.audit.repository import audit_repository
 from src.observer.sources.time_source import gather_time
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def _mock_time(year=2025, month=6, day=2, hour=10, minute=0):
     """Patch datetime.now inside time_source to return a fixed time."""

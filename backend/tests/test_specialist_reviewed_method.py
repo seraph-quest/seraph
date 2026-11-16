@@ -33,8 +33,6 @@ async def test_reviewed_parent_method_keeps_two_specialists_narrow(async_db, mon
     monkeypatch.setattr(settings,'operator_auth_allowed_hosts','test,localhost')
     monkeypatch.setattr(settings,'operator_auth_allowed_origins','http://test')
     monkeypatch.setattr(settings,'use_delegation',True)
-    monkeypatch.setattr('src.memory.m5.get_session',async_db)
-    monkeypatch.setattr('src.workflows.job_runtime.get_session',async_db)
     token,operator=await create_session(); await enroll(operator)
     owner=WorkBoardOwner(principal_id=operator.principal.principal_id,session_id=operator.session_id)
     async with async_db() as db:
@@ -83,9 +81,7 @@ async def test_reviewed_parent_method_keeps_two_specialists_narrow(async_db, mon
     # Bind the actual started owner through the existing Python lifecycle seam;
     # canonical method review reads its detached descriptors, never a fixture grant.
     monkeypatch.setattr('src.work_board.dispatcher._dispatcher',dispatcher)
-    from src.operator import home_projection as home_module
     from src.operator.home_projection import home_projection
-    monkeypatch.setattr(home_module,'get_session',async_db)
     home_projection.start()
     async def execute(prefix, *, blocked=False):
         request=GeneralTaskCreate(goal_revision=1,idempotency_key='genuine-'+prefix,accept=True,expected_plan_revision=1,

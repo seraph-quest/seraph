@@ -22,6 +22,9 @@ from src.tools.mcp_manager import mcp_manager
 from src.workflows.manager import workflow_manager
 from src.security.trust_contract import PrincipalType
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def _extension_mutator_request(operator, path: str):
     return Request(

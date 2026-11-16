@@ -3,19 +3,19 @@ import os
 import shutil
 import tempfile
 import asyncio
-from contextlib import asynccontextmanager, ExitStack
+from contextlib import ExitStack
 from contextlib import suppress
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 from starlette.testclient import TestClient
 
 # Ensure models are registered in SQLModel.metadata before create_all
+import src.db.engine as db_engine
 import src.db.models  # noqa: F401
 from config.settings import settings
 from src.agent.direct_chat import should_use_direct_local_chat as real_should_use_direct_local_chat
@@ -37,22 +37,11 @@ def _make_sync_client_with_db():
     cleanup_list when done.
     """
     tmpdir = tempfile.mkdtemp(prefix="seraph-ws-test-")
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{os.path.join(tmpdir, 'seraph-test.db')}",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    # Production engine configuration on a file, with its own pool (#1222):
+    # installed below as the default database for every get_session caller.
+    engine = db_engine.create_database_engine(
+        f"sqlite+aiosqlite:///{os.path.join(tmpdir, 'seraph-test.db')}")
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
 
     async def _test_init_db():
         async with engine.begin() as conn:
@@ -64,19 +53,8 @@ def _make_sync_client_with_db():
         finally:
             await engine.dispose()
 
-    targets = [
-        "src.db.engine.get_session",
-        "src.agent.session.get_session",
-        "src.workflows.job_runtime.get_session",
-        "src.approval.repository.get_session",
-        "src.audit.repository.get_session",
-        "src.goals.repository.get_session",
-        "src.profile.service.get_db",
-        "src.vault.repository.get_session",
-        "src.api.profile.get_db",
-        "src.api.ws.get_session",
-    ]
-    patches = [patch(t, _get_session) for t in targets]
+    patches = [patch.object(db_engine, "engine", engine),
+               patch.object(db_engine, "async_session_factory", factory)]
     patches.append(patch("src.runtime_plugins.worker.init_db", _test_init_db))
     patches.append(patch("src.runtime_plugins.worker.close_db", _test_close_db))
     patches.append(patch("src.app.init_scheduler", return_value=None))

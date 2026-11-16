@@ -27,7 +27,6 @@ async def test_genuine_source_and_opportunity_auth_home_wire(accounting_db,real_
             original(app,inbox_router,prefix='/api')
         return result
     monkeypatch.setattr(FastAPI,'include_router',include)
-    monkeypatch.setattr(hm,'get_session',accounting_db[2].accounting_sessions)
     statements=[]
     def observe(_conn,_cursor,statement,*_): statements.append(statement)
     async def capture(client,owner,stage):
@@ -64,12 +63,10 @@ async def test_genuine_source_and_opportunity_auth_home_wire(accounting_db,real_
 
 async def test_actual_mail_notice_producer_current_auth_home_wire(accounting_db,monkeypatch,forbid_external_inference):
     from tests import test_mail_reply_watch as mail_fixture
-    from src.scheduler import scheduled_jobs
     from src.integrations.gmail_read import GoogleGmailReadonlyAdapter,GMAIL_READONLY_SCOPE
     from src.vault.repository import vault_repository
     import httpx
     client,operator=await home_setup(accounting_db,monkeypatch)
-    monkeypatch.setattr(scheduled_jobs,'get_session',accounting_db[2].accounting_sessions)
     monkeypatch.setattr(mail_fixture,'OWNER',operator.principal.principal_id)
     monkeypatch.setattr(mail_fixture,'SESSION',operator.session_id)
     # Existing adapter resolves this legacy vault key without an owner argument.

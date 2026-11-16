@@ -4474,15 +4474,29 @@ def test_make_sync_client_with_db_unwinds_patches_when_client_startup_fails():
     assert settings.workspace_dir == original_workspace_dir
 
 
-def test_eval_sync_client_patches_known_sync_runtime_db_aliases():
-    assert "src.api.capabilities.get_db" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
-    assert "src.api.profile.get_db" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
-    assert "src.api.observer.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
-    assert "src.api.workflows.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
-    assert "src.observer.screen_repository.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
-    assert "src.workflows.durable_state.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
-    assert "src.workflows.manager.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
-    assert "src.memory.superiority.get_session" in harness.EVAL_SYNC_CLIENT_DB_PATCH_TARGETS
+def test_eval_sync_client_routes_every_sync_runtime_db_alias_through_the_session_override():
+    # #1223: the eval database is reached through the session-factory override,
+    # so every get_session / get_db alias (including ones imported later) uses
+    # it, and no import site is left bound to a patched stand-in.
+    import importlib
+    from src.db import engine as db_engine
+    aliases = ("src.api.capabilities.get_db", "src.api.profile.get_db", "src.api.observer.get_session",
+               "src.api.workflows.get_session", "src.observer.screen_repository.get_session",
+               "src.workflows.durable_state.get_session", "src.workflows.manager.get_session",
+               "src.memory.superiority.get_session")
+    client, patches, stack = harness._make_sync_client_with_db()
+    try:
+        override = db_engine._session_factory_override.get()
+        assert override is not None
+        for alias in aliases:
+            module, name = alias.rsplit(".", 1)
+            assert getattr(importlib.import_module(module), name) is db_engine.get_session, alias
+    finally:
+        harness._close_sync_client_with_db(patches, stack)
+    assert db_engine._session_factory_override.get() is None
+    for alias in aliases:
+        module, name = alias.rsplit(".", 1)
+        assert getattr(importlib.import_module(module), name) is db_engine.get_session, alias
 
 
 def test_close_sync_client_with_db_closes_stack_before_caller_side_drain():

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 from pathlib import Path
@@ -27,7 +28,7 @@ from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_schedu
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
-from src.utils.background import drain_tracked_tasks
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.runtime_plugins.agent_turns import chat_runtime_status
 
@@ -623,6 +624,9 @@ async def _provider_worker_lifespan(app: FastAPI):
         finally:
             try:
                 await drain_tracked_tasks(timeout_seconds=5.0)
+                # Sync-path audit writers run on their own threads; let them
+                # finish before the engine is disposed (#1223).
+                await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
             except Exception as exc:
                 shutdown_error = exc
             finally:

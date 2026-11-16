@@ -1,7 +1,9 @@
-"""Fire-and-forget background task tracking with error logging."""
+"""Fire-and-forget background task and thread tracking with error logging."""
 
 import asyncio
 import logging
+import threading
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Coroutine
@@ -9,6 +11,8 @@ from typing import Coroutine
 logger = logging.getLogger(__name__)
 
 _tasks: set[asyncio.Task] = set()
+_threads: set[threading.Thread] = set()
+_threads_lock = threading.Lock()
 _task_scope: ContextVar[set[asyncio.Task] | None] = ContextVar(
     "seraph_background_task_scope", default=None
 )
@@ -83,3 +87,43 @@ async def drain_tracked_tasks(*, timeout_seconds: float | None = None) -> None:
                 f"{task_names}"
             )
         return
+
+
+def start_tracked_thread(target, *, name: str) -> threading.Thread:
+    """Start a daemon thread that shutdown (and each test) can join.
+
+    For background work that has to run on its own thread, such as a sync
+    caller's audit write on a dedicated event loop. ``join_tracked_threads``
+    waits for it, so it does not outlive the engine it writes to.
+    """
+    thread = threading.Thread(target=target, name=name, daemon=True)
+    with _threads_lock:
+        _threads.difference_update([item for item in _threads if not item.is_alive()])
+        _threads.add(thread)
+    thread.start()
+    return thread
+
+
+def join_tracked_threads(*, timeout_seconds: float | None = None) -> list[str]:
+    """Join the threads started by ``start_tracked_thread``.
+
+    Returns the names of any still running after ``timeout_seconds`` (a
+    shutdown liveness bound; ``None`` waits for all). A thread cannot be
+    cancelled, so those are only reported.
+    """
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    while True:
+        with _threads_lock:
+            alive = [thread for thread in _threads if thread.is_alive()]
+            _threads.intersection_update(alive)
+        if not alive:
+            return []
+        for thread in alive:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            thread.join(remaining)
+        if deadline is not None and time.monotonic() >= deadline:
+            with _threads_lock:
+                stuck = sorted(thread.name for thread in _threads if thread.is_alive())
+            if stuck:
+                logger.warning("Tracked background thread(s) still running at shutdown: %s", ", ".join(stuck))
+            return stuck

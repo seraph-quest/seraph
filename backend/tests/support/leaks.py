@@ -10,7 +10,8 @@ the test's own fixtures has been finalized:
     test that forgot to await or cancel its own background work stayed green.
     The check runs just before the runner closes the loop, after every async
     fixture on that loop (including the ``db`` fixture's tracked-task drain)
-    has finished.
+    has finished. The loop's own finalizer tasks for collected async
+    generators (``async_generator_athrow``) are not test work and not counted.
 ``threads``
     A thread started during the test that is still running test or product
     code once teardown is over. A thread that has already returned from its
@@ -21,6 +22,8 @@ the test's own fixtures has been finalized:
     A direct child process of the test process (running or an unreaped
     zombie) that did not exist before the test. ``os.waitpid`` is never used
     to look, because it would reap the zombie the check is meant to report.
+    The standard library's per-process ``multiprocessing`` helpers (resource
+    tracker, forkserver) are not counted.
 
 A leaked resource is cleaned up after it is reported (tasks are cancelled by
 the closing runner, children are killed and reaped, a still-running thread is
@@ -89,6 +92,15 @@ PROCESS_LIFETIME_THREADS: tuple[ProcessLifetimeThread, ...] = (
     ProcessLifetimeThread(
         "LanceDBBackgroundEventLoop", "lancedb (src.memory.vector_store)",
         "lancedb runs one daemon event-loop thread per process for its sync API, started on first use",
+    ),
+    ProcessLifetimeThread(
+        "seraph-browser-transport", "src.browser.pinned_transport._BLOCKING_TRANSPORT_EXECUTOR",
+        "the two-slot process-wide blocking transport lane; its workers start on first use and live "
+        "for the process by design",
+    ),
+    ProcessLifetimeThread(
+        "DDGS_", "ddgs.DDGS.get_executor (src.tools.web_search_tool)",
+        "the ddgs library caches one class-level ThreadPoolExecutor per process on first use",
     ),
 )
 
@@ -166,6 +178,26 @@ def child_pids() -> set[int]:
     if children is None:
         raise RuntimeError(f"cannot enumerate child processes on {sys.platform}")
     return children
+
+
+def process_lifetime_children() -> set[int]:
+    """Helper processes the standard library starts once per process by design.
+
+    ``multiprocessing`` starts one resource tracker (and, with that start
+    method, one forkserver) the first time a spawn/forkserver child starts;
+    it serves every later child and exits with this process. It is not a
+    leak of the test that happened to start the first child.
+    """
+
+    pids: set[int] = set()
+    for module_name, attribute in (("multiprocessing.resource_tracker", "_resource_tracker"),
+                                   ("multiprocessing.forkserver", "_forkserver")):
+        module = sys.modules.get(module_name)
+        helper = getattr(module, attribute, None) if module is not None else None
+        pid = getattr(helper, "_pid", None) if helper is not None else None
+        if isinstance(pid, int) and pid > 0:
+            pids.add(pid)
+    return pids
 
 
 def describe_child(pid: int) -> str:
@@ -282,10 +314,18 @@ def describe_task(task: asyncio.Task) -> str:
     return f"task {task.get_name()!r} running {qualname}"
 
 
+def _is_asyncgen_finalizer(task: asyncio.Task) -> bool:
+    # The loop's own ``_asyncgen_finalizer_hook`` schedules ``agen.aclose()``
+    # when the collector reclaims an unclosed async generator (httpx nests
+    # several per response). That is the loop finalizing a generator, not
+    # work the test spawned; the runner completes it at close.
+    return type(task.get_coro()).__name__ == "async_generator_athrow"
+
+
 def pending_tasks(loop: asyncio.AbstractEventLoop) -> list[asyncio.Task]:
     if loop.is_closed():
         return []
-    return [task for task in asyncio.all_tasks(loop) if not task.done()]
+    return [task for task in asyncio.all_tasks(loop) if not task.done() and not _is_asyncgen_finalizer(task)]
 
 
 # ── Plugin ──────────────────────────────────────────────
@@ -379,7 +419,7 @@ def _check_after_teardown(item: pytest.Item) -> None:
                         + "; ".join(failing))
 
     before_children = item.stash.get(_BEFORE_CHILDREN, set())
-    new_children = sorted(child_pids() - before_children)
+    new_children = sorted(child_pids() - before_children - process_lifetime_children())
     descriptions = {pid: describe_child(pid) for pid in new_children}
     failing, excused = _split(item, "children", list(descriptions.values()))
     notes += excused

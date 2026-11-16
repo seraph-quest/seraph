@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import importlib
 import os
@@ -47,7 +48,7 @@ from src.audit.repository import AuditRepository, audit_repository
 from src.llm_runtime import _reset_target_health
 from src.memory.flush import _reset_memory_flush_state
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
-from src.utils.background import drain_tracked_tasks
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
 from tests.support.brokers import fresh_inference_broker  # noqa: F401 - fixture
 from tests.support.db import (arm_canonical_engine_sentinel, create_test_database, install_database,
                               remove_test_database, take_canonical_engine_violations)
@@ -152,6 +153,7 @@ async def db(tmp_path_factory, _db_template_directory, monkeypatch):
     finally:
         try:
             await drain_tracked_tasks(timeout_seconds=5.0)
+            await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
         finally:
             await database.engine.dispose()
             # About 6 MB per test: a full local run would otherwise keep GBs.

@@ -14,7 +14,7 @@ from sqlalchemy.exc import OperationalError
 
 from src.audit.repository import audit_repository
 from src.db.engine import is_database_locked
-from src.utils.background import track_task
+from src.utils.background import start_tracked_thread, track_task
 
 logger = logging.getLogger(__name__)
 _SYNC_AUDIT_WAIT_SECONDS = 5.0
@@ -115,8 +115,7 @@ def _run_coro_on_dedicated_loop(
         except Exception as exc:  # pragma: no cover - fail-open logging path
             error = exc
 
-    worker = threading.Thread(target=_runner, name=label, daemon=True)
-    worker.start()
+    worker = start_tracked_thread(_runner, name=label)
     if settled is not None:
         # The caller needs only the bounded attempt; a deferred retry keeps
         # running on the worker thread.

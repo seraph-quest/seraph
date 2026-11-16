@@ -639,10 +639,12 @@ class OwnedDownloadTransport:
                     if declared is not None and declared.isdigit() and int(declared) > MAX_FILE_BYTES:
                         raise DownloadError("download_oversized")
                     body = bytearray()
-                    async for chunk in response.aiter_raw():
-                        body.extend(chunk)
-                        if len(body) > MAX_FILE_BYTES:
-                            raise DownloadError("download_oversized")
+                    # Closed on every exit (a bound raises mid-stream), not by the collector.
+                    async with contextlib.aclosing(response.aiter_raw()) as chunks:
+                        async for chunk in chunks:
+                            body.extend(chunk)
+                            if len(body) > MAX_FILE_BYTES:
+                                raise DownloadError("download_oversized")
                     return FetchedFile(requested_url=url, final_url=current, redirect_chain=chain,
                                        content_type=response.headers.get("content-type", ""),
                                        filename=_filename_from(response.headers, current), data=bytes(body))

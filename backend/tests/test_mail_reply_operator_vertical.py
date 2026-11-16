@@ -24,6 +24,7 @@ from src.integrations.gmail_read import GMAIL_READONLY_SCOPE
 from src.vault import crypto
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
+from tests.support.sync import within
 
 # ADR-035: pins the operator mail-reply vertical whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -479,6 +480,12 @@ async def test_original_transport_closure_blocks_recovery_before_staging(account
             if not running.done():
                 running.cancel()
             await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), timeout=5)
+            # Cancelling the request does not cancel the shielded original
+            # worker (by design); it must finish before the test ends (#1223).
+            workers = list(runtime._active_workers.values())
+            if workers:
+                await within(asyncio.gather(*workers, return_exceptions=True),
+                             what="the released original mail-reply worker to finish")
         await client.aclose()
 
 

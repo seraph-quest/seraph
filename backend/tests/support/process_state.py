@@ -22,8 +22,8 @@ module-level ``if``/``try``):
 ``rebound``
     A name some function in its module rebinds through ``global``.
 ``primitive``
-    A lock, semaphore, event, condition, barrier or queue (any constructor
-    whose name ends in one of those words).
+    A lock, semaphore, event, condition, barrier, queue or executor (any
+    constructor whose name ends in one of those words).
 ``singleton``
     An instance of a class defined in src, bound at module level.
 ``cache``
@@ -58,7 +58,8 @@ MUTATING_METHODS = frozenset({
     "rotate", "setdefault", "sort", "symmetric_difference_update", "update",
     "__setitem__", "__delitem__",
 })
-PRIMITIVE_SUFFIXES = ("Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Queue", "Barrier")
+PRIMITIVE_SUFFIXES = ("Lock", "RLock", "Semaphore", "BoundedSemaphore", "Event", "Condition", "Queue", "Barrier",
+                     "Executor")
 KINDS = ("container", "rebound", "primitive", "singleton", "cache")
 
 

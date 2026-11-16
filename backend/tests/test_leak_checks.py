@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.support import leaks
+from tests.support.processes import spawned  # noqa: F401 - fixture
 
 pytest_plugins = ["pytester"]
 
@@ -294,15 +295,12 @@ def test_state_isolation_restores_a_module_first_imported_during_a_test(leak_pyt
     result.assert_outcomes(passed=2)
 
 
-def test_child_enumeration_sees_a_child_without_reaping_it():
+def test_child_enumeration_sees_a_child_without_reaping_it(spawned):
     import subprocess
 
-    process = subprocess.Popen([sys.executable, "-c", "pass"], stdout=subprocess.PIPE)
-    try:
-        assert process.stdout.read() == b""
-        assert process.pid in leaks.child_pids()
-        # Looking did not reap it: the owner still collects the exit status.
-        assert process.wait() == 0
-        assert process.pid not in leaks.child_pids()
-    finally:
-        process.stdout.close()
+    process = spawned.popen([sys.executable, "-c", "pass"], stdout=subprocess.PIPE)
+    assert process.stdout.read() == b""
+    assert process.pid in leaks.child_pids()
+    # Looking did not reap it: the owner still collects the exit status.
+    assert process.wait() == 0
+    assert process.pid not in leaks.child_pids()

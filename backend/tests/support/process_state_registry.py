@@ -76,6 +76,7 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.runtime_plugins.worker:_CURRENT": Entry("container", RESTORE),
     "src.scheduler.background_inference:_last_status": Entry("container", RESTORE),
     "src.utils.background:_tasks": Entry("container", RESTORE),
+    "src.utils.background:_threads": Entry("container", RESTORE),
     "src.vault.refs:_issued_refs": Entry("container", RESTORE),
     "src.work_board.channel_capture:_LIVE_SOURCE_FRAMES": Entry("container", RESTORE),
     "src.work_board.document_channel_ingest:_ACTIVE_SOURCE_CLAIMS": Entry("container", RESTORE),
@@ -140,6 +141,9 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.auth.service:_AUTH_TOUCH_LOCKS_GUARD": Entry("primitive", RESTORE),
     "src.auth.service:_VERIFY_LIMIT": Entry("primitive", RESTORE),
     "src.browser.pinned_transport:_BLOCKING_FUTURES_LOCK": Entry("primitive", RESTORE),
+    "src.browser.pinned_transport:_BLOCKING_TRANSPORT_EXECUTOR": Entry("primitive", Shared(
+        "the process-wide two-slot blocking transport lane by design; a caller that times out cancels "
+        "its queued work, and a call already running is bounded by its own OS/library timeout")),
     "src.evolution.engine:_EVOLUTION_TARGET_LOCKS_GUARD": Entry("primitive", RESTORE),
     "src.execution.repo_isolation:_cache_lock": Entry("primitive", RESTORE),
     "src.extensions.capability_execution:_JOURNAL_LOCKS_GUARD": Entry("primitive", RESTORE),
@@ -163,6 +167,7 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.scheduler.jobs.screenshot_folder_ingest:_INGEST_LOCK": Entry("primitive", RESTORE),
     "src.vault.refs:_lock": Entry("primitive", RESTORE),
     "src.workflows.native_software_engineering:_NATIVE_EXECUTION_LOCK": Entry("primitive", RESTORE),
+    "src.utils.background:_threads_lock": Entry("primitive", RESTORE),
     # ── singleton ─────────────────────────────────────────
     "src.agent.session:session_manager": Entry("singleton", RESTORE),
     "src.api.calendar:repository": Entry("singleton", RESTORE),

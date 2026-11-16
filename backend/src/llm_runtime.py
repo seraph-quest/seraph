@@ -1754,10 +1754,12 @@ async def _governed_bounded_chat_transfer(
                     if not 0 <= length <= response_limit:
                         raise RuntimeError(f"{envelope}_response_envelope_exceeded")
                 content = bytearray()
-                async for chunk in incoming.aiter_raw(chunk_size=8192):
-                    if len(content) + len(chunk) > response_limit:
-                        raise RuntimeError(f"{envelope}_response_envelope_exceeded")
-                    content.extend(chunk)
+                # Closed on every exit (the bound raises mid-stream), not by the collector.
+                async with contextlib.aclosing(incoming.aiter_raw(chunk_size=8192)) as chunks:
+                    async for chunk in chunks:
+                        if len(content) + len(chunk) > response_limit:
+                            raise RuntimeError(f"{envelope}_response_envelope_exceeded")
+                        content.extend(chunk)
                 if length is not None and len(content) != length:
                     raise RuntimeError(f"{envelope}_response_truncated")
                 response = httpx.Response(incoming.status_code, headers=incoming.headers,

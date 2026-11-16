@@ -242,6 +242,33 @@ def test_foreground_process_pipe_capture_is_bounded_before_return(tmp_path, monk
     assert len(result["stdout"].encode("utf-8")) <= process_tools_module._PROCESS_OUTPUT_BYTES
 
 
+def test_bounded_pipe_capture_finish_does_not_wait_for_a_held_write_end():
+    """#1234: finish() returns while another holder keeps the pipe open.
+
+    This pins the capture contract directly. The regression guards for the
+    original defect are the two descendant-held-pipe ``run_command`` tests:
+    the old drain's buffered ``read(64 KiB)`` never surfaced this partial
+    chunk before EOF, so against the old code this test fails earlier.
+    """
+    read_fd, write_fd = os.pipe()
+    # The same ``BufferedReader`` type that ``Popen`` hands the capture.
+    stream = os.fdopen(read_fd, "rb")
+    capture = process_tools_module._BoundedPipeCapture(stream, limit=4)
+    finished = threading.Event()
+    try:
+        os.write(write_fd, b"prefix-beyond-limit")
+        wait_until_blocking(lambda: capture.truncated, what="the drain reading the first chunk")
+        # ``write_fd`` stays open, so the pipe never reaches EOF here.
+        finisher = threading.Thread(target=lambda: (capture.finish(timeout=0), finished.set()), daemon=True)
+        finisher.start()
+        wait_until_blocking(finished.is_set, what="finish() returning while the write end is held")
+        wait_until_blocking(lambda: capture.done, what="the stopped drain ending")
+        assert stream.closed
+        assert capture.text() == "pref"
+    finally:
+        os.close(write_fd)
+
+
 def test_run_command_success():
     script_name = _write_script(
         "wave1_process_echo.py",
@@ -300,18 +327,6 @@ _PARKED_DESCENDANT = (
 )
 
 
-_PIPE_BOUND_DEFECT = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1234: _BoundedPipeCapture.finish() closes a pipe another thread is reading, and "
-        "BufferedReader.close() blocks until that read returns, so run_command waits for a "
-        "descendant-held pipe after its timeout. The old elapsed bound (< 4 s) passed only because "
-        "the descendant held the pipe for 2 to 3 s. Remove this marker with the #1234 fix."
-    ),
-)
-
-
-@_PIPE_BOUND_DEFECT
 def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
     # The child intentionally calls setsid and escapes the managed group. This
     # bounds the caller but documents the residual: a general sandbox/tree
@@ -363,7 +378,6 @@ def test_run_command_timeout_does_not_wait_for_descendant_held_pipes():
     assert process_tools_module._delete_runtime_dir(retained_worker_root) is True
 
 
-@_PIPE_BOUND_DEFECT
 def test_run_command_reports_unknown_after_parent_exits_before_cleanup():
     """A vanished leader leaves its descendant group recoverable but unverifiable."""
     workspace = Path(settings.workspace_dir)

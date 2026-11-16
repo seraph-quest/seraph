@@ -736,6 +736,79 @@ def _context_observation_payload(observation: dict | None, upload: CaptureUpload
     return {key: value for key, value in observation.items() if key != "capture_upload"}
 
 
+_PAIRING_HINT = (
+    "pair this Mac and set SERAPH_EDGE_DEVICE_ID, SERAPH_EDGE_PAIRING_ID and "
+    "SERAPH_EDGE_CREDENTIAL_FILE"
+)
+
+
+def _response_code(response: object) -> str:
+    try:
+        data = response.json()  # type: ignore[attr-defined]
+    except Exception:
+        return ""
+    detail = data.get("detail") if isinstance(data, dict) else None
+    code = detail.get("code") if isinstance(detail, dict) else None
+    return str(code) if code else ""
+
+
+class ContextPoster:
+    """Posts window context to ``/api/observer/context`` (#1248).
+
+    Paired: the uploader's paired-edge credential headers, no Origin and no
+    cookie, to its validated loopback origin. Unpaired: the plain post, which
+    the backend refuses; the daemon says once that pairing is needed and keeps
+    capturing locally. Refusals are logged once per state change, never on
+    every poll.
+    """
+
+    def __init__(self, url: str, uploader: LocalCaptureUploader | None) -> None:
+        self._url = url
+        self._uploader = uploader
+        self._state: str | None = None
+
+    @property
+    def paired(self) -> bool:
+        return self._uploader is not None
+
+    async def post(self, client: httpx.AsyncClient, payload: dict) -> bool:
+        """Post once; return ``False`` only when the backend did not accept it."""
+        if self._uploader is None:
+            if self._state is None:
+                self._state = "unpaired"
+                logger.warning(
+                    "Context posting needs pairing: the backend accepts window context only with the "
+                    "paired edge credential (%s). Captures stay local until then.",
+                    _PAIRING_HINT,
+                )
+            response = await client.post(f"{self._url}/api/observer/context", json=payload)
+        else:
+            response = await self._uploader.post_context(client, payload)
+        status = getattr(response, "status_code", None)
+        if not isinstance(status, int):
+            return True
+        accepted = 200 <= status < 300
+        if self._uploader is None:
+            # The one pairing notice above covers every unpaired refusal.
+            return accepted
+        code = "" if accepted else _response_code(response)
+        state = "accepted" if accepted else f"refused:{status}:{code}"
+        if state != self._state:
+            previous, self._state = self._state, state
+            if accepted:
+                if previous is not None:
+                    logger.info("Context post accepted by the backend again")
+            else:
+                logger.warning(
+                    "Context post not accepted (HTTP %s%s): window context is not reaching the backend; "
+                    "check the paired edge credential and pairing (%s).",
+                    status,
+                    f", {code}" if code else "",
+                    _PAIRING_HINT,
+                )
+        return accepted
+
+
 # ─── Main loop ────────────────────────────────────────────
 
 
@@ -756,6 +829,7 @@ async def poll_loop(
     was_idle = False
     shown_notification_ids: set[str] = set()
     daemon_worker_id = worker_id or DAEMON_WORKER_ID
+    context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -1027,10 +1101,7 @@ async def poll_loop(
                         payload["observation"] = context_observation
                         payload["switch_timestamp"] = time.time()
 
-                    await client.post(
-                        f"{url}/api/observer/context",
-                        json=payload,
-                    )
+                    context_accepted = await context_poster.post(client, payload)
                     if verbose:
                         ts = time.strftime("%H:%M:%S")
                         logger.info("[%s] \u2192 %s", ts, active_window)
@@ -1054,9 +1125,10 @@ async def poll_loop(
                             and not observation.get("blocked")
                             and capture_error is None
                         ),
-                        "last_context_post_at": datetime.now(timezone.utc).isoformat(),
                         "last_poll_at": poll_at,
                     }
+                    if context_accepted:
+                        status_update["last_context_post_at"] = datetime.now(timezone.utc).isoformat()
                     if capture_error:
                         status_update.update(
                             {
@@ -1098,6 +1170,7 @@ async def periodic_capture_loop(
     last_periodic = 0.0
     mode_poll_interval = 60  # poll setting every 60s
     check_interval = 10  # check timer every 10s
+    context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -1182,9 +1255,9 @@ async def periodic_capture_loop(
                         last_error_kind=budget_skip_reason,
                         capture_budget=screen_runtime.budget_status(),
                     )
-                    await client.post(
-                        f"{url}/api/observer/context",
-                        json={
+                    await context_poster.post(
+                        client,
+                        {
                             "active_window": active_window,
                             "observation": observation,
                             "switch_timestamp": now,
@@ -1302,21 +1375,23 @@ async def periodic_capture_loop(
                     context_observation = _context_observation_payload(observation, upload_result)
                     if context_observation is not None:
                         payload["observation"] = context_observation
-                    await client.post(f"{url}/api/observer/context", json=payload)
+                    context_accepted = await context_poster.post(client, payload)
                     if verbose:
                         ts = time.strftime("%H:%M:%S")
                         logger.info("[%s] periodic capture → %s", ts, app_name)
-                    _write_daemon_status(
-                        state="running",
-                        active_window=active_window,
-                        frontmost_app=app_name,
-                        window_title=window_title,
-                        capture_ready=bool(
+                    periodic_status: dict = {
+                        "state": "running",
+                        "active_window": active_window,
+                        "frontmost_app": app_name,
+                        "window_title": window_title,
+                        "capture_ready": bool(
                             not observation.get("blocked") and "capture_error" not in observation
                         ),
-                        last_context_post_at=datetime.now(timezone.utc).isoformat(),
-                        last_poll_at=poll_at,
-                    )
+                        "last_poll_at": poll_at,
+                    }
+                    if context_accepted:
+                        periodic_status["last_context_post_at"] = datetime.now(timezone.utc).isoformat()
+                    _write_daemon_status(**periodic_status)
                 except httpx.ConnectError:
                     logger.warning("Backend not reachable at %s — will retry", url)
                 except httpx.HTTPError as exc:

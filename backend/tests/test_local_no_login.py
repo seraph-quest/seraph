@@ -275,6 +275,38 @@ async def test_mutation_requires_allowed_loopback_origin(local_mode, app, async_
 
 
 @pytest.mark.asyncio
+async def test_daemon_context_post_needs_paired_credential_not_origin(local_mode, app, async_db, monkeypatch):
+    """#1248: the daemon's no-Origin context post reaches the paired-edge
+    credential check instead of ``mutation_origin_required``; the browser
+    path keeps the Origin rule and the local operator."""
+    from src.observer.manager import ContextManager
+
+    manager = ContextManager()
+    monkeypatch.setattr("src.api.observer.context_manager", manager)
+    body = {"active_window": "Code — main.py"}
+    async with _client(app) as client:
+        native = await client.post("/api/observer/context", json=body)
+        native_cookie = await client.post("/api/observer/context", json=body, headers={"cookie": "seraph_session=x"})
+        foreign = await client.post("/api/observer/context", json=body, headers={"origin": "https://evil.example"})
+        bad_host = await client.post("/api/observer/context", json=body, headers={"host": "evil.example"})
+        assert manager.get_context().active_window is None
+        browser = await client.post("/api/observer/context", json=body, headers={"origin": ORIGIN})
+    async with _client(app, peer="192.168.1.30") as lan_client:
+        lan = await lan_client.post("/api/observer/context", json=body)
+    assert native.status_code == 401
+    assert native.json()["detail"]["code"] == "authentication_required"
+    assert native_cookie.status_code == 403
+    assert native_cookie.json()["detail"]["code"] == "mutation_origin_required"
+    for response in (foreign, bad_host):
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "origin_forbidden"
+    assert lan.status_code == 403
+    assert lan.json()["detail"]["code"] == "local_peer_forbidden"
+    assert browser.status_code == 200, browser.text
+    assert manager.get_context().active_window == "Code — main.py"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "headers",
     [

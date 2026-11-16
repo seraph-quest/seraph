@@ -35,7 +35,12 @@ _PAIRED_EDGE_INGRESS_PATHS = {
 # precedent: only when the request carries neither Origin nor a cookie, so no
 # browser ambient authority can ride it; the host allow-list still applies and
 # the handler's bearer credential is mandatory.
-_NATIVE_NO_ORIGIN_PATHS = {"/api/observer/captures"}
+_NATIVE_NO_ORIGIN_PATHS = {"/api/observer/captures", "/api/observer/context"}
+# Native no-Origin paths that are otherwise operator-authenticated (#1248).
+# With an Origin they keep the browser origin and operator-session path; on
+# the no-Origin native path the middleware skips the operator session and
+# marks the request so the handler requires the paired-edge credential.
+_NATIVE_EDGE_AUTH_PATHS = {"/api/observer/context"}
 
 
 def _csv(value: str) -> set[str]:
@@ -339,6 +344,11 @@ class OperatorAuthMiddleware(BaseHTTPMiddleware):
         )
         if boundary_error:
             return JSONResponse({"detail": {"code": boundary_error}}, status_code=403)
+        if native_no_origin and request.url.path in _NATIVE_EDGE_AUTH_PATHS:
+            # No operator session is established here; the handler must
+            # verify the paired-edge credential before acting (#1248).
+            request.state.native_edge_ingress = True
+            return await call_next(request)
         # The paired edge authenticates with its scoped node credential at the
         # ingress handler.  Keep the host/origin boundary enforced here, but do
         # not require a browser operator cookie that a native daemon cannot

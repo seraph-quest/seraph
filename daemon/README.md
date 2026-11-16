@@ -148,7 +148,7 @@ When screen analysis is enabled and the upload is configured, each allowed captu
 - **Storage:** private (`0700` directory, `0600` file, atomic rename) under the screenshot folder's `.seraph-daemon-captures/`, which must be a real directory owned by the backend user (a symlinked store is refused and never cleaned). The observation goes through the same dedupe as folder images and is queued for the governed vision analysis job. `screen_cleanup` deletes uploaded files after the observation retention period. These files are not backed up (see #1141).
 - **Bounded retries:** at most two attempts per capture (only on network or 5xx errors), then a cool-down that doubles from 30 s up to 10 min (or the server's `Retry-After`) during which captures are not uploaded. There is no upload queue or poll loop.
 
-When an upload is stored, the context post carries only `active_window`, so the same moment is not recorded twice. Without upload configuration, the daemon keeps posting the on-device OCR observation as JSON.
+When an upload is stored, the context post carries only `active_window`, so the same moment is not recorded twice. When a paired upload is not stored (blocked app, refused or failed upload), the context post carries the on-device OCR observation as JSON. Without pairing, the backend refuses context posts (see below).
 
 ### App Blocklist
 
@@ -225,7 +225,13 @@ curl http://localhost:8004/api/observer/screen-artifacts/{observation_id}/provid
 open http://localhost:8004/api/observer/screen-artifacts/{observation_id}/image
 ```
 
-The daemon posts context to `POST /api/observer/context` (the `observation` is omitted when the capture upload was stored):
+The daemon posts context to `POST /api/observer/context` (the `observation` is omitted when the capture upload was stored).
+
+- **Authentication ([#1248](https://github.com/seraph-quest/seraph/issues/1248)):** when this Mac is paired (the same `SERAPH_EDGE_DEVICE_ID`, `SERAPH_EDGE_PAIRING_ID` and `SERAPH_EDGE_CREDENTIAL_FILE` the capture upload uses), the context post carries the same paired-edge headers (`Authorization: Bearer`, `X-Seraph-Node-Device` / `-Pairing` / `-Extension` / `-Reference`) and no `Origin` or cookie, and goes only to the validated loopback backend. The backend verifies that credential exactly as for captures (active pairing, matching identity, pairing policy allowing `media.ingest` / `screen_capture`); a missing, invalid or revoked credential is refused. This works with or without `--ocr`.
+- **Unpaired:** the daemon still posts without the credential, which the backend refuses. It logs once that context posting needs pairing and keeps capturing locally.
+- **Refusals:** a refused context post is logged once per state change (for example `HTTP 403, pairing_revoked`), and again only when it is accepted again or the refusal changes. `last_context_post_at` in daemon status records only accepted posts.
+
+Example payload:
 ```json
 {
   "active_window": "VS Code — main.py",

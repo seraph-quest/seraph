@@ -744,6 +744,24 @@ async def test_context_post_origin_rules_for_native_ingress(capture_env, context
     )
     assert bad_host.status_code == 403
     assert bad_host.json()["detail"]["code"] == "origin_forbidden"
+    # Any Origin header, even empty or "null", keeps the browser rule.
+    empty_origin = await client.post(
+        "/api/observer/context", headers=_headers(credential, Origin=""), json=_context_body()
+    )
+    assert empty_origin.status_code == 403
+    assert empty_origin.json()["detail"]["code"] == "mutation_origin_required"
+    null_origin = await client.post(
+        "/api/observer/context", headers=_headers(credential, Origin="null"), json=_context_body()
+    )
+    assert null_origin.status_code == 403
+    assert null_origin.json()["detail"]["code"] == "origin_forbidden"
+    # The exemption is exact: another path or method gets no native pass.
+    trailing = await client.post("/api/observer/context/", headers=_headers(credential), json=_context_body())
+    assert trailing.status_code == 403
+    assert trailing.json()["detail"]["code"] == "mutation_origin_required"
+    put = await client.put("/api/observer/context", headers=_headers(credential), json=_context_body())
+    assert put.status_code == 403
+    assert put.json()["detail"]["code"] == "mutation_origin_required"
     assert context_manager_spy.get_context().active_window is None
 
 
@@ -766,3 +784,21 @@ async def test_browser_context_post_keeps_origin_and_operator_path(capture_env, 
     )
     assert with_origin_and_credential.status_code == 401
     assert context_manager_spy.get_context().active_window == "Cockpit"
+
+
+@pytest.mark.asyncio
+async def test_paired_daemon_context_observation_is_persisted(capture_env, context_manager_spy):
+    response = await capture_env["client"].post(
+        "/api/observer/context",
+        headers=_headers(capture_env["credential"]),
+        json={
+            "active_window": "1Password — Vault",
+            "observation": {"app": "1Password", "window_title": "Vault", "blocked": True},
+            "switch_timestamp": datetime.now(timezone.utc).timestamp(),
+        },
+    )
+    assert response.status_code == 200, response.text
+    [observation] = await _observations(capture_env["db"])
+    assert observation.app_name == "1Password"
+    assert observation.window_title == "Vault"
+    assert observation.blocked is True

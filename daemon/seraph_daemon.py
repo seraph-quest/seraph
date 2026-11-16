@@ -778,7 +778,7 @@ class ContextPoster:
                 self._state = "unpaired"
                 logger.warning(
                     "Context posting needs pairing: the backend accepts window context only with the "
-                    "paired edge credential (%s). Captures stay local until then.",
+                    "paired edge credential (%s). Screen captures, if enabled, stay local until then.",
                     _PAIRING_HINT,
                 )
             response = await client.post(f"{self._url}/api/observer/context", json=payload)
@@ -786,7 +786,8 @@ class ContextPoster:
             response = await self._uploader.post_context(client, payload)
         status = getattr(response, "status_code", None)
         if not isinstance(status, int):
-            return True
+            # A response without a status is not proof of acceptance.
+            return False
         accepted = 200 <= status < 300
         if self._uploader is None:
             # The one pairing notice above covers every unpaired refusal.
@@ -819,6 +820,7 @@ async def poll_loop(
     verbose: bool,
     screen_runtime: ScreenAnalysisRuntime | None = None,
     worker_id: str | None = None,
+    context_poster: ContextPoster | None = None,
 ) -> None:
     """Core polling loop — detect window changes, post to backend.
 
@@ -829,7 +831,8 @@ async def poll_loop(
     was_idle = False
     shown_notification_ids: set[str] = set()
     daemon_worker_id = worker_id or DAEMON_WORKER_ID
-    context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
+    if context_poster is None:
+        context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -1159,6 +1162,7 @@ async def periodic_capture_loop(
     idle_timeout: float,
     verbose: bool,
     screen_runtime: ScreenAnalysisRuntime | None = None,
+    context_poster: ContextPoster | None = None,
 ) -> None:
     """Periodic capture loop — takes screenshots at intervals within the same app.
 
@@ -1170,7 +1174,8 @@ async def periodic_capture_loop(
     last_periodic = 0.0
     mode_poll_interval = 60  # poll setting every 60s
     check_interval = 10  # check timer every 10s
-    context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
+    if context_poster is None:
+        context_poster = ContextPoster(url, getattr(screen_runtime, "uploader", None))
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         if screen_runtime is not None:
@@ -1566,6 +1571,8 @@ async def main() -> None:
             _write_daemon_status(state="running")
             logger.info("heartbeat — daemon alive (poll every %gs)", args.interval)
 
+    # One poster for both loops, so each refusal state is logged once.
+    context_poster = ContextPoster(args.url, uploader)
     heartbeat_task = asyncio.create_task(heartbeat_loop())
     poll_task = asyncio.create_task(
         poll_loop(
@@ -1574,6 +1581,7 @@ async def main() -> None:
             args.idle_timeout,
             args.verbose,
             screen_runtime=screen_runtime,
+            context_poster=context_poster,
         )
     )
     periodic_task = asyncio.create_task(
@@ -1582,6 +1590,7 @@ async def main() -> None:
             args.idle_timeout,
             args.verbose,
             screen_runtime=screen_runtime,
+            context_poster=context_poster,
         )
     )
 

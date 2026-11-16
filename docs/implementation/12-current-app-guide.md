@@ -4294,8 +4294,9 @@ retention; these files are not backed up
 **Daemon context post ([#1248](https://github.com/seraph-quest/seraph/issues/1248), Partial):**
 the daemon's window-context post `POST /api/observer/context` uses the same
 native ingress as the capture upload. A request with neither an Origin nor a
-cookie skips the Origin requirement (the host allow-list and loopback-peer
-rule still apply), gets no operator session, and must present the paired-edge
+cookie skips the Origin requirement (the host allow-list still applies, and
+in local no-login mode so does the loopback-peer rule), gets no operator
+session, and must present the paired-edge
 credential (`Authorization: Bearer` plus `X-Seraph-Node-Device` /
 `-Pairing` / `-Extension` / `-Reference`). The handler verifies it with the
 capture upload's check (active pairing, matching identity, policy allowing
@@ -4305,7 +4306,7 @@ carries an Origin keeps the browser origin and operator-session path
 unchanged, and a cookie without an Origin is still refused with
 `mutation_origin_required`. An unpaired daemon still posts without the
 credential, is refused, logs once that context posting needs pairing and keeps
-capturing locally; a paired daemon logs a refused context post once per state
+capturing locally (if screen capture is enabled); a paired daemon logs a refused context post once per state
 change, and `last_context_post_at` in daemon status records only accepted
 posts.
 

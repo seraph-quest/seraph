@@ -307,6 +307,42 @@ async def test_daemon_context_post_needs_paired_credential_not_origin(local_mode
 
 
 @pytest.mark.asyncio
+async def test_paired_daemon_context_post_is_accepted_in_local_mode(local_mode, app, async_db, monkeypatch, tmp_path):
+    """#1248 repro environment: a paired daemon's no-Origin context post is
+    accepted on its credential, and refused once the pairing is revoked."""
+    from src.observer.manager import ContextManager
+    from tests.test_observer_local_capture_upload import _write_edge_extension
+
+    workspace = tmp_path / "workspace"
+    _write_edge_extension(workspace)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    manager = ContextManager()
+    monkeypatch.setattr("src.api.observer.context_manager", manager)
+    adapter = {"extension_id": "seraph.openclaw-device-bridge", "reference": "connectors/nodes/device.yaml"}
+    async with _client(app) as client:
+        pair = await client.post(
+            "/api/nodes/pairings/pair",
+            headers={"origin": ORIGIN},
+            json={**adapter, "device_id": "mac-local-1", "pairing_id": "pair-local-1", "label": "Local daemon"},
+        )
+        assert pair.status_code == 200, pair.text
+        daemon_headers = {
+            "authorization": f"Bearer {pair.json()['credential']}",
+            "x-seraph-node-device": "mac-local-1",
+            "x-seraph-node-pairing": "pair-local-1",
+        }
+        accepted = await client.post("/api/observer/context", json={"active_window": "Code"}, headers=daemon_headers)
+        revoke = await client.post(
+            "/api/nodes/pairings/revoke", headers={"origin": ORIGIN}, json={**adapter, "reason": "lost"}
+        )
+        refused = await client.post("/api/observer/context", json={"active_window": "Later"}, headers=daemon_headers)
+    assert accepted.status_code == 200, accepted.text
+    assert revoke.status_code == 200, revoke.text
+    assert refused.status_code in {401, 403}, refused.text
+    assert manager.get_context().active_window == "Code"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "headers",
     [

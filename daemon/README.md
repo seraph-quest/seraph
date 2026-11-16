@@ -228,7 +228,7 @@ open http://localhost:8004/api/observer/screen-artifacts/{observation_id}/image
 The daemon posts context to `POST /api/observer/context` (the `observation` is omitted when the capture upload was stored).
 
 - **Authentication ([#1248](https://github.com/seraph-quest/seraph/issues/1248)):** when this Mac is paired (the same `SERAPH_EDGE_DEVICE_ID`, `SERAPH_EDGE_PAIRING_ID` and `SERAPH_EDGE_CREDENTIAL_FILE` the capture upload uses), the context post carries the same paired-edge headers (`Authorization: Bearer`, `X-Seraph-Node-Device` / `-Pairing` / `-Extension` / `-Reference`) and no `Origin` or cookie, and goes only to the validated loopback backend. The backend verifies that credential exactly as for captures (active pairing, matching identity, pairing policy allowing `media.ingest` / `screen_capture`); a missing, invalid or revoked credential is refused. This works with or without `--ocr`.
-- **Unpaired:** the daemon still posts without the credential, which the backend refuses. It logs once that context posting needs pairing and keeps capturing locally.
+- **Unpaired:** the daemon still posts without the credential, which the backend refuses. It logs once that context posting needs pairing and, when screen capture is enabled, keeps capturing locally.
 - **Refusals:** a refused context post is logged once per state change (for example `HTTP 403, pairing_revoked`), and again only when it is accepted again or the refusal changes. `last_context_post_at` in daemon status records only accepted posts.
 
 Example payload:

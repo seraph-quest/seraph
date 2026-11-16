@@ -20,6 +20,7 @@ from src.browser.downloads import (
     DOCX, XLSX, DownloadError, DownloadGrant, DownloadQuarantine, OwnedDownloadTransport,
     checked_mime, download_public_files, safe_filename,
 )
+from tests.support.sync import settle
 
 OWNER = {"principal_id": "operator-1", "session_id": "session-1"}
 OTHER = {"principal_id": "operator-2", "session_id": "session-2"}
@@ -697,12 +698,15 @@ async def _blocking_launcher():
 
 
 class _HangingCloseBrowser(_FakeBrowser):
-    def __init__(self):
+    def __init__(self, release: asyncio.Event | None = None):
         super().__init__()
+        self.release = release or asyncio.Event()
         self.context.close = self._hang
 
     async def _hang(self):
-        await asyncio.Event().wait()
+        # Hangs until the test releases it, so the close the product keeps
+        # owning after cancellation can finish before the test ends (#1223).
+        await self.release.wait()
 
 
 def _fresh_lane(root):
@@ -729,17 +733,23 @@ async def test_successful_request_confirms_positive_cleanup_and_frees_the_lane(s
 async def test_cancel_during_launch_or_close_keeps_the_lane_quarantined(server, tmp_path, phase):
     from src.browser.task_lane import browser_task_lane_wait_reason
     grant = _grant([server.url("/r")], [server.url("/report.csv")])
-    launcher = _blocking_launcher if phase == "launch" else _HangingCloseBrowser
+    release = asyncio.Event()
+    launcher = _blocking_launcher if phase == "launch" else (lambda: _HangingCloseBrowser(release))
     task = asyncio.create_task(_run(tmp_path, launcher, grant))
-    await asyncio.sleep(0.3)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert _fresh_lane(tmp_path) is None
-    assert browser_task_lane_wait_reason(tmp_path) == "browser_cleanup_required"
-    # The interrupted request is never re-run by a replay.
-    with pytest.raises(DownloadError, match="download_request_outcome_unknown"):
-        await _run(tmp_path, _FakeBrowser, grant)
+    try:
+        await asyncio.sleep(0.3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert _fresh_lane(tmp_path) is None
+        assert browser_task_lane_wait_reason(tmp_path) == "browser_cleanup_required"
+        # The interrupted request is never re-run by a replay.
+        with pytest.raises(DownloadError, match="download_request_outcome_unknown"):
+            await _run(tmp_path, _FakeBrowser, grant)
+    finally:
+        # The shielded close the product still owns may now finish.
+        release.set()
+        await settle()
 
 
 async def test_unverified_close_quarantines_the_lane(server, tmp_path):

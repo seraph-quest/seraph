@@ -10,8 +10,11 @@ the test's own fixtures has been finalized:
     test that forgot to await or cancel its own background work stayed green.
     The check runs just before the runner closes the loop, after every async
     fixture on that loop (including the ``db`` fixture's tracked-task drain)
-    has finished. The loop's own finalizer tasks for collected async
-    generators (``async_generator_athrow``) are not test work and not counted.
+    has finished. A loop finalizer task closing an async generator nobody
+    closed counts too, unless the generator belongs to a package in
+    ``THIRD_PARTY_FINALIZED_GENERATORS`` (#1244). Only pytest-asyncio's runner
+    loop is checked: tasks left on a loop a test runs itself (``asyncio.run``,
+    an anyio portal) are cancelled by that loop's own close and not reported.
 ``threads``
     A thread started during the test that is still running test or product
     code once teardown is over. A thread that has already returned from its
@@ -24,6 +27,10 @@ the test's own fixtures has been finalized:
     to look, because it would reap the zombie the check is meant to report.
     The standard library's per-process ``multiprocessing`` helpers (resource
     tracker, forkserver) are not counted.
+
+Known limits: the thread and child baselines are taken before session- and
+module-scoped fixtures set up, so a resource such a fixture starts would be
+blamed on the first test that uses it (none does today).
 
 A leaked resource is cleaned up after it is reported (tasks are cancelled by
 the closing runner, children are killed and reaped, a still-running thread is
@@ -41,6 +48,8 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import ctypes.util
+import gc
+import inspect
 import os
 import signal
 import sys
@@ -61,7 +70,11 @@ CHILD_REAP_LIVENESS_SECONDS = 30.0
 
 @dataclass(frozen=True)
 class LeakException:
-    """A narrow, issue-linked exception to one leak check."""
+    """A narrow, issue-linked exception to one leak check.
+
+    An excused child is still killed and reaped after the test, so it cannot
+    reach the next test; only the failure is waived.
+    """
 
     check: str  # "tasks" | "threads" | "children"
     tests: tuple[str, ...]  # node-id prefixes, e.g. "tests/test_x.py" or "tests/test_x.py::test_y"
@@ -87,6 +100,14 @@ class ProcessLifetimeThread:
 # One registry for every exception to the leak checks. Keep each entry as
 # narrow as the evidence allows and delete it with the fix of its issue.
 LEAK_EXCEPTIONS: tuple[LeakException, ...] = ()
+
+# Third-party packages whose internal async generators a loop finalizer may
+# close after the owning code already closed what it holds (#1244): httpx
+# iterates nested generators per response (aiter_bytes -> aiter_raw -> the
+# transport stream) and closing the outer one does not close the inner ones.
+# src closes every generator it owns with contextlib.aclosing; an unclosed
+# generator from src or tests still fails the task check.
+THIRD_PARTY_FINALIZED_GENERATORS: tuple[str, ...] = ("httpx", "httpcore")
 
 PROCESS_LIFETIME_THREADS: tuple[ProcessLifetimeThread, ...] = (
     ProcessLifetimeThread(
@@ -287,15 +308,28 @@ def describe_thread(thread: threading.Thread) -> str:
     return f"thread {thread.name!r} daemon={thread.daemon} target={target_name}{where}"
 
 
-def leaked_threads(before: Iterable[int]) -> list[threading.Thread]:
-    """Threads not in ``before`` that still run code after teardown."""
+def leaked_threads(before: Iterable[threading.Thread]) -> list[threading.Thread]:
+    """Threads not in ``before`` that still run code after teardown.
 
-    known = set(before)
+    ``before`` holds the thread objects themselves, not their idents: the OS
+    reuses idents, so a new thread could otherwise hide behind an old one's.
+    """
+
+    known = {id(thread) for thread in before}
+    frames = sys._current_frames()  # noqa: SLF001 - diagnostics
     leaked = []
     for thread in threading.enumerate():
-        if thread.ident in known or thread is threading.current_thread() or not thread.is_alive():
+        if id(thread) in known or thread is threading.current_thread() or not thread.is_alive():
             continue
         if _is_process_lifetime(thread):
+            continue
+        if isinstance(thread, threading._DummyThread):  # noqa: SLF001
+            # A thread threading did not start (``_thread`` or C code) that
+            # called ``current_thread()``. Its ``is_alive`` is always True and
+            # it cannot be joined, so it is judged only by whether the native
+            # thread still runs.
+            if thread.ident in frames:
+                leaked.append(thread)
             continue
         if _threading_frames_only(thread):
             thread.join(THREAD_EXIT_LIVENESS_SECONDS)
@@ -309,28 +343,49 @@ def leaked_threads(before: Iterable[int]) -> list[threading.Thread]:
 
 
 def describe_task(task: asyncio.Task) -> str:
+    generator = finalized_generator(task)
+    if generator is not None:
+        code = generator.ag_code
+        return (f"task {task.get_name()!r} finalizing the unclosed async generator {code.co_qualname} "
+                f"({Path(code.co_filename).name}:{code.co_firstlineno}); close it with contextlib.aclosing")
     coro = task.get_coro()
     qualname = getattr(getattr(coro, "cr_code", None), "co_qualname", None) or repr(coro)
     return f"task {task.get_name()!r} running {qualname}"
 
 
-def _is_asyncgen_finalizer(task: asyncio.Task) -> bool:
-    # The loop's own ``_asyncgen_finalizer_hook`` schedules ``agen.aclose()``
-    # when the collector reclaims an unclosed async generator (httpx nests
-    # several per response). That is the loop finalizing a generator, not
-    # work the test spawned; the runner completes it at close.
-    return type(task.get_coro()).__name__ == "async_generator_athrow"
+def finalized_generator(task: asyncio.Task):
+    """The async generator a loop finalizer task closes, if it is one.
+
+    The loop's ``_asyncgen_finalizer_hook`` schedules ``agen.aclose()`` when
+    the collector reclaims an async generator nobody closed.
+    """
+
+    coro = task.get_coro()
+    if type(coro).__name__ != "async_generator_athrow":
+        return None
+    for referent in gc.get_referents(coro):
+        if inspect.isasyncgen(referent):
+            return referent
+    return None
+
+
+def _excused_finalizer(task: asyncio.Task) -> bool:
+    generator = finalized_generator(task)
+    if generator is None:
+        return False
+    filename = Path(generator.ag_code.co_filename).parts
+    return any(package in filename for package in THIRD_PARTY_FINALIZED_GENERATORS)
 
 
 def pending_tasks(loop: asyncio.AbstractEventLoop) -> list[asyncio.Task]:
     if loop.is_closed():
         return []
-    return [task for task in asyncio.all_tasks(loop) if not task.done() and not _is_asyncgen_finalizer(task)]
+    return [task for task in asyncio.all_tasks(loop) if not task.done() and not _excused_finalizer(task)]
 
 
 # ── Plugin ──────────────────────────────────────────────
 
-_BEFORE_THREADS = pytest.StashKey[set]()
+_BEFORE_THREADS = pytest.StashKey[list]()
 _BEFORE_CHILDREN = pytest.StashKey[set]()
 _TASK_LEAKS = pytest.StashKey[list]()
 _CURRENT_ITEM: list[pytest.Item] = []
@@ -359,7 +414,7 @@ def pytest_configure(config) -> None:
 
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item):
-    item.stash[_BEFORE_THREADS] = {thread.ident for thread in threading.enumerate()}
+    item.stash[_BEFORE_THREADS] = list(threading.enumerate())
     item.stash[_BEFORE_CHILDREN] = child_pids()
     item.stash[_TASK_LEAKS] = []
     _CURRENT_ITEM[:] = [item]
@@ -410,7 +465,7 @@ def _check_after_teardown(item: pytest.Item) -> None:
             "asyncio task(s) still pending when the test's event loop closed (await or cancel them, "
             "or spawn through src.utils.background.track_task): " + "; ".join(failing))
 
-    before_threads = item.stash.get(_BEFORE_THREADS, set())
+    before_threads = item.stash.get(_BEFORE_THREADS, [])
     threads = leaked_threads(before_threads)
     failing, excused = _split(item, "threads", [describe_thread(thread) for thread in threads])
     notes += excused

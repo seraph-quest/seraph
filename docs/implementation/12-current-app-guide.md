@@ -637,7 +637,8 @@ failing owner settles its claimed job as blocked (`native_governed_cancelled`,
 `inference.request` maps a closed purpose (`interactive` or `background`) to the
 canonical routes `cordis_interactive_inference` and `cordis_background_inference`
 and runs `stream_completion_with_fallback`, that is `execute_streaming` behind
-the single `remote_inference_admission_broker`, bound to the job's lease.
+the single remote-inference broker (`get_remote_inference_admission_broker()`),
+bound to the job's lease.
 Interactive work keeps its priority over queued background work; cancelling a
 queued request releases its reservation without contact; a lost response after
 contact stays an `unknown` cost liability. By broker design that uncertain

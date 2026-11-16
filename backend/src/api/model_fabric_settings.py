@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import asyncio
 
 import base64
@@ -2430,14 +2431,15 @@ async def _execute_canary_transport(
                 async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                     response.raise_for_status()
                     observed = False
-                    async for line in response.aiter_lines():
-                        if line.strip().startswith("data:"):
-                            try:
-                                capture_inference_usage(json.loads(line.strip()[5:].strip(), parse_float=Decimal))
-                            except (ValueError, TypeError):
-                                pass
-                        if _streaming_canary_delta(line):
-                            observed = True
+                    async with contextlib.aclosing(response.aiter_lines()) as lines:
+                        async for line in lines:
+                            if line.strip().startswith("data:"):
+                                try:
+                                    capture_inference_usage(json.loads(line.strip()[5:].strip(), parse_float=Decimal))
+                                except (ValueError, TypeError):
+                                    pass
+                            if _streaming_canary_delta(line):
+                                observed = True
                 if not observed:
                     return CapabilityProbeObservation(False, error_code="stream_empty")
             else:

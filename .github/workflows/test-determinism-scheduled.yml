@@ -103,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'develop' }}
           fetch-depth: 0
 
       - name: Prepare the backend test environment

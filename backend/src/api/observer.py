@@ -1,5 +1,6 @@
 """Observer API — context state and daemon integration endpoints."""
 
+import contextlib
 import json
 import logging
 import mimetypes
@@ -678,11 +679,13 @@ async def _read_bounded_body(request: Request, *, limit: int) -> bytes:
             raise HTTPException(status_code=400, detail={"code": "invalid_content_length"}) from exc
     chunks: list[bytes] = []
     received = 0
-    async for chunk in request.stream():
-        received += len(chunk)
-        if received > limit:
-            raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
-        chunks.append(chunk)
+    # Closed on every exit (the bound raises mid-stream), not by the collector.
+    async with contextlib.aclosing(request.stream()) as body_chunks:
+        async for chunk in body_chunks:
+            received += len(chunk)
+            if received > limit:
+                raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
+            chunks.append(chunk)
     return b"".join(chunks)
 
 

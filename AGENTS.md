@@ -167,8 +167,9 @@ Process-global state is registered (#1223). Every module-level mutable in
 `tests/test_process_state_registry.py` fails on an unregistered one. It also
 fails on a dropped `create_task`/`ensure_future` handle in src: spawn
 background work with `src.utils.background.track_task`. A test fails at
-teardown if it leaves an asyncio task pending when its loop closes, a thread
-running, a registered lock held, or a child process running or unreaped.
+teardown if it leaves a task pending when its pytest-asyncio loop closes, a
+thread running, a registered lock held, or a child process running or
+unreaped. Read an HTTP body iterator through `contextlib.aclosing`.
 Exceptions live only in `backend/tests/support/leaks.py`, each naming its
 issue. Reach the remote-inference broker through
 `get_remote_inference_admission_broker()`; each test gets a fresh one, and a

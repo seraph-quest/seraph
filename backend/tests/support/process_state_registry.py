@@ -140,7 +140,9 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.audit.runtime:_integration_timeout_lock": Entry("primitive", RESTORE),
     "src.auth.service:_AUTH_TOUCH_LOCKS_GUARD": Entry("primitive", RESTORE),
     "src.auth.service:_VERIFY_LIMIT": Entry("primitive", RESTORE),
-    "src.browser.pinned_transport:_BLOCKING_FUTURES_LOCK": Entry("primitive", RESTORE),
+    "src.browser.pinned_transport:_BLOCKING_FUTURES_LOCK": Entry("primitive", Shared(
+        "taken briefly by the process-lifetime browser transport workers' done callbacks, which may finish "
+        "a timed-out call during a later test; it guards only per-request pending sets")),
     "src.browser.pinned_transport:_BLOCKING_TRANSPORT_EXECUTOR": Entry("primitive", Shared(
         "the process-wide two-slot blocking transport lane by design; a caller that times out cancels "
         "its queued work, and a call already running is bounded by its own OS/library timeout")),
@@ -229,7 +231,9 @@ PROCESS_STATE: dict[str, Entry] = {
     # ── cache ─────────────────────────────────────────────
     "src.agent.context_window:_load_encoding": Entry("cache", Shared("tiktoken encoding table loaded once; immutable and independent of any test input")),
     "src.browser.forgejo_form_grammar:manifest": Entry("cache", Shared("parses a checked-in JSON file next to the module; no test writes that file")),
-    "src.cockpit.post_dp_operator_debugging_recovery:_strategy_claim_scan_command_evidence": Entry("cache", Shared("runs the checked-in scripts/check_strategy_claims.py over the checked-in docs once; no test changes its inputs")),
+    # Cleared per test: a run that timed out under load must not stand for every later test.
+    "src.cockpit.post_dp_operator_debugging_recovery:_strategy_claim_scan_command_evidence": Entry("cache", Reset(
+        "src.cockpit.post_dp_operator_debugging_recovery:_strategy_claim_scan_command_evidence.cache_clear")),
     "src.extensions.safe_browser_computer_use:_load_receipt_artifact": Entry("cache", Shared("reads one checked-in receipt artifact; no test writes it")),
     "src.extensions.safe_browser_computer_use:_receipt_artifact_ids": Entry("cache", Shared("derived from the checked-in receipt artifact; callers only read the set")),
     "src.extensions.safe_browser_computer_use:_receipt_artifact_records": Entry("cache", Shared("derived from the checked-in receipt artifact; callers only read the mapping")),

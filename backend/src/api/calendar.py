@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import asyncio
 import json
 import re
@@ -452,15 +453,17 @@ async def _json_body(request: Request, model: type[BaseModel], *, max_bytes: int
         raise HTTPException(status_code=422, detail={"code": "calendar_request_invalid", "message": "Calendar request is invalid", "recovery_action": "correct_request"})
     body_buffer = bytearray()
     try:
-        async for chunk in request.stream():
-            if not isinstance(chunk, (bytes, bytearray, memoryview)):
-                raise HTTPException(status_code=422, detail={"code": "calendar_request_invalid", "message": "Calendar request is invalid", "recovery_action": "correct_request"})
-            if len(body_buffer) + len(chunk) > max_bytes:
-                # Stop consuming the ASGI receive stream as soon as the bound
-                # is crossed.  Credentials in later chunks are never parsed,
-                # stored, or passed to a provider/vault path.
-                raise HTTPException(status_code=413, detail={"code": "calendar_request_too_large", "message": "Calendar setup request exceeds the bounded limit", "recovery_action": "reduce_request"})
-            body_buffer.extend(chunk)
+        # Closed on every exit (the bound raises mid-stream), not by the collector.
+        async with contextlib.aclosing(request.stream()) as body_chunks:
+            async for chunk in body_chunks:
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise HTTPException(status_code=422, detail={"code": "calendar_request_invalid", "message": "Calendar request is invalid", "recovery_action": "correct_request"})
+                if len(body_buffer) + len(chunk) > max_bytes:
+                    # Stop consuming the ASGI receive stream as soon as the bound
+                    # is crossed.  Credentials in later chunks are never parsed,
+                    # stored, or passed to a provider/vault path.
+                    raise HTTPException(status_code=413, detail={"code": "calendar_request_too_large", "message": "Calendar setup request exceeds the bounded limit", "recovery_action": "reduce_request"})
+                body_buffer.extend(chunk)
     except HTTPException:
         raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:

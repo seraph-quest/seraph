@@ -98,9 +98,11 @@ def start_tracked_thread(target, *, name: str) -> threading.Thread:
     """
     thread = threading.Thread(target=target, name=name, daemon=True)
     with _threads_lock:
+        # Started under the lock, so a concurrent join or prune never sees
+        # it registered but not yet alive.
         _threads.difference_update([item for item in _threads if not item.is_alive()])
         _threads.add(thread)
-    thread.start()
+        thread.start()
     return thread
 
 

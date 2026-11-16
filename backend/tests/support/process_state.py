@@ -32,6 +32,13 @@ module-level ``if``/``try``):
 
 Class attributes, closures and objects reachable only through another object
 are outside the scan; a singleton's own attributes are covered by its entry.
+Known gaps (none occur in src today): tuple-unpacked or ``with``/``for``
+bindings at module level, mutation through ``heapq``/``bisect`` helpers,
+stateful iterators such as ``itertools.count()``, ``module.Class()``
+singletons, and modules imported as ``import src.x.y`` without an alias.
+Restore resets an asyncio primitive's loop binding for registered objects
+and singleton attributes, not for primitives held inside registered
+containers.
 """
 from __future__ import annotations
 
@@ -286,6 +293,18 @@ _RESTORABLE_CONTAINERS = (dict, list, set, bytearray, collections.deque)
 _WEAK_CONTAINERS = (weakref.WeakSet, weakref.WeakValueDictionary, weakref.WeakKeyDictionary)
 
 
+def resolve_reset(target: str) -> Callable[[], Any]:
+    """``module:attr[.attr...]`` to the reset callable it names."""
+
+    module, path = target.split(":", 1)
+    value: Any = importlib.import_module(module)
+    for part in path.split("."):
+        value = getattr(value, part)
+    if not callable(value):
+        raise TypeError(f"{target} is not callable")
+    return value
+
+
 def _resolve(key: str) -> tuple[Any, str]:
     module_name, attr = key.split(":", 1)
     module = sys.modules.get(module_name)
@@ -387,8 +406,7 @@ class ProcessStateSnapshot:
                 continue
             owner, attr = _resolve(key)
             if isinstance(entry.strategy, Reset):
-                module, function = entry.strategy.function.split(":", 1)
-                snapshot.resets.append(getattr(importlib.import_module(module), function))
+                snapshot.resets.append(resolve_reset(entry.strategy.function))
                 continue
             binding = getattr(owner, attr)
             saved = _Saved(key, entry, owner, attr, binding)

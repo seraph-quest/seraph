@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.process_state import (KINDS, Entry, ProcessStateSnapshot, Reset, Restore, Shared,
-                                         scan_source_state)
+                                         resolve_reset, scan_source_state)
 from tests.support.process_state_registry import PROCESS_STATE
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -43,8 +43,7 @@ def test_every_registry_entry_resolves():
         module = importlib.import_module(module_name)
         assert hasattr(module, attr), key
         if isinstance(entry.strategy, Reset):
-            reset_module, function = entry.strategy.function.split(":", 1)
-            assert callable(getattr(importlib.import_module(reset_module), function)), key
+            assert callable(resolve_reset(entry.strategy.function)), key
         if entry.kind == "cache":
             # A cache is either cleared per test or shared with a recorded reason.
             assert not isinstance(entry.strategy, Restore), key
@@ -146,18 +145,24 @@ def test_snapshot_restores_in_place_so_other_holders_see_it(monkeypatch):
 SPAWNS = {"create_task", "ensure_future"}
 
 
+def _is_spawn(value: ast.AST) -> bool:
+    if not isinstance(value, ast.Call):
+        return False
+    func = value.func
+    return (isinstance(func, ast.Attribute) and func.attr in SPAWNS) or (isinstance(func, ast.Name) and func.id in SPAWNS)
+
+
 def _discarded_spawns(tree: ast.AST) -> list[int]:
+    """Spawns whose task handle is dropped: an expression statement, or a
+    lambda (a callback) whose result nobody keeps, in either ``if`` branch."""
     lines = []
     for node in ast.walk(tree):
-        value = None
+        values: list[ast.AST] = []
         if isinstance(node, ast.Expr):
-            value = node.value
+            values = [node.value]
         elif isinstance(node, ast.Lambda):
-            value = node.body
-            if isinstance(value, ast.IfExp):
-                value = value.body if isinstance(value.body, ast.Call) else value.orelse
-        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
-                and value.func.attr in SPAWNS):
+            values = [node.body.body, node.body.orelse] if isinstance(node.body, ast.IfExp) else [node.body]
+        if any(_is_spawn(value) for value in values):
             lines.append(node.lineno)
     return lines
 
@@ -180,6 +185,41 @@ def test_spawn_guard_detects_dropped_handles():
             loop.create_task(work())
             page.on("x", lambda p: asyncio.create_task(p.close()) if p else None)
             kept = asyncio.create_task(work())
+            create_task(work())
+            page.on("y", lambda p: None if p else ensure_future(p.close()))
             return kept
     """))
-    assert _discarded_spawns(tree) == [4, 5, 6]
+    assert sorted(_discarded_spawns(tree)) == [4, 5, 6, 8, 9]
+
+
+# ── Bounded stream reads ────────────────────────────────
+
+STREAM_ITERATORS = {"aiter_bytes", "aiter_raw", "aiter_lines", "aiter_text", "stream"}
+
+
+def _bare_stream_loops(tree: ast.AST) -> list[int]:
+    """``async for`` straight over an HTTP body iterator.
+
+    A bounded read raises mid-iteration; without ``contextlib.aclosing`` the
+    iterator is left for the collector, whose finalizer task outlives the
+    request (and the test). ``self.stream()``/``super().stream()`` delegation
+    inside the inference broker is out of scope here (tracked separately).
+    """
+    lines = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.AsyncFor) and isinstance(node.iter, ast.Call)
+                and isinstance(node.iter.func, ast.Attribute) and node.iter.func.attr in STREAM_ITERATORS):
+            continue
+        owner = node.iter.func.value
+        if node.iter.func.attr == "stream" and not (isinstance(owner, ast.Name) and owner.id == "request"):
+            continue
+        lines.append(node.lineno)
+    return lines
+
+
+def test_src_closes_http_body_iterators_explicitly():
+    offenders = []
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        for line in _bare_stream_loops(ast.parse(path.read_text(encoding="utf-8"))):
+            offenders.append(f"{path.relative_to(SRC_ROOT.parent)}:{line}")
+    assert not offenders, f"wrap the body iterator in contextlib.aclosing: {offenders}"

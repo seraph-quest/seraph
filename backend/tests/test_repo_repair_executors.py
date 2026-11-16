@@ -934,3 +934,57 @@ def test_worker_kill_reap_bound_matches_the_shared_owner_bound():
     # repo_worker runs standalone in the container, so it keeps its own copy.
     from src.execution import process_reap, repo_worker
     assert repo_worker.KILL_REAP_LIVENESS_SECONDS == process_reap.KILL_REAP_LIVENESS_SECONDS
+
+
+def _observed_run_fixed(tmp_path: Path, script: str, observer=None):
+    """Run one fixed command; return the raised error and the owner's Popen."""
+
+    seen: list[subprocess.Popen[bytes]] = []
+
+    def observe(process: subprocess.Popen[bytes] | None) -> None:
+        if process is not None:
+            seen.append(process)
+            if observer is not None:
+                observer(process)
+
+    with pytest.raises(BaseException) as error:
+        repo_worker._run_fixed(["/bin/sh", "-c", script], cwd=tmp_path, timeout=300,
+                               allowed_executables=("/bin/sh",), process_observer=observe)
+    [process] = seen
+    return error.value, process
+
+
+def test_run_fixed_closes_pipes_held_by_a_rejected_nested_process(tmp_path: Path):
+    """The nested writer is killed and the owner raises; the pipes still close (#1235)."""
+
+    error, process = _observed_run_fixed(tmp_path, "sleep 300 & echo started")
+    assert isinstance(error, repo_worker.WorkerInputError)
+    assert str(error) == "worker left a nested process running"
+    assert process.returncode == 0
+    assert not repo_worker._process_group_members(process.pid)
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_run_fixed_reaps_the_child_when_its_wait_fails(tmp_path: Path):
+    """An error before the reap still leaves nothing for ``Popen.__del__`` (#1235)."""
+
+    def fail_first_wait(process: subprocess.Popen[bytes]) -> None:
+        original = process.wait
+        calls: list[float | None] = []
+
+        def wait(timeout: float | None = None) -> int:
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise RuntimeError("owner interrupted while waiting")
+            return original(timeout=timeout)
+
+        process.wait = wait  # type: ignore[method-assign]
+
+    error, process = _observed_run_fixed(tmp_path, "exec sleep 300", fail_first_wait)
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "owner interrupted while waiting"
+    assert process.returncode == -9
+    assert not repo_worker._process_group_members(process.pid)
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed

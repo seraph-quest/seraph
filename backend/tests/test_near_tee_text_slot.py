@@ -39,6 +39,7 @@ from src.model_fabric.near_tee_catalog import (
 )
 from src.vault.repository import vault_repository
 from tests.test_openrouter_setup_api import keyless_openrouter, model_fabric_workspace  # noqa: F401
+from tests.support.brokers import use_inference_broker
 
 
 TEXT_MODEL = "Qwen/Qwen3.8-27B"
@@ -166,11 +167,7 @@ def isolated_broker(monkeypatch):
     from src.api import model_fabric_settings as api
     from src.model_fabric import execution, probe, remote_inference_admission
     broker = remote_inference_admission.RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", broker)
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", broker)
-    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
-    monkeypatch.setattr(probe, "remote_inference_admission_broker", broker)
-    monkeypatch.setattr(api, "remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     return broker
 
 

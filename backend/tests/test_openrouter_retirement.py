@@ -351,7 +351,7 @@ def test_route_scoped_revoke_keeps_readable_state():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
 async def test_lane_publication_preserves_ledger_and_revokes_openrouter_routes(client, model_fabric_workspace, keyless_openrouter):
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
     from src.workflows.job_runtime import durable_job_repository
     with patch.object(retirement, "_OPENROUTER_RETIRED", False):
         saved = await client.put("/api/settings/model-fabric", json={"expected_policy_revision": 1,
@@ -366,9 +366,9 @@ async def test_lane_publication_preserves_ledger_and_revokes_openrouter_routes(c
         max_queued=8, max_inflight=1, max_outstanding_per_owner=4, max_retries=1)
     # Reading (and admission configuration) never writes: the migration is pure.
     effective_provider_profiles({})
-    assert remote_inference_admission_broker.max_queued == 8
-    assert remote_inference_admission_broker.max_outstanding_per_owner == 4
-    assert remote_inference_admission_broker.max_retries == 1
+    assert get_remote_inference_admission_broker().max_queued == 8
+    assert get_remote_inference_admission_broker().max_outstanding_per_owner == 4
+    assert get_remote_inference_admission_broker().max_retries == 1
     assert path.read_bytes() == stored
 
     payload = (await client.get("/api/settings/model-fabric")).json()

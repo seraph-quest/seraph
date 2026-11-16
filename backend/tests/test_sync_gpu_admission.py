@@ -184,7 +184,7 @@ def test_bound_sync_admission_receipt_is_adopted_and_binding_is_restored():
     token = set_remote_inference_receipt_binding(binding)
     try:
         assert current_remote_inference_receipt_binding() is binding
-        with patch("src.llm_runtime.gpu_admission_broker", broker):
+        with patch("src.model_fabric.remote_inference_admission._process_broker", broker):
             result = _execute_sync_with_gpu_admission(
                 context=_canonical_context(request_id="sync-durable"),
                 decision=SimpleNamespace(
@@ -227,7 +227,7 @@ def test_bound_sync_uncertain_receipt_is_adopted_before_error_escapes():
         return "late-result"
 
     try:
-        with patch("src.llm_runtime.gpu_admission_broker", broker):
+        with patch("src.model_fabric.remote_inference_admission._process_broker", broker):
             with pytest.raises(RemoteInferenceAdmissionUncertainError) as error:
                 _execute_sync_with_gpu_admission(
                     context=context,
@@ -267,7 +267,7 @@ def test_bound_sync_provider_error_reads_back_terminal_receipt():
         raise RuntimeError("provider failure")
 
     try:
-        with patch("src.llm_runtime.gpu_admission_broker", broker):
+        with patch("src.model_fabric.remote_inference_admission._process_broker", broker):
             with pytest.raises(RuntimeError, match="provider failure"):
                 _execute_sync_with_gpu_admission(
                     context=_canonical_context(request_id="sync-durable-failure"),
@@ -303,7 +303,7 @@ def test_bound_receipt_persistence_failure_is_terminal_and_does_not_enable_retry
         return "remote-result"
 
     try:
-        with patch("src.llm_runtime.gpu_admission_broker", broker):
+        with patch("src.model_fabric.remote_inference_admission._process_broker", broker):
             with pytest.raises(RemoteInferenceReceiptPersistenceError) as error:
                 _execute_sync_with_gpu_admission(
                     context=_canonical_context(request_id="sync-durable-fence"),
@@ -596,7 +596,9 @@ def test_active_deadline_watchdog_blocks_before_sync_callback_returns():
 
 @pytest.mark.openrouter_legacy  # ADR-035: canonical sync completion admission over the intercepted historical OpenRouter route
 def test_canonical_sync_completion_admits_provider_and_finishes_receipt():
-    broker = GpuAdmissionBroker()
+    # Production always installs a remote-inference broker, which profile
+    # resolution configures on this path.
+    broker = RemoteInferenceAdmissionBroker()
     context = _canonical_context(request_id="sync-success")
     decision = MagicMock(allowed=True, attempt_id="attempt-sync-success")
     session = MagicMock()
@@ -617,7 +619,7 @@ def test_canonical_sync_completion_admits_provider_and_finishes_receipt():
         patch("src.llm_runtime._governed_preflight_target", return_value=(decision, ("a" * 64,))),
         patch("src.llm_runtime._new_route_receipt_session", return_value=session),
         patch("src.llm_runtime._governed_openai_chat_completion", return_value=(response, {})) as provider,
-        patch("src.llm_runtime.gpu_admission_broker", broker),
+        patch("src.model_fabric.remote_inference_admission._process_broker", broker),
     ):
         result = completion_with_fallback_sync(
             messages=[{"role": "user", "content": "hello"}],
@@ -658,7 +660,7 @@ def test_canonical_sync_admission_denial_stops_fallback_and_persists_denial():
         patch("src.llm_runtime._new_route_receipt_session", return_value=None),
         patch("src.llm_runtime._governed_openai_chat_completion") as provider,
         patch("src.llm_runtime._persist_denied_route_sync") as denied,
-        patch("src.llm_runtime.gpu_admission_broker", broker),
+        patch("src.model_fabric.remote_inference_admission._process_broker", broker),
     ):
         with pytest.raises(GpuAdmissionCapacityError):
             completion_with_fallback_sync(
@@ -695,7 +697,7 @@ def test_canonical_sync_uncertain_completion_keeps_route_outcome_out_of_denial_r
 
     with (
         patch("src.llm_runtime._persist_sync_gpu_admission_denial", denied),
-        patch("src.llm_runtime.gpu_admission_broker", broker),
+        patch("src.model_fabric.remote_inference_admission._process_broker", broker),
     ):
         with pytest.raises(GpuAdmissionUncertainError) as error:
             _execute_sync_with_gpu_admission(
@@ -721,7 +723,7 @@ def test_canonical_sync_missing_owner_fails_closed_before_broker_or_provider():
 
     with (
         patch("src.llm_runtime._persist_denied_route_sync", denied),
-        patch("src.llm_runtime.gpu_admission_broker", broker),
+        patch("src.model_fabric.remote_inference_admission._process_broker", broker),
     ):
         with pytest.raises(GpuAdmissionIdentityError):
             _execute_sync_with_gpu_admission(
@@ -740,7 +742,7 @@ def test_legacy_sync_context_keeps_transitional_provider_compatibility():
     broker = MagicMock()
     provider = Mock(return_value="legacy-result")
 
-    with patch("src.llm_runtime.gpu_admission_broker", broker):
+    with patch("src.model_fabric.remote_inference_admission._process_broker", broker):
         result = _execute_sync_with_gpu_admission(
             context=None,
             decision=None,

@@ -51,6 +51,7 @@ from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: pins calendar vertical negatives whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -102,8 +103,7 @@ async def _seed_vertical(async_db, monkeypatch, tmp_path: Path, *, mode: str) ->
     await DurableJobRepository().configure_inference_accounting(25_000)
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     from src.llm_runtime import _provider_profile
 
     proof_profile = _provider_profile("openrouter")

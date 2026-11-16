@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from tests.test_inference_accounting import accounting_db
+from tests.support.brokers import use_inference_broker
 
 
 BACKEND_SRC = Path(__file__).resolve().parents[1] / "src"
@@ -202,7 +203,7 @@ async def test_registered_agent_binds_tools_response_format_and_options_to_exact
 
     setup_configuration(ceiling=1000, bound=100)
     await DurableJobRepository().configure_inference_accounting(1000)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", RemoteInferenceAdmissionBroker(durable_accounting=True))
+    use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker(durable_accounting=True))
     from src.security.trust_contract import (
         canonical_digest,
     )

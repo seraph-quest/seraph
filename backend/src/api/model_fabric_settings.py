@@ -109,7 +109,7 @@ from src.model_fabric.selector import (
 )
 from src.vault.repository import vault_repository
 from src.model_fabric.remote_inference_admission import (
-    remote_inference_admission_broker,
+    get_remote_inference_admission_broker,
 )
 from src.security.trust_contract import (
     AuthorityGrant,
@@ -1371,7 +1371,7 @@ async def settle_inference_accounting(body: InferenceSettlementInput, request: R
     if (row.get("runtime_path") == "near_text_native" and row.get("profile_id") == "near.text"
             or near_tee_profile_slot(row.get("runtime_path"), row.get("profile_id")) is not None):
         try:
-            result["lane_recovery"] = await remote_inference_admission_broker.reconcile_settled_near_operation(
+            result["lane_recovery"] = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
                 operation_id=row["operation_id"], job_id=row["job_id"],
                 expected_revision=row["revision"], operator=getattr(request.state, "operator", None),
             )
@@ -1889,7 +1889,7 @@ async def _run_model_fabric_canary_locked(body, profile, policy, candidate, prin
             proof_ttl_seconds=body.proof_ttl_seconds,
             transport=transport,
             now=now,
-            admission_broker=remote_inference_admission_broker,
+            admission_broker=get_remote_inference_admission_broker(),
         )
     publish_receipt_persistence(
         runtime_path="capability_probe",

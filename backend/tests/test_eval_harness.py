@@ -36,6 +36,7 @@ from src.evals.final_parity_audit import (
 )
 from src.evals import harness
 from src.evals.harness import available_benchmark_suites, available_scenarios, main, run_benchmark_suites, run_runtime_evals
+from tests.support.brokers import use_inference_broker
 from src.cockpit.production_operator_control import (
     PRODUCTION_OPERATOR_CONTROL_PARITY_SCENARIO_NAMES,
     PRODUCTION_PARITY_TRAIN_SCENARIO_NAMES,
@@ -4611,8 +4612,7 @@ def test_runtime_eval_scenarios_expose_expected_details(monkeypatch):
     # broker's isolated fixture mode; real #909 accounting is a separate proof.
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=False)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     summary = asyncio.run(
         run_runtime_evals(
             [

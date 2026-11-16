@@ -1,7 +1,7 @@
 """#1018 acceptance: governed capability and inference services through Cordis.
 
 Real Auth, SQLite, durable jobs, CapabilityExecutionHost, model-fabric
-execute_streaming behind the single remote_inference_admission_broker and the
+execute_streaming behind the single remote-inference admission broker and the
 real reviewed Cordis child. Model inference runs on the ADR-035 NEAR TEE text
 slot against the intercepted NEAR gateway (fixed in-memory responses); Python
 socket connects and DNS are denied.
@@ -96,8 +96,6 @@ async def governed(accounting_db, monkeypatch, *, package_root=None, hook=None):
     jobs = DurableJobRepository()
     # Interactive chat and Cordis share one broker instance (the module singleton).
     from src.model_fabric import remote_inference_admission
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
-                        remote_inference_admission.remote_inference_admission_broker)
     # ADR-035: governed inference runs on the NEAR TEE text slot. Streaming
     # inference requires a slot that has proven streaming, as chat does.
     model = await prepare_near_tee_vertical(monkeypatch, jobs=jobs, near=Model(),
@@ -113,7 +111,7 @@ async def governed(accounting_db, monkeypatch, *, package_root=None, hook=None):
             await hook(frame)
     async with research_host(jobs, package_root=package_root, observe=observe) as host:
         yield {"jobs": jobs, "host": host, "operator": operator, "model": model, "frames": frames, "root": root,
-               "broker": remote_inference_admission.remote_inference_admission_broker}
+               "broker": remote_inference_admission.get_remote_inference_admission_broker()}
 
 
 def _chat(env, tag, *, gated=False):

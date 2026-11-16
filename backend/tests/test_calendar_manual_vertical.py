@@ -47,6 +47,7 @@ from src.work_board.input_artifacts import prepare_input_artifact
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: pins the calendar vertical whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -106,8 +107,7 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
     await DurableJobRepository().configure_inference_accounting(25_000)
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     # Seed the same bounded, hashed capability proofs consumed by the real
     # governed preflight selector.  The test intercepts only the final model
     # transport; it does not replace route admission or its policy decision.
@@ -403,8 +403,7 @@ async def test_calendar_dispatcher_real_durable_two_reads_model_and_readback(
         recovered = await DurableJobRepository().recover_stale_jobs()
         assert recovered[0]["status"] == "queued", recovered
         restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
-        monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", restarted)
-        monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", restarted)
+        use_inference_broker(monkeypatch, restarted)
         dispatcher = WorkBoardDispatcher(repository=repository, jobs=DurableJobRepository(), session_provider=async_db)
         reconciled = await dispatcher.reconcile_linked_attempts()
         assert original_reservation["job_id"] in reconciled

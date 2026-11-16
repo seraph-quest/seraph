@@ -4,7 +4,7 @@ A Cordis provider never executes a tool, holds a credential or opens a cost
 lane: ``capabilities.invoke`` and ``inference.request`` forward to these Python
 owners, which run the existing governed executors (``CapabilityExecutionHost``
 and the model-fabric streaming path behind the single
-``remote_inference_admission_broker``) for one canonical job/attempt/lease with
+``get_remote_inference_admission_broker()``) for one canonical job/attempt/lease with
 an exact input digest. Each call records an intent before the effect and seals
 Python's own result; the child's answer is accepted only as an echo of it.
 Outputs are bounded and Vault-redacted before they leave Python.

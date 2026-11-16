@@ -36,6 +36,7 @@ from src.llm_runtime import _execute_sync_with_gpu_admission
 from src.model_fabric.execution import SyncAdapterReceiptError
 from src.model_fabric.proofs import build_model_route_proof
 from src.model_fabric.receipts import ReceiptPersistenceResult
+from tests.support.brokers import use_inference_broker
 from src.security.trust_contract import (
     AuthorityGrant,
     ContentOrigin,
@@ -257,7 +258,7 @@ async def test_llm_runtime_sync_caller_uses_the_same_durable_fence(async_db, mon
     # broker contract. Keep this injected callback local and isolate its
     # broker so no unresolved state can leak between tests.
     broker = RemoteInferenceAdmissionBroker()
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-llm-runtime", request_id="request-744-llm-runtime", profile=profile)
@@ -360,7 +361,7 @@ async def test_provider_error_persists_uncertain_blocked_receipt_without_fallbac
     # Keep the intentionally unresolved provider outcome isolated from later
     # tests; the production broker correctly holds its active lease until an
     # operator reconciliation settles the unknown cost.
-    monkeypatch.setattr(execution, "gpu_admission_broker", RemoteInferenceAdmissionBroker())
+    use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker())
     now = time.time()
     profile = _profile(now=now)
     context = _context(job_id="job-744-provider-error", request_id="request-744-provider-error", profile=profile)
@@ -601,7 +602,7 @@ async def test_restart_after_terminal_remote_success_recovers_without_dispatch(a
     from src.model_fabric import execution
 
     broker = RemoteInferenceAdmissionBroker()
-    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     now = time.time()
     profile = _profile(now=now)
     context = _context(
@@ -690,7 +691,7 @@ async def test_sync_route_persistence_degradation_settles_durable_remote_first(a
     from src.model_fabric import execution
 
     broker = RemoteInferenceAdmissionBroker()
-    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     now = time.time()
     profile = _profile(now=now)
     context = _context(

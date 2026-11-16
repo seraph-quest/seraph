@@ -522,7 +522,29 @@ RemoteInferenceAdmissionRequest = GpuAdmissionRequest
 RemoteInferenceAdmissionUncertainError = GpuAdmissionUncertainError
 RemoteInferencePriority = GpuPriority
 
-remote_inference_admission_broker: RemoteInferenceAdmissionBroker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+# The process's one shared remote-inference lane. Reach it only through
+# ``get_remote_inference_admission_broker()``: callers resolve it at use time,
+# so the composition root (and each test) can install a fresh lane without
+# patching every importer (#1223).
+_process_broker: RemoteInferenceAdmissionBroker = RemoteInferenceAdmissionBroker(durable_accounting=True)
+
+
+def get_remote_inference_admission_broker() -> RemoteInferenceAdmissionBroker:
+    """Return the process's shared remote-inference admission broker."""
+    return _process_broker
+
+
+def install_remote_inference_admission_broker(
+    broker: RemoteInferenceAdmissionBroker,
+) -> RemoteInferenceAdmissionBroker:
+    """Make ``broker`` the process's remote-inference lane; return the previous one.
+
+    For the composition root and tests. It does not move leases or receipts
+    between brokers: the previous broker keeps its own state.
+    """
+    global _process_broker
+    previous, _process_broker = _process_broker, broker
+    return previous
 
 
 def configure_remote_inference_admission(
@@ -534,7 +556,7 @@ def configure_remote_inference_admission(
     max_retries: int = REMOTE_INFERENCE_DEFAULT_RETRIES,
 ) -> None:
     """Apply canonical setup limits to the process-local remote lane."""
-    remote_inference_admission_broker.configure_policy(
+    get_remote_inference_admission_broker().configure_policy(
         max_queued=max_queued,
         max_inflight=max_inflight,
         max_outstanding_per_owner=max_outstanding_per_owner,
@@ -581,7 +603,8 @@ __all__ = [
     "RemoteInferenceAdmissionRequest",
     "RemoteInferenceAdmissionUncertainError",
     "RemoteInferencePriority",
-    "remote_inference_admission_broker",
+    "get_remote_inference_admission_broker",
+    "install_remote_inference_admission_broker",
     "configure_remote_inference_admission",
     "priority_for_inference_context",
 ]

@@ -10,6 +10,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      lanes:
+        description: 'JSON list of shard lanes to run, e.g. ["single-process","single-process-reversed"]'
+        required: false
+        default: '["random-order","single-process","single-process-reversed","timezone"]'
 
 permissions:
   contents: read
@@ -26,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [random-order, single-process, timezone]
+        lane: ${{ fromJSON(github.event.inputs.lanes || '["random-order","single-process","single-process-reversed","timezone"]') }}
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     defaults:
       run:
@@ -34,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: develop
+          # The schedule runs develop; a manual dispatch runs the ref it was
+          # dispatched on, so a branch can prove its lanes before merging.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'develop' }}
           fetch-depth: 0
 
       - name: Prepare the backend test environment
@@ -60,6 +67,9 @@ jobs:
             single-process)
               # The whole shard in one pytest process, to expose cross-file leaks.
               uv run python scripts/run_backend_test_shard.py "${common[@]}" --single-process --single-process-timeout-seconds 3900 ;;
+            single-process-reversed)
+              # The same, files in reverse order (#1223): a leak is seen from the other side.
+              uv run python scripts/run_backend_test_shard.py "${common[@]}" --single-process --reverse --single-process-timeout-seconds 3900 ;;
             timezone)
               # One pass under UTC+14, far from the runner's UTC. The root
               # conftest pins tests to UTC unless SERAPH_TEST_TZ opts in.

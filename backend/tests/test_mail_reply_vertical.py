@@ -47,6 +47,7 @@ from src.work_board.dispatcher import WorkBoardDispatcher
 from src.work_board.repository import WorkBoardRepository
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_inference_accounting import accounting_db
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: pins the mail-reply vertical whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -229,8 +230,7 @@ async def _configure_model_route(async_db, monkeypatch, tmp_path):
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     from src.llm_runtime import _provider_profile
 
     profile = _provider_profile("openrouter")

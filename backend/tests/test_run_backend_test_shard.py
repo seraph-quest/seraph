@@ -1006,6 +1006,30 @@ def test_single_process_command_keeps_retirement_and_writes_one_report(tmp_path:
     assert f"--junitxml={tmp_path / 'junit' / 'single-process.xml'}" in command
 
 
+def test_single_process_reverse_runs_the_files_backwards_with_its_own_report(tmp_path: Path):
+    files = ["tests/test_alpha.py", "tests/test_beta.py", "tests/test_gamma.py"]
+    with patch("scripts.run_backend_test_shard.subprocess.run",
+               return_value=CompletedProcess(args=["pytest"], returncode=0)) as mock_run:
+        assert run_shard_single_process(tmp_path, files, junit_dir=tmp_path / "junit", reverse=True) == 0
+    command = mock_run.call_args.args[0]
+    positions = [command.index(path) for path in files]
+    assert positions == sorted(positions, reverse=True)
+    assert f"--junitxml={tmp_path / 'junit' / 'single-process-reversed.xml'}" in command
+    assert "junit_suite_name=single-process-reversed" in command
+
+
+def test_cli_reverse_is_passed_to_the_single_process_run_and_refused_without_it(tmp_path: Path):
+    argv = ["runner", "--shard-count", "10", "--shard-index", "2", "--single-process", "--reverse"]
+    with patch.object(sys, "argv", argv), patch(
+        "scripts.run_backend_test_shard.shard_for_index", return_value=["tests/test_alpha.py"],
+    ), patch("scripts.run_backend_test_shard.run_shard_single_process", return_value=0) as single:
+        assert main() == 0
+    assert single.call_args.kwargs["reverse"] is True
+    with patch.object(sys, "argv", ["runner", "--files", "tests/test_alpha.py", "--reverse"]), \
+            pytest.raises(SystemExit):
+        main()
+
+
 def test_single_process_timeout_leaves_a_synthetic_report(tmp_path: Path):
     import xml.etree.ElementTree as ElementTree
 

@@ -31,7 +31,8 @@ from src.db.models import Goal, RepoRepairProposal as RepoRepairProposalRow, Rep
 from src.execution.repo_sandbox import LocalRepoRepairExecutor, RepoSandboxJob, build_repo_repair_executor
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
-from src.model_fabric import remote_inference_admission_broker
+from src.model_fabric import get_remote_inference_admission_broker
+from tests.support.brokers import use_inference_broker
 from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardOwner, WorkBoardTaskCreate
 from src.work_board.dispatcher import WorkBoardDispatcher, registered_executor_id
 from src.work_board.input_artifacts import prepare_input_artifact
@@ -795,9 +796,7 @@ async def _prepare_native_flow(
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
-    monkeypatch.setattr(sys.modules[__name__], "remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
 
     executor = build_repo_repair_executor()
     preflight = await asyncio.to_thread(executor.preflight)
@@ -1010,7 +1009,7 @@ async def test_local_native_repo_repair_api_vertical(client, async_db, tmp_path:
     assert approval_projection["local_host_execution_required"] is True
     assert pending_payload["memory_status"] == "no_learning"
 
-    broker_status = await remote_inference_admission_broker.status()
+    broker_status = await get_remote_inference_admission_broker().status()
     assert broker_status["active"] is None
     assert broker_status["queued"] == []
     durable_pending = await durable_job_repository.get_job(job_id)
@@ -1225,7 +1224,7 @@ async def test_local_native_two_goals_share_one_worker(
     assert high_payload["goal_id"] != low_payload["goal_id"]
     assert high_payload["proposal"]["approval_id"] != low_payload["proposal"]["approval_id"]
     assert high_payload["proposal"]["base_snapshot_digest"] == low_payload["proposal"]["base_snapshot_digest"]
-    broker_status = await remote_inference_admission_broker.status()
+    broker_status = await get_remote_inference_admission_broker().status()
     assert broker_status["active"] is None
     assert broker_status["queued"] == []
 

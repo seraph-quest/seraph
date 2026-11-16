@@ -96,7 +96,6 @@ async def actual_billing_journey(accounting_db, real_auth, monkeypatch):
         return original(**kwargs)
     monkeypatch.setattr(httpx, "AsyncClient", clients)
     # Each fresh SQLite deployment uses the same actual canonical broker at every imported alias.
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", remote_inference_admission.remote_inference_admission_broker)
     app = FastAPI()
     app.add_middleware(OperatorAuthMiddleware)
     for router, prefix in ((auth.router, "/api/auth"), (work_board.router, "/api"),
@@ -184,14 +183,14 @@ async def test_manual_unknown_settlement_reconciles_only_debt_after_reopen(actua
     assert row.state == "settled" and row.actual_cost_microusd == 7
     assert json.loads(row.evidence_json)[-1]["provenance"] == "manual_externally_unverified"
     assert json.loads(row.evidence_json)[-1]["provider_charge_verified"] is False
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
-    original_broker_receipt = remote_inference_admission_broker.receipt_for(row.operation_id)
+    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
+    original_broker_receipt = get_remote_inference_admission_broker().receipt_for(row.operation_id)
     assert original_broker_receipt.status == 'failed' and original_broker_receipt.callback_completed
     assert original_broker_receipt.active_operation_id is None and not original_broker_receipt.reconciliation_required
     from src.auth.service import authenticate_token
     from config.settings import settings
     operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-    replay = await remote_inference_admission_broker.reconcile_settled_near_operation(
+    replay = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
         operation_id=row.operation_id, job_id=run.run_identity, expected_revision=row.revision, operator=operator)
     assert replay == {'status': 'reconciled', 'reason_code': 'already_reconciled'}
     async with factory.accounting_sessions() as db:
@@ -300,7 +299,8 @@ async def test_actual_or_canaries_and_near_native_share_serial_priority_and_ledg
         native = asyncio.create_task(drive(dispatcher))
         workers.extend((second, native))
         def native_queued():
-            from src.model_fabric.remote_inference_admission import remote_inference_admission_broker as broker
+            from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
+            broker = get_remote_inference_admission_broker()
             with broker._condition:
                 return any(broker._operations[item].request.runtime_path == "near_text_native" for item in broker._queue)
         # The native reservation precedes its enqueue behind the held canary.
@@ -348,7 +348,7 @@ async def test_actual_or_canaries_and_near_native_share_serial_priority_and_ledg
 async def test_real_near_recovery_rejects_unproved_release(actual_billing_journey, monkeypatch, case):
     from config.settings import settings
     from src.auth.service import authenticate_token, revoke_session
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker, RemoteInferenceAdmissionBroker
+    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker, RemoteInferenceAdmissionBroker
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     controls['missing'] = True
     task_id, _owner = await create_actual_near_task(client, factory)
@@ -356,7 +356,7 @@ async def test_real_near_recovery_rejects_unproved_release(actual_billing_journe
     task, run, row = await state(factory, task_id)
     no_answer(task, run)
     operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-    original_receipt = remote_inference_admission_broker.receipt_for(row.operation_id)
+    original_receipt = get_remote_inference_admission_broker().receipt_for(row.operation_id)
     assert original_receipt.callback_completed and original_receipt.status == 'blocked'
     assert original_receipt.active_operation_id == row.operation_id
     # Exercise the actual durable settlement boundary before its new postcommit bridge.
@@ -369,7 +369,7 @@ async def test_real_near_recovery_rejects_unproved_release(actual_billing_journe
         task, run, row = await state(factory, task_id)
         assert row.state == 'settled' and row.actual_cost_microusd == 7
     selector_job, selector_revision = run.run_identity, row.revision
-    selected_broker = remote_inference_admission_broker
+    selected_broker = get_remote_inference_admission_broker()
     if case == 'wrong_job':
         selector_job = 'foreign-native-job'
     elif case == 'wrong_revision':
@@ -398,7 +398,7 @@ async def test_real_near_recovery_rejects_unproved_release(actual_billing_journe
         'revoked_root': 'original_root_inactive', 'cold_restart': 'no_local_operation',
         'fence_race': 'broker_reconciliation_deferred'}
     assert result == {'status': 'absent' if case == 'cold_restart' else 'deferred', 'reason_code': expected[case]}
-    current = remote_inference_admission_broker.receipt_for(row.operation_id)
+    current = get_remote_inference_admission_broker().receipt_for(row.operation_id)
     if case == 'fence_race':
         assert current.status == 'failed' and current.active_operation_id is None
     else:
@@ -412,7 +412,7 @@ async def test_real_near_recovery_rejects_unproved_release(actual_billing_journe
 
 @pytest.mark.asyncio
 async def test_manual_debt_commit_cannot_release_physically_running_callback(actual_billing_journey):
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     task_id, _owner = await create_actual_near_task(client, factory)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -424,7 +424,7 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
     try:
         await asyncio.wait_for(entered.wait(), 10)
         _task, run, row = await state(factory, task_id)
-        before = remote_inference_admission_broker.receipt_for(row.operation_id)
+        before = get_remote_inference_admission_broker().receipt_for(row.operation_id)
         assert before.status == 'running' and not before.callback_completed
         settled = await client.post('/api/settings/model-fabric/accounting/settle', json={
             'operation_id': row.operation_id, 'job_id': run.run_identity, 'expected_revision': row.revision,
@@ -432,7 +432,7 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
             'idempotency_key': str(uuid4())})
         assert settled.status_code == 200 and settled.json()['status'] == 'settled', settled.text
         assert settled.json()['lane_recovery'] == {'status': 'deferred', 'reason_code': 'provider_callback_running'}
-        current = remote_inference_admission_broker.receipt_for(row.operation_id)
+        current = get_remote_inference_admission_broker().receipt_for(row.operation_id)
         assert current.status == 'running' and not current.callback_completed
         assert current.active_operation_id == row.operation_id and current.fencing_token == before.fencing_token
         assert controls['calls'] == [('cloud-api.near.ai', '/v1/chat/completions')]
@@ -441,7 +441,7 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
         task, run, final_row = await state(factory, task_id)
         no_answer(task, run)
         assert final_row.actual_cost_microusd == 7
-        assert remote_inference_admission_broker.receipt_for(row.operation_id).callback_completed
+        assert get_remote_inference_admission_broker().receipt_for(row.operation_id).callback_completed
     finally:
         release.set()
         if not worker.done():
@@ -454,7 +454,7 @@ async def test_manual_debt_commit_cannot_release_physically_running_callback(act
 async def test_near_lane_recovery_cannot_reconcile_real_openrouter_operation(actual_billing_journey):
     from config.settings import settings
     from src.auth.service import authenticate_token
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
     client, factory, jobs, _dispatcher, _controls, _engine = actual_billing_journey
     assert (await client.post('/api/auth/login', json={'password': 'research-vertical-private-secret'})).status_code == 200
     saved = await client.put('/api/settings/model-fabric', json={'expected_policy_revision': 1,
@@ -467,7 +467,7 @@ async def test_near_lane_recovery_cannot_reconcile_real_openrouter_operation(act
     assert len(snapshot['operations']) == 1
     row = snapshot['operations'][0]
     operator = await authenticate_token(client.cookies.get(settings.operator_auth_cookie_name), touch=False)
-    result = await remote_inference_admission_broker.reconcile_settled_near_operation(
+    result = await get_remote_inference_admission_broker().reconcile_settled_near_operation(
         operation_id=row['operation_id'], job_id=row['job_id'], expected_revision=row['revision'], operator=operator)
     assert result == {'status': 'deferred', 'reason_code': 'settled_operation_changed'}
     after = await jobs.inference_accounting_snapshot()
@@ -481,7 +481,7 @@ async def test_two_ready_ordinary_or_contenders_and_near_choose_highest_priority
     from src.auth.service import authenticate_token
     from src.llm_runtime import completion_with_fallback, preflight_governed_completion_target_async
     from src.model_fabric.caller_context import build_canonical_inference_context
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+    from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
     client, factory, jobs, dispatcher, controls, _engine = actual_billing_journey
     assert (await client.post('/api/auth/login', json={'password': 'research-vertical-private-secret'})).status_code == 200
     saved = await client.put('/api/settings/model-fabric', json={'expected_policy_revision': 1,
@@ -528,7 +528,7 @@ async def test_two_ready_ordinary_or_contenders_and_near_choose_highest_priority
     try:
         await asyncio.wait_for(controls['or_started'].wait(), 10)
         def queued_routes():
-            broker = remote_inference_admission_broker
+            broker = get_remote_inference_admission_broker()
             with broker._condition:
                 return [broker._operations[item].request.runtime_path for item in broker._queue]
         async def wait_ready(route, worker):
@@ -551,7 +551,7 @@ async def test_two_ready_ordinary_or_contenders_and_near_choose_highest_priority
         assert len(pending) == 3, [(row.runtime_path, row.state, row.priority) for row in rows]
         priorities = {row.runtime_path: row.priority for row in pending}
         assert priorities == {'session_title_generation': 2, 'chat_agent': 5, 'near_text_native': 5}
-        assert remote_inference_admission_broker.max_outstanding_per_owner == 16
+        assert get_remote_inference_admission_broker().max_outstanding_per_owner == 16
         assert controls['order'] == ['or-1', 'or-2', 'or-3', 'or-4'] and controls['peak'] == 1
         controls['or_release'].set()
         await asyncio.wait_for(asyncio.gather(*workers), 35)

@@ -24,6 +24,7 @@ from src.workflows.inference_accounting import InferenceAccountingError, account
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
 from tests.support.db import install_database
 from tests.support.sync import Gate, settle, started_or_raise, wait_until, within
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
 # witness mechanics that still settle retained liabilities; retired-route
@@ -265,7 +266,7 @@ async def test_authenticated_settings_canary_unknown_manual_readback(accounting_
     monkeypatch.setattr(settings, "openrouter_api_key", "intercepted-test-key")
     _reset_login_throttle_for_tests()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.api.model_fabric_settings.remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     calls = []
     async def intercepted_post(client, url, **kwargs):
         calls.append(str(url))

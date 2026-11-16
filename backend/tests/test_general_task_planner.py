@@ -13,6 +13,7 @@ from tests.test_inference_accounting import accounting_db, setup_configuration
 from src.work_board.contracts import GeneralTaskInput, TaskLimits, ToolDescriptor, WorkBoardOwner
 from src.work_board.general_task_planner import GeneralTaskPlanner, planner_messages, public_schema
 from src.work_board.repository import BoardError
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -127,7 +128,7 @@ async def prepare(accounting_db, monkeypatch, *, existing_owner=None):
     jobs = DurableJobRepository()
     await jobs.configure_inference_accounting(1000)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     if existing_owner is None:
         _, operator = await create_session()
     else:
@@ -206,8 +207,7 @@ async def test_real_serial_broker_records_planning_contact_without_task_executio
     # A restart cannot renew a contacted planning operation if task publication
     # was lost: durable canonical accounting rejects its original identity.
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
-    monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker",
-        RemoteInferenceAdmissionBroker(durable_accounting=True))
+    use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker(durable_accounting=True))
     with pytest.raises(BoardError, match="Original planning operation exists"):
         await propose(accounting_db, owner)
     with pytest.raises(BoardError, match="Original planning operation exists"):

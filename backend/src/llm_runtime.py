@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 from dataclasses import dataclass, replace
 import hashlib
@@ -53,10 +54,11 @@ from src.model_fabric.remote_inference_admission import (
     current_remote_inference_receipt_binding,
     prepare_bound_remote_inference,
     bind_accounting_profile,
-    remote_inference_admission_broker as gpu_admission_broker,
+    get_remote_inference_admission_broker,
     stable_remote_inference_operation_id,
 )
 from src.operators.local_codex import reject_legacy_external_agent_model
+from src.utils.background import track_task
 from src.security.trust_contract import (
     DestinationClass,
     TrustDecision,
@@ -3423,7 +3425,7 @@ async def _near_tee_stream(
             yield delta
 
     error_receipt = None
-    broker_stream = gpu_admission_broker.stream(request, admitted)
+    broker_stream = get_remote_inference_admission_broker().stream(request, admitted)
     try:
         with bind_precontact_guard(lambda: near_tee_precontact_reason(call)):
             try:
@@ -3630,13 +3632,13 @@ def _persist_bound_sync_admission_receipt(
     persisted_receipt = receipt
     if persisted_receipt is None and readback:
         try:
-            persisted_receipt = gpu_admission_broker.receipt_for(operation_id)
+            persisted_receipt = get_remote_inference_admission_broker().receipt_for(operation_id)
         except (AttributeError, KeyError):
             return
     if persisted_receipt is None:
         return
     _run_receipt_hook_sync(
-        gpu_admission_broker.persist_receipt(
+        get_remote_inference_admission_broker().persist_receipt(
             persisted_receipt,
             repository=binding.repository,
             owner=binding.owner,
@@ -3693,7 +3695,7 @@ def _execute_sync_with_gpu_admission(
             "canonical synchronous inference requires a valid GPU admission owner context"
         ) from error
     try:
-        result = gpu_admission_broker.execute_sync(request, operation)
+        result = get_remote_inference_admission_broker().execute_sync(request, operation)
     except GpuAdmissionError as error:
         _persist_bound_sync_admission_receipt(
             effective_operation_id,
@@ -3906,7 +3908,7 @@ def _log_llm_runtime_event_sync(
     session_id = get_current_session_id()
     try:
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             asyncio.run(_log_llm_runtime_event(
                 event_type=event_type,
@@ -3917,13 +3919,13 @@ def _log_llm_runtime_event_sync(
             ))
             return
 
-        loop.create_task(_log_llm_runtime_event(
+        track_task(_log_llm_runtime_event(
             event_type=event_type,
             summary=summary,
             details=details,
             session_id=session_id,
             request_id=request_id,
-        ))
+        ), name=f"llm_runtime_audit:{event_type}")
     except Exception:
         logger.debug("Failed to run LLM runtime audit logger", exc_info=True)
 
@@ -4243,7 +4245,7 @@ class FallbackLiteLLMModel(BaseLiteLLMModel):
 
         attempt_targets = _attemptable_targets(
             ordered_targets,
-            max_retries=getattr(gpu_admission_broker, "max_retries", None),
+            max_retries=getattr(get_remote_inference_admission_broker(), "max_retries", None),
         )
         receipt_session = _new_route_receipt_session(request_context)
         governed_attempted = False
@@ -4831,7 +4833,7 @@ def completion_with_fallback_sync(
 
         attempt_targets = _attemptable_targets(
             ordered_targets,
-            max_retries=getattr(gpu_admission_broker, "max_retries", None),
+            max_retries=getattr(get_remote_inference_admission_broker(), "max_retries", None),
         )
         receipt_session = _new_route_receipt_session(request_context)
         governed_attempted = False
@@ -5319,20 +5321,23 @@ async def stream_completion_with_fallback(
                 "POST", candidate.endpoint, headers=headers, json=transport_body
             ) as response:
                 response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(data, parse_float=Decimal)
-                        capture_inference_usage(event)
-                        delta = event["choices"][0]["delta"].get("content")
-                    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-                        continue
-                    if isinstance(delta, str) and delta:
-                        yield delta
+                # Closed here, not by the collector: breaking at [DONE] would
+                # otherwise leave the line iterator for a GC-time aclose task.
+                async with contextlib.aclosing(response.aiter_lines()) as lines:
+                    async for line in lines:
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(data, parse_float=Decimal)
+                            capture_inference_usage(event)
+                            delta = event["choices"][0]["delta"].get("content")
+                        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+                            continue
+                        if isinstance(delta, str) and delta:
+                            yield delta
 
     transport = _model_fabric_streaming_transport or default_transport
     hooks = _model_fabric_receipt_hooks or RouteReceiptSession(context=request_context)

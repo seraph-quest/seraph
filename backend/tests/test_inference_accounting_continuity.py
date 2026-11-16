@@ -17,6 +17,7 @@ from src.model_fabric.remote_inference_admission import RemoteInferenceAdmission
 from src.workflows.job_runtime import DurableJobRepository
 from src.workspace.accounting_continuity import acknowledge_accounting_period
 from src.workspace.production import ProductionWorkspace, read_lifecycle_receipt
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: pins historical OpenRouter ledger continuity, restore and period-review mechanics that still settle retained liabilities
 pytestmark = pytest.mark.openrouter_legacy
@@ -251,7 +252,7 @@ async def test_authenticated_period_reserve_review_and_current_revision_regrant(
         "openrouter_api_key": "intercepted-test-key"}.items():
         monkeypatch.setattr(settings, name, value)
     _reset_login_throttle_for_tests()
-    monkeypatch.setattr("src.api.model_fabric_settings.remote_inference_admission_broker", RemoteInferenceAdmissionBroker(durable_accounting=True))
+    use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker(durable_accounting=True))
     original_post = httpx.AsyncClient.post
     calls, charge = [], ["0.000101"]
     async def route_post(client, url, **kwargs):

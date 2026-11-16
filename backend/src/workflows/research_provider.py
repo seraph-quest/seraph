@@ -160,9 +160,10 @@ async def execute_funded_child(jobs, *, child_id, owner, fence):
     from src.model_fabric.hooks import RouteReceiptSession
     from src.model_fabric.remote_inference_admission import (
         GpuAdmissionRequest, bind_remote_inference_receipt,
-        prepare_bound_remote_inference, remote_inference_admission_broker as broker,
+        prepare_bound_remote_inference, get_remote_inference_admission_broker,
     )
     from src.security.trust_contract import canonical_digest
+    broker = get_remote_inference_admission_broker()
     child = await jobs.get_job(child_id)
     await current_inputs(jobs, child["parent_job_id"])
     ready = checkpoint(child, "research:prompt-ready")
@@ -355,8 +356,9 @@ async def execute_discovery_request(jobs, *, job_id, owner, fence, slot, instruc
     from src.model_fabric.caller_context import build_canonical_inference_context
     from src.model_fabric.hooks import RouteReceiptSession
     from src.model_fabric.remote_inference_admission import (GpuAdmissionRequest, bind_remote_inference_receipt,
-        prepare_bound_remote_inference, remote_inference_admission_broker as broker)
+        prepare_bound_remote_inference, get_remote_inference_admission_broker)
     from src.llm_runtime import _governed_preflight_target_async, _governed_research_chat_completion, _token_usage_from_payload
+    broker = get_remote_inference_admission_broker()
     witness = await physical_discovery_inputs(jobs, job_id)
     if type(slot) is not int or not 0 <= slot < witness.plan.limits.max_inference_requests:
         raise ValueError("programme original inference request cap exceeded")

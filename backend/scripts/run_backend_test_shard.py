@@ -779,6 +779,7 @@ def run_shard_single_process(
     exclude_cancelled_eval_harness: bool = False,
     junit_dir: Path | None = None,
     timeout_seconds: int | None = None,
+    reverse: bool = False,
 ) -> int:
     """Run every assigned file in one pytest process (#1220).
 
@@ -792,6 +793,11 @@ def run_shard_single_process(
     """
     selected = [path for path in files
                 if not (exclude_cancelled_eval_harness and path == "tests/test_eval_harness.py")]
+    if reverse:
+        # Files in reverse order (#1223): state one file leaves for the next is
+        # seen from the other side. Tests within a file keep their order.
+        selected.reverse()
+    label = "single-process-reversed" if reverse else "single-process"
     if not selected:
         print("No backend tests assigned to this shard.")
         return 0
@@ -804,24 +810,24 @@ def run_shard_single_process(
     # apply to the whole run (scheduled lane only).
     command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect,
                *tracked_warning_args(selected)]
-    report = junit_dir / "single-process.xml" if junit_dir is not None else None
+    report = junit_dir / f"{label}.xml" if junit_dir is not None else None
     if report is not None:
         junit_dir.mkdir(parents=True, exist_ok=True)
-        command += [f"--junitxml={report}", "-o", "junit_suite_name=single-process"]
-    print(f"[backend-shard] single process: {len(selected)} file(s)")
+        command += [f"--junitxml={report}", "-o", f"junit_suite_name={label}"]
+    print(f"[backend-shard] single process: {len(selected)} file(s){', reversed' if reverse else ''}")
     started_at = time.perf_counter()
     try:
         completed = subprocess.run(command, cwd=root, check=False, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         duration_s = time.perf_counter() - started_at
-        print(f"[backend-shard] single-process -> 124 ({duration_s:.2f}s) timed out after {timeout_seconds}s")
+        print(f"[backend-shard] {label} -> 124 ({duration_s:.2f}s) timed out after {timeout_seconds}s")
         if report is not None:
-            write_timeout_junit(report, "single-process", timeout_seconds, duration_s)
+            write_timeout_junit(report, label, timeout_seconds, duration_s)
         return 124
     duration_s = time.perf_counter() - started_at
-    print(f"[backend-shard] single-process -> {completed.returncode} ({duration_s:.2f}s)")
+    print(f"[backend-shard] {label} -> {completed.returncode} ({duration_s:.2f}s)")
     if completed.returncode != 0 and report is not None and not report.exists():
-        write_synthetic_junit(report, "single-process", "invocation-crashed",
+        write_synthetic_junit(report, label, "invocation-crashed",
                               f"pytest exited {completed.returncode} without writing a report", duration_s)
     return completed.returncode
 
@@ -865,6 +871,10 @@ def main() -> int:
         "--single-process", action="store_true",
         help="run the whole shard as one pytest process to expose cross-file leaks (#1220)",
     )
+    parser.add_argument(
+        "--reverse", action="store_true",
+        help="with --single-process: run the shard's files in reverse order (#1223)",
+    )
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     # Progress lines must reach the job log as each file ends, not at exit:
@@ -882,6 +892,8 @@ def main() -> int:
     if extra_args[:1] == ["--"]:
         extra_args = extra_args[1:]
     extra_args = lane_pytest_args(quarantine=args.quarantine, shuffle_seed=args.shuffle_seed) + extra_args
+    if args.reverse and not args.single_process:
+        parser.error("--reverse applies to --single-process only")
     if args.single_process:
         return run_shard_single_process(
             root,
@@ -890,6 +902,7 @@ def main() -> int:
             exclude_cancelled_eval_harness=args.exclude_cancelled_eval_harness,
             junit_dir=args.junit_dir.resolve() if args.junit_dir is not None else None,
             timeout_seconds=args.single_process_timeout_seconds,
+            reverse=args.reverse,
         )
     return run_shard_files(
         root,

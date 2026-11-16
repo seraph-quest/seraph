@@ -24,6 +24,7 @@ from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: pins the native research vertical whose setup saves the historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -51,9 +52,7 @@ def real_auth(monkeypatch):
     # forgiven; every broker still uses production durable accounting.
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker", broker)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.api.model_fabric_settings.remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     yield
     _reset_login_throttle_for_tests()
 
@@ -319,8 +318,7 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
             await engine.dispose()
             from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
             fresh_broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-            monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker", fresh_broker)
-            monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", fresh_broker)
+            use_inference_broker(monkeypatch, fresh_broker)
             monkeypatch.setattr(work_board, "dispatcher", WorkBoardDispatcher(jobs=jobs, session_provider=factory.accounting_sessions))
             if scenario in snapshot_scenarios:
                 if scenario == "snapshot_stale_goal":

@@ -11,7 +11,7 @@ from src.model_fabric.configuration import (
     OPENROUTER_VAULT_CREDENTIAL_REF,
     hydrate_openrouter_credential,
 )
-from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
 from tests.support.sync import wait_until
 from src.vault.repository import vault_repository
 
@@ -705,14 +705,14 @@ async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_m
     embedding_started, release_embedding = threading.Event(), threading.Event()
     dimension_override = [None]
     failures = []
-    execute = api.remote_inference_admission_broker.execute
+    execute = get_remote_inference_admission_broker().execute
     async def checked_execute(*args, **kwargs):
         try:
             return await execute(*args, **kwargs)
         except Exception as error:
             failures.append((type(error).__name__, str(error), type(error.__cause__).__name__, str(error.__cause__)))
             raise
-    monkeypatch.setattr(api.remote_inference_admission_broker, "execute", checked_execute)
+    monkeypatch.setattr(get_remote_inference_admission_broker(), "execute", checked_execute)
     class ProviderClient:
         def __init__(self, **kwargs):
             assert kwargs["follow_redirects"] is False
@@ -857,7 +857,7 @@ async def test_v2_native_manual_canaries_use_exact_slots_shared_accounting_and_m
                 max_tokens=64, runtime_path="chat_agent", request_context=chat_context))
             # Reservation precedes enqueue: once both wait in the shared lane
             # their durable rows exist.
-            shared_broker = api.remote_inference_admission_broker
+            shared_broker = get_remote_inference_admission_broker()
             await wait_until(lambda: len(shared_broker._queue) == 2, what="vision and chat queued behind embedding",
                              task=chat_task, state=lambda: list(shared_broker._queue))
             pending = (await durable_job_repository.inference_accounting_snapshot())["operations"]
@@ -1048,7 +1048,7 @@ async def test_persisted_controls_drive_profile_and_remote_admission(
         "max_retries": 1,
         "spend_ceiling_microusd": 25_000,
     }
-    admission = await remote_inference_admission_broker.status()
+    admission = await get_remote_inference_admission_broker().status()
     assert admission["max_inflight"] == 1
     assert admission["max_retries"] == 1
     assert admission["capacity"]["max_queued"] == 8

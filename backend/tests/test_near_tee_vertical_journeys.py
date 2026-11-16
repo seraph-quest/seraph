@@ -34,6 +34,7 @@ from tests.near_tee_support import (
 from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_general_task_planner import descriptor, forbid_external_inference  # noqa: F401
 from tests.test_general_task_planner import task_input as _legacy_task_input
+from tests.support.brokers import use_inference_broker
 
 
 NEAR_COST_MICROUSD = 1500  # the fixture's 1_500_000 nano-USD billing record
@@ -51,9 +52,7 @@ def isolated_broker(monkeypatch):
     from src import llm_runtime
     from src.model_fabric import execution, remote_inference_admission
     broker = remote_inference_admission.RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", broker)
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", broker)
-    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     return broker
 
 
@@ -814,9 +813,7 @@ async def test_mail_reply_near_reservation_resumes_after_crash_before_contact(ac
     restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
     from src import llm_runtime
     from src.model_fabric import execution, remote_inference_admission
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(execution, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", restarted)
+    use_inference_broker(monkeypatch, restarted)
     dispatcher = WorkBoardDispatcher(repository=WorkBoardRepository(), jobs=DurableJobRepository(),
         session_provider=sessions, runner_id="service:work-board")
     reconciled = await dispatcher.reconcile_linked_attempts()
@@ -996,9 +993,7 @@ async def test_calendar_meeting_prep_near_reservation_resumes_after_crash_before
     restarted = RemoteInferenceAdmissionBroker(durable_accounting=True)
     from src import llm_runtime
     from src.model_fabric import execution, remote_inference_admission
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(execution, "gpu_admission_broker", restarted)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", restarted)
+    use_inference_broker(monkeypatch, restarted)
     dispatcher = WorkBoardDispatcher(repository=dispatcher.repository, jobs=DurableJobRepository(),
         session_provider=sessions)
     reconciled = await dispatcher.reconcile_linked_attempts()

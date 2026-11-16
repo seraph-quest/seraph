@@ -16,7 +16,7 @@ from fastapi import HTTPException
 import pytest
 from starlette.requests import Request
 
-from tests.async_wait_support import started_or_raise
+from tests.support.sync import started_or_raise
 from src.approval.runtime import (
     get_current_session_id,
     get_current_trust_principal,

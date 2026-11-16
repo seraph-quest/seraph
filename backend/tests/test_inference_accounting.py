@@ -22,7 +22,7 @@ from src.security.trust_contract import EgressClass
 from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError, account_charge_microusd
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
-from tests.async_wait_support import started_or_raise
+from tests.support.sync import started_or_raise
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
 # witness mechanics that still settle retained liabilities; retired-route

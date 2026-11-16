@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from config.settings import settings
 from src.db.models import CalendarEventBinding, CalendarReadConsent, Goal, GovernedScheduleBinding, GovernedScheduleOccurrence, GoogleServiceConnection, OperatorSession, ScheduledJob, WorkBoardInputArtifact, WorkBoardTask, WorkflowRunState
@@ -1510,13 +1510,17 @@ async def test_provider_events_and_prep_return_redacted_event_and_exact_seven_fi
 
     async def revoke_before_publication(db, owner, task_request, **kwargs):
         # The route's session holds SQLite's writer lock here, so the revoke
-        # goes through that session: a second connection would wait on the
-        # lock (#1222 gives every session its own connection).
-        current_consent = await db.get(CalendarReadConsent, consent["consent_id"])
-        assert current_consent is not None
-        current_consent.state = "revoked"
-        current_consent.revision += 1
-        await db.flush()
+        # goes through that session's connection: a second connection would
+        # wait on the lock (#1222 gives every session its own connection).
+        # A Core UPDATE that leaves the session's cached consent stale, so the
+        # callback only sees the revoke if it re-reads the row.
+        revoked = await db.execute(
+            update(CalendarReadConsent)
+            .where(CalendarReadConsent.consent_id == consent["consent_id"])
+            .values(state="revoked", revision=CalendarReadConsent.revision + 1)
+            .execution_options(synchronize_session=False)
+        )
+        assert revoked.rowcount == 1
         return await original_create_task(db, owner, task_request, **kwargs)
 
     monkeypatch.setattr(calendar_api.repository, "create_task", revoke_before_publication)

@@ -45,6 +45,8 @@ async def accounting_db(tmp_path, monkeypatch):
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(tmp_path / "deployment-lifecycle"))
     from src.workspace.production import prepare_lifecycle_directory
     prepare_lifecycle_directory(ProductionWorkspace(host_root=root))
+    # Its own engine, not create_database_engine: several fixtures seeded on it
+    # violate foreign keys, which production pragmas enforce (#1222 follow-up).
     engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'seraph.db'}", connect_args={"timeout": 5})
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with engine.begin() as connection:

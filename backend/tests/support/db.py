@@ -152,11 +152,15 @@ async def create_test_database(path: Path, *, template_directory: Path) -> TestD
 def install_database(monkeypatch, database_engine: AsyncEngine) -> Callable[[], AsyncSession]:
     """Make ``database_engine`` the default database for the rest of the test.
 
-    Every ``get_session`` caller then uses it through the production path.
-    Returns the session factory. ``monkeypatch`` restores the canonical
-    default at teardown.
+    Every ``get_session`` caller then uses it through the production path,
+    starting with an open state gate. Returns the session factory.
+    ``monkeypatch`` restores the canonical default and the gate at teardown.
     """
     factory = sessionmaker(database_engine, class_=AsyncSession, expire_on_commit=False)
     monkeypatch.setattr(db_engine, "engine", database_engine)
     monkeypatch.setattr(db_engine, "async_session_factory", factory)
+    # Every session now passes the process-global state gate. Start the test
+    # with no provider worker attached and restore the previous gate after
+    # it, so a gate a test leaves closed cannot fail later tests.
+    monkeypatch.setattr(db_engine, "_STATE_GATE", [None, None])
     return factory

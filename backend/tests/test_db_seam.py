@@ -35,14 +35,32 @@ def _configuration(database_engine):
         "echo": database_engine.echo,
         "driver": database_engine.url.drivername,
         "listeners": [event.contains(database_engine.sync_engine, name, fn) for name, fn in _LISTENERS],
+        # Every listener in registration order, SQLAlchemy's own included.
+        "pool_events": {name: [_name(fn) for fn in getattr(pool.dispatch, name)]
+                        for name in ("connect", "checkout", "checkin")},
+        "engine_events": {name: [_name(fn) for fn in getattr(database_engine.sync_engine.dispatch, name)]
+                          for name in ("before_cursor_execute", "commit", "rollback")},
     }
 
 
+def _name(listener) -> str:
+    return getattr(listener, "__qualname__", repr(listener))
+
+
 async def test_canonical_engine_keeps_its_production_configuration(tmp_path):
+    canonical = _configuration(CANONICAL_ENGINE)
     expected = {"pool": "AsyncAdaptedQueuePool", "size": 20, "max_overflow": 0, "timeout": 3,
                 "pre_ping": True, "echo": db_engine.settings.database_echo,
-                "driver": "sqlite+aiosqlite", "listeners": [True] * len(_LISTENERS)}
-    assert _configuration(CANONICAL_ENGINE) == expected
+                "driver": "sqlite+aiosqlite", "listeners": [True] * len(_LISTENERS),
+                "pool_events": canonical["pool_events"], "engine_events": canonical["engine_events"]}
+    assert canonical == expected
+    # Seraph's own listeners, in the order production registered them.
+    assert [fn for fn in canonical["pool_events"]["connect"] if fn.startswith("_")] == [
+        "_configure_sqlite_connection"]
+    assert canonical["pool_events"]["checkout"] == ["_restore_sqlite_busy_timeout"]
+    assert canonical["pool_events"]["checkin"] == ["_forget_write_start"]
+    assert canonical["engine_events"]["commit"] == canonical["engine_events"]["rollback"] == [
+        "_report_write_hold"]
     assert CANONICAL_ENGINE.url.database == db_engine._db_path
     # A test database is built by the same factory, so it is configured the same.
     other = db_engine.create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'other.sqlite3'}")
@@ -119,3 +137,29 @@ async def test_sentinel_refuses_and_records_a_canonical_connection():
     violations = take_canonical_engine_violations()  # taken, so this test does not fail
     assert len(violations) == 1
     assert "test_db_seam.py" in violations[0]
+
+
+async def test_session_scope_publishes_work_board_events_only_after_commit(db, monkeypatch):
+    import src.work_board.events as events
+
+    published: list[list[str]] = []
+
+    async def record(pending):
+        published.append(list(pending))
+    monkeypatch.setattr(events, "publish_work_board_events", record)
+
+    async with db_engine.get_session() as session:
+        session.add(AuditEvent(event_type="committed", summary="committed"))
+        session.info["work_board_events_after_commit"] = ["after-commit"]
+    assert published == [["after-commit"]]
+
+    with pytest.raises(RuntimeError):
+        async with db_engine.get_session() as session:
+            session.info["work_board_events_after_commit"] = ["rolled-back"]
+            raise RuntimeError("roll back")
+    assert published == [["after-commit"]]
+
+
+async def test_each_test_database_starts_with_an_open_state_gate(db):
+    assert db_engine.state_gate() == (None, None)
+    db_engine.set_state_gate("failed", "leaked_by_a_test")  # restored at teardown

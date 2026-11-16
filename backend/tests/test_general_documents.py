@@ -553,6 +553,9 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
                 else:
                     refused = await client.post("/api/documents/read", json=read_request(fmt, identifier).model_dump())
                     assert refused.status_code in {401, 409}, refused.text
+                    if mode == "original_deadline":
+                        # The fake clock is past the original window: that, not another expiry, refused it.
+                        assert refused.json()["detail"]["code"] == "document_original_execution_window_expired", refused.text
                 async with factory.accounting_sessions() as db:
                     source_row = await db.get(WorkBoardInputArtifact, identifier)
                     retained_value = json.loads(source_row.document_metadata_json)

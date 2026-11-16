@@ -211,7 +211,7 @@ def _governed_embedding_context():
         patch.object(embedder, "get_current_trust_principal", return_value=principal),
         patch("src.llm_runtime.provider_profiles", side_effect=profiles),
         patch("src.model_fabric.caller_context.effective_workload_policy", return_value=policy),
-        patch("src.model_fabric.execution.gpu_admission_broker", _InlineEmbeddingAdmission()),
+        patch("src.model_fabric.remote_inference_admission._process_broker", _InlineEmbeddingAdmission()),
         patch.object(embedder, "model_fabric_repository", repository),
     ):
         yield

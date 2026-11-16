@@ -9,6 +9,7 @@ authority.
 
 from __future__ import annotations
 
+import contextlib
 import asyncio
 import json
 import logging
@@ -445,16 +446,18 @@ async def _json_body(request: Request, model: type[_Strict]) -> _Strict:
     chunks: list[bytes] = []
     size = 0
     try:
-        async for chunk in request.stream():
-            if not isinstance(chunk, bytes):
-                raise ValueError("request body is not bytes")
-            size += len(chunk)
-            if size > _MAX_SETUP_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail={"code": "mail_request_too_large", "message": "The Mail request is too large", "recovery_action": "reduce_request"},
-                )
-            chunks.append(chunk)
+        # Closed on every exit (the bound raises mid-stream), not by the collector.
+        async with contextlib.aclosing(request.stream()) as body_chunks:
+            async for chunk in body_chunks:
+                if not isinstance(chunk, bytes):
+                    raise ValueError("request body is not bytes")
+                size += len(chunk)
+                if size > _MAX_SETUP_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail={"code": "mail_request_too_large", "message": "The Mail request is too large", "recovery_action": "reduce_request"},
+                    )
+                chunks.append(chunk)
         raw = json.loads(b"".join(chunks))
         return model.model_validate(raw)
     except HTTPException:

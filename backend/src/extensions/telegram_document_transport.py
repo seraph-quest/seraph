@@ -1,4 +1,5 @@
 """Fixed Telegram getFile/file HTTPS boundary; no authority or retry policy."""
+import contextlib
 from contextlib import asynccontextmanager
 import json
 import logging
@@ -49,10 +50,12 @@ class TelegramDocumentHTTP:
                     if response.status_code != 200:
                         raise BoardError("channel_document_provider_rejected", "Telegram rejected document metadata acquisition", status_code=409)
                     body = bytearray()
-                    async for chunk in response.aiter_bytes(65536):
-                        if len(body) + len(chunk) > 8192:
-                            raise BoardError("channel_document_provider_metadata_bound", "Telegram document metadata exceeded its bound", status_code=409)
-                        body.extend(chunk)
+                    # Closed on every exit (the bound raises mid-stream), not by the collector.
+                    async with contextlib.aclosing(response.aiter_bytes(65536)) as chunks:
+                        async for chunk in chunks:
+                            if len(body) + len(chunk) > 8192:
+                                raise BoardError("channel_document_provider_metadata_bound", "Telegram document metadata exceeded its bound", status_code=409)
+                            body.extend(chunk)
                     result = json.loads(body)
                     if result.get("ok") is not True or type(result.get("result")) is not dict:
                         raise BoardError("channel_document_provider_rejected", "Telegram document metadata is unavailable", status_code=409)

@@ -31,6 +31,7 @@ from config.settings import settings
 from src.security.site_policy import evaluate_site_access
 from src.utils.clock import get_clock
 from src.workspace import canonical_workspace_root
+from src.utils.background import track_task
 from src.workflows.job_runtime import (
     DurableJobAdmissionDenied,
     DurableJobError,
@@ -2165,7 +2166,7 @@ class BrowserTaskRunner:
             if close is not None:
                 result = close()
                 if inspect.isawaitable(result):
-                    asyncio.create_task(result)
+                    track_task(result, name="browser-task:close-popup")
 
         def on_download(download: Any) -> None:
             state.download_blocked = True
@@ -2173,7 +2174,7 @@ class BrowserTaskRunner:
             if cancel is not None:
                 result = cancel()
                 if inspect.isawaitable(result):
-                    asyncio.create_task(result)
+                    track_task(result, name="browser-task:cancel-download")
 
         context_on = getattr(context, "on", None)
         if context_on is not None:
@@ -3197,7 +3198,7 @@ class ProfiledInteractionPage:
                 await new_page.close()
 
         self.resources.context.on("page", reject_page)
-        self.page.on("download", lambda download: asyncio.create_task(download.cancel()))
+        self.page.on("download", lambda download: track_task(download.cancel(), name="browser-preparation:cancel-download"))
         # Uploads are unsupported: a file chooser is never answered, and any
         # later action is refused (C5.3).
         self.page.on("filechooser", lambda chooser: setattr(self, "file_chooser_opened", True))

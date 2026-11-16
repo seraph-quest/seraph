@@ -9,6 +9,7 @@ the response through ``route.fulfill``.  No ambient Chromium resolver or
 
 from __future__ import annotations
 
+import contextlib
 import asyncio
 from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
 from functools import partial
@@ -643,13 +644,15 @@ class PinnedBrowserTransport:
                         ) as response_obj:
                             _reject_encoded_response(response_obj.headers)
                             body = bytearray()
-                            async for chunk in response_obj.aiter_bytes():
-                                body.extend(chunk)
-                                if len(body) > self.max_response_bytes:
-                                    raise PinnedTransportError(
-                                        "response exceeds the bounded byte limit",
-                                        code="response_limit",
-                                    )
+                            # Closed on every exit (a bound raises mid-stream), not by the collector.
+                            async with contextlib.aclosing(response_obj.aiter_bytes()) as chunks:
+                                async for chunk in chunks:
+                                    body.extend(chunk)
+                                    if len(body) > self.max_response_bytes:
+                                        raise PinnedTransportError(
+                                            "response exceeds the bounded byte limit",
+                                            code="response_limit",
+                                        )
                             response = PinnedBrowserResponse(
                                 status_code=response_obj.status_code,
                                 headers={str(key).lower(): str(value) for key, value in response_obj.headers.items()},

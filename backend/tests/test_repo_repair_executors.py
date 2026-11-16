@@ -928,3 +928,9 @@ def test_local_marker_corruption_fails_closed(tmp_path: Path):
     marker.write_text("not-json", encoding="utf-8")
     marker.chmod(0o600)
     assert runner.reconcile({"job_id": "corrupt"})["marker"] is None
+
+
+def test_worker_kill_reap_bound_matches_the_shared_owner_bound():
+    # repo_worker runs standalone in the container, so it keeps its own copy.
+    from src.execution import process_reap, repo_worker
+    assert repo_worker.KILL_REAP_LIVENESS_SECONDS == process_reap.KILL_REAP_LIVENESS_SECONDS

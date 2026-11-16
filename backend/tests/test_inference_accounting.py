@@ -24,6 +24,8 @@ from src.workflows.inference_accounting import InferenceAccountingError, account
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
 from tests.support.db import install_database
 from tests.support.sync import Gate, settle, started_or_raise, wait_until, within
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
 # witness mechanics that still settle retained liabilities; retired-route
@@ -65,8 +67,16 @@ async def accounting_db(tmp_path, monkeypatch):
     # The single database seam (#1222): every get_session caller uses this file.
     install_database(monkeypatch, engine)
     factory.accounting_sessions = sessions
-    yield root, engine, factory
-    await engine.dispose()
+    try:
+        yield root, engine, factory
+    finally:
+        # As the `db` fixture: tracked background work writes to this engine,
+        # so it finishes before the engine is disposed (#1223).
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+            await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
+        finally:
+            await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -265,7 +275,7 @@ async def test_authenticated_settings_canary_unknown_manual_readback(accounting_
     monkeypatch.setattr(settings, "openrouter_api_key", "intercepted-test-key")
     _reset_login_throttle_for_tests()
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.api.model_fabric_settings.remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     calls = []
     async def intercepted_post(client, url, **kwargs):
         calls.append(str(url))

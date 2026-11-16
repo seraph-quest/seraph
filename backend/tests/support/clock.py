@@ -25,8 +25,15 @@ from src.utils.clock import FakeClock
 from tests.support.sync import LIVENESS_SECONDS, settle, wait_until, within
 
 
+# Every clock installed during the current test; the leak checks
+# (tests/support/leaks.py) fail a test whose fake clock still has a pending
+# timer after its loop closed, then clear this list.
+installed_clocks: list[clock_module.Clock] = []
+
+
 def install_clock(clock: clock_module.Clock) -> clock_module.Clock:
     """Install ``clock`` as the process clock; returns the previous one to restore."""
+    installed_clocks.append(clock)
     return clock_module.set_clock(clock)
 
 

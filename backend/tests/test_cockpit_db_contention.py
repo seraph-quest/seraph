@@ -26,6 +26,7 @@ from config.settings import settings
 from src.app import create_app
 from src.auth import service as auth_service
 from src.db.engine import _configure_sqlite_connection, _ensure_search_indexes, override_session_factory
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
 from tests.support.sqlite_locks import assert_only_bounded_writes, bounded_write_watch
 
 COCKPIT_BASELINE = (
@@ -85,6 +86,10 @@ async def _cockpit(tmp_path, monkeypatch):
             ) as client:
                 with bounded_write_watch(engine.sync_engine) as writes:
                     yield client, path, writes
+            # Deferred audit retries (#1074) write to this engine: let them
+            # finish before it is disposed, as the `db` fixture does (#1223).
+            await drain_tracked_tasks(timeout_seconds=5.0)
+            await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
     finally:
         await engine.dispose()
 

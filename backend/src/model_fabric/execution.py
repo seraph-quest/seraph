@@ -25,7 +25,7 @@ from .remote_inference_admission import (
     RemoteInferenceAdmissionRequest as GpuAdmissionRequest,
     current_remote_inference_receipt_binding,
     prepare_bound_remote_inference,
-    remote_inference_admission_broker as gpu_admission_broker,
+    get_remote_inference_admission_broker,
     stable_remote_inference_operation_id,
 )
 from .selector import select_route
@@ -61,12 +61,12 @@ async def _persist_bound_admission_receipt(
     persisted_receipt = receipt
     if persisted_receipt is None and readback:
         try:
-            persisted_receipt = gpu_admission_broker.receipt_for(operation_id)
+            persisted_receipt = get_remote_inference_admission_broker().receipt_for(operation_id)
         except (AttributeError, KeyError):
             return
     if persisted_receipt is None:
         return
-    await gpu_admission_broker.persist_receipt(
+    await get_remote_inference_admission_broker().persist_receipt(
         persisted_receipt,
         repository=binding.repository,
         owner=binding.owner,
@@ -272,7 +272,7 @@ async def execute_streaming(
 
         admission_error_receipt = None
         try:
-            async for delta in gpu_admission_broker.stream(
+            async for delta in get_remote_inference_admission_broker().stream(
                 admission_request,
                 admitted_transport,
                 now=now,
@@ -417,7 +417,7 @@ async def run_preflighted_adapter(
 
     admission_error_receipt = None
     try:
-        result = await gpu_admission_broker.execute(admission_request, admitted_adapter)
+        result = await get_remote_inference_admission_broker().execute(admission_request, admitted_adapter)
         return result
     except GpuAdmissionError as error:
         admission_error_receipt = getattr(error, "receipt", None)
@@ -553,7 +553,7 @@ def execute_sync_adapter(
         return result
 
     try:
-        result = gpu_admission_broker.execute_sync(admission_request, admitted_adapter, now=now)
+        result = get_remote_inference_admission_broker().execute_sync(admission_request, admitted_adapter, now=now)
     except GpuAdmissionError as error:
         # Persist the broker's terminal/uncertain result while the durable
         # intent is still the authoritative operation record. Route-receipt

@@ -22,7 +22,8 @@ from src.db import engine as database
 from src.db.models import (Goal, OperatorIdentity, OperatorSession, ProgrammeDigestReceipt,
     ProgrammeFollowThrough, ProgrammeFindingAction, ProgrammeNotificationPreference, WorkflowRunState,
     InferenceCostReservation, NativeNotificationOutbox)
-from src.guardian.goal_programmes import GoalProgrammeError, _load, _aware, goal_programme_service
+from src.guardian import goal_programmes
+from src.guardian.goal_programmes import GoalProgrammeError, _load, _aware
 from src.guardian.research_plan_contracts import ArtifactRef
 from src.work_board.repository import BoardError
 
@@ -200,7 +201,7 @@ def run_outcome(run):
 
 async def tick(now=None):
     """Coalesce only today's 08:00 occurrence, with durable stable-owner key."""
-    goal_programme_service._ready()
+    goal_programmes.goal_programme_service._ready()
     now = _aware(now or datetime.now(timezone.utc))
     local = local_clock(now)
     if local.hour < 8:
@@ -247,7 +248,7 @@ async def tick(now=None):
                         WorkflowRunState.job_kind == DISCOVERY_KIND))
                     runs[programme["id"]] = run
                     try:
-                        await goal_programme_service.validate_current_binding(db=db,
+                        await goal_programmes.goal_programme_service.validate_current_binding(db=db,
                             binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(programme),
                                 "guardian.goal-discovery.v1"), policy=policy)
                     except GoalProgrammeError:
@@ -378,7 +379,7 @@ async def _read_binding(operator, binding, now):
 
 
 async def list_digests(operator, now=None):
-    goal_programme_service._ready()
+    goal_programmes.goal_programme_service._ready()
     now = _aware(now or datetime.now(timezone.utc))
     async with database.get_session() as db:
         _, identity = await owner_identity(db, operator)
@@ -532,7 +533,7 @@ async def programme_status(operator, now):
         if not any(p["owner_identity_id"] == identity.id for p in _load(goal)["generations"]):
             continue
         try:
-            inspected = await goal_programme_service.inspect(operator=operator, goal_id=goal.id)
+            inspected = await goal_programmes.goal_programme_service.inspect(operator=operator, goal_id=goal.id)
             history = await goal_discovery_service.inspect(operator=operator, goal_id=goal.id)
         except GoalProgrammeError:
             continue  # Unselected recovery scopes do not expose another Root's Goal.
@@ -646,7 +647,7 @@ async def _deadline_negative_key(db, receipt, preference, now, policy):
             or generation["grant_revision"] != binding["grant_revision"] or generation["owner_identity_id"] != identity.id):
             return None
         try:
-            await goal_programme_service.validate_current_binding(db=db,
+            await goal_programmes.goal_programme_service.validate_current_binding(db=db,
                 binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(generation),
                     "guardian.goal-discovery.v1"), policy=policy)
         except GoalProgrammeError:
@@ -704,7 +705,7 @@ async def deliver_notices(now):
                         if raw["id"] not in original_ids or raw["owner_identity_id"] != identity.id:
                             continue
                         try:
-                            await goal_programme_service.validate_current_binding(db=db,
+                            await goal_programmes.goal_programme_service.validate_current_binding(db=db,
                                 binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(raw),
                                     "guardian.goal-discovery.v1"), policy=policy)
                         except GoalProgrammeError:
@@ -725,7 +726,7 @@ async def deliver_notices(now):
                         valid = False
                         break
                     try:
-                        await goal_programme_service.validate_current_binding(db=db,
+                        await goal_programmes.goal_programme_service.validate_current_binding(db=db,
                             binding=GoalProgrammeAuthorityBinding.from_programme(GoalProgramme.model_validate(raw),
                                 "guardian.goal-discovery.v1"), policy=policy)
                     except GoalProgrammeError:
@@ -955,7 +956,7 @@ async def action(operator, identifier, request, now=None):
         goal = await db.get(Goal, finding["goal_id"], populate_existing=True)
         if goal is None or goal.revision != finding["goal_revision"]:
             raise GoalProgrammeError("programme_goal_review_required")
-        await goal_programme_service._issuer(db, operator, goal)
+        await goal_programmes.goal_programme_service._issuer(db, operator, goal)
         run = await db.scalar(select(WorkflowRunState).where(WorkflowRunState.run_identity == finding["job_id"]))
         if run is None:
             raise GoalProgrammeError("programme_finding_refresh_required")
@@ -1072,7 +1073,7 @@ async def prepare_task(operator, finding, request, *, now=None):
             raise GoalProgrammeError("programme_finding_refresh_required")
         await assert_discovery_authority(db, run.declared_authority_json, run=run)
         goal = await db.get(Goal, finding["goal_id"], populate_existing=True)
-        await goal_programme_service._issuer(db, operator, goal)
+        await goal_programmes.goal_programme_service._issuer(db, operator, goal)
         assert_fresh_sources(witness, now + timedelta(seconds=time.monotonic() - staged_at))
     # No content supplies paths, tool identities or new authority. The server
     # selects a private local output; the operator separately accepts this plan.
@@ -1090,8 +1091,8 @@ async def prepare_task(operator, finding, request, *, now=None):
         goal = await db.get(Goal, finding["goal_id"])
         if goal is None or goal.revision != finding["goal_revision"]:
             raise GoalProgrammeError("programme_goal_review_required")
-        await goal_programme_service._issuer(db, operator, goal)
-        await goal_programme_service.assert_authority(goal_id=goal.id, programme_id=finding["programme_id"],
+        await goal_programmes.goal_programme_service._issuer(db, operator, goal)
+        await goal_programmes.goal_programme_service.assert_authority(goal_id=goal.id, programme_id=finding["programme_id"],
             grant_revision=finding["grant_revision"], capability_id="guardian.goal-discovery.v1")
         mutation = await service.create(db, WorkBoardOwner(principal_id=operator.principal.principal_id,
             session_id=operator.session_id), task_request, publication_authority_check=publication_check,

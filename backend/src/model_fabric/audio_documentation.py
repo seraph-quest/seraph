@@ -6,6 +6,7 @@ as execution authority. This is an explicit source-completeness boundary.
 """
 from __future__ import annotations
 
+import contextlib
 import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -300,10 +301,12 @@ async def metadata_get(url, credential, maximum):
                     or len(advertised)>8 or int(advertised)>maximum):
                     raise DocumentationError('audio_metadata_response_oversized')
                 raw = bytearray()
-                async for chunk in response.aiter_raw():
-                    if len(raw)+len(chunk)>maximum:
-                        raise DocumentationError('audio_metadata_response_oversized')
-                    raw.extend(chunk)
+                # Closed on every exit (a bound raises mid-stream), not by the collector.
+                async with contextlib.aclosing(response.aiter_raw()) as chunks:
+                    async for chunk in chunks:
+                        if len(raw)+len(chunk)>maximum:
+                            raise DocumentationError('audio_metadata_response_oversized')
+                        raw.extend(chunk)
                 if not raw or advertised is not None and len(raw)!=int(advertised):
                     raise DocumentationError('audio_metadata_response_incomplete')
                 return bytes(raw)

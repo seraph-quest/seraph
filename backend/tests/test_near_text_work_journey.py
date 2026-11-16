@@ -72,8 +72,6 @@ async def test_actual_native_https_answer_and_unknown_no_release(accounting_db,r
     from src.api import auth,work_board,model_fabric_settings,goals
     root,engine,factory=accounting_db
     from src.work_board import near_text_native
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
-    monkeypatch.setattr('src.model_fabric.execution.gpu_admission_broker',remote_inference_admission_broker)
     calls=[];body_id='chatcmpl-private-fixture';provider_id=str(uuid5(NAMESPACE_DNS,body_id))
     second_task_id=None
     async def publish_second():
@@ -279,8 +277,6 @@ async def test_expired_contact_finance_recovers_ended_attempt_without_current_gr
     import asyncio
     from src.api import auth,work_board,model_fabric_settings
     from src.work_board.near_text_native import expired_finance_binding,utc
-    from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
-    monkeypatch.setattr('src.model_fabric.execution.gpu_admission_broker',remote_inference_admission_broker)
     _,_,factory=accounting_db
     entered=asyncio.Event();release=asyncio.Event();calls=[]
     async def provider(request):

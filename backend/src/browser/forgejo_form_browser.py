@@ -16,6 +16,7 @@ from src.browser.forgejo_form_grammar import (NATIVE_SNAPSHOT, ordinary_selector
 from src.browser.forgejo_issue_title import (ForgejoError, ORIGIN, MAX_DOCUMENT_BYTES,
     checked_segment, checked_title, positive_id, digest)
 from src.security.http_transport import _TransportLifecycleMarker, request_pinned_https
+from src.utils.background import track_task
 
 
 class ForgejoFormBrowser:
@@ -244,7 +245,7 @@ class ForgejoFormBrowser:
 
             await context.route("**/*", route_guard)
             await context.route_web_socket("**/*", lambda socket: socket.close())
-            context.on("page", lambda other: asyncio.create_task(other.close()) if other != page else None)
+            context.on("page", lambda other: track_task(other.close(), name="forgejo-form:close-popup") if other != page else None)
             await page.goto(ORIGIN + page_path, wait_until="domcontentloaded", timeout=10000)
             if route_failure is not None: raise route_failure
             if (await context.cookies() or await page.locator("details.dropdown .header strong").all_text_contents() != [username]

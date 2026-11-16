@@ -24,6 +24,7 @@ from src.db.models import Goal, MemoryProposal, MemoryProposalStatus, WorkBoardA
 from src.memory.procedure_recommendations import assert_current_root, canonical, digest, read_private_proof
 from src.work_board.repository import BoardError, _begin_sqlite_immediate
 from src.workflows.procedure_contracts import ProcedureCandidateV3, ProcedureSaveRequest
+from src.utils.background import track_task
 
 PROPOSAL_SCHEMA = "task_method_proposal.v1"
 _STAGE_SEAL = object()
@@ -769,7 +770,7 @@ async def create_task_lesson(operator, request: LessonRequest, *, _automatic: bo
             def completed(done):
                 if not done.cancelled():
                     done.exception()
-                    asyncio.create_task(_finish_io(io_start))
+                    track_task(_finish_io(io_start), name="task-lessons:finish-io")
             worker.add_done_callback(completed)
             raise
         finally:

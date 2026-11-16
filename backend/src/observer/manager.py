@@ -10,6 +10,7 @@ from src.audit.runtime import log_background_task_event
 from src.observer.context import CurrentContext
 from src.observer.salience import derive_observer_assessment
 from src.observer.user_state import UserState, user_state_machine
+from src.utils.background import track_task
 from src.utils.clock import get_clock
 
 logger = logging.getLogger(__name__)
@@ -330,7 +331,7 @@ class ContextManager:
                         "State transition %s → %s (epoch=%d) — delivering queued bundle",
                         old.user_state, new_user_state, epoch,
                     )
-                    asyncio.create_task(self._deliver_bundle(epoch))
+                    track_task(self._deliver_bundle(epoch), name=f"observer:deliver-bundle:{epoch}")
 
                 await log_background_task_event(
                     task_name="observer_context_refresh",

@@ -1,4 +1,5 @@
 """Authenticated explicit document selection. Never generic event content."""
+import contextlib
 from contextlib import asynccontextmanager
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -40,10 +41,12 @@ async def _private_build_body(request, model, *, maximum):
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
         raise HTTPException(status_code=415, detail={"code": "document_build_json_required"}, headers=private_headers)
     raw = bytearray()
-    async for chunk in request.stream():
-        if len(raw)+len(chunk) > maximum:
-            raise HTTPException(status_code=413, detail={"code": "document_build_request_bound"}, headers=private_headers)
-        raw.extend(chunk)
+    # Closed on every exit (the bound raises mid-stream), not by the collector.
+    async with contextlib.aclosing(request.stream()) as body_chunks:
+        async for chunk in body_chunks:
+            if len(raw)+len(chunk) > maximum:
+                raise HTTPException(status_code=413, detail={"code": "document_build_request_bound"}, headers=private_headers)
+            raw.extend(chunk)
     try:
         return model.model_validate_json(bytes(raw))
     except ValidationError as exc:
@@ -340,10 +343,10 @@ async def upload_source(request: Request, identifier: str, expected_revision: in
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/octet-stream":
         raise HTTPException(status_code=415, detail={"code": "document_raw_stream_required"})
     try:
-        async with get_session() as db:
+        async with get_session() as db, contextlib.aclosing(request.stream()) as body:
             owner = _owner(_operator(request))
             service = getattr(request.app.state, "document_service", None)
-            await sources.upload(db, owner, identifier, expected_revision, "source", request.stream(), capability=CAPABILITY,
+            await sources.upload(db, owner, identifier, expected_revision, "source", body, capability=CAPABILITY,
                 upload_profile=service._upload_profile if service is not None else None)
             row, _ = await sources.owned(db, owner, identifier, capability=CAPABILITY)
             return projection(row)

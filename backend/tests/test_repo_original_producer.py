@@ -129,8 +129,21 @@ def test_original_command_eof_never_spawns_next_command(tmp_path, monkeypatch):
         child.close()
 
 
-def test_original_command_ordinal_ack_runs_real_command(tmp_path, monkeypatch):
+@pytest.fixture
+def in_process_subreaper():
+    """The production supervisor's subreaper, in this test process for one
+    test only: the flag is process-wide, so it is put back afterwards (#1223)."""
+    from tests.support.leaks import child_subreaper, set_child_subreaper
+    before = child_subreaper()
     repo_supervisor.enable_subreaper()
+    try:
+        yield
+    finally:
+        if before is not None:
+            set_child_subreaper(before)
+
+
+def test_original_command_ordinal_ack_runs_real_command(tmp_path, monkeypatch, in_process_subreaper):
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     control = producer.ProducerControl(child, "a" * 64, time.monotonic() + 5)
     monkeypatch.setattr(repo_supervisor, "ORIGINAL_PRODUCER", control)

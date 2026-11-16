@@ -312,7 +312,7 @@ async def run_near_tee_vertical_call(call, *, priority=None, before_contact=None
     try:
         try:
             response, _outcome = await execute_near_tee_vertical_call(call, request=request,
-                broker=execution.gpu_admission_broker, hooks=hooks, before_contact=before_contact)
+                broker=execution.get_remote_inference_admission_broker(), hooks=hooks, before_contact=before_contact)
         except BaseException as exc:
             error_receipt = getattr(exc, "receipt", None)
             if hooks.attempt_active:

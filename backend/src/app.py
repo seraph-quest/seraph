@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 from pathlib import Path
@@ -20,14 +21,14 @@ from src.model_fabric.configuration import (
     effective_workload_policy,
     read_model_fabric_configuration,
 )
-from src.model_fabric.remote_inference_admission import remote_inference_admission_broker
+from src.model_fabric.remote_inference_admission import get_remote_inference_admission_broker
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError, reject_legacy_external_agent_model
 from src.runbooks.manager import runbook_manager
 from src.scheduler.engine import init_scheduler, shutdown_scheduler, sync_scheduled_jobs
 from src.skills.manager import skill_manager
 from src.starter_packs.manager import starter_pack_manager
 from src.tools.mcp_manager import mcp_manager
-from src.utils.background import drain_tracked_tasks
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
 from src.vlm_runtime import deferred_vlm_live_probe, effective_vlm_status
 from src.runtime_plugins.agent_turns import chat_runtime_status
 
@@ -623,6 +624,9 @@ async def _provider_worker_lifespan(app: FastAPI):
         finally:
             try:
                 await drain_tracked_tasks(timeout_seconds=5.0)
+                # Sync-path audit writers run on their own threads; let them
+                # finish before the engine is disposed (#1223).
+                await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
             except Exception as exc:
                 shutdown_error = exc
             finally:
@@ -987,7 +991,7 @@ def create_app() -> FastAPI:
         from src.api.model_fabric_settings import model_fabric_runtime_status
 
         fabric_status = await model_fabric_runtime_status(str(runtime.get("active_profile") or ""))
-        remote_inference_admission = await remote_inference_admission_broker.status()
+        remote_inference_admission = await get_remote_inference_admission_broker().status()
         setup_status = fabric_status.get("openrouter_setup")
         remote_inference_admission["verification"] = {
             # The contract is covered by local deterministic tests; this

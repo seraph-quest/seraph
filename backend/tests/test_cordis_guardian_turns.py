@@ -883,8 +883,6 @@ async def test_strategist_inference_lands_in_the_one_broker_and_ledger_on_both_o
     from src.db.models import InferenceCostReservation
     from src.model_fabric import remote_inference_admission
     from tests.near_tee_support import near_inference_requests, prepare_near_tee_vertical
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker",
-                        remote_inference_admission.remote_inference_admission_broker)
     near = await prepare_near_tee_vertical(monkeypatch, jobs=durable_job_repository)
     near.answer = {"role": "assistant", "content": STRATEGIST_SCENARIOS["no_intervene"]}
     ledger = {}

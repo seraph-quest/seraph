@@ -85,7 +85,6 @@ async def test_source_eligibility_uses_real_scheduler_daily_occurrence_and_nativ
 @pytest.fixture
 async def digest_owner(programme_setup, async_db, monkeypatch):
     service, operator, goal, request, clock = programme_setup
-    monkeypatch.setattr(digest, "goal_programme_service", service)
     monkeypatch.setattr("src.guardian.goal_programmes.goal_programme_service", service)
     monkeypatch.setattr("config.settings.settings.user_timezone", "Europe/Warsaw")
     clock[0] = datetime.now(timezone.utc).replace(hour=8, minute=0, second=0, microsecond=0)

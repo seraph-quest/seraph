@@ -15,6 +15,7 @@ from sqlalchemy import select
 from tests.test_general_task_planner import accounting_db, forbid_external_inference, prepare
 from tests.test_work_board_m6_provider_free_journey import _goal
 from tests.test_document_build_native_capacity import build_admission_lifecycle
+from tests.support.brokers import use_inference_broker
 
 # ADR-035: pins general-task planning/continuation/accounting mechanics whose model step runs over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -159,8 +160,7 @@ async def test_http_governed_intent_plan_accept_native_readback_and_restart(acco
         restored.start()
         restarted = WorkBoardDispatcher(session_provider=sessions, general_tasks=restored)
         monkeypatch.setattr(module, "dispatcher", restarted)
-        monkeypatch.setattr("src.model_fabric.remote_inference_admission.remote_inference_admission_broker",
-            RemoteInferenceAdmissionBroker(durable_accounting=True))
+        use_inference_broker(monkeypatch, RemoteInferenceAdmissionBroker(durable_accounting=True))
         replay = await client.post("/api/work-board/general-tasks", json=body)
         assert replay.status_code == 200, replay.text
         assert replay.json()["idempotent_replay"]

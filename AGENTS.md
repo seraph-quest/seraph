@@ -166,6 +166,22 @@ from the shard runner only; run it with
 `uv run python scripts/run_backend_test_shard.py --files tests/test_repo_repair_executors.py`,
 since plain `uv run pytest` on it fails on the leak.
 
+Process-global state is registered (#1223). Every module-level mutable in
+`backend/src` has an entry in `backend/tests/support/process_state_registry.py`
+(restored around every test, reset, or shared with a stated reason), and
+`tests/test_process_state_registry.py` fails on an unregistered one. It also
+fails on a dropped `create_task`/`ensure_future` handle in src: spawn
+background work with `src.utils.background.track_task`. A test fails at
+teardown if it leaves a task pending when its pytest-asyncio loop closes, a
+thread running, a registered lock held, or a child process running or
+unreaped. Read an HTTP body iterator through `contextlib.aclosing`.
+Exceptions live only in `backend/tests/support/leaks.py`, each naming its
+issue. Reach the remote-inference broker through
+`get_remote_inference_admission_broker()`; each test gets a fresh one, and a
+test installs its own with `tests.support.brokers.use_inference_broker`.
+`run_backend_test_shard.py --single-process [--reverse]` runs a whole shard in
+one process, in file order or reversed.
+
 Determinism lanes (#1220) never retry a test to turn a job green. A pull
 request's changed backend test files run 20 times under CPU contention in
 printed random orders (`stress-changed-tests`), with watchdogs scaled to the

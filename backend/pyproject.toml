@@ -74,14 +74,9 @@ filterwarnings = [
     # child and its pipes gets its exception as -W in
     # scripts/run_backend_test_shard.py (TRACKED_LEAK_FILES), not here.
     #
-    # #1223: pytest-asyncio 1.3.0 asks asyncio.get_event_loop() for the "old"
-    # loop when it builds a scoped runner (plugin.py _temporary_event_loop_policy).
-    # On a fresh main thread that implicitly creates a loop nobody closes; the
-    # loop and its self-pipe socketpair (AF_UNIX, no address) are collected
-    # later. An application loop leaked the same way would match too, so the
-    # #1223 leak checks replace these two; sockets with an address still fail.
-    "ignore:unclosed event loop <_UnixSelectorEventLoop running=False closed=False debug=False>:ResourceWarning",
-    "ignore:unclosed <socket.socket fd=\\d+, family=1, type=1, proto=0>:ResourceWarning",
+    # (#1223 removed the two ignores for the event loop pytest-asyncio's
+    # runner made implicitly: tests/support/leaks.py marks the main thread's
+    # loop as explicitly unset at configure time, so none is created.)
     # #1222: seen in test_cordis_governed_services under the per-file
     # accounting_db engine. Per-file engines are also reached through sync
     # bridges that run asyncio.run() on a helper thread, so a pooled aiosqlite

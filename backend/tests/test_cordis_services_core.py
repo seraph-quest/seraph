@@ -39,6 +39,7 @@ from src.runtime_plugins.service_jobs import (
     admit_service_job, claim_service_job, execute_native_read, open_invocation, verified_task_call)
 from src.workflows.job_runtime import DurableJobLeaseError, DurableJobRepository
 from src.workspace.lifecycle import lifecycle_fence_marker
+from src.utils.background import drain_tracked_tasks, join_tracked_threads
 
 NODE = os.environ.get("SERAPH_CORDIS_TEST_NODE")
 PACKAGE = Path(__file__).resolve().parents[2] / "runtime" / "cordis"
@@ -87,9 +88,15 @@ async def service_db(tmp_path, monkeypatch):
         # A non-empty inventory is never reseeded or repaired.
         assert await connection.run_sync(seed_legacy_inventory_sync) == 0
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    with override_session_factory(factory):
-        yield db_path
-    await engine.dispose()
+    try:
+        with override_session_factory(factory):
+            yield db_path
+            # As the `db` fixture: tracked background work (runtime audits)
+            # writes to this engine, so it finishes first (#1223).
+            await drain_tracked_tasks(timeout_seconds=5.0)
+            await asyncio.to_thread(join_tracked_threads, timeout_seconds=5.0)
+    finally:
+        await engine.dispose()
 
 
 async def _operator():

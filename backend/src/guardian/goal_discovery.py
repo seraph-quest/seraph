@@ -14,7 +14,8 @@ from uuid import UUID, uuid5, NAMESPACE_URL
 
 from sqlalchemy import select
 from src.db.models import Goal, WorkflowRunState, InferenceCostReservation
-from src.guardian.goal_programmes import goal_programme_service, _load
+from src.guardian import goal_programmes
+from src.guardian.goal_programmes import _load
 from src.goals.contracts import GoalProgramme, GoalProgrammeAuthorityBinding
 from src.guardian.research_plan_contracts import (
     GoalResearchPlanSpecV1, SearchManifestV1, SourceSelectionV1, Closed)
@@ -176,11 +177,11 @@ class GoalDiscoveryService:
         return uuid5(NAMESPACE_URL, f"seraph:public-discovery:{owner_identity_id}:{programme_id}:{day}")
 
     def _today(self):
-        return goal_programme_service._clock().astimezone(timezone.utc).date().isoformat()
+        return goal_programmes.goal_programme_service._clock().astimezone(timezone.utc).date().isoformat()
 
     async def admit(self, *, goal_id, programme_id, grant_revision):
         self._ready()
-        programme = await goal_programme_service.assert_authority(goal_id=goal_id,
+        programme = await goal_programmes.goal_programme_service.assert_authority(goal_id=goal_id,
             programme_id=programme_id, grant_revision=grant_revision, capability_id=DISCOVERY_CAPABILITY)
         binding = GoalProgrammeAuthorityBinding.from_programme(programme, DISCOVERY_CAPABILITY)
         from src.workflows.job_runtime import _utc_now
@@ -764,7 +765,7 @@ class GoalDiscoveryService:
 
     async def inspect(self, *, operator, goal_id):
         self._ready()
-        owned = await goal_programme_service.inspect(operator=operator, goal_id=goal_id)
+        owned = await goal_programmes.goal_programme_service.inspect(operator=operator, goal_id=goal_id)
         ids = {programme["id"] for programme in owned["programmes"]}
         from src.work_board.research_parent import discovery_authority
         async with self.jobs._session() as db:
@@ -830,7 +831,7 @@ class GoalDiscoveryService:
         self._ready()
         # Current read authorization precedes filesystem access. Recheck its
         # exact live owner and immutable generation in the same final writer.
-        await goal_programme_service.inspect(operator=operator, goal_id=goal_id)
+        await goal_programmes.goal_programme_service.inspect(operator=operator, goal_id=goal_id)
         witness = await physical_discovery_inputs(self.jobs, job_id, completed_read=True)
         if witness.plan.goal_id != goal_id or witness.plan.programme_id.hex != programme_id:
             raise PermissionError("programme_discovery_selected_binding_mismatch")
@@ -843,7 +844,7 @@ class GoalDiscoveryService:
                 await db.execute(text("BEGIN IMMEDIATE"))
                 run = await self.jobs._fetch(db, job_id)
                 goal = await db.get(Goal, goal_id)
-                current_root, identity = await goal_programme_service._issuer(db, operator, goal, require_goal_owner=False)
+                current_root, identity = await goal_programmes.goal_programme_service._issuer(db, operator, goal, require_goal_owner=False)
                 if current_root.id != goal.owner_session_id:
                     from src.auth.ownership import selected_read_scopes
                     if (await selected_read_scopes(operator, "goal", db=db)).get(goal.id) != goal.owner_session_id:

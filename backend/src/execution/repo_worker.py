@@ -112,20 +112,39 @@ def _wait_process_group_quiescent(pgid: int, *, deadline_at: float | None) -> No
         time.sleep(min(0.01, remaining))
 
 
+# This file also runs standalone inside the worker container, so it cannot
+# import src.execution.process_reap; this mirrors its KILL_REAP_LIVENESS_SECONDS
+# (pinned equal by tests/test_repo_repair_executors.py).
+KILL_REAP_LIVENESS_SECONDS = 30.0
+
+# Liveness bound for a drain thread to reach EOF after its process group was
+# killed or exited. It decides nothing on time: a thread that has not ended
+# keeps its stream (#1235).
+OUTPUT_DRAIN_LIVENESS_SECONDS = 30.0
+
+
 def _terminate_and_reap_process(
     process: subprocess.Popen[bytes],
     *,
     deadline_at: float | None,
 ) -> None:
-    """Kill and prove quiescence without adding a fixed post-deadline wait."""
+    """Kill, reap the direct child, and prove group quiescence.
+
+    The reap after a delivered SIGKILL is bounded by the shared kill-reap
+    liveness bound, not by what is left of the deadline: at the deadline that
+    remainder is about zero, and a wait of zero left the killed child
+    unreaped for ``Popen.__del__`` (#1235). A killed child is normally
+    reapable at once; the bound only stops an unkillable child (stuck in
+    uninterruptible sleep) from hanging the owner, and then cleanup stays
+    unproven. Group quiescence keeps the original deadline.
+    """
 
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    remaining = 0.25 if deadline_at is None else max(0.0, min(0.25, float(deadline_at) - time.monotonic()))
     try:
-        process.wait(timeout=remaining)
+        process.wait(timeout=KILL_REAP_LIVENESS_SECONDS)
     except subprocess.TimeoutExpired as exc:
         raise WorkerInputError("worker process cleanup is unproven") from exc
     _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
@@ -769,11 +788,15 @@ def _run_fixed(
         if stdout_thread.is_alive() or stderr_thread.is_alive():
             raise WorkerInputError("worker output cleanup exceeded the wall deadline")
 
+    # True once the direct child is reaped and its group proven empty: no
+    # writer is left, so the drain threads reach EOF promptly.
+    writers_gone = False
     try:
         if deadline_at is not None:
             remaining = float(deadline_at) - time.monotonic()
             if remaining <= 0:
                 _terminate_and_reap_process(process, deadline_at=deadline_at)
+                writers_gone = True
                 raise WorkerInputError("worker wall deadline expired before process completion")
             timeout = min(float(timeout), remaining)
         process.wait(timeout=max(0.0, float(timeout)))
@@ -790,6 +813,7 @@ def _run_fixed(
         return int(process.returncode or 0), bytes(stdout_buffer), bytes(stderr_buffer), False
     except subprocess.TimeoutExpired:
         _terminate_and_reap_process(process, deadline_at=deadline_at)
+        writers_gone = True
         _join_output_threads()
         _wait_process_group_quiescent(process.pid, deadline_at=deadline_at)
         if process_observer is not None:
@@ -799,9 +823,15 @@ def _run_fixed(
                 raise WorkerInputError("worker terminal identity observation failed") from exc
         return 124, bytes(stdout_buffer), bytes(stderr_buffer), True
     finally:
-        # The owner closes the pipes it opened (#1224). A drain thread still
-        # reading (output cleanup exceeded the deadline) keeps its stream; it
-        # ends at EOF once the process group is gone.
+        # The owner closes the pipes it opened (#1224). After the deadline kill
+        # the drain threads may still be reading output the reaped group left
+        # buffered; with no writer left they end at EOF, so wait for that under
+        # one shared liveness bound and then close (#1235). When a writer may
+        # survive, nothing waits: the drain thread keeps its stream until EOF.
+        if writers_gone:
+            drained_by = time.monotonic() + OUTPUT_DRAIN_LIVENESS_SECONDS
+            for thread in (stdout_thread, stderr_thread):
+                thread.join(max(0.0, drained_by - time.monotonic()))
         if not stdout_thread.is_alive() and not stderr_thread.is_alive():
             _close_child_streams(process)
 

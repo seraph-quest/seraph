@@ -304,7 +304,7 @@ def _review(
 _CANONICAL_ADAPTERS = (
     _review(
         "model_fabric/near_client.py",
-        98,
+        99,
         "read_near_response",
         "client.stream",
         "canonical_adapter",
@@ -313,7 +313,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "model_fabric/near_client.py",
-        161,
+        164,
         "stream_near_events",
         "client.send",
         "canonical_adapter",
@@ -322,7 +322,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1742,
+        1744,
         "_governed_bounded_chat_transfer",
         "client.stream",
         "canonical_adapter",
@@ -331,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1680,
+        1682,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -340,7 +340,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        5318,
+        5322,
         "stream_completion_with_fallback.default_transport",
         "client.stream",
         "canonical_adapter",
@@ -371,7 +371,7 @@ _CANONICAL_ADAPTERS = (
 _REVIEWED_EXCEPTIONS = (
     _review(
         "browser/pinned_transport.py",
-        638,
+        639,
         "PinnedBrowserTransport.resolve_and_fetch",
         "client.stream",
         "non_model_transport",
@@ -380,7 +380,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "extensions/telegram_document_transport.py",
-        48,
+        49,
         "TelegramDocumentHTTP.acquire",
         "client.stream",
         "non_model_transport",
@@ -389,7 +389,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "extensions/telegram_document_transport.py",
-        62,
+        65,
         "TelegramDocumentHTTP.acquire",
         "client.stream",
         "non_model_transport",
@@ -398,7 +398,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "model_fabric/audio_documentation.py",
-        288,
+        289,
         "metadata_get",
         "client.stream",
         "non_model_transport",
@@ -416,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "security/http_transport.py",
-        444,
+        445,
         "_request_pinned_https",
         "client.stream",
         "non_model_transport",
@@ -425,7 +425,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4351,
+        4355,
         "FallbackLiteLLMModel.generate.invoke_primary_transport",
         "BaseLiteLLMModel.generate",
         "transitional_provider_call",
@@ -434,7 +434,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4431,
+        4435,
         "FallbackLiteLLMModel.generate.invoke_fallback_transport",
         "fallback_model.generate",
         "transitional_provider_call",
@@ -443,7 +443,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4913,
+        4917,
         "completion_with_fallback_sync.invoke_primary_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -452,7 +452,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "llm_runtime.py",
-        4992,
+        4996,
         "completion_with_fallback_sync.invoke_fallback_transport",
         "litellm.completion",
         "transitional_provider_call",
@@ -461,7 +461,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2417,
+        2418,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",
@@ -470,7 +470,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2430,
+        2431,
         "_execute_canary_transport",
         "client.stream",
         "capability_probe",
@@ -479,7 +479,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "api/model_fabric_settings.py",
-        2445,
+        2447,
         "_execute_canary_transport",
         "client.post",
         "capability_probe",

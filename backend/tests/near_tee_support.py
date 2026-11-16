@@ -170,6 +170,7 @@ def restore_repository_repair_route_block(monkeypatch) -> None:
 
 
 from src.model_fabric import near_tee_vertical as _near_tee_vertical  # noqa: E402
+from tests.support.brokers import use_inference_broker
 _REAL_REPOSITORY_REPAIR_ROUTE_BLOCK = _near_tee_vertical.repository_repair_route_block
 
 
@@ -248,11 +249,7 @@ def install_isolated_broker(monkeypatch):
     from src.api import model_fabric_settings as api
     from src.model_fabric import execution, probe, remote_inference_admission
     broker = remote_inference_admission.RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr(remote_inference_admission, "remote_inference_admission_broker", broker)
-    monkeypatch.setattr(llm_runtime, "gpu_admission_broker", broker)
-    monkeypatch.setattr(execution, "gpu_admission_broker", broker)
-    monkeypatch.setattr(probe, "remote_inference_admission_broker", broker)
-    monkeypatch.setattr(api, "remote_inference_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     return broker
 
 

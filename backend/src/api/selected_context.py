@@ -1,6 +1,7 @@
 """Closed signed companion ingress and current owned Task attachment controls."""
 from __future__ import annotations
 
+import contextlib
 import time
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.routing import APIRoute
@@ -48,10 +49,12 @@ def operator(request):
 
 async def body(request, schema):
     raw = bytearray()
-    async for chunk in request.stream():
-        if len(raw) + len(chunk) > MAX_ENVELOPE_BYTES:
-            deny("selected_context_envelope_bound", 413)
-        raw.extend(chunk)
+    # Closed on every exit (the bound raises mid-stream), not by the collector.
+    async with contextlib.aclosing(request.stream()) as body_chunks:
+        async for chunk in body_chunks:
+            if len(raw) + len(chunk) > MAX_ENVELOPE_BYTES:
+                deny("selected_context_envelope_bound", 413)
+            raw.extend(chunk)
     return parse_body(bytes(raw), schema)
 
 

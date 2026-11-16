@@ -13,6 +13,7 @@ from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
 from src.workflows.job_runtime import DurableJobRepository
 from src.utils.clock import get_clock
 from tests.support.clock import advance_until_done, fake_clock  # noqa: F401
+from tests.support.sync import within
 
 # ADR-035: pins the bounded research HTTP envelope over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -106,7 +107,16 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
     # spent, not a wall-clock bound.
     executing = asyncio.ensure_future(
         broker.execute(request("response-"+kind), lambda: _governed_research_chat_completion(**kwargs)))
-    spent = await advance_until_done(fake_clock, executing, what=f"bounded research HTTP failure ({kind})")
+    if kind == "trickle":
+        spent = await advance_until_done(fake_clock, executing, what=f"bounded research HTTP failure ({kind})")
+    else:
+        # Every other failure must end on its own: the clock is never advanced,
+        # so a failure that waited for its deadline would hang to the liveness
+        # bound instead of passing. (Advancing here raced the response close,
+        # which still has awaits after the deadline timer is armed, #1223.)
+        started_at = fake_clock.monotonic()
+        await within(asyncio.wait({executing}), what=f"bounded research HTTP failure ({kind}) ending on its own")
+        spent = fake_clock.monotonic() - started_at
     with pytest.raises(GpuAdmissionUncertainError):
         await executing
     # The absolute deadline cut the trickle mid-body; every other failure ends

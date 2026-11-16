@@ -24,6 +24,7 @@ from src.runtime_plugins.board_worker_turns import (BOARD_WORKERS_DOMAIN, PRESET
                                                     board_worker_runtime_status)
 from src.work_board.dispatcher import WorkBoardDispatcher
 from src.workflows.job_runtime import DurableJobRepository, durable_job_repository
+from tests.support.brokers import use_inference_broker
 
 pytestmark = [needs_cordis, pytest.mark.asyncio]
 OUTPUT = {"subject": "Re: Architecture review", "body": "Thanks, I will follow up next week.",
@@ -89,8 +90,7 @@ async def _setup(accounting_db, monkeypatch):  # noqa: F811
     _NEAR["fixture"] = await prepare_near_tee_vertical(monkeypatch, jobs=durable_job_repository)
     from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    monkeypatch.setattr("src.llm_runtime.gpu_admission_broker", broker)
-    monkeypatch.setattr("src.model_fabric.execution.gpu_admission_broker", broker)
+    use_inference_broker(monkeypatch, broker)
     return async_db
 
 

@@ -343,10 +343,10 @@ async def upload_source(request: Request, identifier: str, expected_revision: in
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/octet-stream":
         raise HTTPException(status_code=415, detail={"code": "document_raw_stream_required"})
     try:
-        async with get_session() as db:
+        async with get_session() as db, contextlib.aclosing(request.stream()) as body:
             owner = _owner(_operator(request))
             service = getattr(request.app.state, "document_service", None)
-            await sources.upload(db, owner, identifier, expected_revision, "source", request.stream(), capability=CAPABILITY,
+            await sources.upload(db, owner, identifier, expected_revision, "source", body, capability=CAPABILITY,
                 upload_profile=service._upload_profile if service is not None else None)
             row, _ = await sources.owned(db, owner, identifier, capability=CAPABILITY)
             return projection(row)

@@ -194,24 +194,52 @@ def test_spawn_guard_detects_dropped_handles():
 
 # ── Bounded stream reads ────────────────────────────────
 
-STREAM_ITERATORS = {"aiter_bytes", "aiter_raw", "aiter_lines", "aiter_text", "stream"}
+AITER_METHODS = {"aiter_bytes", "aiter_raw", "aiter_lines", "aiter_text"}
 
 
-def _bare_stream_loops(tree: ast.AST) -> list[int]:
-    """``async for`` straight over an HTTP body iterator.
+def _unclosed_body_iterators(tree: ast.AST) -> list[int]:
+    """HTTP body iterators src opens without closing them explicitly.
 
-    A bounded read raises mid-iteration; without ``contextlib.aclosing`` the
-    iterator is left for the collector, whose finalizer task outlives the
-    request (and the test). ``self.stream()``/``super().stream()`` delegation
-    inside the inference broker is out of scope here (tracked separately).
+    A bounded read raises mid-iteration; an iterator nobody closed is left to
+    the collector, whose finalizer task outlives the request (and the test).
+    Each ``aiter_*()`` (and Starlette's ``request.stream()``) must be the
+    argument of ``contextlib.aclosing`` or be bound to a name whose
+    ``aclose()`` the same function calls. Delegation between the inference
+    broker's own streams is tracked separately (#1245).
     """
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    def is_body_iterator(node: ast.AST) -> bool:
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            return False
+        if node.func.attr in AITER_METHODS:
+            return True
+        owner = node.func.value
+        return node.func.attr == "stream" and isinstance(owner, ast.Name) and owner.id == "request"
+
+    def closed_by_name(node: ast.AST) -> bool:
+        parent = parents.get(node)
+        if not (isinstance(parent, ast.Assign) and len(parent.targets) == 1 and isinstance(parent.targets[0], ast.Name)):
+            return False
+        name = parent.targets[0].id
+        scope = parent
+        while scope is not None and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+            scope = parents.get(scope)
+        return any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "aclose"
+                   and isinstance(call.func.value, ast.Name) and call.func.value.id == name
+                   for call in ast.walk(scope))
+
     lines = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.AsyncFor) and isinstance(node.iter, ast.Call)
-                and isinstance(node.iter.func, ast.Attribute) and node.iter.func.attr in STREAM_ITERATORS):
+        if not is_body_iterator(node):
             continue
-        owner = node.iter.func.value
-        if node.iter.func.attr == "stream" and not (isinstance(owner, ast.Name) and owner.id == "request"):
+        parent = parents.get(node)
+        wrapped = (isinstance(parent, ast.Call) and node in parent.args
+                   and ((isinstance(parent.func, ast.Attribute) and parent.func.attr == "aclosing")
+                        or (isinstance(parent.func, ast.Name) and parent.func.id == "aclosing")))
+        # ``yield response.aiter_bytes()`` hands the iterator to the caller,
+        # who owns closing it.
+        if wrapped or closed_by_name(node) or isinstance(parent, ast.Yield):
             continue
         lines.append(node.lineno)
     return lines
@@ -220,6 +248,23 @@ def _bare_stream_loops(tree: ast.AST) -> list[int]:
 def test_src_closes_http_body_iterators_explicitly():
     offenders = []
     for path in sorted(SRC_ROOT.rglob("*.py")):
-        for line in _bare_stream_loops(ast.parse(path.read_text(encoding="utf-8"))):
+        for line in _unclosed_body_iterators(ast.parse(path.read_text(encoding="utf-8"))):
             offenders.append(f"{path.relative_to(SRC_ROOT.parent)}:{line}")
-    assert not offenders, f"wrap the body iterator in contextlib.aclosing: {offenders}"
+    assert not offenders, f"close the body iterator with contextlib.aclosing (or aclose()): {offenders}"
+
+
+def test_body_iterator_guard_detects_unclosed_iterators():
+    tree = ast.parse(textwrap.dedent("""
+        import contextlib
+        async def f(response, request):
+            async for chunk in response.aiter_raw():
+                pass
+            async with contextlib.aclosing(response.aiter_bytes()) as chunks:
+                pass
+            held = response.aiter_lines()
+            kept = response.aiter_text()
+            await kept.aclose()
+            async for chunk in request.stream():
+                pass
+    """))
+    assert sorted(_unclosed_body_iterators(tree)) == [4, 8, 11]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import contextlib
 import hashlib
 import json
 import re
@@ -2124,8 +2125,9 @@ async def upload_document_source(request: Request, identifier: str, slot: str, e
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/octet-stream":
         raise HTTPException(status_code=415, detail={"code": "document_raw_stream_required"})
     try:
-        async with get_session() as db:
-            return await upload(db, _owner(_operator(request)), identifier, expected_revision, slot, request.stream())
+        # Closed on every exit (the upload bound raises mid-stream), not by the collector.
+        async with get_session() as db, contextlib.aclosing(request.stream()) as body:
+            return await upload(db, _owner(_operator(request)), identifier, expected_revision, slot, body)
     except BoardError as exc:
         _raise_board_error(exc)
 

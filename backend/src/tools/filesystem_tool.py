@@ -139,11 +139,15 @@ def _open_workspace_file(
         # This context owns every descriptor it opened, the yielded one too.
         # Callers read through it (or wrap it with ``closefd=False``) and never
         # close it themselves; a successful read used to leak it (#1223).
-        if final_fd is not None:
-            os.close(final_fd)
-        if parent_fd != root_fd:
-            os.close(parent_fd)
-        os.close(root_fd)
+        try:
+            if final_fd is not None:
+                os.close(final_fd)
+        finally:
+            try:
+                if parent_fd != root_fd:
+                    os.close(parent_fd)
+            finally:
+                os.close(root_fd)
 
 
 @contextmanager

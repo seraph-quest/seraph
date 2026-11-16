@@ -788,11 +788,15 @@ def _run_fixed(
         if stdout_thread.is_alive() or stderr_thread.is_alive():
             raise WorkerInputError("worker output cleanup exceeded the wall deadline")
 
+    # True once the direct child is reaped and its group proven empty: no
+    # writer is left, so the drain threads reach EOF promptly.
+    writers_gone = False
     try:
         if deadline_at is not None:
             remaining = float(deadline_at) - time.monotonic()
             if remaining <= 0:
                 _terminate_and_reap_process(process, deadline_at=deadline_at)
+                writers_gone = True
                 raise WorkerInputError("worker wall deadline expired before process completion")
             timeout = min(float(timeout), remaining)
         process.wait(timeout=max(0.0, float(timeout)))
@@ -818,15 +822,15 @@ def _run_fixed(
                 raise WorkerInputError("worker terminal identity observation failed") from exc
         return 124, bytes(stdout_buffer), bytes(stderr_buffer), True
     finally:
-        # The owner closes the pipes it opened (#1224). On an early exit the
-        # drain threads may still be reading the output the killed group left
-        # buffered; they end at EOF once no writer remains, so wait for that
-        # (liveness bound only) and then close. A drain thread still reading
-        # after the bound (a writer survived) keeps its stream, which it owns
-        # until EOF (#1235).
-        for thread in (stdout_thread, stderr_thread):
-            if thread.is_alive():
-                thread.join(OUTPUT_DRAIN_LIVENESS_SECONDS)
+        # The owner closes the pipes it opened (#1224). After the deadline kill
+        # the drain threads may still be reading output the reaped group left
+        # buffered; with no writer left they end at EOF, so wait for that under
+        # one shared liveness bound and then close (#1235). When a writer may
+        # survive, nothing waits: the drain thread keeps its stream until EOF.
+        if writers_gone:
+            drained_by = time.monotonic() + OUTPUT_DRAIN_LIVENESS_SECONDS
+            for thread in (stdout_thread, stderr_thread):
+                thread.join(max(0.0, drained_by - time.monotonic()))
         if not stdout_thread.is_alive() and not stderr_thread.is_alive():
             _close_child_streams(process)
 

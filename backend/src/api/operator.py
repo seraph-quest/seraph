@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 import logging
 import re
@@ -3680,7 +3681,8 @@ async def _benchmark_reports_in_order(*reports):
             results.append(await report)
     finally:
         for report in reports[len(results) + 1:]:
-            report.close()
+            if inspect.iscoroutine(report):
+                report.close()
     return results
 
 

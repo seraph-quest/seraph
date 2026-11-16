@@ -1,6 +1,7 @@
 """Fire-and-forget background task and thread tracking with error logging."""
 
 import asyncio
+import contextvars
 import logging
 import threading
 import time
@@ -96,7 +97,10 @@ def start_tracked_thread(target, *, name: str) -> threading.Thread:
     caller's audit write on a dedicated event loop. ``join_tracked_threads``
     waits for it, so it does not outlive the engine it writes to.
     """
-    thread = threading.Thread(target=target, name=name, daemon=True)
+    # Run in a copy of the caller's context, as asyncio.to_thread does: a new
+    # thread otherwise starts with empty context variables and loses scoped
+    # state such as the session-factory override.
+    thread = threading.Thread(target=contextvars.copy_context().run, args=(target,), name=name, daemon=True)
     with _threads_lock:
         # Started under the lock, so a concurrent join or prune never sees
         # it registered but not yet alive.

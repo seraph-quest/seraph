@@ -4484,10 +4484,17 @@ def test_eval_sync_client_routes_every_sync_runtime_db_alias_through_the_session
                "src.api.workflows.get_session", "src.observer.screen_repository.get_session",
                "src.workflows.durable_state.get_session", "src.workflows.manager.get_session",
                "src.memory.superiority.get_session")
+    from src.utils.background import join_tracked_threads, start_tracked_thread
     client, patches, stack = harness._make_sync_client_with_db()
     try:
         override = db_engine._session_factory_override.get()
         assert override is not None
+        # Background writers on their own threads (sync-path audits) reach the
+        # eval database too, not the canonical one.
+        seen = []
+        start_tracked_thread(lambda: seen.append(db_engine._session_factory_override.get()), name="eval-db-probe")
+        assert join_tracked_threads(timeout_seconds=30) == []
+        assert seen == [override]
         for alias in aliases:
             module, name = alias.rsplit(".", 1)
             assert getattr(importlib.import_module(module), name) is db_engine.get_session, alias

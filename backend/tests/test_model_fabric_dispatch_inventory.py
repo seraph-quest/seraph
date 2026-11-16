@@ -331,7 +331,7 @@ _CANONICAL_ADAPTERS = (
     ),
     _review(
         "llm_runtime.py",
-        1679,
+        1680,
         "_governed_openai_chat_completion",
         "client.post",
         "canonical_adapter",
@@ -416,7 +416,7 @@ _REVIEWED_EXCEPTIONS = (
     ),
     _review(
         "security/http_transport.py",
-        442,
+        444,
         "_request_pinned_https",
         "client.stream",
         "non_model_transport",

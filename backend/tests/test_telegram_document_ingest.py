@@ -121,8 +121,7 @@ async def test_actual_original_event_quota_before_http_physical_first_seal_and_e
             preparation_body = {"artifact_ref": "document-source:" + current.artifact_id,
                 "expected_source_revision": current.revision, "citation_refs": [leaf["source_ref"]],
                 "acknowledge_local_use": True, "idempotency_key": "separate-explicit-local-preparation"}
-        from src.api import work_board, documents as documents_api
-        monkeypatch.setattr(documents_api, "get_session", async_db)
+        from src.api import work_board
         from src.work_board.dispatcher import WorkBoardDispatcher, _parse_typed_input
         dispatcher = WorkBoardDispatcher(session_provider=async_db, general_tasks=work_board.dispatcher.general_tasks)
         monkeypatch.setattr(work_board, "dispatcher", dispatcher)
@@ -399,8 +398,6 @@ async def test_copy_of_private_original_witness_cannot_reserve(client, async_db,
 
 
 async def ready_source(client, async_db, monkeypatch):
-    from src.api import documents as documents_api
-    monkeypatch.setattr(documents_api, "get_session", async_db)
     adapter, boundary, service, event, owner, raw, contacts = await prepare(client, monkeypatch, async_db)
     response = await client.post("/api/telegram/updates", json=event)
     assert response.status_code == 200, response.text

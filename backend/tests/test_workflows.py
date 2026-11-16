@@ -56,6 +56,9 @@ from src.tools.approval import ApprovalTool
 from src.workflows.durable_state import workflow_state_repository
 from src.workflows.run_identity import build_workflow_run_identity
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 class DummyTool:
     def __init__(self, name: str, responder):

@@ -24,7 +24,6 @@ from src.workflows.job_runtime import DurableJobError
 from sqlalchemy import select
 
 from config.settings import settings
-from src.api import mail
 from src.db.models import CalendarEventBinding, CalendarReadConsent, GoogleServiceConnection, Goal, MailLabelBinding, MailMessageBinding, MailReadConsent, OperatorIdentity, OperatorSession, Session, WorkflowRunState
 from src.integrations import connection_sync as sync
 from src.integrations.gmail_read import GMAIL_READONLY_SCOPE, GoogleGmailReadonlyAdapter, message_key
@@ -38,8 +37,6 @@ OWNER = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-aut
 
 @pytest_asyncio.fixture
 async def source(async_db, monkeypatch, tmp_path):
-    monkeypatch.setattr(sync, "get_session", async_db)
-    monkeypatch.setattr(mail, "get_session", async_db)
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     monkeypatch.setattr(settings, "deployment_environment", "test")
     monkeypatch.setattr(crypto, "_fernet", None)

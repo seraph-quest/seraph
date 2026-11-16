@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-pytestmark = pytest.mark.usefixtures("mocked_canonical_inference_context")
+pytestmark = [pytest.mark.usefixtures("mocked_canonical_inference_context"), pytest.mark.usefixtures("db")]
 
 from config.settings import settings
 from src.audit.repository import audit_repository

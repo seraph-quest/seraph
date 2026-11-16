@@ -199,9 +199,7 @@ async def test_actual_authenticated_stop_and_task_discovery_capture(accounting_d
                     general_task_service=service, reason="operator_cancelled")
             assert stopped["pending"] is True
     # Existing singleton owns the exact fixture Source and durable repository.
-    monkeypatch.setattr(workflows_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
-    monkeypatch.setattr(board_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(board_api.dispatcher, "general_tasks", service)
     monkeypatch.setattr(board_api.dispatcher, "jobs", jobs)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "localhost,test,127.0.0.1")

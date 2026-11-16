@@ -27,7 +27,7 @@ from src.approval.exceptions import ApprovalRequired
 from src.security.trust_contract import AuthorityGrant, EgressClass, PrincipalType, TrustPrincipal
 
 # ADR-035: drives the real agent loop over the scripted governed OpenRouter transport; retired chat denial is covered in test_openrouter_retirement.py
-pytestmark = pytest.mark.openrouter_legacy
+pytestmark = [pytest.mark.openrouter_legacy, pytest.mark.usefixtures("db")]
 
 PRINCIPAL = TrustPrincipal(principal_id="operator:test", principal_type=PrincipalType.OPERATOR,
                            grants=(AuthorityGrant.MODEL_INFERENCE,))

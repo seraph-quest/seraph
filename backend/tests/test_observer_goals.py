@@ -5,6 +5,9 @@ import pytest
 from src.audit.repository import audit_repository
 from src.observer.sources.goal_source import gather_goals
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 _OWNER_SCOPE = {
     "owner_principal_id": "operator:test",

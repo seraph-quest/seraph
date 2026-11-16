@@ -14,17 +14,8 @@
     "backend/tests/conftest.py": {
       "environ-assign": 2
     },
-    "backend/tests/connected_source_native_fixture.py": {
-      "get-session-patch": 1
-    },
     "backend/tests/fixtures/connection_sync_process.py": {
       "environ-assign": 3
-    },
-    "backend/tests/test_899_identity_snapshot_evidence.py": {
-      "get-session-patch": 2
-    },
-    "backend/tests/test_915_browser_attention.py": {
-      "get-session-patch": 1
     },
     "backend/tests/test_activity_digest.py": {
       "sleep": 1
@@ -73,12 +64,6 @@
     "backend/tests/test_catalog_api.py": {
       "settings-assign": 2
     },
-    "backend/tests/test_channel_document_retirement_origin.py": {
-      "get-session-patch": 2
-    },
-    "backend/tests/test_channel_document_source_write_race.py": {
-      "get-session-patch": 1
-    },
     "backend/tests/test_cockpit_db_contention.py": {
       "clock-compare": 1
     },
@@ -90,21 +75,14 @@
     },
     "backend/tests/test_connection_sync.py": {
       "sleep": 1,
-      "clock-compare": 1,
-      "get-session-patch": 2
+      "clock-compare": 1
     },
     "backend/tests/test_conversation_identity_outbox.py": {
       "sleep": 3,
       "get-session-patch": 6
     },
-    "backend/tests/test_cordis_agent_loop.py": {
-      "get-session-patch": 2
-    },
     "backend/tests/test_cordis_agent_loop_chat.py": {
       "sleep": 5
-    },
-    "backend/tests/test_cordis_bound_adapters.py": {
-      "get-session-patch": 1
     },
     "backend/tests/test_cordis_delegation.py": {
       "sleep": 1
@@ -153,9 +131,6 @@
     "backend/tests/test_document_build_renderer.py": {
       "popen": 2
     },
-    "backend/tests/test_document_build_storage.py": {
-      "get-session-patch": 1
-    },
     "backend/tests/test_document_pairs.py": {
       "sleep": 1
     },
@@ -166,7 +141,7 @@
       "timeout-skip": 2
     },
     "backend/tests/test_effective_grants.py": {
-      "get-session-patch": 2
+      "get-session-patch": 1
     },
     "backend/tests/test_eval_harness.py": {
       "sleep": 1
@@ -188,13 +163,7 @@
       "clock-compare": 1,
       "settings-assign": 2
     },
-    "backend/tests/test_general_documents.py": {
-      "get-session-patch": 1
-    },
     "backend/tests/test_general_task_api.py": {
-      "get-session-patch": 1
-    },
-    "backend/tests/test_general_task_methods.py": {
       "get-session-patch": 1
     },
     "backend/tests/test_general_task_native_dispatch_api.py": {
@@ -207,38 +176,22 @@
       "get-session-patch": 1
     },
     "backend/tests/test_gmail_read.py": {
-      "get-session-patch": 13
+      "get-session-patch": 1
     },
     "backend/tests/test_guardian_opportunities.py": {
       "get-session-patch": 1
-    },
-    "backend/tests/test_guardian_opportunity_feedback.py": {
-      "get-session-patch": 1
-    },
-    "backend/tests/test_guardian_opportunity_plan_vertical.py": {
-      "get-session-patch": 1
-    },
-    "backend/tests/test_guardian_opportunity_plans.py": {
-      "get-session-patch": 6
     },
     "backend/tests/test_guardian_opportunity_preferences.py": {
       "get-session-patch": 1
     },
     "backend/tests/test_guardian_opportunity_vertical.py": {
-      "sleep": 1,
-      "get-session-patch": 1
+      "sleep": 1
     },
     "backend/tests/test_guardian_policy_metadata.py": {
       "get-session-patch": 1
     },
     "backend/tests/test_hermetic_test_inputs.py": {
       "settings-assign": 5
-    },
-    "backend/tests/test_home_attention.py": {
-      "get-session-patch": 2
-    },
-    "backend/tests/test_home_continuation.py": {
-      "get-session-patch": 1
     },
     "backend/tests/test_inference_accounting.py": {
       "sleep": 3,
@@ -260,12 +213,6 @@
       "sleep": 5
     },
     "backend/tests/test_mail_reply_operator_vertical.py": {
-      "get-session-patch": 2
-    },
-    "backend/tests/test_mail_reply_vertical.py": {
-      "get-session-patch": 1
-    },
-    "backend/tests/test_mail_reply_watch.py": {
       "get-session-patch": 1
     },
     "backend/tests/test_mcp_manager.py": {
@@ -305,9 +252,6 @@
     },
     "backend/tests/test_near_text_work_journey.py": {
       "sleep": 1
-    },
-    "backend/tests/test_observer_local_capture_upload.py": {
-      "get-session-patch": 1
     },
     "backend/tests/test_observer_manager.py": {
       "clock-compare": 1,
@@ -411,9 +355,6 @@
       "clock-compare": 3,
       "popen": 1
     },
-    "backend/tests/test_repo_repair_controlplane_api.py": {
-      "get-session-patch": 4
-    },
     "backend/tests/test_repo_repair_executors.py": {
       "sleep": 3,
       "clock-compare": 3,
@@ -424,11 +365,7 @@
       "clock-compare": 5
     },
     "backend/tests/test_repo_source_public_live_pending.py": {
-      "clock-compare": 3,
-      "get-session-patch": 2
-    },
-    "backend/tests/test_repo_source_public_recovery.py": {
-      "get-session-patch": 2
+      "clock-compare": 3
     },
     "backend/tests/test_repo_source_public_recovery_boundaries.py": {
       "sleep": 1
@@ -439,12 +376,6 @@
     },
     "backend/tests/test_repo_work_original_limits.py": {
       "sleep": 4
-    },
-    "backend/tests/test_repo_work_stop_metadata.py": {
-      "get-session-patch": 2
-    },
-    "backend/tests/test_repo_work_stop_uncertainty.py": {
-      "get-session-patch": 2
     },
     "backend/tests/test_repo_work_task_publication.py": {
       "sleep": 2
@@ -495,9 +426,6 @@
     "backend/tests/test_specialist_partial.py": {
       "get-session-patch": 1
     },
-    "backend/tests/test_specialist_reviewed_method.py": {
-      "get-session-patch": 3
-    },
     "backend/tests/test_specialist_stop.py": {
       "sleep": 1
     },
@@ -507,24 +435,14 @@
     "backend/tests/test_sync_gpu_admission.py": {
       "sleep": 5
     },
-    "backend/tests/test_task_conversation_continuity.py": {
-      "get-session-patch": 1
-    },
     "backend/tests/test_task_evidence.py": {
-      "get-session-patch": 3
+      "get-session-patch": 2
     },
     "backend/tests/test_task_lessons.py": {
       "sleep": 2,
-      "get-session-patch": 1,
       "popen": 1
     },
-    "backend/tests/test_task_lessons_native.py": {
-      "get-session-patch": 2
-    },
     "backend/tests/test_task_method_research_vertical.py": {
-      "get-session-patch": 2
-    },
-    "backend/tests/test_telegram_document_ingest.py": {
       "get-session-patch": 2
     },
     "backend/tests/test_timeouts.py": {
@@ -540,9 +458,6 @@
     "backend/tests/test_vertical_no_provider_journeys.py": {
       "get-session-patch": 3
     },
-    "backend/tests/test_work_board_api.py": {
-      "get-session-patch": 5
-    },
     "backend/tests/test_work_board_dispatcher.py": {
       "get-session-patch": 2
     },
@@ -554,9 +469,6 @@
     },
     "backend/tests/test_work_board_m6_provider_free_journey.py": {
       "get-session-patch": 8
-    },
-    "backend/tests/test_work_board_memory.py": {
-      "get-session-patch": 3
     },
     "backend/tests/test_work_board_publication_recovery.py": {
       "get-session-patch": 1

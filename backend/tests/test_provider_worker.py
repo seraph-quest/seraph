@@ -19,6 +19,9 @@ from src.runtime_plugins import worker as worker_module
 from src.runtime_plugins.worker import (DEGRADABLE, MANDATORY, ProviderActivationError, ProviderWorker, attach,
                                         current_worker, domain_provider_unavailable)
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 BACKEND = Path(__file__).resolve().parents[1]
 
 

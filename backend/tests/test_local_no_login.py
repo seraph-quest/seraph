@@ -18,12 +18,12 @@ import pytest
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 from starlette.testclient import TestClient
 
+import src.db.engine as db_engine
 import src.db.models  # noqa: F401
 from config.settings import settings
 from src.auth.middleware import authenticate_websocket, validate_request_boundary
@@ -700,22 +700,11 @@ async def test_password_mode_session_contract_is_unchanged(monkeypatch, client, 
 
 def _make_local_sync_client(monkeypatch):
     tmpdir = tempfile.mkdtemp(prefix="seraph-local-no-login-")
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{os.path.join(tmpdir, 'seraph-test.db')}",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    # Production engine configuration on a file, with its own pool (#1222):
+    # installed below as the default database for every get_session caller.
+    engine = db_engine.create_database_engine(
+        f"sqlite+aiosqlite:///{os.path.join(tmpdir, 'seraph-test.db')}")
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
 
     async def _init_db():
         async with engine.begin() as conn:
@@ -727,20 +716,8 @@ def _make_local_sync_client(monkeypatch):
         finally:
             await engine.dispose()
 
-    targets = [
-        "src.db.engine.get_session",
-        "src.auth.service.get_session",
-        "src.agent.session.get_session",
-        "src.workflows.job_runtime.get_session",
-        "src.approval.repository.get_session",
-        "src.audit.repository.get_session",
-        "src.goals.repository.get_session",
-        "src.profile.service.get_db",
-        "src.vault.repository.get_session",
-        "src.api.profile.get_db",
-        "src.api.ws.get_session",
-    ]
-    patches = [patch(target, _get_session) for target in targets]
+    patches = [patch.object(db_engine, "engine", engine),
+               patch.object(db_engine, "async_session_factory", factory)]
     patches += [
         # #1024: the provider worker owns init_db/close_db in the lifespan.
         patch("src.runtime_plugins.worker.init_db", _init_db),

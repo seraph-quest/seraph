@@ -11,15 +11,13 @@ from src.auth.service import authenticate_session, authenticate_token, AuthFailu
 from src.db.models import (Goal, OperatorSession, OperatorRecoveryJournal, WorkBoardTask,
     WorkBoardAttempt, WorkBoardProposal, WorkBoardEvent, WorkflowRunState,
     InferenceCostReservation, ApprovalRequest)
-from tests.test_first_result_setup import async_db, setup_workspace, create_snapshot, run_task, progress
+from tests.test_first_result_setup import setup_workspace, create_snapshot, run_task, progress
 from tests.test_operator_identity import auth, login, enroll, recover, HEADERS
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reentry", ["logout", "idle_expires_at", "absolute_expires_at"])
 async def test_actual_identity_starter_snapshot_recovery_and_scoped_evidence(client, async_db, setup_workspace, monkeypatch, reentry):
-    from src.api import task_evidence
-    monkeypatch.setattr(task_evidence, "get_session", async_db)
     from src.work_board import triage
     transport = AsyncMock(side_effect=AssertionError("Recovered source reached model transport"))
     monkeypatch.setattr(triage, "completion_with_fallback", transport)
@@ -167,8 +165,6 @@ async def test_actual_identity_starter_snapshot_recovery_and_scoped_evidence(cli
 @pytest.mark.parametrize("fence", ["rollback", "modified", "deleted", "identity_revoke", "device_forget",
     "source_running", "source_review", "unknown_effect", "missing_child", "forged_child"])
 async def test_actual_selected_snapshot_recovery_fences(client, async_db, setup_workspace, monkeypatch, fence):
-    from src.api import task_evidence
-    monkeypatch.setattr(task_evidence, "get_session", async_db)
     client.headers.update(HEADERS)
     first = await login(client)
     await enroll(client)

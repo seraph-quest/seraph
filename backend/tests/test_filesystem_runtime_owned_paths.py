@@ -16,6 +16,9 @@ from src.tools.filesystem_tool import (
 )
 from src.workspace import AgentWorkspaceAccess
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 _ORIGINAL = "runtime-owned before\n"
 _OPERATIONS = ("read", "write", "preview", "apply")
 # Registry paths that no agent file tool may read or write.

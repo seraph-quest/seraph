@@ -69,7 +69,6 @@ async def test_genuine_completed_native_source_review_next_task_and_future_rollb
     workspace.mkdir(mode=0o700)
     monkeypatch.setattr(settings, 'workspace_dir', str(workspace))
     monkeypatch.setattr(settings, 'operator_auth_secret', 'isolated-real-native-method')
-    monkeypatch.setattr('src.memory.m5.get_session', async_db)
     _, operator = await create_session()
     await enroll(operator)
     async with async_db() as db:

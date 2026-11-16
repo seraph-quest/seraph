@@ -78,12 +78,13 @@ def _patch_deps(
     persist_intervention: bool = False,
 ):
     """Patch the lazy-imported singletons at their source modules."""
-    # ``async_db`` replaces the feedback repository's session factory with the
-    # in-memory fixture.  Keep persistence for those tests while making the
-    # small routing-only tests independent of the operator's local database.
-    from src.guardian import feedback as feedback_module
+    # ``async_db`` installs the test's own database as the default (#1222).
+    # Keep persistence for those tests while making the small routing-only
+    # tests independent of the operator's local database.
+    import src.db.engine as db_engine
+    from tests.support.db import CANONICAL_ENGINE
 
-    if not persist_intervention and getattr(feedback_module.get_session, "__module__", "") != "src.db.engine":
+    if not persist_intervention and db_engine.engine is not CANONICAL_ENGINE:
         persist_intervention = True
     mock_cm = MagicMock()
     mock_cm.get_context.return_value = ctx

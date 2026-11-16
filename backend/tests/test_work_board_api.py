@@ -419,7 +419,6 @@ async def test_bound_workflow_job_denies_same_principal_from_a_different_operato
             session_id="test-auth-bypass",
         ),
     )
-    monkeypatch.setattr("src.api.workflows.get_session", async_db)
     async with async_db() as db:
         db.add(task)
         await db.flush()
@@ -477,7 +476,6 @@ async def test_bound_workflow_job_missing_root_cannot_authorize_descendant(
             session_id="test-auth-bypass",
         ),
     )
-    monkeypatch.setattr("src.api.workflows.get_session", async_db)
     async with async_db() as db:
         db.add(task)
         await db.flush()
@@ -553,7 +551,6 @@ async def test_bound_workflow_job_rejects_parent_identity_mismatch(
             session_id="test-auth-bypass",
         ),
     )
-    monkeypatch.setattr("src.api.workflows.get_session", async_db)
     async with async_db() as db:
         db.add(task)
         await db.flush()
@@ -633,7 +630,6 @@ async def test_bound_workflow_job_allows_null_session_m2_descendant(
             session_id="test-auth-bypass",
         ),
     )
-    monkeypatch.setattr("src.api.workflows.get_session", async_db)
     async with async_db() as db:
         db.add(task)
         await db.flush()
@@ -717,7 +713,6 @@ async def test_bound_workflow_job_denies_explicit_foreign_session_descendant(
             session_id="test-auth-bypass",
         ),
     )
-    monkeypatch.setattr("src.api.workflows.get_session", async_db)
     async with async_db() as db:
         db.add(task)
         await db.flush()

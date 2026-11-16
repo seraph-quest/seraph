@@ -118,7 +118,6 @@ async def prepared_flow(accounting_db, real_auth, monkeypatch, *, approve=True, 
     root, engine, factory = accounting_db
     root.chmod(0o700)
     monkeypatch.setattr(crypto, "_fernet", None)
-    monkeypatch.setattr(mail, "get_session", factory.accounting_sessions)
     original_error = mail._error
     def traced_error(exc):
         import traceback

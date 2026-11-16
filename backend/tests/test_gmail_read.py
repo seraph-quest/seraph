@@ -317,7 +317,6 @@ async def test_provider_scope_absence_stays_unverified_and_broader_scope_is_deni
 async def test_persisted_scope_omission_clears_prior_positive_evidence(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     owner = mail_api._owner(_test_operator())
     connection = GoogleServiceConnection(
         connection_id="scope-clear-connection",
@@ -524,7 +523,6 @@ def test_source_consent_rejects_duplicate_ordered_fields_and_digest_preserves_or
 async def test_source_consent_requires_explicit_ack_before_any_db_grant(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     base = {
         "schema_version": 1,
         "connection_id": "missing-connection",
@@ -554,7 +552,6 @@ async def test_source_consent_requires_explicit_ack_before_any_db_grant(async_db
 async def test_authenticated_mail_metadata_get_is_offline_and_owner_bound(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     operator = _test_operator()
     connection = GoogleServiceConnection(
         connection_id="connection-private",
@@ -580,7 +577,6 @@ async def test_authenticated_mail_metadata_get_is_offline_and_owner_bound(async_
 async def test_connection_setup_recovery_is_exact_owner_bound_and_redacted(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     operator = _test_operator()
     owner = mail_api._owner(operator)
     request_digest = "sha256:" + "a" * 64
@@ -878,7 +874,6 @@ async def test_python_task_cancel_after_intent_settles_unknown_with_original_can
 async def test_source_scope_revision_and_goal_limits_fail_closed_before_provider(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     owner = mail_api._owner(_test_operator())
     now = datetime.now(timezone.utc)
     connection = GoogleServiceConnection(
@@ -939,7 +934,6 @@ async def test_source_scope_revision_and_goal_limits_fail_closed_before_provider
 async def test_model_consent_update_preserves_independent_source_revision(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     owner = mail_api._owner(_test_operator())
     consent = MailReadConsent(
         consent_id="model-consent-row",
@@ -1007,7 +1001,6 @@ async def test_model_consent_update_preserves_independent_source_revision(async_
 async def test_revoke_mutations_replay_exact_key_and_redact_provider_identity(async_db, monkeypatch, tmp_path: Path):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     monkeypatch.setattr(config_settings, "workspace_dir", str(tmp_path))
     owner = mail_api._owner(_test_operator())
     connection = GoogleServiceConnection(
@@ -1125,7 +1118,6 @@ async def test_revoke_mutations_replay_exact_key_and_redact_provider_identity(as
 async def test_message_binding_scope_mismatch_blocks_body_contact(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     owner = mail_api._owner(_test_operator())
     connection = GoogleServiceConnection(
         connection_id="binding-scope-connection",
@@ -1225,7 +1217,6 @@ async def test_message_binding_scope_mismatch_blocks_body_contact(async_db, monk
 async def test_connection_delete_redacts_ciphertext_and_exact_terminal_artifact(async_db, monkeypatch, tmp_path: Path):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     monkeypatch.setattr(config_settings, "workspace_dir", str(tmp_path))
     owner = mail_api._owner(_test_operator())
     connection = GoogleServiceConnection(
@@ -1301,7 +1292,6 @@ async def test_connection_delete_redacts_ciphertext_and_exact_terminal_artifact(
 async def test_connection_delete_retains_unknown_artifact_and_surfaces_reconciliation(async_db, monkeypatch, tmp_path: Path):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     monkeypatch.setattr(config_settings, "workspace_dir", str(tmp_path))
     owner = mail_api._owner(_test_operator())
     connection = GoogleServiceConnection(
@@ -1351,7 +1341,6 @@ async def test_connection_delete_retains_unknown_artifact_and_surfaces_reconcili
 async def test_connection_delete_cleanup_exception_is_bounded_and_same_key_retries(async_db, monkeypatch):
     monkeypatch.setattr(config_settings, "deployment_environment", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allow_unauthenticated_tests", True)
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     owner = mail_api._owner(_test_operator())
     connection = GoogleServiceConnection(
         connection_id="cleanup-exception-connection",
@@ -1496,7 +1485,6 @@ async def test_authenticated_asgi_mail_journey_uses_one_owner_and_mock_provider(
     monkeypatch.setattr(config_settings, "operator_auth_allowed_hosts", "test")
     monkeypatch.setattr(config_settings, "operator_auth_allowed_origins", "http://localhost:3001")
     monkeypatch.setattr(config_settings, "workspace_dir", str(tmp_path))
-    monkeypatch.setattr(mail_api, "get_session", async_db)
 
     provider_requests: list[str] = []
     metadata_requests: list[str] = []

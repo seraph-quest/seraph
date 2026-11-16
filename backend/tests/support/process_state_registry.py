@@ -9,6 +9,9 @@ Each entry names the scanned kind and one strategy:
 ``RESTORE``
     Snapshot before every test and restore after it (the default). See
     ``process_state.Restore`` for what that means per kind.
+``Owned()``
+    Restore, and fail the test that left the binding replaced (a seam with
+    its own install/restore API).
 ``Reset("module:function")``
     Call a reset function after every test.
 ``Shared("reason")``
@@ -18,7 +21,7 @@ Each entry names the scanned kind and one strategy:
 The autouse ``isolated_process_state`` fixture in the root conftest applies
 the registry to every test.
 """
-from tests.support.process_state import Entry, Restore, Reset, Shared
+from tests.support.process_state import Entry, Owned, Restore, Reset, Shared
 
 RESTORE = Restore()
 
@@ -125,8 +128,11 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.skills.loader:_loaded_skills": Entry("rebound", RESTORE),
     "src.vault.crypto:_fernet": Entry("rebound", RESTORE),
     "src.workspace.production:_RUNTIME_OWNER_DEPTH": Entry("rebound", RESTORE),
-    # Also replaced per test by the conftest's ``isolate_inference_broker``.
-    "src.model_fabric.remote_inference_admission:_process_broker": Entry("rebound", RESTORE),
+    # Installed per test by the conftest's ``isolate_inference_broker``, which
+    # restores it; a test that installs its own and keeps it fails.
+    "src.model_fabric.remote_inference_admission:_process_broker": Entry("rebound", Owned()),
+    # The clock seam (#1225): a test that leaves a FakeClock installed fails.
+    "src.utils.clock:_clock": Entry("rebound", Owned()),
     # ── primitive ─────────────────────────────────────────
     "src.api.calendar:_CALENDAR_CONNECTION_CREATE_LOCK": Entry("primitive", RESTORE),
     "src.api.calendar:_CALENDAR_CONSENT_CREATE_LOCK": Entry("primitive", RESTORE),

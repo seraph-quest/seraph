@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 from src.db.engine import bound_lock_wait, get_session, is_database_locked
 from src.db.models import ApprovalRequest, Session
 from src.db.session_refs import ensure_sessions_exist
+from src.utils.clock import get_clock
 from src.approval.runtime import (
     _CAPABILITY_APPROVAL_KEY,
     _approval_repository_proof_bytes,
@@ -57,7 +58,7 @@ def _approval_is_expired(value: object, *, now: datetime | None = None) -> bool:
     expiry = _approval_expiry(value)
     if expiry is None:
         return True
-    current = now or datetime.now(timezone.utc)
+    current = now or get_clock().now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return expiry <= current
@@ -466,7 +467,7 @@ class ApprovalRepository:
             raise ValueError("approval_binding_changed")
         if row.status != "pending":
             return row
-        now = datetime.now(timezone.utc)
+        now = get_clock().now(timezone.utc)
         state = "expired" if _approval_is_expired(row.expires_at, now=now) else decision
         transition = await db.execute(update(ApprovalRequest)
             .where(ApprovalRequest.id == approval_id, ApprovalRequest.status == "pending",
@@ -568,7 +569,7 @@ class ApprovalRepository:
         from src.workflows.job_runtime import _assert_canonical_goal_fence
         from src.auth.service import authenticate_principal
         exact = dict(binding)
-        now = datetime.now(timezone.utc)
+        now = get_clock().now(timezone.utc)
         request = await db.get(ApprovalRequest, approval_id)
         run = await db.scalar(select(WorkflowRunState).where(
             WorkflowRunState.run_identity == exact.get("job_id")))
@@ -653,7 +654,7 @@ class ApprovalRepository:
         request = await db.get(ApprovalRequest, approval_id)
         if run is None or parent is None or request is None:
             return None
-        now = datetime.now(timezone.utc)
+        now = get_clock().now(timezone.utc)
         try:
             details = json.loads(request.details_json or "{}")
             manifest = read_manifest(parent)
@@ -758,7 +759,7 @@ class ApprovalRepository:
         if "attachment_refs" in details or "attachments" in details:
             details["attachment_refs"] = safe_attachment_refs
             details.pop("attachments", None)
-        pending_now = datetime.now(timezone.utc)
+        pending_now = get_clock().now(timezone.utc)
         pending_expires_at = _bounded_pending_expiry(
             details.get("expires_at", details.get("approval_expires_at")),
             now=pending_now,
@@ -901,7 +902,7 @@ class ApprovalRepository:
             if request.status != "pending":
                 db.expunge(request)
                 return request
-            now = datetime.now(timezone.utc)
+            now = get_clock().now(timezone.utc)
             if _approval_is_expired(request.expires_at, now=now):
                 transition = await db.execute(
                     update(ApprovalRequest)
@@ -955,7 +956,7 @@ class ApprovalRepository:
                 ApprovalRequest.fingerprint == row.fingerprint,
                 ApprovalRequest.status == row.status,
                 ApprovalRequest.resolved_at == row.resolved_at,
-            ).values(status="denied", resolved_at=datetime.now(timezone.utc)).execution_options(synchronize_session=False))
+            ).values(status="denied", resolved_at=get_clock().now(timezone.utc)).execution_options(synchronize_session=False))
             if mutation.rowcount != 1:
                 await db.refresh(row)
                 if row.status == "consumed":
@@ -1032,7 +1033,7 @@ class ApprovalRepository:
                 owner_principal_id=owner_principal_id,
                 approval_binding=approval_binding,
             )
-            now = datetime.now(timezone.utc)
+            now = get_clock().now(timezone.utc)
             current_requests: list[ApprovalRequest] = []
             for candidate in requests:
                 if _approval_is_expired(candidate.expires_at, now=now):
@@ -1305,7 +1306,7 @@ class ApprovalRepository:
             != expected_approval_owner_principal
         ):
             return None
-        now = datetime.now(timezone.utc)
+        now = get_clock().now(timezone.utc)
         try:
             _validated_approval_attachment_refs(request)
         except ConversationIdentityError as exc:
@@ -1466,7 +1467,7 @@ class ApprovalRepository:
             observed_expires = float(detail("approval_expires_at", "expires_at"))
         except (TypeError, ValueError, OverflowError):
             return None
-        if observed_expires != expires_at or observed_expires <= datetime.now(timezone.utc).timestamp():
+        if observed_expires != expires_at or observed_expires <= get_clock().now(timezone.utc).timestamp():
             return None
 
         consumed = await db.execute(
@@ -1549,7 +1550,7 @@ class ApprovalRepository:
                 owner_principal_id=owner_principal_id,
                 approval_binding=approval_binding,
             )
-            now = datetime.now(timezone.utc)
+            now = get_clock().now(timezone.utc)
             current_requests: list[ApprovalRequest] = []
             for request in requests:
                 if _approval_is_expired(request.expires_at, now=now):
@@ -1672,7 +1673,7 @@ async def _persist_read_expiry(db, expired_ids: list[str]) -> None:
                 ApprovalRequest.id.in_(expired_ids),
                 ApprovalRequest.status == "pending",
             )
-            .values(status="expired", resolved_at=datetime.now(timezone.utc))
+            .values(status="expired", resolved_at=get_clock().now(timezone.utc))
         )
         await db.commit()
     except OperationalError as exc:

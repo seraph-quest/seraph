@@ -1,17 +1,17 @@
 """Time context source — pure computation, no I/O."""
 
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from config.settings import settings
 from src.audit.runtime import log_integration_event_sync
+from src.utils.clock import get_clock
 
 
 def gather_time() -> dict:
     """Return time-of-day classification, day of week, and working hours flag."""
     try:
         tz = ZoneInfo(settings.user_timezone)
-        now = datetime.now(tz)
+        now = get_clock().now(tz)
         hour = now.hour
 
         if 5 <= hour < 12:

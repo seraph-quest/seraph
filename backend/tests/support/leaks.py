@@ -367,7 +367,11 @@ def leaked_threads(before: Iterable[threading.Thread]) -> list[threading.Thread]
             if thread.ident in frames:
                 leaked.append(thread)
             continue
-        if _threading_frames_only(thread):
+        # A cancelled ``threading.Timer`` (its ``finished`` event set) has been
+        # told to stop and only has to wake and return; that is decided by the
+        # event, not by timing, so wait for it like an exiting thread.
+        cancelled_timer = isinstance(thread, threading.Timer) and thread.finished.is_set()
+        if cancelled_timer or _threading_frames_only(thread):
             thread.join(THREAD_EXIT_LIVENESS_SECONDS)
             if not thread.is_alive():
                 continue
@@ -522,6 +526,14 @@ def _check_after_teardown(item: pytest.Item) -> None:
     if failing:
         problems.append("child process(es) left running or unreaped by the test (own them with the "
                         "`spawned` fixture or reap them): " + "; ".join(failing))
+
+    # FakeClock timers are process-wide (#1225): a timer still pending once the
+    # test's loop has closed belongs to work nothing will ever run.
+    fake_clock = (getattr(item, "funcargs", None) or {}).get("fake_clock")
+    pending_deadlines = getattr(fake_clock, "pending_deadlines", None)
+    if callable(pending_deadlines) and pending_deadlines():
+        problems.append(f"fake clock timer(s) still pending at teardown, due in {pending_deadlines()} fake "
+                        "seconds: advance the clock to them or cancel what armed them")
 
     before_subreaper = item.stash.get(_BEFORE_SUBREAPER, None)
     after_subreaper = child_subreaper()

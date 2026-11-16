@@ -34,6 +34,7 @@ from smolagents.models import (
 
 from config.settings import settings
 from src.agent.prompt_compaction import compact_messages_for_local_runtime
+from src.utils.clock import get_clock
 from src.approval.runtime import get_current_session_id, get_current_trust_principal
 from src.auth.cancellation import RuntimeRevokedError, assert_runtime_not_revoked
 from src.audit.repository import audit_repository
@@ -1723,7 +1724,7 @@ async def _governed_bounded_chat_transfer(
     candidate = decision.selected
     if candidate.adapter != "openai_compatible_chat" or context.fallback_allowed:
         raise ProviderProfileConfigurationError("bounded transfer requires one governed chat target")
-    remaining = float(context.deadline_at) - time.time()
+    remaining = float(context.deadline_at) - get_clock().time()
     if remaining <= 0:
         raise TimeoutError("model_fabric_deadline_exceeded")
     headers = {"content-type": "application/json", "accept-encoding": "identity"}
@@ -1734,11 +1735,10 @@ async def _governed_bounded_chat_transfer(
     assert_current_inference_policy()
     # Final policy work consumes the original deadline; it never grants a
     # fresh relative timeout before the provider transfer begins.
-    remaining = float(context.deadline_at) - time.time()
+    remaining = float(context.deadline_at) - get_clock().time()
     if remaining <= 0:
         raise TimeoutError("model_fabric_deadline_exceeded")
-    transfer_deadline = asyncio.get_running_loop().time() + remaining
-    async with asyncio.timeout_at(transfer_deadline):
+    async with get_clock().timeout(remaining):
         async with httpx.AsyncClient(follow_redirects=False, trust_env=False,
                 timeout=httpx.Timeout(remaining)) as client:
             async with client.stream("POST", candidate.endpoint, headers=headers, json=body) as incoming:

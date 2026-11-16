@@ -98,14 +98,30 @@ def test_joins_its_thread():
     worker.join()
     assert done.is_set()
 
+ARMED = []
+
+def test_cancels_its_timer():
+    timer = threading.Timer(3600, STOP.set)
+    timer.start()
+    timer.cancel()
+
+def test_leaves_a_timer_armed():
+    timer = threading.Timer(3600, STOP.set)
+    timer.daemon = True
+    timer.start()
+    ARMED.append(timer)
+
 def test_zz_release():
     STOP.set()
+    for timer in ARMED:
+        timer.cancel()
 '''
 
 
 def test_thread_check_fails_a_test_that_leaves_a_thread_running(leak_pytester):
     result = _run(leak_pytester, THREADS, "tests.support.leaks")
-    result.assert_outcomes(passed=3, errors=1)
+    result.assert_outcomes(passed=5, errors=2)
+    result.stdout.fnmatch_lines(["*ERROR at teardown of test_leaves_a_timer_armed*"])
     result.stdout.fnmatch_lines([
         "*ERROR at teardown of test_leaks_a_thread*",
         "*thread(s) started by the test still running after teardown*'forgotten-thread'*Event.wait*",
@@ -186,7 +202,7 @@ import threading
 import types
 
 from tests.support import state_isolation
-from tests.support.process_state import Entry, Restore
+from tests.support.process_state import Entry, Owned, Restore
 
 fake = types.ModuleType("fake_state_module")
 fake.CACHE = {"seed": 1}
@@ -201,6 +217,7 @@ class Service:
         self.started = False
 
 fake.service = Service()
+fake.seam = object()
 sys.modules["fake_state_module"] = fake
 
 state_isolation.registry_provider = lambda: {
@@ -210,6 +227,7 @@ state_isolation.registry_provider = lambda: {
     "fake_state_module:ALOCK": Entry("primitive", Restore()),
     "fake_state_module:PERMITS": Entry("primitive", Restore()),
     "fake_state_module:service": Entry("singleton", Restore()),
+    "fake_state_module:seam": Entry("rebound", Owned()),
 }
 '''
 
@@ -248,6 +266,12 @@ async def test_f_contends_an_asyncio_lock():
     await waiter
     fake.ALOCK.release()
 
+def test_h_leaves_an_owned_seam_replaced():
+    fake.seam = "a stand-in nobody restored"
+
+def test_i_owned_seam_was_put_back():
+    assert fake.seam != "a stand-in nobody restored"
+
 async def test_g_reuses_the_asyncio_lock_on_a_new_loop():
     async with fake.ALOCK:
         waiter = asyncio.ensure_future(fake.ALOCK.acquire())
@@ -259,7 +283,11 @@ async def test_g_reuses_the_asyncio_lock_on_a_new_loop():
 
 def test_state_isolation_restores_registered_state_and_fails_held_primitives(leak_pytester):
     result = _run(leak_pytester, STATE, "tests.support.state_isolation", conftest=STATE_CONFTEST)
-    result.assert_outcomes(passed=7, errors=2)
+    result.assert_outcomes(passed=9, errors=3)
+    result.stdout.fnmatch_lines([
+        "*ERROR at teardown of test_h_leaves_an_owned_seam_replaced*",
+        "*fake_state_module:seam was left replaced*",
+    ])
     result.stdout.fnmatch_lines([
         "*ERROR at teardown of test_c_leaves_a_lock_held*",
         "*fake_state_module:LOCK is still held after the test*",
@@ -323,3 +351,33 @@ def test_subreaper_check_fails_a_test_that_leaves_the_flag_set_and_restores_it(l
     result.assert_outcomes(passed=2, errors=1)
     result.stdout.fnmatch_lines(["*ERROR at teardown of test_leaves_the_subreaper_flag_set*",
                                  "*child-subreaper flag at 1 (was 0; now restored)*"])
+
+
+FAKE_CLOCK = '''
+import asyncio
+from tests.support.clock import fake_clock  # noqa: F401
+from src.utils.clock import get_clock
+
+HELD = []
+
+async def test_leaves_a_timer_pending(fake_clock):
+    # A sleep driven to its timer and then abandoned, still referenced: its
+    # timer outlives the test's loop, and nothing will ever advance to it.
+    sleeper = get_clock().sleep(30)
+    HELD.append(sleeper)
+    sleeper.send(None)
+
+async def test_runs_its_timer(fake_clock):
+    task = asyncio.ensure_future(get_clock().sleep(30))
+    await fake_clock.wait_for_timers(1)
+    fake_clock.advance(30)
+    await task
+'''
+
+
+def test_fake_clock_timer_check_fails_a_test_that_leaves_a_timer_pending(leak_pytester):
+    result = _run(leak_pytester, FAKE_CLOCK, "tests.support.leaks")
+    outcomes = result.parseoutcomes()
+    assert outcomes.get("passed") == 2 and outcomes.get("errors") == 1, result.stdout.str()
+    result.stdout.fnmatch_lines(["*ERROR at teardown of test_leaves_a_timer_pending*",
+                                 "*fake clock timer(s) still pending at teardown*"])

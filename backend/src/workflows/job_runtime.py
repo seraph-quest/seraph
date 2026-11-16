@@ -27,6 +27,7 @@ from sqlmodel import select
 from src.artifacts.registry import build_artifact_record
 from src.db.models import ApprovalRequest, Goal, GuardianRoutine, GuardianRoutineVersion, WorkflowRunState
 from src.db.session_refs import ensure_sessions_exist
+from src.utils.clock import get_clock
 from src.workflows.inference_accounting import InferenceAccountingRepositoryMixin
 
 
@@ -314,7 +315,7 @@ class DurableJobLeaseError(DurableJobError):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return get_clock().now(timezone.utc)
 
 
 def _as_utc(value: datetime | str | None) -> datetime | None:

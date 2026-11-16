@@ -20,6 +20,8 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 import httpx
 
+from src.utils.clock import get_clock
+
 
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_FORM_BODY_BYTES = 16 * 1024
@@ -380,11 +382,11 @@ async def _request_pinned_https(
     # and response/context cleanup.  HTTPX's per-read timeout alone would let
     # a peer keep a request alive indefinitely by sending tiny chunks.
     try:
-        async with asyncio.timeout(bounded_timeout):
+        async with get_clock().timeout(bounded_timeout):
             if handoff_check is not None:
                 await handoff_check()
             try:
-                addresses = await asyncio.wait_for(
+                addresses = await get_clock().wait_for(
                     _resolve(resolver, parsed.hostname or "", parsed.port or 443),
                     timeout=resolve_timeout,
                 )

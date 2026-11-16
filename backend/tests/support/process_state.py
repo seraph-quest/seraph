@@ -278,6 +278,16 @@ class Shared:
             raise ValueError("a Shared entry needs a real reason")
 
 
+@dataclass(frozen=True)
+class Owned(Restore):
+    """Restore, and fail the test if it left the binding changed.
+
+    For a process-wide seam with an install/restore API (the clock, the
+    inference broker): whoever installs a replacement must put the previous
+    one back, so a forgotten restore is a leak, not something to tidy up.
+    """
+
+
 Strategy = Restore | Reset | Shared
 
 
@@ -440,6 +450,8 @@ class ProcessStateSnapshot:
                     current.set() if saved.flag else current.clear()
                 _unbind_loop(saved.binding)
             if current is not saved.binding:
+                if isinstance(saved.entry.strategy, Owned):
+                    problems.append(f"{saved.key} was left replaced by {current!r} (restore what you install)")
                 setattr(saved.owner, saved.attr, saved.binding)
             if saved.attributes is not None:
                 attributes = vars(saved.binding)
@@ -465,6 +477,7 @@ _MISSING = object()
 __all__ = [
     "Entry",
     "Finding",
+    "Owned",
     "KINDS",
     "ProcessStateSnapshot",
     "Reset",

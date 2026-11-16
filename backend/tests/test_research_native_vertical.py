@@ -311,10 +311,10 @@ async def test_authenticated_parent_two_children_real_public_source_and_dossier(
                                     await provider.execute_funded_child(jobs, child_id=child_id, owner=owner,
                                         fence=claimed["lease"]["fencing_token"])
                             # The crashed process never releases its child
-                            # leases; they lapse. Lapse them as of now instead
+                            # leases; they lapse. Lapse them in the past instead
                             # of waiting out a wall-clock lease (#1230).
                             async with factory.accounting_sessions() as db:
-                                lapsed = datetime.now(timezone.utc).replace(tzinfo=None)
+                                lapsed = datetime.now(timezone.utc).replace(tzinfo=None)-__import__("datetime").timedelta(seconds=1)
                                 for row in (await db.scalars(select(WorkflowRunState).where(
                                         WorkflowRunState.run_identity.in_(creation["child_ids"])))).all():
                                     assert row.status == "running" and row.lease_owner == owner and row.lease_expires_at > lapsed

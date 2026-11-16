@@ -243,7 +243,13 @@ def test_foreground_process_pipe_capture_is_bounded_before_return(tmp_path, monk
 
 
 def test_bounded_pipe_capture_finish_does_not_wait_for_a_held_write_end():
-    """#1234: finish() returns while another holder keeps the pipe open."""
+    """#1234: finish() returns while another holder keeps the pipe open.
+
+    This pins the capture contract directly. The regression guards for the
+    original defect are the two descendant-held-pipe ``run_command`` tests:
+    the old drain's buffered ``read(64 KiB)`` never surfaced this partial
+    chunk before EOF, so against the old code this test fails earlier.
+    """
     read_fd, write_fd = os.pipe()
     # The same ``BufferedReader`` type that ``Popen`` hands the capture.
     stream = os.fdopen(read_fd, "rb")

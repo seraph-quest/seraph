@@ -1,4 +1,5 @@
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timezone
 import asyncio
 from unittest.mock import patch, MagicMock
 
@@ -6,17 +7,22 @@ import pytest
 
 from src.audit.repository import audit_repository
 from src.observer.sources.time_source import gather_time
+from src.utils.clock import FakeClock
+from tests.support.clock import install_clock
 
 # Every test here reaches the database (#1222).
 pytestmark = pytest.mark.usefixtures("db")
 
 
+@contextmanager
 def _mock_time(year=2025, month=6, day=2, hour=10, minute=0):
-    """Patch datetime.now inside time_source to return a fixed time."""
-    fixed = datetime(year, month, day, hour, minute)
-    mock_dt = MagicMock(wraps=datetime)
-    mock_dt.now.return_value = fixed
-    return patch("src.observer.sources.time_source.datetime", mock_dt)
+    """Install a fake process clock at a fixed time (the settings mock uses UTC)."""
+    clock = FakeClock(start=datetime(year, month, day, hour, minute, tzinfo=timezone.utc))
+    previous = install_clock(clock)
+    try:
+        yield clock
+    finally:
+        install_clock(previous)
 
 
 def _mock_settings(**overrides):

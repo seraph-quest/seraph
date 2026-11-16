@@ -8,8 +8,9 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 import secrets
-import time
 from typing import Any
+
+from src.utils.clock import get_clock
 
 from .composition import CHILD_ENV, CORDIS_VERSION, CompositionBlocked, ReviewedComposition, reviewed_composition
 from .contracts import SERVICE_METHODS, validate_request, validate_result
@@ -284,7 +285,7 @@ class CordisHost:
                     if (frame["method"] not in SERVICE_METHODS or self.service_dispatch is None
                             or not self.admitting or frame["request_id"] != f"c-{frame['seq']}"
                             or self._unresolved >= MAX_PENDING
-                            or frame["deadline_at"] <= int(time.time() * 1000)):
+                            or frame["deadline_at"] <= int(get_clock().time() * 1000)):
                         raise ProtocolError("unadmitted native service request")
                     originals = [entry for entry in self._pending.values()
                                  if entry.native_binding is not None and not entry.future.done()
@@ -305,7 +306,7 @@ class CordisHost:
                     raise ProtocolError("unsolicited or duplicate response")
                 request = pending.frame
                 expected = "runtime.ready" if request["method"] == "bootstrap.hello" else request["method"]
-                if frame["method"] != expected or any(frame[key] != request[key] for key in ("invocation_ref", "composition_epoch", "composition_digest", "package_digest", "deadline_at")) or frame["deadline_at"] <= int(time.time() * 1000):
+                if frame["method"] != expected or any(frame[key] != request[key] for key in ("invocation_ref", "composition_epoch", "composition_digest", "package_digest", "deadline_at")) or frame["deadline_at"] <= int(get_clock().time() * 1000):
                     raise ProtocolError("response identity or deadline mismatch")
                 if frame["method"] in {"runtime.ready", "runtime.status"}:
                     self._verify_plugins(frame["payload"]["plugins"])
@@ -327,13 +328,13 @@ class CordisHost:
                     or pending.future.done() or pending.native_binding is not called_scope
                     or called_scope.host_boot_nonce != original_boot):
                 raise ProtocolError("native parent correlation no longer active")
-            remaining = max(0, (request["deadline_at"] - int(time.time() * 1000)) / 1000)
-            async with asyncio.timeout(remaining):
+            remaining = max(0, (request["deadline_at"] - int(get_clock().time() * 1000)) / 1000)
+            async with get_clock().timeout(remaining):
                 payload = await self.service_dispatch.dispatch(request, called_scope=called_scope)
                 validate_result(request["method"], payload)
                 async with self._write_lock:
                     if (self.boot_nonce != original_boot or not self.admitting
-                            or int(time.time() * 1000) >= request["deadline_at"]
+                            or int(get_clock().time() * 1000) >= request["deadline_at"]
                             or self.process is None or self.process.stdin is None):
                         raise ProtocolError("native result lost original boot/deadline")
                     response = {**request, "kind": "response", "seq": self._out_seq + 1, "payload": payload}
@@ -430,7 +431,7 @@ class CordisHost:
         """
         if not self.admitting:
             return self.snapshot()
-        now = int(time.time() * 1000)
+        now = int(get_clock().time() * 1000)
         if deadline_at is not None and type(deadline_at) is not int:
             return self.snapshot()
         deadline = min(now + 4000, deadline_at if deadline_at is not None else now + 4000)
@@ -439,13 +440,13 @@ class CordisHost:
             payload = await self.request(deadline_at=deadline)
         except (HostBlocked, ProtocolError):
             return self.snapshot()
-        if original_boot != self.boot_nonce or not self.admitting or int(time.time() * 1000) >= deadline:
+        if original_boot != self.boot_nonce or not self.admitting or int(get_clock().time() * 1000) >= deadline:
             return self.snapshot()
         if payload["state"] != "ready":
             self._fence("runtime_not_ready")
             return self.snapshot()
         self._plugins = payload["plugins"]
-        self._readiness_checked_at = int(time.time() * 1000)
+        self._readiness_checked_at = int(get_clock().time() * 1000)
         return self._snapshot(verified=True)
 
     async def _rpc(self, method: str, *, internal: bool = False, invocation_ref: str | None = None,
@@ -457,7 +458,7 @@ class CordisHost:
             raise HostBlocked("runtime_not_started")
         if self._unresolved >= MAX_PENDING:
             raise HostBlocked("rpc_capacity_exhausted")
-        now = int(time.time() * 1000)
+        now = int(get_clock().time() * 1000)
         if deadline_at is not None and (type(deadline_at) is not int or deadline_at <= now):
             raise HostBlocked("deadline_expired")
         if method in SERVICE_METHODS:
@@ -476,13 +477,13 @@ class CordisHost:
         request_id: str | None = None
         locked = False
         try:
-            await asyncio.wait_for(self._write_lock.acquire(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            await get_clock().wait_for(self._write_lock.acquire(), max(0.001, (deadline - int(get_clock().time() * 1000)) / 1000))
             locked = True
             if self.boot_nonce != original_boot or (not internal and not self.admitting):
                 raise HostBlocked("boot_changed_or_admission_closed")
             if len(self._pending) >= MAX_PENDING:
                 raise HostBlocked("rpc_capacity_exhausted")
-            if deadline <= int(time.time() * 1000):
+            if deadline <= int(get_clock().time() * 1000):
                 raise HostBlocked("deadline_expired")
             seq = self._out_seq + 1
             request_id = f"r-{seq}"
@@ -500,10 +501,10 @@ class CordisHost:
                                                  deadline, request_id, original_boot)
             self._pending[request_id] = Pending(frame, future, called)
             self.process.stdin.write(wire)
-            await asyncio.wait_for(self.process.stdin.drain(), max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            await get_clock().wait_for(self.process.stdin.drain(), max(0.001, (deadline - int(get_clock().time() * 1000)) / 1000))
             self._write_lock.release()
             locked = False
-            return await asyncio.wait_for(future, max(0.001, (deadline - int(time.time() * 1000)) / 1000))
+            return await get_clock().wait_for(future, max(0.001, (deadline - int(get_clock().time() * 1000)) / 1000))
         except asyncio.CancelledError:
             if request_id in self._pending:
                 self._fence("rpc_cancelled")
@@ -556,7 +557,7 @@ class CordisHost:
         self.state = "quiescing"
         shutdown_disposal_proof = None
         original_boot = self.boot_nonce
-        now = int(time.time() * 1000)
+        now = int(get_clock().time() * 1000)
         drain_deadline = min([now + 10_000, *[pending.frame["deadline_at"] for pending in self._pending.values()]])
         if process.returncode is None and not preserve_blocked:
             try:
@@ -578,7 +579,7 @@ class CordisHost:
                     shutdown_disposal_proof = original_boot
                 if payload["resources_remaining"] != 0 or self._cordis_disposal != "confirmed":
                     self._cleanup_state = "unknown"
-                await asyncio.wait_for(process.wait(), max(0.001, min(1.0, (drain_deadline - int(time.time() * 1000)) / 1000)))
+                await get_clock().wait_for(process.wait(), max(0.001, min(1.0, (drain_deadline - int(get_clock().time() * 1000)) / 1000)))
                 self._reaped = True
             except (HostBlocked, ProtocolError, asyncio.TimeoutError, OSError):
                 self._cordis_disposal = "unconfirmed"
@@ -587,10 +588,10 @@ class CordisHost:
                 if process.returncode is None:
                     process.terminate()
                 try:
-                    await asyncio.wait_for(process.wait(), 2)
+                    await get_clock().wait_for(process.wait(), 2)
                 except asyncio.TimeoutError:
                     process.kill()
-                    await asyncio.wait_for(process.wait(), 2)
+                    await get_clock().wait_for(process.wait(), 2)
                 self._reaped = True
                 if self._cordis_disposal == "not_started":
                     self._cordis_disposal = "unconfirmed"
@@ -599,7 +600,7 @@ class CordisHost:
         if process.stdin is not None:
             process.stdin.close()
             try:
-                await asyncio.wait_for(process.stdin.wait_closed(), 2)
+                await get_clock().wait_for(process.stdin.wait_closed(), 2)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # The OS already closed this pipe.
             except (OSError, asyncio.TimeoutError):

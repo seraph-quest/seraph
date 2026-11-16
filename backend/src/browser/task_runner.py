@@ -17,7 +17,6 @@ import os
 import re
 import sys
 import stat
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from config.settings import settings
 from src.security.site_policy import evaluate_site_access
+from src.utils.clock import get_clock
 from src.workspace import canonical_workspace_root
 from src.workflows.job_runtime import (
     DurableJobAdmissionDenied,
@@ -813,7 +813,7 @@ class BrowserTaskRunner:
                         playwright_installed=playwright_installed,
                         browser_executable_present=browser_executable_present,
                     ).model_dump(mode="json")
-                await asyncio.wait_for(
+                await get_clock().wait_for(
                     _resolve_all(
                         transport.resolver,
                         hostname,
@@ -1221,7 +1221,7 @@ class BrowserTaskRunner:
         routine_parent_fencing_token: int | None = None,
         routine_step_id: str | None = None,
     ) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
+        now = get_clock().now(timezone.utc)
         safe_inputs = {
             "task_id": task_id,
             "attempt_id": attempt_id,
@@ -1451,7 +1451,7 @@ class BrowserTaskRunner:
             fencing_token=fencing_token,
         )
         revision = int(active.get("revision") or revision)
-        execution_started = time.monotonic()
+        execution_started = get_clock().monotonic()
         try:
             durable_remaining = self._durable_remaining_seconds(active)
         except BrowserTaskError as exc:
@@ -1749,7 +1749,7 @@ class BrowserTaskRunner:
             return False
         try:
             return bool(
-                await asyncio.wait_for(
+                await get_clock().wait_for(
                     session.close(),
                     timeout=timeout_seconds,
                 )
@@ -1781,7 +1781,7 @@ class BrowserTaskRunner:
         if resources.cleanup_task is None:
             resources.cleanup_task = asyncio.create_task(resources.close())
         try:
-            await asyncio.wait_for(asyncio.shield(resources.cleanup_task), timeout=timeout_seconds)
+            await get_clock().wait_for(asyncio.shield(resources.cleanup_task), timeout=timeout_seconds)
         except asyncio.CancelledError:
             # The shielded cleanup task remains owned by the holder.  The
             # caller's cancellation is preserved by returning an unverified
@@ -1816,7 +1816,7 @@ class BrowserTaskRunner:
         if timeout_seconds <= 0:
             return False
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+            await get_clock().wait_for(asyncio.shield(task), timeout=timeout_seconds)
         except (asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):
             # Cancelling the child itself is the normal heartbeat teardown
             # path: ``shield`` reports its CancelledError even though the
@@ -1840,7 +1840,7 @@ class BrowserTaskRunner:
             if reserve_cleanup
             else state.execution_deadline_monotonic
         )
-        remaining = deadline - time.monotonic()
+        remaining = deadline - get_clock().monotonic()
         if remaining <= 0:
             raise cls._runtime_deadline_error(state)
         return remaining
@@ -1865,7 +1865,7 @@ class BrowserTaskRunner:
                 operation.close()
             raise
         try:
-            return await asyncio.wait_for(operation, timeout=timeout_seconds)
+            return await get_clock().wait_for(operation, timeout=timeout_seconds)
         except asyncio.TimeoutError as exc:
             raise self._runtime_deadline_error(state) from exc
         except TimeoutError as exc:
@@ -1932,7 +1932,7 @@ class BrowserTaskRunner:
             )
 
         try:
-            await asyncio.wait_for(record(), timeout=BROWSER_CLEANUP_TIMEOUT_SECONDS)
+            await get_clock().wait_for(record(), timeout=BROWSER_CLEANUP_TIMEOUT_SECONDS)
             return True
         except Exception:
             return False
@@ -1963,13 +1963,13 @@ class BrowserTaskRunner:
         # continuing to reject malformed explicit values above.
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return (parsed - datetime.now(timezone.utc)).total_seconds()
+        return (parsed - get_clock().now(timezone.utc)).total_seconds()
 
     @staticmethod
     def _cleanup_timeout_seconds(state: "_ExecutionState") -> float:
         return max(0.0, min(
             float(BROWSER_CLEANUP_TIMEOUT_SECONDS),
-            state.execution_deadline_monotonic - time.monotonic(),
+            state.execution_deadline_monotonic - get_clock().monotonic(),
         ))
 
     @staticmethod
@@ -1982,12 +1982,12 @@ class BrowserTaskRunner:
 
     @classmethod
     def _assert_execution_budget(cls, state: "_ExecutionState") -> None:
-        if time.monotonic() >= state.execution_deadline_monotonic:
+        if get_clock().monotonic() >= state.execution_deadline_monotonic:
             raise cls._runtime_deadline_error(state)
 
     @classmethod
     def _operation_timeout_ms(cls, state: "_ExecutionState") -> int:
-        remaining = state.action_deadline_monotonic - time.monotonic()
+        remaining = state.action_deadline_monotonic - get_clock().monotonic()
         if remaining <= 0:
             raise cls._runtime_deadline_error(state)
         return max(1, int(remaining * 1000))
@@ -2097,7 +2097,7 @@ class BrowserTaskRunner:
         if heartbeat is None:
             return
         while True:
-            await asyncio.sleep(interval)
+            await get_clock().sleep(interval)
             try:
                 async with state.lock:
                     refreshed = await heartbeat(
@@ -2426,7 +2426,7 @@ class BrowserTaskRunner:
             except Exception as exc:
                 if state.receipt_limit_hit:
                     self._assert_receipt_budget(state)
-                if time.monotonic() >= state.action_deadline_monotonic:
+                if get_clock().monotonic() >= state.action_deadline_monotonic:
                     raise self._runtime_deadline_error(state) from exc
                 if state.network_dispatched:
                     raise BrowserUnknownExternalEffect(type(exc).__name__, code="navigation_failed") from exc
@@ -2457,7 +2457,7 @@ class BrowserTaskRunner:
                     value = await self._locator_value(state, locator, "get_attribute", action.attribute)
                     value = value or ""
             except (asyncio.TimeoutError, TimeoutError) as exc:
-                if time.monotonic() >= state.action_deadline_monotonic:
+                if get_clock().monotonic() >= state.action_deadline_monotonic:
                     raise self._runtime_deadline_error(state) from exc
                 raise BrowserUnknownExternalEffect(
                     f"browser extraction timed out at action {action_index} "
@@ -2465,7 +2465,7 @@ class BrowserTaskRunner:
                     code="extract_selector_timeout",
                 ) from exc
             except Exception as exc:
-                if time.monotonic() >= state.action_deadline_monotonic:
+                if get_clock().monotonic() >= state.action_deadline_monotonic:
                     raise self._runtime_deadline_error(state) from exc
                 # Playwright exposes its own TimeoutError class. Keep the
                 # operator receipt typed and bounded without importing a
@@ -2627,7 +2627,7 @@ class BrowserTaskRunner:
             )
             state.revision = int(artifact.get("revision") or state.revision)
         self._assert_receipt_budget(state)
-        verified_at = datetime.now(timezone.utc).isoformat()
+        verified_at = get_clock().now(timezone.utc).isoformat()
         readback_id = "readback-" + _digest(
             {"job_id": state.job_id, "path": relative, "digest": digest}
         )[:32]
@@ -2993,7 +2993,7 @@ class BrowserTaskRunner:
         durable_status = "unknown_external_effect" if error.dispatched else "blocked"
         observed = error.observed_request_receipts
         with suppress(Exception):
-            current = await asyncio.wait_for(
+            current = await get_clock().wait_for(
                 self.jobs.get_job(job_id),
                 timeout=BROWSER_CLEANUP_TIMEOUT_SECONDS,
             )
@@ -3004,7 +3004,7 @@ class BrowserTaskRunner:
                 owner = _text(lease.get("owner"))
                 fence = int(lease.get("fencing_token") or 0)
                 if owner and fence > 0:
-                    transition = await asyncio.wait_for(
+                    transition = await get_clock().wait_for(
                         self.jobs.transition_job(
                             job_id,
                             durable_status,
@@ -3267,7 +3267,7 @@ class ProfiledInteractionPage:
             self.nodes[node_id] = (handle, control, actions)
             public.append(AccessibleNode(node_id=node_id, role=role, name=control["name"], actions=actions))
         self.latest = PageSnapshot(url=DOCUMENT_URL, document_digest=revision,
-            accessible_nodes=public, captured_at=datetime.now(timezone.utc))
+            accessible_nodes=public, captured_at=get_clock().now(timezone.utc))
         if len(self.latest.model_dump_json().encode()) > 32768:
             raise InteractionError("browser_snapshot_bounds")
         return self.latest.model_dump(mode="json")
@@ -3342,7 +3342,7 @@ class ProfiledInteractionPage:
     async def stop(self):
         self.nodes.clear()
         try:
-            clean = await asyncio.wait_for(self.resources.close(), timeout=10)
+            clean = await get_clock().wait_for(self.resources.close(), timeout=10)
         except BaseException:
             clean = False
         return (clean and (self.resources.has_resources or self.resources.context_not_started)

@@ -45,11 +45,12 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import timezone
 import json
 import logging
-import time
 from typing import Any, Awaitable, Callable
+
+from src.utils.clock import get_clock
 
 from .ownership import DISPATCH_DOMAIN, SCHEDULER_DOMAIN, CompositionBindingError, domain_ready_predicate
 
@@ -185,7 +186,7 @@ async def assert_tick_fence(db) -> None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return get_clock().now(timezone.utc).isoformat()
 
 
 class RuntimeLifecycle:
@@ -308,7 +309,7 @@ class RuntimeLifecycle:
         async with self._lock(domain):
             if self.closing or domain in self._transitioning or self.current(domain) is not None:
                 return self.status(domain)
-            self._last_attempt[domain] = time.monotonic()
+            self._last_attempt[domain] = get_clock().monotonic()
             held = [task for task in self._held.get(domain, ()) if not task.done()]
             if held:
                 # Work cancelled past its bound is still alive: never admit beside it.
@@ -349,7 +350,7 @@ class RuntimeLifecycle:
         activation = self.current(domain)
         if activation is not None or not self.managed or self.closing or domain in self._transitioning:
             return activation
-        if time.monotonic() - self._last_attempt.get(domain, 0.0) < REACTIVATE_INTERVAL_SECONDS:
+        if get_clock().monotonic() - self._last_attempt.get(domain, 0.0) < REACTIVATE_INTERVAL_SECONDS:
             return None
         await self.activate(domain)
         return self.current(domain)
@@ -403,9 +404,9 @@ class RuntimeLifecycle:
             tasks.update(registry().values())
             return list(tasks)
 
-        deadline = time.monotonic() + max(bound, 0.0)
-        while pending() and time.monotonic() < deadline:
-            await asyncio.wait(pending(), timeout=min(0.5, max(deadline - time.monotonic(), 0.01)))
+        deadline = get_clock().monotonic() + max(bound, 0.0)
+        while pending() and get_clock().monotonic() < deadline:
+            await get_clock().wait(pending(), timeout=min(0.5, max(deadline - get_clock().monotonic(), 0.01)))
         result: dict[str, Any] = {"cancelled": [], "unknown": [], "alive": []}
         if not pending():
             return result
@@ -431,7 +432,7 @@ class RuntimeLifecycle:
         for task in leftovers:
             task.cancel()
         if leftovers:
-            await asyncio.wait(leftovers, timeout=5.0)
+            await get_clock().wait(leftovers, timeout=5.0)
             result["cancelled"].extend({"wrapper": task.get_name()} for task in leftovers if task.done())
         result["alive"] = pending()
         if result["alive"]:
@@ -599,11 +600,11 @@ class RuntimeLifecycle:
             for task in moving:
                 task.cancel()
             if moving:
-                await asyncio.wait(moving, timeout=SHUTDOWN_TRANSITION_SECONDS)
+                await get_clock().wait(moving, timeout=SHUTDOWN_TRANSITION_SECONDS)
             for domain in reversed(LIFECYCLE_DOMAINS):
                 lock = self._lock(domain)
                 try:
-                    await asyncio.wait_for(lock.acquire(), timeout=SHUTDOWN_TRANSITION_SECONDS)
+                    await get_clock().wait_for(lock.acquire(), timeout=SHUTDOWN_TRANSITION_SECONDS)
                 except asyncio.TimeoutError:
                     self._set_status(domain, "blocked", "lifecycle_shutdown")
                     continue

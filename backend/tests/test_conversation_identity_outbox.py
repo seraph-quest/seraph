@@ -38,6 +38,7 @@ from src.observer.delivery import _canonical_delivery_message, _resolve_delivery
 from src.observer.native_notification_queue import NativeNotificationQueue
 from src.scheduler.connection_manager import ConnectionManager
 from src.security.trust_contract import TrustPrincipal
+from tests.support.clock import fake_clock  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -716,9 +717,7 @@ async def test_pending_approval_expiry_creates_fresh_bounded_request(file_db, mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.realtime(reason="needs #1225: the attachment quarantine receipt expiry is read from the wall clock "
-                      "in src/conversation/identity.py, so the test waits for the real expiry to pass")
-async def test_approved_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
+async def test_approved_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch, fake_clock):
     get_session, _ = file_db
     monkeypatch.setattr("src.approval.repository.get_session", get_session)
     await _add_owner(
@@ -727,7 +726,7 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
         owner_id="operator:approval-attachment",
         operator_session_id="operator-session-approval-attachment",
     )
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     receipt = issue_attachment_quarantine_receipt(
         attachment_id="approval-expiring-attachment",
         owner_principal_id="operator:approval-attachment",
@@ -769,7 +768,8 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
             )
         )
 
-    await asyncio.sleep(0.4)
+    # The receipt expires on the fake clock; nothing waits in real time.
+    fake_clock.advance(0.4)
     assert not await approval_repository.consume_approved(
         session_id="conversation-approval-attachment-expiry",
         tool_name="attachment-tool",
@@ -791,9 +791,7 @@ async def test_approved_consume_revalidates_attachment_receipt_at_execution(file
 
 
 @pytest.mark.asyncio
-@pytest.mark.realtime(reason="needs #1225: the attachment quarantine receipt expiry is read from the wall clock "
-                      "in src/conversation/identity.py, so the test waits for the real expiry to pass")
-async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch):
+async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_db, monkeypatch, fake_clock):
     get_session, _ = file_db
     monkeypatch.setattr("src.approval.repository.get_session", get_session)
     await _add_owner(
@@ -802,7 +800,7 @@ async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_d
         owner_id="operator:resume-attachment",
         operator_session_id="operator-session-resume-attachment",
     )
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     receipt = issue_attachment_quarantine_receipt(
         attachment_id="resume-expiring-attachment",
         owner_principal_id="operator:resume-attachment",
@@ -858,7 +856,8 @@ async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_d
             )
         )
 
-    await asyncio.sleep(0.4)
+    # The receipt expires on the fake clock; nothing waits in real time.
+    fake_clock.advance(0.4)
     assert await approval_repository.consume_approved_for_resume(
         approval_id=approval_id,
         owner_operator_session_id="operator-session-resume-attachment",
@@ -889,9 +888,7 @@ async def test_resume_consume_revalidates_attachment_receipt_at_execution(file_d
 
 
 @pytest.mark.asyncio
-@pytest.mark.realtime(reason="needs #1225: the attachment quarantine receipt expiry is read from the wall clock "
-                      "in src/conversation/identity.py, so the test waits for the real expiry to pass")
-async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
+async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db, fake_clock):
     get_session, _ = file_db
     await _add_owner(
         get_session,
@@ -899,7 +896,7 @@ async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
         owner_id="operator:attachment",
         operator_session_id="operator-session-attachment",
     )
-    now = datetime.now(timezone.utc)
+    now = fake_clock.now(timezone.utc)
     receipt = issue_attachment_quarantine_receipt(
         attachment_id="outbox-expiring",
         owner_principal_id="operator:attachment",
@@ -927,7 +924,8 @@ async def test_expired_outbox_attachment_is_cancelled_before_claim(file_db):
             "quarantine_receipt": receipt,
         }],
     )
-    await asyncio.sleep(0.8)
+    # The receipt expires on the fake clock; nothing waits in real time.
+    fake_clock.advance(0.8)
     assert await queue.claim_next(worker_id="expired-attachment-worker") is None
     stored = await queue.get(notification.id)
     assert stored is not None

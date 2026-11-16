@@ -16,6 +16,7 @@ from sqlalchemy import func, select, update
 
 from config.settings import settings
 from src.db.engine import get_session
+from src.utils.clock import get_clock
 from src.db.models import Goal, WorkBoardAttempt, WorkBoardHandoff, WorkBoardInputArtifact, WorkBoardLink, WorkBoardProposal, WorkBoardStatus, WorkBoardTask, WorkflowRunState
 from src.work_board.contracts import WorkBoardInputArtifactCreate, WorkBoardLinkCreate, WorkBoardOwner, WorkBoardTaskCreate
 from src.work_board.pipeline_contracts import CAPABILITIES, CPU_KINDS, DOSSIER, REPORT, PIPELINE_KIND, SLOTS, EvidenceConsumerInput, MAX_QUOTED_BYTES, canonical_bytes, digest
@@ -279,7 +280,7 @@ def utc(value: datetime) -> datetime:
 
 
 def now() -> datetime:
-    return datetime.now(timezone.utc)
+    return get_clock().now(timezone.utc)
 
 
 def root_binding() -> Mapping[str, Any]:

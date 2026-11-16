@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from src.db import engine as db_engine
+from src.utils.clock import get_clock
 from src.db.models import (
     Goal,
     NativeNotificationDeliveryAttempt,
@@ -177,7 +178,7 @@ class NativeNotification:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return get_clock().now(timezone.utc)
 
 
 def _aware(value: datetime | None) -> datetime | None:

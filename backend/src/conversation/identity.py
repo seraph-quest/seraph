@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass, fields, is_dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
+from src.utils.clock import get_clock
+
 
 CONVERSATION_SCHEMA_VERSION = "seraph.conversation.v1"
 MAX_IDENTITY_CHARS = 256
@@ -408,7 +410,7 @@ def issue_attachment_quarantine_receipt(
     while persistence keeps only its digest and signed metadata.
     """
 
-    issued = _receipt_datetime(issued_at or datetime.now(timezone.utc), field="issued_at")
+    issued = _receipt_datetime(issued_at or get_clock().now(timezone.utc), field="issued_at")
     expires = _receipt_datetime(
         expires_at or issued + timedelta(hours=1),
         field="expires_at",
@@ -418,7 +420,7 @@ def issue_attachment_quarantine_receipt(
             "attachment_receipt_invalid",
             "Attachment receipt expiry is outside the allowed lifetime.",
         )
-    now = datetime.now(timezone.utc)
+    now = get_clock().now(timezone.utc)
     if issued > now + ATTACHMENT_RECEIPT_CLOCK_SKEW:
         raise ConversationIdentityError(
             "attachment_receipt_invalid",
@@ -528,7 +530,7 @@ def _decode_attachment_quarantine_receipt(
             "attachment_receipt_invalid",
             "Attachment receipt expiry is outside the allowed lifetime.",
         )
-    current = _receipt_datetime(now or datetime.now(timezone.utc), field="now")
+    current = _receipt_datetime(now or get_clock().now(timezone.utc), field="now")
     if issued > current + ATTACHMENT_RECEIPT_CLOCK_SKEW:
         raise ConversationIdentityError(
             "attachment_receipt_invalid",
@@ -634,7 +636,7 @@ def _canonical_attachment_ref(
                 "attachment_receipt_invalid",
                 "Attachment receipt expiry is outside the allowed lifetime.",
             )
-        current = datetime.now(timezone.utc)
+        current = get_clock().now(timezone.utc)
         if issued_at > current + ATTACHMENT_RECEIPT_CLOCK_SKEW:
             raise ConversationIdentityError(
                 "attachment_receipt_invalid",

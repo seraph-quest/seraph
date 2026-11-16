@@ -50,6 +50,16 @@ moved by hand. The only exemption is ``@pytest.mark.realtime(reason="...")``
 or class, or in the module's ``pytestmark``. It exempts only ``sleep`` and
 ``clock-compare``: a real-time test still may not mutate ambient state, patch
 ``get_session`` or spawn unowned processes.
+
+Clock seam (#1225): the production modules in ``CLOCK_SEAM_MODULES`` read time
+and wait on timers only through ``src.utils.clock.get_clock()``. In them, any
+direct ``time.time/monotonic/perf_counter`` (or ``*_ns``), ``datetime.now/
+utcnow/today``, ``date.today``, event-loop ``time()``, ``asyncio.wait_for``,
+``asyncio.timeout``/``timeout_at``, ``time.sleep``, nonzero ``asyncio.sleep``,
+``asyncio.wait(..., timeout=...)`` (or ``**kwargs``), ``asyncio.sleep``/``wait``
+passed as a value, or an event loop's ``time``/``call_later``/``call_at`` is
+an error. There is no baseline for these:
+the count is zero, and a module leaves the list only through a reviewed edit.
 """
 
 from __future__ import annotations
@@ -66,6 +76,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS_DIR = ROOT / "backend/tests"
+SRC_DIR = ROOT / "backend/src"
 BASELINE = ROOT / "scripts/test_determinism_baseline.json"
 SUPPORT_PACKAGE = "support"
 
@@ -121,6 +132,114 @@ COMPARE_METHODS = frozenset(
 ENVIRON_MUTATORS = frozenset({"update", "setdefault", "pop", "popitem", "clear"})
 QUARANTINE_CAP = 10
 ISSUE_REFERENCE = re.compile(r"#?[1-9][0-9]*")
+
+
+# Production modules adopted onto the clock seam (#1225), relative to backend/src.
+CLOCK_SEAM_MODULES = (
+    "api/extension_metadata.py",
+    "api/settings.py",
+    "api/ws.py",
+    "approval/repository.py",
+    "browser/task_runner.py",
+    "conversation/identity.py",
+    "integrations/connection_sync.py",
+    "integrations/gmail_read.py",
+    "model_fabric/near_tee_catalog.py",
+    "observer/manager.py",
+    "observer/native_notification_queue.py",
+    "observer/sources/time_source.py",
+    "runtime_plugins/bridge.py",
+    "runtime_plugins/lifecycle.py",
+    "security/http_transport.py",
+    "work_board/dispatcher.py",
+    "work_board/pipelines.py",
+    "workflows/repo_repair_source.py",
+)
+CLOCK_SEAM_READS = frozenset(
+    {f"time.{name}" for name in CLOCK_FUNCTIONS}
+    | {"datetime.datetime.now", "datetime.datetime.utcnow", "datetime.datetime.today", "datetime.date.today"}
+)
+CLOCK_SEAM_TIMERS = frozenset({"asyncio.wait_for", "asyncio.timeout", "asyncio.timeout_at", "time.sleep",
+                               "asyncio.tasks.wait_for", "asyncio.timeouts.timeout", "asyncio.timeouts.timeout_at"})
+# Referenced without being called (passed as a value), these timers escape the call checks.
+CLOCK_SEAM_TIMER_VALUES = frozenset({"asyncio.sleep", "asyncio.wait"})
+LOOP_TIMER_METHODS = frozenset({"call_later", "call_at"})
+
+
+def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> list[str]:
+    """Direct clock reads and timers in modules adopted onto ``get_clock()``; each is an error."""
+    errors: list[str] = []
+    for module in modules:
+        path = src_dir / module
+        try:
+            display = path.relative_to(root).as_posix()
+        except ValueError:
+            display = path.as_posix()
+        try:
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+        except FileNotFoundError:
+            errors.append(f"{display}: listed in CLOCK_SEAM_MODULES but missing; update the list")
+            continue
+        except SyntaxError as error:
+            errors.append(f"{display}:{error.lineno}: cannot parse: {error.msg}")
+            continue
+        imports = Imports(tree)
+        lines = source.split("\n")
+
+        def resolved(node: ast.AST) -> str | None:
+            return imports.resolve(dotted(node))
+
+        found: list[tuple[int, str]] = []
+
+        def report(node: ast.AST, what: str) -> None:
+            snippet = lines[node.lineno - 1].strip()[:120] if node.lineno <= len(lines) else ""
+            found.append((node.lineno, f"{display}:{node.lineno}: direct {what}; "
+                                       f"use src.utils.clock.get_clock(): {snippet}"))
+
+        calls: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = resolved(node.func)
+                if name in {"datetime.now", "datetime.utcnow", "datetime.today", "date.today"}:
+                    # ``from datetime import datetime`` resolves to datetime.datetime; a bare
+                    # unresolved ``datetime.now`` is the same read.
+                    name = "datetime." + name
+                func = node.func
+                if name == "asyncio.sleep":
+                    calls.add(id(func))
+                    delay = node.args[0] if node.args else next(
+                        (keyword.value for keyword in node.keywords if keyword.arg == "delay"), None)
+                    if delay is None or not is_zero(delay):
+                        report(node, "asyncio.sleep timer")
+                elif name == "asyncio.wait":
+                    calls.add(id(func))
+                    if any(keyword.arg in {"timeout", None} for keyword in node.keywords) or len(node.args) > 1:
+                        report(node, "asyncio.wait timeout")
+                elif isinstance(func, ast.Attribute) and func.attr == "time" and not node.args and (
+                        (isinstance(func.value, ast.Call)
+                         and (dotted(func.value.func) or "").rpartition(".")[2] in LOOP_ACCESSORS)
+                        or (dotted(func.value) or "").endswith("loop")):
+                    report(node, "event-loop clock read")
+                elif isinstance(func, ast.Attribute) and func.attr in LOOP_TIMER_METHODS and (
+                        (isinstance(func.value, ast.Call)
+                         and (dotted(func.value.func) or "").rpartition(".")[2] in LOOP_ACCESSORS)
+                        or (dotted(func.value) or "").endswith("loop")):
+                    report(node, "event-loop timer " + func.attr)
+            elif isinstance(node, (ast.Attribute, ast.Name)):
+                if id(node) in calls:
+                    continue
+                name = resolved(node)
+                if name in {"datetime.now", "datetime.utcnow", "datetime.today", "date.today"}:
+                    name = "datetime." + name
+                if name in CLOCK_SEAM_READS:
+                    report(node, "clock read " + name)
+                elif name in CLOCK_SEAM_TIMERS:
+                    report(node, "timer " + name)
+                elif name in CLOCK_SEAM_TIMER_VALUES:
+                    report(node, "timer " + name + " used as a value")
+        errors.extend(message for _, message in sorted(found))
+    return errors
 
 
 @dataclass(frozen=True)
@@ -582,6 +701,7 @@ def compare(
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tests-dir", type=Path, default=TESTS_DIR, help=argparse.SUPPRESS)
+    parser.add_argument("--src-dir", type=Path, default=SRC_DIR, help=argparse.SUPPRESS)
     parser.add_argument("--root", type=Path, default=ROOT, help=argparse.SUPPRESS)
     parser.add_argument("--baseline", type=Path, default=BASELINE, help="baseline JSON path")
     parser.add_argument(
@@ -612,6 +732,9 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     root = args.root.resolve()
     result = scan(args.tests_dir.resolve(), root)
+    src_dir = args.src_dir.resolve()
+    if src_dir.is_dir():
+        result.errors.extend(scan_clock_seam(src_dir, root))
     for error in result.errors:
         print(error, file=sys.stderr)
     current = result.counts()

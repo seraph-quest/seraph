@@ -18,6 +18,7 @@ from typing import Any
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
+from src.utils.clock import get_clock
 from src.work_board.contracts import (TaskProposalGroupV1,
     GeneralTaskNativeChildBindingV1, RepositoryTaskSourceBinding)
 
@@ -4351,7 +4352,7 @@ def assert_repo_iteration_process_binding(binding, job, *, allow_expired_for_cle
             or binding.authority_digest != job.authority_digest
             or binding.base_digest != job.base_digest
             or binding.original_deadline_at.tzinfo is None
-            or (not allow_expired_for_cleanup and binding.original_deadline_at <= datetime.now(timezone.utc))
+            or (not allow_expired_for_cleanup and binding.original_deadline_at <= get_clock().now(timezone.utc))
             or not job.execution_deadline_at):
         raise RepoSandboxError("original source-issued iteration binding required")
     try:
@@ -4715,7 +4716,7 @@ async def validate_repository_iteration_accounting(db, witness, run, *, rows,
         await _validate_recovered_repository_accounting_source(db, source, witness, run,
             rows=rows, operation_id=operation_id, payload_digest=payload_digest,
             bound_microusd=bound_microusd, deadline_at=deadline_at, already_reserved=already_reserved)
-    now = datetime.now(timezone.utc)
+    now = get_clock().now(timezone.utc)
     def blocked(code="repository_iteration_binding_changed"):
         raise InferenceAccountingError(code)
     goal = await db.get(Goal, witness.group.goal_id, populate_existing=True)

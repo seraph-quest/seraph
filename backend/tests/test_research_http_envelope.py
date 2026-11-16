@@ -1,7 +1,6 @@
 """Actual HTTPX transport interception; no claim of complete research admission."""
 import asyncio
 import json
-import time
 from types import SimpleNamespace
 
 import httpx
@@ -12,7 +11,8 @@ from src.llm_runtime import _governed_research_chat_completion, ProviderProfileC
 from src.model_fabric.remote_inference_admission import RemoteInferenceAdmissionBroker
 from src.model_fabric.gpu_admission import GpuAdmissionUncertainError
 from src.workflows.job_runtime import DurableJobRepository
-from tests.support.sync import within
+from src.utils.clock import get_clock
+from tests.support.clock import advance_until_done, fake_clock  # noqa: F401
 
 # ADR-035: pins the bounded research HTTP envelope over the intercepted historical OpenRouter route
 pytestmark = pytest.mark.openrouter_legacy
@@ -28,7 +28,9 @@ class ResponseStream(httpx.AsyncByteStream):
         if self.drop:
             raise httpx.ReadError("intercepted accepted POST dropped before response data")
         for offset in range(0, len(self.content), 4096):
-            await asyncio.sleep(self.delay)
+            # The provider's pacing runs on the process clock, so under a fake
+            # clock it moves only when the test advances time.
+            await get_clock().sleep(self.delay)
             chunk = self.content[offset:offset+4096]
             self.yielded += len(chunk)
             yield chunk
@@ -57,7 +59,7 @@ def arguments(*, seconds=1):
     return dict(decision=SimpleNamespace(allowed=True, selected=SimpleNamespace(
         adapter="openai_compatible_chat", endpoint="https://openrouter.ai/api/v1/chat/completions",
         profile=SimpleNamespace(provider_kind="openrouter"))),
-        context=SimpleNamespace(deadline_at=time.time()+seconds, fallback_allowed=False),
+        context=SimpleNamespace(deadline_at=get_clock().time()+seconds, fallback_allowed=False),
         body={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "quoted evidence"}], "max_tokens": 1024},
         api_key="intercepted-test-key")
 
@@ -73,10 +75,8 @@ async def test_bounded_research_http_positive_has_one_actual_post(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.realtime(reason="needs #1225: the research HTTP deadline is computed from time.time() in production; "
-                             "the elapsed bound is the only proof that the absolute deadline, not the stream end, cut it")
 @pytest.mark.parametrize("kind", ["oversized", "compressed", "truncated", "trickle", "drop", "5xx"])
-async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db, monkeypatch, kind):
+async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db, monkeypatch, kind, fake_clock):
     setup_configuration()
     repository = DurableJobRepository()
     await repository.configure_inference_accounting(1000)
@@ -101,13 +101,17 @@ async def test_actual_http_failure_is_one_post_unknown_and_bounded(accounting_db
     # the [trickle] flake, #1180). 1.5s reaches the POST and some body bytes.
     kwargs = arguments(seconds=1.5 if kind == "trickle" else 2)
     broker = RemoteInferenceAdmissionBroker(durable_accounting=True)
-    # A hang fails at the liveness bound with a diagnostic; the elapsed bound
-    # stays (realtime, needs #1225) because the deadline is a production clock.
-    started = time.monotonic()
+    # The deadline and the provider's pacing read the fake clock: time moves
+    # only from one parked timer to the next, so the proof is the fake time
+    # spent, not a wall-clock bound.
+    executing = asyncio.ensure_future(
+        broker.execute(request("response-"+kind), lambda: _governed_research_chat_completion(**kwargs)))
+    spent = await advance_until_done(fake_clock, executing, what=f"bounded research HTTP failure ({kind})")
     with pytest.raises(GpuAdmissionUncertainError):
-        await within(broker.execute(request("response-"+kind), lambda: _governed_research_chat_completion(**kwargs)),
-                     what=f"bounded research HTTP failure ({kind}) returning")
-    assert time.monotonic()-started < 3
+        await executing
+    # The absolute deadline cut the trickle mid-body; every other failure ends
+    # on its own, with no time spent.
+    assert spent == (1.5 if kind == "trickle" else 0)
     assert len(calls) == 1 and stream.closed
     assert stream.yielded <= 64 * 1024 + 8192
     if kind == "compressed":
@@ -135,11 +139,11 @@ async def test_research_fallback_flag_rejected_before_any_http(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_final_policy_check_consumes_original_transfer_deadline(monkeypatch):
+async def test_final_policy_check_consumes_original_transfer_deadline(monkeypatch, fake_clock):
     stream = ResponseStream(b"{}")
     calls = intercept(monkeypatch, stream)
     def slow_current_policy():
-        time.sleep(0.04)
+        fake_clock.advance(0.04)  # the final policy check outlasts the original deadline
     monkeypatch.setattr("src.model_fabric.accounting.assert_current_inference_policy", slow_current_policy)
     with pytest.raises(TimeoutError, match="model_fabric_deadline_exceeded"):
         await _governed_research_chat_completion(**arguments(seconds=0.02))

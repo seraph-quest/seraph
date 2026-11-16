@@ -54,6 +54,7 @@ import ctypes
 import ctypes.util
 import gc
 import inspect
+import linecache
 import os
 import signal
 import sys
@@ -327,6 +328,29 @@ def _threading_frames_only(thread: threading.Thread) -> bool:
     return True
 
 
+def _aiosqlite_worker_finishing(thread: threading.Thread) -> bool:
+    """An aiosqlite connection thread that is not parked on its request queue.
+
+    ``Connection.close()`` returns once the worker has posted the stop result
+    to the loop; the worker then breaks out of its loop without blocking
+    again. A worker parked in ``queue.get`` serves an open connection and is
+    reported; one still delivering its last result is waited for like an
+    exiting thread. Decided by where the thread is, not by timing.
+    """
+
+    target = getattr(thread, "_target", None)
+    if getattr(target, "__module__", None) != "aiosqlite.core":
+        return False
+    frame = sys._current_frames().get(thread.ident)  # noqa: SLF001 - diagnostics
+    if frame is None:
+        return True
+    # The queue is a C SimpleQueue, so a parked worker's innermost Python
+    # frame is the worker loop itself, on its ``tx.get()`` line.
+    parked = (frame.f_code.co_name == "_connection_worker_thread"
+              and ".get(" in linecache.getline(frame.f_code.co_filename, frame.f_lineno))
+    return not parked
+
+
 def _only_threading_code(thread: threading.Thread) -> bool:
     frame = sys._current_frames().get(thread.ident)  # noqa: SLF001 - diagnostics
     while frame is not None:
@@ -383,7 +407,7 @@ def leaked_threads(before: Iterable[threading.Thread]) -> list[threading.Thread]
         # already running when ``cancel()`` arrived is still reported.
         cancelled_timer = (isinstance(thread, threading.Timer) and thread.finished.is_set()
                            and _only_threading_code(thread))
-        if cancelled_timer or _threading_frames_only(thread):
+        if cancelled_timer or _threading_frames_only(thread) or _aiosqlite_worker_finishing(thread):
             thread.join(THREAD_EXIT_LIVENESS_SECONDS)
             if not thread.is_alive():
                 continue

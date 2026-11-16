@@ -350,7 +350,7 @@ class GeneralTaskService:
         return result
 
     def retain_native_invocation(self, jobs, binding, invocation, *, output_root_witness=None):
-        import asyncio
+        from src.utils.background import track_task
         self._native_invocations[binding.invocation_id] = invocation
         self._native_invocation_bindings[binding.invocation_id] = binding
         self._native_output_root_witnesses[binding.invocation_id] = output_root_witness
@@ -363,7 +363,8 @@ class GeneralTaskService:
                     # discard the source producer. A later observation may
                     # retry the same cleanup-only canonical publication.
                     return
-            task = asyncio.create_task(observe())
+            # Tracked so shutdown (and each test's drain) waits for it (#1223).
+            task = track_task(observe(), name=f"general-task:observe-cancel:{binding.parent_job_id}")
             self._native_cancel_observers.add(task)
             task.add_done_callback(self._native_cancel_observers.discard)
         invocation.on_closed(closed)

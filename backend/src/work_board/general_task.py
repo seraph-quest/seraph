@@ -537,7 +537,6 @@ class GeneralTaskService:
             assert_agent_readable(resolved, file_path=inputs["file_path"])
             with _open_workspace_file(resolved, flags=os.O_RDONLY) as fd:
                 os.fstat(fd)  # metadata only; original adapter owns content
-                os.close(fd)
         except (OSError, ValueError) as exc:
             raise BoardError("general_task_method_source_missing", "Restore the reviewed source file before tool contact", status_code=409) from exc
 

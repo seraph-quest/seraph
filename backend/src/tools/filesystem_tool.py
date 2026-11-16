@@ -135,15 +135,12 @@ def _open_workspace_file(
         if not stat.S_ISREG(final_stat.st_mode) or final_stat.st_nlink != 1:
             raise ValueError("workspace file must be a regular single-link file")
         yield final_fd
-        final_fd = None
     finally:
+        # This context owns every descriptor it opened, the yielded one too.
+        # Callers read through it (or wrap it with ``closefd=False``) and never
+        # close it themselves; a successful read used to leak it (#1223).
         if final_fd is not None:
-            try:
-                os.close(final_fd)
-            except OSError:
-                # ``os.fdopen`` owns and closes the descriptor when a caller
-                # raises while the yielded stream is active.
-                pass
+            os.close(final_fd)
         if parent_fd != root_fd:
             os.close(parent_fd)
         os.close(root_fd)
@@ -164,7 +161,9 @@ def _open_workspace_text(
         flags=flags,
         create_parents=create_parents,
     ) as file_fd:
-        with os.fdopen(file_fd, "r+" if write else "r", encoding="utf-8") as stream:
+        # The descriptor stays owned by ``_open_workspace_file``; closing the
+        # stream first flushes it.
+        with os.fdopen(file_fd, "r+" if write else "r", encoding="utf-8", closefd=False) as stream:
             yield stream
 
 

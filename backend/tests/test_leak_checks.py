@@ -304,3 +304,22 @@ def test_child_enumeration_sees_a_child_without_reaping_it(spawned):
     # Looking did not reap it: the owner still collects the exit status.
     assert process.wait() == 0
     assert process.pid not in leaks.child_pids()
+
+
+SUBREAPER = '''
+from tests.support import leaks
+
+def test_leaves_the_subreaper_flag_set():
+    leaks.set_child_subreaper(1)
+
+def test_next_test_finds_it_restored():
+    assert leaks.child_subreaper() == 0
+'''
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the child-subreaper flag exists only on Linux")
+def test_subreaper_check_fails_a_test_that_leaves_the_flag_set_and_restores_it(leak_pytester):
+    result = _run(leak_pytester, SUBREAPER, "tests.support.leaks")
+    result.assert_outcomes(passed=2, errors=1)
+    result.stdout.fnmatch_lines(["*ERROR at teardown of test_leaves_the_subreaper_flag_set*",
+                                 "*child-subreaper flag at 1 (was 0; now restored)*"])

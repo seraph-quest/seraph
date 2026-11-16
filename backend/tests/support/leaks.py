@@ -32,6 +32,10 @@ Known limits: the thread and child baselines are taken before session- and
 module-scoped fixtures set up, so a resource such a fixture starts would be
 blamed on the first test that uses it (none does today).
 
+The Linux child-subreaper flag is checked the same way: it is process-wide
+kernel state, and a test that leaves it set makes every later orphan a
+zombie of the test process.
+
 A leaked resource is cleaned up after it is reported (tasks are cancelled by
 the closing runner, children are killed and reaped, a still-running thread is
 added to the baseline) so one leak fails one test, not every later test.
@@ -221,6 +225,38 @@ def process_lifetime_children() -> set[int]:
     return pids
 
 
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
+
+
+def _prctl():
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+    return libc.prctl
+
+
+def child_subreaper() -> int | None:
+    """This process's Linux child-subreaper flag, or None where there is none.
+
+    The flag is process-wide kernel state: once set, every orphaned
+    descendant of any later test is reparented to the test process and stays
+    a zombie nobody waits for.
+    """
+
+    if not sys.platform.startswith("linux"):
+        return None
+    value = ctypes.c_int()
+    if _prctl()(_PR_GET_CHILD_SUBREAPER, ctypes.addressof(value), 0, 0, 0) != 0:
+        return None
+    return value.value
+
+
+def set_child_subreaper(value: int) -> None:
+    if _prctl()(_PR_SET_CHILD_SUBREAPER, value, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_CHILD_SUBREAPER) failed")
+
+
 def describe_child(pid: int) -> str:
     """A short description of a child for the failure message."""
 
@@ -387,6 +423,7 @@ def pending_tasks(loop: asyncio.AbstractEventLoop) -> list[asyncio.Task]:
 
 _BEFORE_THREADS = pytest.StashKey[list]()
 _BEFORE_CHILDREN = pytest.StashKey[set]()
+_BEFORE_SUBREAPER = pytest.StashKey[object]()
 _TASK_LEAKS = pytest.StashKey[list]()
 _CURRENT_ITEM: list[pytest.Item] = []
 
@@ -416,6 +453,7 @@ def pytest_configure(config) -> None:
 def pytest_runtest_setup(item: pytest.Item):
     item.stash[_BEFORE_THREADS] = list(threading.enumerate())
     item.stash[_BEFORE_CHILDREN] = child_pids()
+    item.stash[_BEFORE_SUBREAPER] = child_subreaper()
     item.stash[_TASK_LEAKS] = []
     _CURRENT_ITEM[:] = [item]
     return (yield)
@@ -484,6 +522,13 @@ def _check_after_teardown(item: pytest.Item) -> None:
     if failing:
         problems.append("child process(es) left running or unreaped by the test (own them with the "
                         "`spawned` fixture or reap them): " + "; ".join(failing))
+
+    before_subreaper = item.stash.get(_BEFORE_SUBREAPER, None)
+    after_subreaper = child_subreaper()
+    if before_subreaper is not None and after_subreaper != before_subreaper:
+        set_child_subreaper(int(before_subreaper))
+        problems.append(f"the test left this process's child-subreaper flag at {after_subreaper} (was "
+                        f"{before_subreaper}; now restored): orphans of later tests would become unreaped zombies")
 
     for note in notes:
         item.add_report_section("teardown", "tracked leak exception", note)

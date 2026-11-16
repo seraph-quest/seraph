@@ -25,6 +25,7 @@ from tests.cordis_research import needs_cordis, research_host
 from tests.test_cordis_services_core import service_db  # noqa: F401
 from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import real_auth  # noqa: F401
+from tests.support.clock import advance_until_done, fake_clock  # noqa: F401
 from tests.support.sync import Gate, Signal, assert_blocked, suspended_in, wait_until, within
 
 pytestmark = pytest.mark.asyncio
@@ -297,9 +298,7 @@ async def test_api_launched_workers_refuse_while_dispatch_is_not_active(service_
 
 # ------------------------------------------------------------------ drain and restart
 
-@pytest.mark.realtime(reason="needs #1225: the 1 s dispatch drain bound is real time in production "
-                             "(src/runtime_plugins/lifecycle.py); the gated quick attempt must finish inside it")
-async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_never_a_bare_cancel(service_db):  # noqa: F811
+async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_never_a_bare_cancel(service_db, fake_clock):  # noqa: F811
     registry: dict = {}
     calls: list[tuple] = []
     lifecycle = _lifecycle(registry=lambda: registry)
@@ -309,7 +308,7 @@ async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_n
         calls.append((task_id, attempt_id, reason))
         worker = registry[(task_id, attempt_id)]
         worker.cancel()
-        await asyncio.wait([worker], timeout=1)
+        await asyncio.gather(worker, return_exceptions=True)
         return {"task_id": task_id, "attempt_id": attempt_id, "job_id": "job-" + task_id, "status": "cancelled",
                 "cleanup_proven": True, "worker_alive": False}
 
@@ -330,16 +329,23 @@ async def test_drain_waits_then_routes_leftover_attempts_through_their_cleanup_n
     registry[("t2", "a2")] = asyncio.create_task(stuck())
     await quick_gate.wait_reached()
     # The quick attempt is still running when the drain starts and finishes inside it.
-    # The drain bound is real time in production (#1225); it only has to outlast one
-    # loop turn between the drain parking and the gate release.
+    # The 1 s drain bound reads the fake clock, which moves only when this test advances it.
     draining = asyncio.create_task(
         lifecycle.deactivate(DISPATCH_DOMAIN, "dispatch_owner_draining", drain_seconds=1.0))
     try:
-        await wait_until(lambda: suspended_in(draining, "RuntimeLifecycle._drain"),
+        await wait_until(lambda: suspended_in(draining, "RuntimeLifecycle._drain") and fake_clock.pending_deadlines(),
                          what="dispatch drain waits on the live attempts", task=draining)
         assert finished == []
     finally:
         quick_gate.release()
+    await wait_until(lambda: finished == ["quick"], what="the quick attempt finishes inside the drain bound",
+                     task=draining)
+    # Still inside the bound: only the stuck attempt holds the drain open.
+    await assert_blocked(draining, at=lambda: suspended_in(draining, "RuntimeLifecycle._drain"),
+                         what="the drain waits out its bound for the stuck attempt")
+    assert calls == []
+    # The drain waits exactly its original bound before the leftover goes to cleanup.
+    assert await advance_until_done(fake_clock, draining, what="dispatch drain") == 1.0
     status = await draining
     assert finished == ["quick"]
     assert calls == [("t2", "a2", "dispatch_drain_timeout")]  # only the attempt past its bound

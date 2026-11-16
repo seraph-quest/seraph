@@ -40,8 +40,8 @@ async def _root_state(jobs, job_id):
 
 
 @pytest.mark.asyncio
-@pytest.mark.realtime(reason="needs #1225: the live observation must finish inside the original producer's real "
-                      "monotonic deadline and the bounded ACK window, both read from the clock in production")
+@pytest.mark.realtime(reason="the live observation must finish inside the original producer child's kernel "
+                      "monotonic deadline and the bounded ACK window; the child's clock is not the test's (#1225)")
 async def test_authenticated_live_original_producer_pending_preserves_root_and_physical_bytes(
         accounting_db, monkeypatch, repository_admission_signer, record_property):
     captured, physical_pending = {}, []

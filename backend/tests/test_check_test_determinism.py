@@ -478,3 +478,34 @@ def test_marker_aliases_are_resolved(tmp_path: Path) -> None:
     assert sum("only supported as a decorator on a test function" in error for error in result.errors) == 1
     assert result.counts() == {"backend/tests/test_a.py": {"realtime": 1}}
     assert result.realtime_files == ["backend/tests/test_a.py"]
+
+
+def test_clock_seam_modules_have_no_direct_clock_reads_or_timers(tmp_path: Path) -> None:
+    """#1225: an adopted module that reads time or arms a timer directly fails the check."""
+    assert checker.scan_clock_seam(ROOT / "backend/src", ROOT) == []
+    module = tmp_path / "src/adopted.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(textwrap.dedent("""\
+        import asyncio
+        import time
+        from datetime import date, datetime, timezone
+        from time import perf_counter
+
+        async def work(loop, task):
+            clean = await asyncio.sleep(0), await asyncio.wait({task})
+            time.monotonic()
+            datetime.now(timezone.utc)
+            date.today()
+            perf_counter()
+            loop.time()
+            await asyncio.sleep(1)
+            await asyncio.wait({task}, timeout=2)
+            async with asyncio.timeout(3):
+                pass
+            waiter = asyncio.wait_for
+    """), encoding="utf-8")
+    errors = checker.scan_clock_seam(tmp_path / "src", tmp_path, modules=("adopted.py",))
+    assert [int(error.split(":")[1]) for error in errors] == [8, 9, 10, 11, 12, 13, 14, 15, 17]
+    assert all("use src.utils.clock.get_clock()" in error for error in errors)
+    missing = checker.scan_clock_seam(tmp_path / "src", tmp_path, modules=("gone.py",))
+    assert len(missing) == 1 and "missing" in missing[0]

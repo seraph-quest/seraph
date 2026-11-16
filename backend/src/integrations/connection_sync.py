@@ -27,6 +27,7 @@ from src.vault import decrypt, encrypt
 from src.vault.repository import secret_binding_digest
 from src.work_board.contracts import WorkBoardOwner
 from src.scheduler.governed_schedules import _begin_serialized
+from src.utils.clock import get_clock
 from src.workflows.job_runtime import DurableJobIdentity, DurableJobSpec, NativePhysicalCleanupBinding, NativePhysicalCleanupProof, ConnectedSourcePhysicalCleanupOwner, native_external_effect_state, durable_job_repository
 
 SYNC_SECONDS = 120
@@ -39,7 +40,7 @@ SYNC_KIND = "connection_source_sync"
 
 
 def now() -> datetime:
-    return datetime.now(timezone.utc)
+    return get_clock().now(timezone.utc)
 
 
 def aware(value: datetime) -> datetime:
@@ -267,7 +268,7 @@ class ConnectionSyncService:
     async def synchronize(self, owner: WorkBoardOwner, request: SyncRequest, *, authenticated_token_hash: str | None = None) -> dict[str, Any]:
         self._ready()
         async def callback():
-            async with asyncio.timeout(SYNC_SECONDS):
+            async with get_clock().timeout(SYNC_SECONDS):
                 return await self._synchronize(owner, request, authenticated_token_hash=authenticated_token_hash)
         task = asyncio.create_task(callback())
         self._tasks.add(task)
@@ -441,7 +442,7 @@ class ConnectionSyncService:
                     retry_at = now() + timedelta(seconds=RETRY_SECONDS)
                     checkpoint = await durable_job_repository.record_checkpoint(job_id, checkpoint_id="connection-sync-cooldown", state={"retry_at": retry_at.isoformat(), "retry_count": 1, "grant_digest": original.snapshot_digest, "original_deadline": claimed["deadline_at"], "page": page_count}, checkpoint_payload={"retry_at": retry_at.isoformat(), "retry_count": 1, "original_deadline": claimed["deadline_at"]}, safe=True, owner=lease_owner, fencing_token=fence, expected_revision=current_revision)
                     current_revision = checkpoint["revision"]
-                    await asyncio.sleep(RETRY_SECONDS)
+                    await get_clock().sleep(RETRY_SECONDS)
                     await check()
                     records, next_token, consumed = await fetch()
                 remaining -= consumed

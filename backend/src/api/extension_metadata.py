@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 
+from src.utils.clock import get_clock
+
 CALLER_WAIT_SECONDS = 4.0
 
 
@@ -79,7 +81,7 @@ async def bounded_extension_metadata(builder: Callable[..., dict[str, Any]], *, 
             raise _unavailable()
         future = current.future
     try:
-        return await asyncio.wait_for(asyncio.shield(future), timeout=CALLER_WAIT_SECONDS)
+        return await get_clock().wait_for(asyncio.shield(future), timeout=CALLER_WAIT_SECONDS)
     except asyncio.CancelledError:
         raise
     except Exception:

@@ -17,6 +17,7 @@ from sqlmodel import col, select
 from config.settings import RepoSandboxSettings, settings
 from src.db.engine import get_session as get_db
 from src.db.models import MemoryEpisode, ScreenObservation, UserProfile
+from src.utils.clock import get_clock
 from src.local_runtime_profile_verifier import (
     PROFILE_VERIFIER_VERSION,
     latest_local_runtime_profile_proof,
@@ -501,7 +502,7 @@ def _read_daemon_status(max_age_seconds: float = 45) -> dict[str, object]:
             parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
-            status["alive"] = (datetime.now(timezone.utc) - parsed).total_seconds() < max_age_seconds
+            status["alive"] = (get_clock().now(timezone.utc) - parsed).total_seconds() < max_age_seconds
         except ValueError:
             status["alive"] = False
     return status
@@ -547,7 +548,7 @@ async def _choose_screenshot_folder_with_native_dialog() -> str:
     except OSError as exc:
         raise HTTPException(status_code=503, detail="Native folder picker is unavailable") from exc
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+        stdout, stderr = await get_clock().wait_for(process.communicate(), timeout=90)
     except asyncio.TimeoutError as exc:
         process.kill()
         await process.communicate()
@@ -673,7 +674,7 @@ def _fallback_screenshot_folder_summary(root: Path, *, status: str) -> dict[str,
 
 async def _screenshot_folder_summary_fast(root: Path) -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             asyncio.to_thread(_screenshot_folder_summary, root),
             timeout=_SCREENSHOT_FOLDER_SUMMARY_TIMEOUT_S,
         )
@@ -919,7 +920,7 @@ def _screenshot_visual_run_summary(details_payloads: list[str]) -> dict[str, int
 
 async def _screenshot_folder_pipeline_summary_fast(root: Path | None = None) -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             _screenshot_folder_pipeline_summary(root),
             timeout=_SCREENSHOT_PIPELINE_SUMMARY_TIMEOUT_S,
         )
@@ -953,7 +954,7 @@ def _report_receipt_summary(report_dir: Path) -> dict[str, object]:
 
 async def _report_receipt_summary_fast(report_dir: Path) -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             asyncio.to_thread(_report_receipt_summary, report_dir),
             timeout=_REPORT_RECEIPT_SUMMARY_TIMEOUT_S,
         )
@@ -1017,7 +1018,7 @@ def _local_runtime_profile_proof_summary() -> dict[str, object]:
 
 async def _local_runtime_profile_proof_summary_fast() -> dict[str, object]:
     try:
-        return await asyncio.wait_for(
+        return await get_clock().wait_for(
             asyncio.to_thread(_local_runtime_profile_proof_summary),
             timeout=_LOCAL_RUNTIME_PROOF_SUMMARY_TIMEOUT_S,
         )
@@ -1103,7 +1104,7 @@ async def set_interruption_mode(body: InterruptionModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.interruption_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     ctx = context_manager.get_context()
@@ -1582,7 +1583,7 @@ async def set_tool_policy_mode(body: ToolPolicyModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.tool_policy_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     return {"mode": body.mode}
@@ -1623,7 +1624,7 @@ async def set_mcp_policy_mode(body: McpPolicyModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.mcp_policy_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     return {"mode": body.mode}
@@ -1650,7 +1651,7 @@ async def set_approval_mode(body: ApprovalModeRequest):
         profile = result.scalars().first()
         if profile:
             profile.approval_mode = body.mode
-            profile.updated_at = datetime.now(timezone.utc)
+            profile.updated_at = get_clock().now(timezone.utc)
             db.add(profile)
 
     return {"mode": body.mode}

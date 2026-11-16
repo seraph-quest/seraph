@@ -27,7 +27,8 @@ from config.settings import settings
 from src.db.models import CalendarEventBinding, CalendarReadConsent, GoogleServiceConnection, Goal, MailLabelBinding, MailMessageBinding, MailReadConsent, OperatorIdentity, OperatorSession, Session, WorkflowRunState
 from src.integrations import connection_sync as sync
 from src.integrations.gmail_read import GMAIL_READONLY_SCOPE, GoogleGmailReadonlyAdapter, message_key
-from tests.support.sync import within
+from tests.support.clock import fake_clock  # noqa: F401
+from tests.support.sync import Signal, settle, within
 from src.integrations.google_calendar import GoogleCalendarReadonlyAdapter, canonical_event_key
 from src.vault import crypto, encrypt, vault_repository
 from src.work_board.contracts import WorkBoardOwner
@@ -637,10 +638,12 @@ async def test_revocation_during_page_prevents_any_adoption_and_private_read(sou
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_db", ["file"], indirect=True)
-async def test_contact_timeout_remains_two_seconds_and_records_unknown(source, async_db, monkeypatch):
+async def test_contact_timeout_remains_two_seconds_and_records_unknown(source, async_db, monkeypatch, fake_clock):
     runtime, timestamp, db_factory, _ = source
     provider = Provider(timestamp)
+    contacted = Signal("provider contacted")
     async def respond(req):
+        contacted.set()
         await asyncio.Event().wait()  # the provider never answers; only the contact timeout ends the wait
         return provider.response(req)
     timeouts = []
@@ -653,10 +656,18 @@ async def test_contact_timeout_remains_two_seconds_and_records_unknown(source, a
     transport = httpx.MockTransport(respond)
     monkeypatch.setattr(sync, "GoogleGmailReadonlyAdapter", lambda connection, **kwargs: RecordingAdapter(
         connection, transport=transport, resolver=lambda *_: ["8.8.8.8"], **kwargs))
+    synchronizing = asyncio.create_task(runtime.synchronize(OWNER, request(timestamp)))
+    await contacted.wait(task=synchronizing)
+    # The hung contact is parked on its two-second contact timeout (the
+    # original deadline is further away). Fake time moves only here, so the
+    # test does no real waiting and the bound cannot race machine load.
+    assert 2.0 in fake_clock.pending_deadlines(), fake_clock.pending_deadlines()
+    fake_clock.advance(1.5)
+    await settle()
+    assert not synchronizing.done()
+    fake_clock.advance(0.5)
     with pytest.raises(sync.GmailReadError, match="authorization is unavailable"):
-        await within(runtime.synchronize(OWNER, request(timestamp)), what="hung provider contact timing out")
-    # The contact that hung was bounded by the two-second contact timeout
-    # (the original deadline is further away), not by an elapsed oracle.
+        await within(synchronizing, what="hung provider contact timing out")
     assert timeouts and set(timeouts) == {2.0}, timeouts
     status = await runtime.status(OWNER, "connection")
     assert status["state"] == "unknown_external_effect" and status["cursor_revision"] == 0

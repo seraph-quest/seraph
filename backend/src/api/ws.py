@@ -5,7 +5,6 @@ import uuid
 import logging
 from threading import Event
 from contextlib import aclosing, suppress
-from time import perf_counter
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from smolagents import ActionStep, ToolCall, FinalAnswerStep
@@ -60,6 +59,7 @@ from src.auth.service import (
     bind_operator_principal,
 )
 from src.db.engine import get_session
+from src.utils.clock import get_clock
 from src.guardian.state import build_guardian_state
 from src.security.trust_contract import TrustPrincipal
 from src.models.schemas import ChatIngressEnvelope, WSMessage, WSResponse
@@ -143,9 +143,9 @@ async def _await_authorized(awaitable, revoked_event: asyncio.Event, *, timeout:
     try:
         wait_kwargs = {"return_when": asyncio.FIRST_COMPLETED}
         if timeout is None:
-            done, _ = await asyncio.wait({work_task, revoked_task}, **wait_kwargs)
+            done, _ = await get_clock().wait({work_task, revoked_task}, **wait_kwargs)
         else:
-            done, _ = await asyncio.wait({work_task, revoked_task}, timeout=timeout, **wait_kwargs)
+            done, _ = await get_clock().wait({work_task, revoked_task}, timeout=timeout, **wait_kwargs)
             if not done:
                 work_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -185,7 +185,7 @@ async def watch_operator_session(
         return
     poll_seconds = max(float(settings.operator_auth_revocation_poll_seconds), 0.25)
     while True:
-        await asyncio.sleep(poll_seconds)
+        await get_clock().sleep(poll_seconds)
         try:
             await authenticate_websocket_session(session_id, touch=False)
         except AuthFailure as exc:
@@ -218,7 +218,7 @@ async def _authorized_with_timeout(
         name="operator-authorized-work",
     )
     try:
-        return await asyncio.wait_for(authorized_task, timeout=timeout)
+        return await get_clock().wait_for(authorized_task, timeout=timeout)
     except BaseException:
         if not authorized_task.done():
             authorized_task.cancel()
@@ -288,7 +288,7 @@ async def _build_agent(
         return create_onboarding_agent(message), True, set()
 
     try:
-        guardian_state = await asyncio.wait_for(
+        guardian_state = await get_clock().wait_for(
             build_guardian_state(
                 session_id=session_id,
                 user_message=message,
@@ -496,7 +496,7 @@ async def websocket_work_board_events(websocket: WebSocket):
             wait_set = {event_task, disconnect_task}
             if auth_session_id:
                 wait_set.add(revocation_task)
-            done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await get_clock().wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
             if revocation_task in done and auth_revoked.is_set():
                 event_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -1019,7 +1019,7 @@ async def websocket_chat(websocket: WebSocket):
                 runtime_path=direct_runtime_path,
                 is_onboarding=direct_is_onboarding,
             ):
-                started_at = perf_counter()
+                started_at = get_clock().perf_counter()
                 if await _cordis_profile_changed({"direct"}):
                     active_turn_completed = True
                     continue
@@ -1035,7 +1035,7 @@ async def websocket_chat(websocket: WebSocket):
                         outcome="failed",
                         policy_mode=get_current_tool_policy_mode(),
                         details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
                             "runtime": "direct-openrouter-chat",
@@ -1136,7 +1136,7 @@ async def websocket_chat(websocket: WebSocket):
                         outcome="timed_out",
                         policy_mode=get_current_tool_policy_mode(),
                         details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
                             "timeout_seconds": direct_chat_turn_timeout(),
                             "request_id": llm_request_id,
@@ -1167,7 +1167,7 @@ async def websocket_chat(websocket: WebSocket):
                         outcome="blocked",
                         policy_mode=get_current_tool_policy_mode(),
                         details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
                             "request_id": llm_request_id,
@@ -1207,7 +1207,7 @@ async def websocket_chat(websocket: WebSocket):
                         outcome="uncertain",
                         policy_mode=get_current_tool_policy_mode(),
                         details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
                             "request_id": llm_request_id,
@@ -1238,7 +1238,7 @@ async def websocket_chat(websocket: WebSocket):
                         outcome="failed",
                         policy_mode=get_current_tool_policy_mode(),
                         details={
-                            "duration_ms": int((perf_counter() - started_at) * 1000),
+                            "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                             "message_length": len(ws_msg.message),
                             "error": safe_error,
                             "request_id": llm_request_id,
@@ -1305,7 +1305,7 @@ async def websocket_chat(websocket: WebSocket):
                     outcome="succeeded",
                     policy_mode=get_current_tool_policy_mode(),
                     details={
-                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                         "message_length": len(ws_msg.message),
                         "response_length": len(final_result),
                         "request_id": llm_request_id,
@@ -1366,7 +1366,7 @@ async def websocket_chat(websocket: WebSocket):
             step_num = 0
             final_result = ""
             tool_call_count = 0
-            started_at = perf_counter()
+            started_at = get_clock().perf_counter()
             run_outcome = "succeeded"
 
             try:
@@ -1472,7 +1472,7 @@ async def websocket_chat(websocket: WebSocket):
                     outcome="blocked",
                     policy_mode=get_current_tool_policy_mode(),
                     details={
-                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                         "message_length": len(ws_msg.message),
                         "error": safe_reason,
                         "request_id": llm_request_id,
@@ -1512,7 +1512,7 @@ async def websocket_chat(websocket: WebSocket):
                     outcome="timed_out",
                     policy_mode=get_current_tool_policy_mode(),
                     details={
-                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                         "message_length": len(ws_msg.message),
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
@@ -1644,7 +1644,7 @@ async def websocket_chat(websocket: WebSocket):
                     outcome="failed",
                     policy_mode=get_current_tool_policy_mode(),
                     details={
-                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                         "message_length": len(ws_msg.message),
                         "step_count": step_num,
                         "tool_call_count": tool_call_count,
@@ -1713,7 +1713,7 @@ async def websocket_chat(websocket: WebSocket):
                     outcome="succeeded",
                     policy_mode=get_current_tool_policy_mode(),
                     details={
-                        "duration_ms": int((perf_counter() - started_at) * 1000),
+                        "duration_ms": int((get_clock().perf_counter() - started_at) * 1000),
                         "message_length": len(ws_msg.message),
                         "response_length": len(final_result),
                         "step_count": step_num,

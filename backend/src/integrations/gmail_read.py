@@ -31,6 +31,7 @@ from src.security.http_transport import (
     request_pinned_https,
 )
 from src.vault import vault_repository
+from src.utils.clock import get_clock
 
 
 GOOGLE_API_ORIGIN = "https://gmail.googleapis.com"
@@ -384,7 +385,7 @@ class GoogleGmailReadonlyAdapter:
     def _contact_timeout(self) -> float:
         remaining = self.contact_timeout_seconds
         if self.deadline_at is not None:
-            remaining = min(remaining, (self.deadline_at - datetime.now(timezone.utc)).total_seconds())
+            remaining = min(remaining, (self.deadline_at - get_clock().now(timezone.utc)).total_seconds())
         if remaining <= 0:
             raise GmailReadError("source_deadline_expired", "The original source read deadline expired", status_code=409, recovery_action="reconcile_existing_sync")
         return remaining

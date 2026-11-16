@@ -493,7 +493,8 @@ async def test_secret_runtime_paths_failed_reads_and_policy_changes_never_succee
         assert job["status"] == "blocked" and job["effects"] == []
 
 
-@pytest.mark.realtime(reason="needs #1225: service_jobs.SERVICE_TIMEOUT is a real-time deadline the late handler must outlast")
+@pytest.mark.realtime(reason="service_jobs.SERVICE_TIMEOUT becomes the original deadline the Cordis child process "
+                             "enforces with its own wall clock; a fake clock in the test process cannot move it (#1225)")
 async def test_late_and_cancelled_capability_results_are_settled_and_recoverable(accounting_db, real_auth, monkeypatch):  # noqa: F811
     import threading
     from datetime import timedelta

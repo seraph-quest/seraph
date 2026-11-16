@@ -38,7 +38,7 @@ from src.memory.flush import _reset_memory_flush_state
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.utils.background import drain_tracked_tasks
 from tests.support.db import (arm_canonical_engine_sentinel, create_test_database, install_database,
-                              take_canonical_engine_violations)
+                              remove_test_database, take_canonical_engine_violations)
 
 # ── Settings isolation ──────────────────────────────────
 
@@ -142,6 +142,8 @@ async def db(tmp_path_factory, _db_template_directory, monkeypatch):
             await drain_tracked_tasks(timeout_seconds=5.0)
         finally:
             await database.engine.dispose()
+            # About 6 MB per test: a full local run would otherwise keep GBs.
+            remove_test_database(database.path)
 
 
 @pytest.fixture

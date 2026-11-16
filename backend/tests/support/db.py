@@ -18,7 +18,8 @@ for the session workspace) refuses every connection. A test that reaches it
 fails, even when the code under test swallows the refusal.
 
 Schemas are created once per process in a template file and copied per test,
-so a test pays for a file copy instead of ``create_all``.
+so a test pays for a file copy instead of ``create_all``. The copy is deleted
+at teardown.
 """
 from __future__ import annotations
 
@@ -58,16 +59,19 @@ def _caller_frames(limit: int = 8) -> str:
     chain back to the caller.
     """
     frames = []
-    current = greenlet.getcurrent()
-    while current is not None:
-        frame = sys._getframe(1) if current is greenlet.getcurrent() else current.gr_frame
-        while frame is not None:
-            name = frame.f_code.co_filename
-            if (name.startswith(_BACKEND_ROOT) and "site-packages" not in name
-                    and not name.endswith(("tests/support/db.py", "src/db/engine.py"))):
-                frames.append(f"{name[len(_BACKEND_ROOT):]}:{frame.f_lineno}:{frame.f_code.co_name}")
-            frame = frame.f_back
-        current = current.parent
+    try:
+        current = greenlet.getcurrent()
+        while current is not None:
+            frame = sys._getframe(1) if current is greenlet.getcurrent() else current.gr_frame
+            while frame is not None:
+                name = frame.f_code.co_filename
+                if (name.startswith(_BACKEND_ROOT) and "site-packages" not in name
+                        and not name.endswith(("tests/support/db.py", "src/db/engine.py"))):
+                    frames.append(f"{name[len(_BACKEND_ROOT):]}:{frame.f_lineno}:{frame.f_code.co_name}")
+                frame = frame.f_back
+            current = current.parent
+    except Exception as exc:  # diagnostics must never break the sentinel
+        frames.append(f"<call chain unavailable: {type(exc).__name__}>")
     return " <- ".join(frames[:limit]) or "unknown"
 
 
@@ -138,15 +142,21 @@ async def _build_template(directory: Path) -> _Template:
 async def create_test_database(path: Path, *, template_directory: Path) -> TestDatabase:
     """Create a production-configured file database with the full schema at ``path``."""
     global _template
-    if _template is None or not _template.path.exists():
+    if (_template is None or not _template.path.exists()
+            or set(SQLModel.metadata.tables) - _template.tables):
+        # First use, or a table registered after the template was built:
+        # (re)build it so late tables get the same schema and search indexes
+        # production builds. ``create_all`` and the index DDL only add what
+        # is missing.
         _template = await _build_template(template_directory)
     shutil.copyfile(_template.path, path)
-    database = TestDatabase(engine=db_engine.create_database_engine(f"sqlite+aiosqlite:///{path}"), path=path)
-    if set(SQLModel.metadata.tables) - _template.tables:
-        # A table registered after the template was built; create only it.
-        async with database.engine.begin() as connection:
-            await connection.run_sync(SQLModel.metadata.create_all)
-    return database
+    return TestDatabase(engine=db_engine.create_database_engine(f"sqlite+aiosqlite:///{path}"), path=path)
+
+
+def remove_test_database(path: Path) -> None:
+    """Delete a test database file and its WAL and shared-memory siblings."""
+    for candidate in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        candidate.unlink(missing_ok=True)
 
 
 def install_database(monkeypatch, database_engine: AsyncEngine) -> Callable[[], AsyncSession]:

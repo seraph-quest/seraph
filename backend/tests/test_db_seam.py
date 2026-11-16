@@ -8,9 +8,14 @@ from sqlalchemy import event, select, text
 
 import src.db.engine as db_engine
 from src.db.models import AuditEvent
+from sqlmodel import SQLModel
+
 from tests.support.db import (
     CANONICAL_ENGINE,
     CanonicalEngineReached,
+    create_test_database,
+    install_database,
+    remove_test_database,
     take_canonical_engine_violations,
 )
 
@@ -160,6 +165,45 @@ async def test_session_scope_publishes_work_board_events_only_after_commit(db, m
     assert published == [["after-commit"]]
 
 
-async def test_each_test_database_starts_with_an_open_state_gate(db):
+async def test_each_test_database_starts_with_an_open_state_gate_and_restores_it(db, tmp_path):
     assert db_engine.state_gate() == (None, None)
-    db_engine.set_state_gate("failed", "leaked_by_a_test")  # restored at teardown
+    # Install a second database by hand, leave its gate closed, and undo it
+    # as the fixture's teardown does: the previous gate comes back.
+    outer_gate = db_engine._STATE_GATE
+    other = db_engine.create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'other.sqlite3'}")
+    patcher = pytest.MonkeyPatch()
+    try:
+        install_database(patcher, other)
+        assert db_engine.state_gate() == (None, None)
+        db_engine.set_state_gate("failed", "leaked_by_a_test")
+        assert db_engine.state_gate() == ("failed", "leaked_by_a_test")
+    finally:
+        patcher.undo()
+        await other.dispose()
+    assert db_engine._STATE_GATE is outer_gate
+    assert db_engine.state_gate() == (None, None)
+    assert db_engine.engine is db.engine
+
+
+async def test_late_tables_get_the_template_schema_and_indexes(db, tmp_path, _db_template_directory):
+    from sqlalchemy import Column, Integer, Table
+
+    late = Table("zz_late_registered_probe", SQLModel.metadata, Column("id", Integer, primary_key=True))
+    try:
+        database = await create_test_database(tmp_path / "late.sqlite3", template_directory=_db_template_directory)
+        try:
+            async with database.engine.connect() as connection:
+                names = {row[0] for row in (await connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master")).all()}
+        finally:
+            await database.engine.dispose()
+            remove_test_database(database.path)
+    finally:
+        SQLModel.metadata.remove(late)
+    assert {"zz_late_registered_probe", "session_recall_fts"} <= names
+    # The template itself was rebuilt, so the search-index DDL ran with the
+    # late table registered, as production's init_db does.
+    from tests.support import db as support_db
+    assert "zz_late_registered_probe" in support_db._template.tables
+    assert not database.path.exists()
+    assert not database.path.with_name(database.path.name + "-wal").exists()

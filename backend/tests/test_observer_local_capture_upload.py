@@ -605,3 +605,200 @@ async def test_uploaded_local_analysis_feeds_digest_report_and_status(capture_en
 
     status = await _screenshot_folder_pipeline_summary(capture_env["shots"])
     assert status["total_observation_count"] == 1
+
+
+# ── Native daemon context post (#1248) ─────────────────────────────────
+
+
+def _context_body(window: str = "Code — main.py") -> dict[str, object]:
+    return {"active_window": window, "screen_context": None}
+
+
+@pytest.fixture
+def context_manager_spy(monkeypatch):
+    from src.observer.manager import ContextManager
+
+    manager = ContextManager()
+    monkeypatch.setattr(observer, "context_manager", manager)
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_paired_daemon_context_post_without_origin_is_accepted(capture_env, context_manager_spy):
+    response = await capture_env["client"].post(
+        "/api/observer/context", headers=_headers(capture_env["credential"]), json=_context_body()
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "ok"}
+    context = context_manager_spy.get_context()
+    assert context.active_window == "Code — main.py"
+    assert context.last_daemon_post is not None
+
+
+@pytest.mark.asyncio
+async def test_daemon_context_post_requires_valid_paired_credential(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+
+    missing = await client.post("/api/observer/context", headers=_headers(None), json=_context_body())
+    assert missing.status_code == 401
+    bare = await client.post("/api/observer/context", json=_context_body())
+    assert bare.status_code == 401
+    assert bare.json()["detail"]["code"] == "authentication_required"
+    wrong = await client.post("/api/observer/context", headers=_headers("not-the-credential"), json=_context_body())
+    assert wrong.status_code == 401
+    no_identity = await client.post(
+        "/api/observer/context", headers={"Authorization": f"Bearer {credential}"}, json=_context_body()
+    )
+    assert no_identity.status_code == 401
+    wrong_device = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, **{"X-Seraph-Node-Device": "other-device"}),
+        json=_context_body(),
+    )
+    assert wrong_device.status_code == 403
+    assert wrong_device.json()["detail"]["code"] == "pairing_identity_mismatch"
+    # Authentication precedes body validation: an unauthenticated malformed
+    # body is refused as unauthenticated, not parsed.
+    malformed = await client.post(
+        "/api/observer/context", headers=_headers(None), content=b"{not json",
+    )
+    assert malformed.status_code == 401
+    # Once authenticated, a malformed or oversized body is refused.
+    bad_json = await client.post(
+        "/api/observer/context", headers=_headers(credential), content=b"{not json",
+    )
+    assert bad_json.status_code == 422
+    assert bad_json.json()["detail"]["code"] == "invalid_context_request"
+    oversized = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential),
+        json={"active_window": "x" * (observer._MAX_CONTEXT_REQUEST_BYTES + 1)},
+    )
+    assert oversized.status_code == 413
+    assert oversized.json()["detail"]["code"] == "context_request_too_large"
+    assert context_manager_spy.get_context().active_window is None
+    assert context_manager_spy.get_context().last_daemon_post is None
+
+
+@pytest.mark.asyncio
+async def test_revoked_pairing_cannot_post_context(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+    before = await client.post("/api/observer/context", headers=_headers(credential), json=_context_body("Before"))
+    assert before.status_code == 200, before.text
+
+    revoke = await capture_env["operator_client"].post(
+        "/api/nodes/pairings/revoke",
+        headers={"Origin": ORIGIN},
+        json={
+            "extension_id": "seraph.openclaw-device-bridge",
+            "reference": "connectors/nodes/device.yaml",
+            "reason": "lost device",
+        },
+    )
+    assert revoke.status_code == 200, revoke.text
+
+    after = await client.post("/api/observer/context", headers=_headers(credential), json=_context_body("After"))
+    assert after.status_code in {401, 403}, after.text
+    assert context_manager_spy.get_context().active_window == "Before"
+
+
+@pytest.mark.asyncio
+async def test_context_post_pairing_policy_is_enforced(capture_env, context_manager_spy):
+    await _set_pairing_policy(allowed_capabilities=["presence.read"])
+    response = await capture_env["client"].post(
+        "/api/observer/context", headers=_headers(capture_env["credential"]), json=_context_body()
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "capability_scope_not_allowed"
+    assert context_manager_spy.get_context().active_window is None
+
+
+@pytest.mark.asyncio
+async def test_context_post_origin_rules_for_native_ingress(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+    # A cookie on the no-Origin path keeps the browser rule, even with the
+    # paired credential.
+    with_cookie = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Cookie="seraph_session=x"),
+        json=_context_body(),
+    )
+    assert with_cookie.status_code == 403
+    assert with_cookie.json()["detail"]["code"] == "mutation_origin_required"
+    # A foreign Origin is refused before any credential check.
+    foreign = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Origin="http://evil"),
+        json=_context_body(),
+    )
+    assert foreign.status_code == 403
+    assert foreign.json()["detail"]["code"] == "origin_forbidden"
+    # The host allow-list still applies on the native path.
+    bad_host = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Host="evil.example"),
+        json=_context_body(),
+    )
+    assert bad_host.status_code == 403
+    assert bad_host.json()["detail"]["code"] == "origin_forbidden"
+    # Any Origin header, even empty or "null", keeps the browser rule.
+    empty_origin = await client.post(
+        "/api/observer/context", headers=_headers(credential, Origin=""), json=_context_body()
+    )
+    assert empty_origin.status_code == 403
+    assert empty_origin.json()["detail"]["code"] == "mutation_origin_required"
+    null_origin = await client.post(
+        "/api/observer/context", headers=_headers(credential, Origin="null"), json=_context_body()
+    )
+    assert null_origin.status_code == 403
+    assert null_origin.json()["detail"]["code"] == "origin_forbidden"
+    # The exemption is exact: another path or method gets no native pass.
+    trailing = await client.post("/api/observer/context/", headers=_headers(credential), json=_context_body())
+    assert trailing.status_code == 403
+    assert trailing.json()["detail"]["code"] == "mutation_origin_required"
+    put = await client.put("/api/observer/context", headers=_headers(credential), json=_context_body())
+    assert put.status_code == 403
+    assert put.json()["detail"]["code"] == "mutation_origin_required"
+    assert context_manager_spy.get_context().active_window is None
+
+
+@pytest.mark.asyncio
+async def test_browser_context_post_keeps_origin_and_operator_path(capture_env, context_manager_spy):
+    client = capture_env["client"]
+    credential = capture_env["credential"]
+    # The browser cockpit path (allowed Origin + operator cookie) is unchanged.
+    browser = await capture_env["operator_client"].post(
+        "/api/observer/context", headers={"Origin": ORIGIN}, json=_context_body("Cockpit")
+    )
+    assert browser.status_code == 200, browser.text
+    assert context_manager_spy.get_context().active_window == "Cockpit"
+    # An allowed Origin without an operator session is refused, and the paired
+    # credential is not browser authority.
+    with_origin_and_credential = await client.post(
+        "/api/observer/context",
+        headers=_headers(credential, Origin=ORIGIN),
+        json=_context_body("Credential via browser"),
+    )
+    assert with_origin_and_credential.status_code == 401
+    assert context_manager_spy.get_context().active_window == "Cockpit"
+
+
+@pytest.mark.asyncio
+async def test_paired_daemon_context_observation_is_persisted(capture_env, context_manager_spy):
+    response = await capture_env["client"].post(
+        "/api/observer/context",
+        headers=_headers(capture_env["credential"]),
+        json={
+            "active_window": "1Password — Vault",
+            "observation": {"app": "1Password", "window_title": "Vault", "blocked": True},
+            "switch_timestamp": datetime.now(timezone.utc).timestamp(),
+        },
+    )
+    assert response.status_code == 200, response.text
+    [observation] = await _observations(capture_env["db"])
+    assert observation.app_name == "1Password"
+    assert observation.window_title == "Vault"
+    assert observation.blocked is True

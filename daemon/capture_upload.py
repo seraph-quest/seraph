@@ -31,6 +31,7 @@ except ImportError:  # pragma: no cover - package import fallback
     from .blocklist import is_blocked
 
 CAPTURE_UPLOAD_PATH = "/api/observer/captures"
+CONTEXT_PATH = "/api/observer/context"
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_LOCAL_TEXT_CHARS = 8 * 1024
 _LOCAL_PROVIDERS = frozenset({"apple-vision"})
@@ -182,6 +183,15 @@ class LocalCaptureUploader:
             "X-Seraph-Node-Reference": self.reference,
         }
 
+    async def post_context(self, client: httpx.AsyncClient, payload: dict[str, object]) -> httpx.Response:
+        """Post window context to the loopback backend with the paired credential.
+
+        Same native ingress as the capture upload (#1248): no Origin, no
+        cookie, the scoped paired-edge credential headers, and only to the
+        validated loopback origin. One attempt; the caller reports refusals.
+        """
+        return await client.post(f"{self.origin}{CONTEXT_PATH}", json=payload, headers=self._headers())
+
     def _record_failure(self, result: CaptureUploadResult, *, retry_after: float | None = None) -> CaptureUploadResult:
         self._consecutive_failures += 1
         backoff = min(_COOLDOWN_MAX_SECONDS, _COOLDOWN_BASE_SECONDS * (2 ** (self._consecutive_failures - 1)))
@@ -299,6 +309,7 @@ class LocalCaptureUploader:
 
 __all__ = [
     "CAPTURE_UPLOAD_PATH",
+    "CONTEXT_PATH",
     "CaptureUploadResult",
     "LocalCaptureUploader",
     "bounded_local_analysis",

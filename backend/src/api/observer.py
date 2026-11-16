@@ -482,9 +482,42 @@ async def get_observer_state(request: Request):
     ).to_dict()
 
 
-@router.post("/observer/context")
-async def post_screen_context(body: ScreenContextRequest):
-    """Receive screen context from native daemon."""
+_MAX_CONTEXT_REQUEST_BYTES = 1024 * 1024
+
+
+async def _require_context_ingress_auth(request: Request) -> None:
+    """Authenticate a context post before any body byte is read (#1248).
+
+    The daemon posts with no Origin and no cookie; the middleware then marks
+    the request as native edge ingress and establishes no operator session,
+    so the paired-edge credential is mandatory. Any other request must carry
+    the operator session the middleware established.
+    """
+    if getattr(request.state, "native_edge_ingress", False):
+        await _authenticate_paired_daemon(request)
+    elif getattr(request.state, "operator", None) is None:
+        raise HTTPException(status_code=401, detail={"code": "authenticated_operator_required"})
+
+
+@router.post(
+    "/observer/context",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {"application/json": {"schema": ScreenContextRequest.model_json_schema()}},
+        }
+    },
+)
+async def post_screen_context(request: Request):
+    """Receive screen context from the native daemon or the operator path."""
+    await _require_context_ingress_auth(request)
+    raw = await _read_bounded_body(
+        request, limit=_MAX_CONTEXT_REQUEST_BYTES, too_large_code="context_request_too_large"
+    )
+    try:
+        body = ScreenContextRequest.model_validate_json(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "invalid_context_request"}) from exc
     context_manager.update_screen_context(body.active_window, body.screen_context)
     await log_integration_event(
         integration_type="observer_daemon",
@@ -589,8 +622,11 @@ _CAPTURE_CAPABILITY = "media.ingest"
 _CAPTURE_DATA_PURPOSE = "screen_capture"
 
 
-async def _authenticate_capture_uploader(request: Request):
+async def _authenticate_paired_daemon(request: Request):
     """Authenticate the daemon with its scoped paired-edge credential.
+
+    Shared by the capture upload and the native context post (#1248), so both
+    native ingress paths enforce one credential, lifecycle and policy check.
 
     This reuses the paired-edge credential path (vault-held secret, owner
     principal re-authentication, active pairing lifecycle); it never accepts
@@ -669,12 +705,12 @@ async def _authenticate_capture_uploader(request: Request):
     )
 
 
-async def _read_bounded_body(request: Request, *, limit: int) -> bytes:
+async def _read_bounded_body(request: Request, *, limit: int, too_large_code: str = "capture_too_large") -> bytes:
     declared = request.headers.get("content-length")
     if declared is not None:
         try:
             if int(declared) > limit:
-                raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
+                raise HTTPException(status_code=413, detail={"code": too_large_code})
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"code": "invalid_content_length"}) from exc
     chunks: list[bytes] = []
@@ -684,7 +720,7 @@ async def _read_bounded_body(request: Request, *, limit: int) -> bytes:
         async for chunk in body_chunks:
             received += len(chunk)
             if received > limit:
-                raise HTTPException(status_code=413, detail={"code": "capture_too_large"})
+                raise HTTPException(status_code=413, detail={"code": too_large_code})
             chunks.append(chunk)
     return b"".join(chunks)
 
@@ -710,7 +746,7 @@ async def upload_local_capture(request: Request):
     from src.observer.screen_analysis_settings import effective_screen_analysis_enabled
 
     # Authenticate before reading or parsing any bytes.
-    uploader, policy = await _authenticate_capture_uploader(request)
+    uploader, policy = await _authenticate_paired_daemon(request)
     if not effective_screen_analysis_enabled():
         raise HTTPException(status_code=403, detail={"code": "screen_capture_disabled"})
     if not upload_rate_limiter.allow(f"{uploader['device_id']}:{uploader['pairing_id']}"):

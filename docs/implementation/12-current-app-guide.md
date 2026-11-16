@@ -4291,6 +4291,25 @@ analysis exists. A repeated `capture_id` is idempotent. `screen_cleanup` removes
 retention; these files are not backed up
 ([#1141](https://github.com/seraph-quest/seraph/issues/1141)).
 
+**Daemon context post ([#1248](https://github.com/seraph-quest/seraph/issues/1248), Partial):**
+the daemon's window-context post `POST /api/observer/context` uses the same
+native ingress as the capture upload. A request with neither an Origin nor a
+cookie skips the Origin requirement (the host allow-list still applies, and
+in local no-login mode so does the loopback-peer rule), gets no operator
+session, and must present the paired-edge
+credential (`Authorization: Bearer` plus `X-Seraph-Node-Device` /
+`-Pairing` / `-Extension` / `-Reference`). The handler verifies it with the
+capture upload's check (active pairing, matching identity, policy allowing
+`media.ingest` / `screen_capture`) before reading the body, which is bounded
+to 1 MiB; a missing, invalid or revoked credential is refused. A request that
+carries an Origin keeps the browser origin and operator-session path
+unchanged, and a cookie without an Origin is still refused with
+`mutation_origin_required`. An unpaired daemon still posts without the
+credential, is refused, logs once that context posting needs pairing and keeps
+capturing locally (if screen capture is enabled); a paired daemon logs a refused context post once per state
+change, and `last_context_post_at` in daemon status records only accepted
+posts.
+
 The optional [selected-text companion](https://github.com/seraph-quest/seraph/issues/926)
 implements ADR-022's ordinary top-frame Chromium text profile within
 [ADR-008](./decisions/008-portable-core-and-consented-context.md). A deliberate

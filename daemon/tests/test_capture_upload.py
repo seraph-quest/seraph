@@ -8,6 +8,7 @@ import asyncio
 import base64
 import importlib
 import json
+import logging
 import os
 import platform
 import sys
@@ -27,7 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from capture_upload import LocalCaptureUploader, validate_local_backend_origin  # noqa: E402
 from ocr import create_provider  # noqa: E402
 from ocr.base import AnalysisResult  # noqa: E402
-from seraph_daemon import ScreenAnalysisRuntime, periodic_capture_loop, poll_loop  # noqa: E402
+from seraph_daemon import ContextPoster, ScreenAnalysisRuntime, periodic_capture_loop, poll_loop  # noqa: E402
 
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
@@ -391,3 +392,150 @@ async def test_periodic_capture_uploads_and_skips_blocked_apps(tmp_path):
                                         screen_runtime=blocked_runtime)
     assert blocked_backend.uploads() == []
     blocked_capture.assert_not_called()
+
+
+# ── Context post authentication (#1248) ────────────────────────────────
+
+_EDGE_HEADERS = (
+    "authorization",
+    "x-seraph-node-device",
+    "x-seraph-node-pairing",
+    "x-seraph-node-extension",
+    "x-seraph-node-reference",
+)
+
+
+def _context_posts(backend: _GuardedBackend) -> list[httpx.Request]:
+    return [request for request in backend.requests if request.url.path == "/api/observer/context"]
+
+
+async def _run_poll_loop(backend: _GuardedBackend, runtime) -> None:
+    with patch("httpx.AsyncClient", side_effect=backend.client_factory()), \
+         patch("ocr.create_provider", return_value=_FakeAppleVision()), \
+         patch("blocklist.load_blocklist", return_value=set()), \
+         patch("seraph_daemon._write_daemon_status"), \
+         patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+         patch("seraph_daemon.get_frontmost_app_name", return_value="Code"), \
+         patch("seraph_daemon.get_window_title", return_value="main.py"), \
+         patch("ocr.screenshot.capture_screen_png", return_value=b"\x89PNG\r\n\x1a\nscreen"):
+        with pytest.raises(asyncio.CancelledError):
+            await poll_loop("http://localhost:8004", interval=0.01, idle_timeout=300, verbose=False,
+                            screen_runtime=runtime, worker_id="test-worker")
+
+
+@pytest.mark.asyncio
+async def test_paired_context_post_sends_edge_credential_without_origin_or_cookie(tmp_path):
+    backend = _GuardedBackend()
+    await _run_poll_loop(backend, _runtime(tmp_path, _uploader()))
+
+    [context] = _context_posts(backend)
+    assert context.url.host == "localhost" and context.url.port == 8004
+    assert context.headers["authorization"] == "Bearer synthetic-edge-credential"
+    assert context.headers["x-seraph-node-device"] == "mac-local-1"
+    assert context.headers["x-seraph-node-pairing"] == "pair-local-1"
+    assert context.headers["x-seraph-node-extension"] == "seraph.openclaw-device-bridge"
+    assert context.headers["x-seraph-node-reference"] == "connectors/nodes/device.yaml"
+    assert "origin" not in context.headers
+    assert "cookie" not in context.headers
+    # Credential headers match the capture upload's exactly.
+    [upload] = backend.uploads()
+    for name in _EDGE_HEADERS:
+        assert context.headers[name] == upload.headers[name]
+
+
+@pytest.mark.asyncio
+async def test_unpaired_context_post_carries_no_credential_and_logs_pairing_once(tmp_path, caplog):
+    backend = _GuardedBackend()
+    with caplog.at_level(logging.WARNING, logger="seraph_daemon"):
+        await _run_poll_loop(backend, _runtime(tmp_path, None))
+
+    [context] = _context_posts(backend)
+    for name in (*_EDGE_HEADERS, "origin", "cookie"):
+        assert name not in context.headers
+    pairing_notices = [r for r in caplog.records if "Context posting needs pairing" in r.getMessage()]
+    assert len(pairing_notices) == 1
+
+
+def _refusing_transport(statuses: list[int], seen: list[httpx.Request]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host in _LOOPBACK
+        seen.append(request)
+        status = statuses[len(seen) - 1]
+        if status >= 400:
+            return httpx.Response(status, json={"detail": {"code": "pairing_revoked"}})
+        return httpx.Response(status, json={"status": "ok"})
+
+    return httpx.MockTransport(handler)
+
+
+def _context_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("Context post")]
+
+
+@pytest.mark.asyncio
+async def test_refused_context_post_is_logged_once_per_state_change(caplog):
+    seen: list[httpx.Request] = []
+    statuses = [403, 403, 403, 200, 200, 401, 401]
+    poster = ContextPoster("http://localhost:8004", _uploader())
+    with caplog.at_level(logging.INFO, logger="seraph_daemon"):
+        async with _REAL_ASYNC_CLIENT(transport=_refusing_transport(statuses, seen)) as client:
+            results = [await poster.post(client, {"active_window": f"w{i}"}) for i in range(len(statuses))]
+
+    assert results == [False, False, False, True, True, False, False]
+    assert len(seen) == len(statuses)
+    messages = _context_warnings(caplog)
+    assert len(messages) == 3, messages
+    assert "HTTP 403, pairing_revoked" in messages[0]
+    assert messages[1] == "Context post accepted by the backend again"
+    assert "HTTP 401, pairing_revoked" in messages[2]
+
+
+@pytest.mark.asyncio
+async def test_unpaired_refusals_do_not_repeat_the_log(caplog):
+    seen: list[httpx.Request] = []
+    statuses = [403, 403, 403]
+    poster = ContextPoster("http://localhost:8004", None)
+    with caplog.at_level(logging.INFO, logger="seraph_daemon"):
+        async with _REAL_ASYNC_CLIENT(transport=_refusing_transport(statuses, seen)) as client:
+            results = [await poster.post(client, {"active_window": "w"}) for _ in statuses]
+
+    assert results == [False, False, False]
+    assert len(seen) == 3
+    for request in seen:
+        assert "authorization" not in request.headers
+    assert len(_context_warnings(caplog)) == 1
+    assert _context_warnings(caplog)[0].startswith("Context posting needs pairing")
+
+
+@pytest.mark.asyncio
+async def test_refused_context_post_does_not_record_last_context_post_at(tmp_path, monkeypatch):
+    status_file = tmp_path / "daemon-status.json"
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(status_file))
+    backend = _GuardedBackend(stop_on_context=False)
+
+    def refuse_context(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/observer/context":
+            backend.requests.append(request)
+            return httpx.Response(403, json={"detail": {"code": "pairing_revoked"}})
+        return _GuardedBackend.handler(backend, request)
+
+    def factory(*args, **kwargs):
+        kwargs.pop("transport", None)
+        return _REAL_ASYNC_CLIENT(*args, transport=httpx.MockTransport(refuse_context), **kwargs)
+
+    with patch("httpx.AsyncClient", side_effect=factory), \
+         patch("ocr.create_provider", return_value=_FakeAppleVision()), \
+         patch("blocklist.load_blocklist", return_value=set()), \
+         patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+         patch("seraph_daemon.get_frontmost_app_name", return_value="Code"), \
+         patch("seraph_daemon.get_window_title", return_value="main.py"), \
+         patch("ocr.screenshot.capture_screen_png", return_value=b"\x89PNG\r\n\x1a\nscreen"), \
+         patch("seraph_daemon.asyncio.sleep", side_effect=asyncio.CancelledError()):
+        with pytest.raises(asyncio.CancelledError):
+            await poll_loop("http://localhost:8004", interval=0.01, idle_timeout=300, verbose=False,
+                            screen_runtime=_runtime(tmp_path, _uploader()), worker_id="test-worker")
+
+    assert len(_context_posts(backend)) == 1
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    assert status["active_window"] == "Code — main.py"
+    assert "last_context_post_at" not in status

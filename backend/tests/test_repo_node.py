@@ -275,23 +275,30 @@ def test_cleanup_expired_budget_never_claims_proof():
     assert supervisor.cleanup(time.monotonic()-1)["cleanup_proven"] is False
 
 
-def _fifo_writers_gone(read_fd):
-    """True once every process that opened the FIFO for writing has exited."""
+def _fifo_read(read_fd):
+    """One non-blocking read: a byte, b"" once every writer has exited (or none
+    ever opened it), or None while a writer still holds it with nothing to read."""
     try:
-        return os.read(read_fd,1)==b""
+        return os.read(read_fd,1)
     except BlockingIOError:
-        return False
+        return None
+
+
+def _fifo_writers_gone(read_fd):
+    return _fifo_read(read_fd)==b""
 
 
 @pytest.mark.parametrize("keep_parent",[False,True])
 def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_parent):
     marker=tmp_path/"detached-pid";sentinel=tmp_path/"late-write";alive=tmp_path/"descendant-alive"
-    # The descendant holds the write end of a FIFO for its whole life, so the
-    # test sees its death as EOF on the read end, whatever pid namespace the
-    # sandbox gives it.
+    # Node opens the write end of a FIFO, writes one byte, and hands that fd
+    # to the descendant at spawn (fd 3), so a writer exists from before the
+    # descendant's birth to its death (node closes its own copy after the
+    # spawn). The test sees the byte, then EOF once the descendant is gone, whatever pid namespace the sandbox uses.
     os.mkfifo(alive);alive_fd=os.open(alive,os.O_RDONLY|os.O_NONBLOCK)
-    code="import os,time;from pathlib import Path;os.setsid();[os.close(fd) for fd in (0,1,2)];held=open("+repr(str(alive))+",'w');Path("+repr(str(marker))+").write_text(str(os.getpid()));time.sleep(4);Path("+repr(str(sentinel))+").write_text('BAD')"
-    script="const {spawn}=require('node:child_process');const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:'ignore'});p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else "")
+    code="import os,time;from pathlib import Path;os.setsid();[os.close(fd) for fd in (0,1,2)];Path("+repr(str(marker))+").write_text(str(os.getpid()));time.sleep(4);Path("+repr(str(sentinel))+").write_text('BAD')"
+    script=("const fs=require('node:fs');const {spawn}=require('node:child_process');const held=fs.openSync("+json.dumps(str(alive))+",'w');fs.writeSync(held,'W');"
+            "const p=spawn('/usr/bin/python3',['-c',"+json.dumps(code)+"],{stdio:['ignore','ignore','ignore',held]});fs.closeSync(held);p.unref();"+("setTimeout(()=>{},10000);" if keep_parent else ""))
     executor,repo,job=make_fixture(tmp_path,script=script)
     job=replace(job,deadline_seconds=3)
     try:
@@ -320,7 +327,10 @@ def test_detached_closed_pipe_descendant_rejected_and_reaped(tmp_path,keep_paren
     # the FIFO's write end is gone (EOF), so the sentinel can never appear;
     # no sleep past the descendant's timer.
     try:
-        assert _fifo_writers_gone(alive_fd),"the detached descendant outlived the executor's cleanup"
+        # The byte proves the writer (and so the descendant's fd) existed; a
+        # run where node never spawned the descendant proves nothing and fails.
+        assert _fifo_read(alive_fd)==b"W","node never opened the liveness FIFO before spawning the descendant"
+        assert _fifo_read(alive_fd)==b"","the detached descendant outlived the executor's cleanup"
     finally:
         os.close(alive_fd)
     assert not sentinel.exists()

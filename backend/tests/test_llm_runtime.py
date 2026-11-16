@@ -2838,7 +2838,16 @@ async def test_completion_with_fallback_sync_logs_inside_running_loop(async_db):
             temperature=0.3,
             max_tokens=256,
         )
-        await asyncio.sleep(0)
+        # Inside a running loop the audit write is a task on this loop. Wait
+        # for that task, not one loop turn: on the per-test file database
+        # (#1222) the write takes several turns through aiosqlite's thread.
+        audit_writes = [
+            task for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and getattr(task.get_coro(), "__name__", "") == "_log_llm_runtime_event"
+        ]
+        assert audit_writes
+        await asyncio.gather(*audit_writes)
 
     assert result is success_response
     events = await audit_repository.list_events(limit=5)

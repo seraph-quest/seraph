@@ -8,6 +8,9 @@ import pytest
 from src.audit.repository import audit_repository
 from src.tools.mcp_manager import MCPManager
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 @pytest.mark.parametrize("case", ["valid", "missing", "malformed", "duplicate", "sanitized_collision", "sanitized_name", "cross_session", "unguarded", "unsafe_schema", "oversized_schema", "missing_output_schema", "open_input", "unbounded_input", "reference_input"])
 def test_stock_discovery_output_schema_is_exact_closed_and_detached(case):

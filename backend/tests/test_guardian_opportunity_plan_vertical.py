@@ -72,7 +72,6 @@ async def _actual_plan_journey(accounting_db, real_auth, monkeypatch, blueprint,
     from src.work_board.contracts import WorkBoardOwner
 
     root, _, factory = accounting_db
-    monkeypatch.setattr('src.work_board.triage.get_session', factory.accounting_sessions)
     original_connect = socket.socket.connect
     def local_connect(sock, address):
         if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):

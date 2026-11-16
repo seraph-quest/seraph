@@ -18,6 +18,9 @@ from src.operators.local_codex import (
 )
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 _REMOVED_PROFILE_CONFIG = json.dumps(
     {
         "profiles": {

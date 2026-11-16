@@ -36,6 +36,9 @@ from tests.test_cordis_services_core import service_db  # noqa: F401
 from tests.test_inference_accounting import accounting_db  # noqa: F401
 from tests.test_research_native_vertical import real_auth  # noqa: F401
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 OPERATOR_SECRET = "research-vertical-private-secret"
 SECRETS = {"vault_1199_canary_name": "vault-1199-value-SHOULD-NEVER-APPEAR",
            "github/1199-token": "ghp_1199_never_in_status_or_logs",

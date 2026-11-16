@@ -8,6 +8,9 @@ from smolagents import FinalAnswerStep
 
 from tests.test_websocket import _make_sync_client_with_db
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def _mock_onboarding_agent():
     agent = MagicMock()

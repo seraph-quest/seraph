@@ -31,7 +31,6 @@ async def setup_feedback(async_db, monkeypatch):
         db.add(GuardianIntervention(id='intervention', intervention_type='opportunity', opportunity_id='opportunity',
             owner_principal_id=principal, original_root_id='root', goal_id='goal', goal_revision=1,delivery_status='not_requested'))
         await db.commit()
-    monkeypatch.setattr(feedback, 'get_session', async_db)
     from src.guardian import opportunity_plans as plans
     async def staged(db, row, **kwargs):
         return PlanSourceWitness(row.id,row.revision,row.owner_principal_id,row.original_root_id,row.goal_id,row.goal_revision,

@@ -19,10 +19,9 @@ pytestmark = pytest.mark.parametrize('async_db', ['file'], indirect=True)
 async def test_source_retirement_after_successful_preflight_blocks_final_positive_cas(
     client, async_db, setup_workspace, monkeypatch, operation,
 ):
-    from src.api import documents as document_api, work_board as board_api
+    from src.api import work_board as board_api
     from src.work_board import repository as repository_module, input_artifacts
     from src.work_board.historical_method import historical_method_service
-    monkeypatch.setattr(document_api, 'get_session', async_db)
     adapter, boundary, document_service, event, owner, raw, contacts = await prepare(
         client, monkeypatch, async_db, 'csv')
     service = board_api.dispatcher.general_tasks

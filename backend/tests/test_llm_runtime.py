@@ -43,6 +43,9 @@ from src.llm_runtime import (
 )
 from src.operators.local_codex import ExternalAgentRuntimeRemovedError
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def test_governed_http_transport_does_not_start_after_deadline():
     decision = MagicMock(allowed=True)

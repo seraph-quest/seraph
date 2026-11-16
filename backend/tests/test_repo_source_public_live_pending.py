@@ -134,9 +134,7 @@ async def test_authenticated_live_original_producer_pending_preserves_root_and_p
                 original_start_identity=ready.start_identity, original_guard_identity=list(ready.guard_identity),
                 original_registration_digest=captured["ack"].registration_digest)
             retain()
-            monkeypatch.setattr(workflows_api, "get_session", accounting_db[2].accounting_sessions)
             monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
-            monkeypatch.setattr(work_board_api, "get_session", accounting_db[2].accounting_sessions)
             monkeypatch.setattr(work_board_api.dispatcher, "jobs", jobs)
             monkeypatch.setattr(work_board_api.dispatcher, "general_tasks", tasks)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),

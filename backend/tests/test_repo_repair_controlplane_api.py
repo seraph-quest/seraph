@@ -261,9 +261,7 @@ async def test_authenticated_source_preview_and_consent_use_actual_source_servic
 
     # The API creates its source service and uses its process-global dispatcher;
     # point those handles at the fixture's actual database and durable jobs.
-    monkeypatch.setattr(workflows_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
-    monkeypatch.setattr(work_board_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(work_board_api.dispatcher, "jobs", jobs)
     monkeypatch.setattr(work_board_api.dispatcher, "general_tasks", service)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "localhost,test,127.0.0.1")
@@ -416,9 +414,7 @@ async def test_authenticated_source_three_iteration_approval_execution_and_readb
     prepared = await prepare_repository_native_source(service, jobs, binding,
         child_owner="actual-api-three-worker", principal=operator.principal)
     root_id = prepared["repository_job_id"]
-    monkeypatch.setattr(workflows_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(workflows_api, "durable_job_repository", jobs)
-    monkeypatch.setattr(board_api, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(board_api.dispatcher, "jobs", jobs)
     monkeypatch.setattr(board_api.dispatcher, "general_tasks", service)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "localhost,test,127.0.0.1")

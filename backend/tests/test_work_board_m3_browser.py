@@ -56,6 +56,9 @@ from src.work_board.input_artifacts import (
 from src.work_board.repository import BoardError, WorkBoardRepository
 from sqlalchemy import select
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 OWNER = WorkBoardOwner(principal_id="operator:test-bypass", session_id="test-auth-bypass")
 OTHER_OWNER = WorkBoardOwner(principal_id="operator:other", session_id="other-auth")

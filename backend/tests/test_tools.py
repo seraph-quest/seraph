@@ -10,6 +10,9 @@ from src.tools.filesystem_tool import _safe_resolve, apply_workspace_patch, prev
 from src.tools.template_tool import fill_template
 from src.tools.web_search_tool import web_search
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 @pytest.fixture(autouse=True)
 def reset_site_policy():

@@ -27,7 +27,6 @@ from tests.test_operator_identity import auth, enroll, goal, login, recover, HEA
 
 @pytest_asyncio.fixture(autouse=True)
 async def continuity(app, async_db, monkeypatch):
-    monkeypatch.setattr("src.api.sessions.get_session", async_db)
     service = TaskContinuityService(WorkBoardRepository())
     await service.start()
     app.state.task_continuity = service

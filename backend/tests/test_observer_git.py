@@ -4,6 +4,10 @@ from unittest.mock import patch, MagicMock
 
 from src.audit.repository import audit_repository
 from src.observer.sources.git_source import gather_git
+import pytest
+
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
 
 
 def _reflog_line(message: str, seconds_ago: int = 0) -> str:

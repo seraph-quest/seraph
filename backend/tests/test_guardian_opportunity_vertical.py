@@ -395,7 +395,6 @@ async def test_actual_http_goal_watch_native_cited_inbox(accounting_db, real_aut
             assert detail["assessment"]["citations"][0]["span_sha256"] == offered.sources[0].excerpt_sha256
             return
         from src.guardian import feedback
-        monkeypatch.setattr(feedback, "get_session", factory.accounting_sessions)
         async def forbid_memory_refresh(**kwargs):
             raise AssertionError("opportunity feedback cannot refresh canonical memory")
         monkeypatch.setattr(feedback.guardian_feedback_repository, "_refresh_learning_memories", forbid_memory_refresh)

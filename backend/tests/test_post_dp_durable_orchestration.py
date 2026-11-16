@@ -11,6 +11,9 @@ from src.workflows.post_dp_durable_orchestration import (
     build_post_dp_durable_orchestration_report,
 )
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def test_post_dp_durable_orchestration_contract_exposes_redacted_recovery_packets():
     contract = build_post_dp_durable_orchestration_contract()

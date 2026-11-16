@@ -224,7 +224,7 @@ def test_unknown_formula_objects_never_serialize_repr():
     "profile_missing", "profile_moved", "profile_stop", "upload_orphan"])
 async def test_authenticated_private_source_upload_seal_read_delete(accounting_db, monkeypatch, fmt):
     from config.settings import settings
-    from src.api import auth, documents
+    from src.api import auth
     from src.api.router import api_router
     from src.auth.middleware import OperatorAuthMiddleware
     from src.vault import crypto
@@ -233,7 +233,6 @@ async def test_authenticated_private_source_upload_seal_read_delete(accounting_d
     if fmt not in {"pdf", "docx", "xlsx", "csv"}:
         fmt = "csv"
     root, _engine, factory = accounting_db
-    monkeypatch.setattr(documents, "get_session", factory.accounting_sessions)
     monkeypatch.setattr(crypto, "_fernet", None)
     monkeypatch.setattr(settings, "vault_encryption_key", "")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)

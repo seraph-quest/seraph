@@ -108,7 +108,6 @@ async def capture_env(tmp_path, monkeypatch, async_db):
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", ORIGIN)
     monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(shots))
     monkeypatch.setenv("SERAPH_SCREEN_ANALYSIS_ENABLED", "1")
-    monkeypatch.setattr(nodes, "get_session", async_db)
     # Observe the queued marker only; no analysis or provider call happens.
     monkeypatch.setattr(screenshot_folder_source, "screenshot_semantic_analysis_enabled", lambda: True)
     local_capture_upload.upload_rate_limiter.reset()

@@ -40,6 +40,9 @@ from src.security.http_transport import PinnedTransportError, fetch_pinned_https
 from src.tools.filesystem_tool import _open_workspace_file
 from config.settings import settings
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 def test_source_contract_is_bounded_and_identity_is_stable():
     source = parse_sources(

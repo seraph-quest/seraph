@@ -34,6 +34,9 @@ from src.tools.process_tools import (
     stop_process,
 )
 
+# Every test here reaches the database (#1222).
+pytestmark = pytest.mark.usefixtures("db")
+
 
 @pytest.fixture(autouse=True)
 def reset_process_runtime():

@@ -23,6 +23,7 @@ from src.workflows.job_runtime import DurableJobRepository
 from src.workflows.inference_accounting import InferenceAccountingError, account_charge_microusd
 from src.workspace.production import ProductionWorkspace, lifecycle_receipt_path
 from tests.async_wait_support import started_or_raise
+from tests.support.db import install_database
 
 # ADR-035: these pin the historical OpenRouter broker, ledger, settlement and
 # witness mechanics that still settle retained liabilities; retired-route
@@ -57,14 +58,8 @@ async def accounting_db(tmp_path, monkeypatch):
             except BaseException:
                 await session.rollback()
                 raise
-    for target in ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",
-                   "src.db.engine.get_session", "src.auth.service.get_session",
-                   "src.model_fabric.repository.get_session", "src.api.settings.get_db",
-                   "src.vault.repository.get_session", "src.audit.repository.get_session",
-                   "src.work_board.dispatcher.get_session", "src.api.work_board.get_session",
-                   "src.api.calendar.get_session", "src.goals.repository.get_session",
-                   "src.agent.session.get_session", "src.approval.repository.get_session"):
-        monkeypatch.setattr(target, sessions)
+    # The single database seam (#1222): every get_session caller uses this file.
+    install_database(monkeypatch, engine)
     factory.accounting_sessions = sessions
     yield root, engine, factory
     await engine.dispose()

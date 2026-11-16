@@ -1,7 +1,6 @@
 import copy
 import importlib
 import os
-from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import time
@@ -10,11 +9,6 @@ import pytest
 import pytest_asyncio
 from types import SimpleNamespace
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
 
 os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 os.environ.setdefault("CAPABILITY_JOURNAL_SECRET", "test-capability-journal-secret")
@@ -40,49 +34,11 @@ for _module in TABLE_MODEL_MODULES:
 from src.app import create_app
 from src.audit.repository import AuditRepository, audit_repository
 from src.llm_runtime import _reset_target_health
-from src.db.engine import _configure_sqlite_connection, _ensure_search_indexes
 from src.memory.flush import _reset_memory_flush_state
 from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.utils.background import drain_tracked_tasks
-
-# Every place get_session is imported — use the local attribute name.
-_PATCH_TARGETS = [
-    "src.db.engine.get_session",
-    "src.auth.service.get_session",
-    "src.agent.session.get_session",
-    "src.approval.repository.get_session",
-    "src.goals.repository.get_session",
-    "src.audit.repository.get_session",
-    "src.model_fabric.repository.get_session",
-    "src.profile.service.get_db",
-    "src.api.settings.get_db",  # aliased: `import get_session as get_db`
-    "src.api.calendar.get_session",
-    "src.api.work_board.get_session",
-    "src.api.workflows.get_session",
-    "src.work_board.triage.get_session",
-    "src.work_board.dispatcher.get_session",
-    "src.api.ws.get_session",
-    "src.api.nodes.get_session",
-    "src.api.observer.get_session",
-    "src.scheduler.jobs.memory_consolidation.get_session",
-    "src.scheduler.jobs.screenshot_observation_digest.get_session",
-    "src.scheduler.scheduled_jobs.get_session",
-    "src.observer.insight_queue.get_session",
-    "src.observer.screenshot_folder_source.get_session",
-    "src.observer.local_capture_upload.get_session",
-    "src.guardian.feedback.get_session",
-    "src.vault.repository.get_session",
-    "src.observer.screen_repository.get_session",
-    "src.memory.repository.get_session",
-    "src.memory.decay.get_session",
-    "src.memory.control.get_session",
-    "src.memory.flush.get_session",
-    "src.memory.hybrid_retrieval.get_session",
-    "src.workflows.durable_state.get_session",
-    "src.workflows.job_runtime.get_session",
-    "src.workflows.production_workflow_guarantees.get_session",
-]
-
+from tests.support.db import (arm_canonical_engine_sentinel, create_test_database, install_database,
+                              take_canonical_engine_violations)
 
 # ── Settings isolation ──────────────────────────────────
 
@@ -107,122 +63,92 @@ def restore_settings(snapshot: dict) -> None:
             current[name] = value
 
 
-@pytest.hookimpl(hookwrapper=True)
+@pytest.hookimpl(wrapper=True)
 def pytest_runtest_setup(item):
     # Taken before any fixture runs, so the restore below returns the shared
     # settings object to exactly its pre-test state.
     item.stash[_SETTINGS_SNAPSHOT_KEY] = snapshot_settings()
-    yield
+    take_canonical_engine_violations()
+    try:
+        return (yield)
+    finally:
+        _fail_on_canonical_engine_violations("setup")
 
 
-@pytest.hookimpl(hookwrapper=True)
+@pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item, nextitem):
-    yield
-    # Runs after every fixture finalizer, including ``monkeypatch`` undo, so a
-    # direct ``settings.x = ...`` assignment (or an in-place change to a nested
-    # settings model) in a test or fixture cannot leak into the next test.
-    # This also undoes settings changes made by a module-, class- or
-    # session-scoped fixture: such a fixture must set them per test instead.
-    snapshot = item.stash.get(_SETTINGS_SNAPSHOT_KEY, None)
-    if snapshot is None:
-        return
-    # Items live for the whole session; do not keep every test's copy.
-    del item.stash[_SETTINGS_SNAPSHOT_KEY]
-    restore_settings(snapshot)
+    try:
+        return (yield)
+    finally:
+        # Runs after every fixture finalizer, including ``monkeypatch`` undo, so a
+        # direct ``settings.x = ...`` assignment (or an in-place change to a nested
+        # settings model) in a test or fixture cannot leak into the next test.
+        # This also undoes settings changes made by a module-, class- or
+        # session-scoped fixture: such a fixture must set them per test instead.
+        snapshot = item.stash.get(_SETTINGS_SNAPSHOT_KEY, None)
+        if snapshot is not None:
+            # Items live for the whole session; do not keep every test's copy.
+            del item.stash[_SETTINGS_SNAPSHOT_KEY]
+            restore_settings(snapshot)
+        _fail_on_canonical_engine_violations("teardown")
 
 
-# ── In-memory async DB fixture ──────────────────────────
+# ── Database seam (#1222) ───────────────────────────────
+
+# Any connection to the canonical engine fails the test that made it.
+arm_canonical_engine_sentinel()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    try:
+        return (yield)
+    finally:
+        _fail_on_canonical_engine_violations("the test body")
+
+
+def _fail_on_canonical_engine_violations(phase: str) -> None:
+    # The refusal may be swallowed by the code under test; the record is not.
+    violations = take_canonical_engine_violations()
+    if violations:
+        pytest.fail(
+            f"{len(violations)} connection(s) to the canonical database engine during {phase}; "
+            "request the `db` fixture (tests/support/db.py). First attempt:\n" + violations[0],
+            pytrace=False,
+        )
+
+
+@pytest.fixture(scope="session")
+def _db_template_directory(tmp_path_factory):
+    return tmp_path_factory.mktemp("db-template")
+
 
 @pytest_asyncio.fixture
-async def async_db(request, tmp_path_factory):
-    """Provide an isolated SQLite engine with all tables created.
+async def db(tmp_path_factory, _db_template_directory, monkeypatch):
+    """The test's own production-configured SQLite file database.
 
-    Patches ``get_session`` in every module that imports it so the test
-    database is used transparently.  The default remains a single-connection
-    in-memory database for ordinary unit tests; native concurrency proofs may
-    request ``indirect=["file"]`` to exercise production-like SQLite pooling.
+    Installed as the default database, so every ``get_session`` caller uses
+    it through the production path. Calling the handle opens a session.
     """
-    if getattr(request, "param", None) == "file":
-        database_path = tmp_path_factory.mktemp("async-db") / "test.sqlite3"
-        engine = create_async_engine(
-            f"sqlite+aiosqlite:///{database_path}",
-            echo=settings.database_echo,
-            connect_args={"check_same_thread": False},
-            pool_size=20,
-            max_overflow=0,
-            pool_timeout=3,
-            pool_pre_ping=True,
-        )
-        event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
-    else:
-        engine = create_async_engine(
-            "sqlite+aiosqlite://",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-
-        @event.listens_for(engine.sync_engine, "connect")
-        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
-        await _ensure_search_indexes(conn)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    import sys
-    import src.db.engine as canonical_engine
-
-    canonical_get_session = canonical_engine.get_session
-    # Import every patched module before patching any of them. Otherwise a
-    # module first imported here binds ``from src.db.engine import
-    # get_session`` to this fixture's patched function, and that stale binding
-    # is what its own patcher later "restores". The teardown sweep below also
-    # repairs captures by modules first imported during the test body.
-    for target in _PATCH_TARGETS:
-        importlib.import_module(target.rsplit(".", 1)[0])
-    patches = []
-    for target in _PATCH_TARGETS:
-        p = patch(target, _get_session)
-        p.start()
-        patches.append(p)
-
-    yield _get_session
-
-    teardown_error: Exception | None = None
+    database = await create_test_database(
+        tmp_path_factory.mktemp("db") / "seraph-test.sqlite3",
+        template_directory=_db_template_directory,
+    )
+    install_database(monkeypatch, database.engine)
     try:
-        await drain_tracked_tasks(timeout_seconds=5.0)
-    except Exception as exc:
-        teardown_error = exc
+        yield database
     finally:
-        for p in patches:
-            p.stop()
-        # A module first imported during this test ran
-        # ``from src.db.engine import get_session`` while the patch above was
-        # active and captured this fixture's private session function. Point
-        # every such capture back at the canonical function, or later tests
-        # (and their session-factory overrides) reach this disposed database.
-        for module in list(sys.modules.values()):
-            if getattr(module, "__name__", "").startswith("src."):
-                for name, value in list(vars(module).items()):
-                    if value is _get_session:
-                        setattr(module, name, canonical_get_session)
-        await engine.dispose()
-    if teardown_error is not None:
-        raise teardown_error
+        try:
+            await drain_tracked_tasks(timeout_seconds=5.0)
+        finally:
+            await database.engine.dispose()
+
+
+@pytest.fixture
+def async_db(db):
+    """Older name for ``db``. Accepts the retired ``indirect=["file"]`` param:
+    every test database is now a file database."""
+    return db
 
 
 # ── App / HTTP client fixtures ──────────────────────────
@@ -255,7 +181,10 @@ def isolate_operator_auth_defaults(monkeypatch):
 
 @pytest_asyncio.fixture
 async def client(app, async_db, monkeypatch):
-    """Async HTTP test client backed by the in-memory DB."""
+    """Async HTTP test client backed by the test's own database (``db``).
+
+    Requested through ``async_db`` so tests that parametrize that name
+    indirectly keep resolving it."""
     # The synthetic ASGI host ``test`` is in the default allowed hosts. Pin the
     # allowed origins to the single cockpit origin this fixture's tests use.
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")

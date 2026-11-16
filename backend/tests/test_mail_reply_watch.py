@@ -125,7 +125,6 @@ def _request(body: dict[str, object], operator: AuthenticatedOperator) -> Reques
 
 
 async def _seed(async_db, monkeypatch, existing_operator=None):
-    monkeypatch.setattr(mail_api, "get_session", async_db)
     now = datetime.now(timezone.utc)
     budget = GoalAdmissionBudget(
         reviewed_grant=True,

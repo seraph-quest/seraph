@@ -3,6 +3,7 @@ import { API_URL } from "../../config/constants";
 import { apiFetch } from "../../lib/api";
 import {
   GITHUB_ACTIVITY_GRANT_SENTENCE, ghLoginCheck, githubActivityItems, githubActivityStatus, parseRepositoryList,
+  validOwner, validRepository,
   type GhLoginCheck, type GitHubActivityItem, type GitHubActivityStatus,
 } from "../../lib/githubActivity";
 
@@ -21,6 +22,7 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
   const [excluded, setExcluded] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
   const [modelContext, setModelContext] = useState(false);
+  const [kinds, setKinds] = useState<string[] | null>(null);
   const [items, setItems] = useState<GitHubActivityItem[] | null>(null);
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -53,7 +55,9 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
         setRepositories(next.source.scope.repositories.join(", "));
         setOwners(next.source.scope.owners.join(", "));
         setExcluded(next.source.scope.exclude_repositories.join(", "));
+        if (next.source.scope.kinds.length) setKinds(next.source.scope.kinds);
       }
+      setModelContext(next.source.model_context_allowed);
     }).catch(() => { if (current === generation.current) setError("GitHub activity metadata unavailable. Refresh settings to recover."); });
     return () => { ++generation.current; controller.abort(); };
     // Consent resets on owner/root changes, including a new login.
@@ -89,7 +93,8 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
     const value = githubActivityStatus(await post("/source", {
       expected_revision: status.source.revision,
       scope: { discover_from_activity: discover, repositories: parseRepositoryList(repositories),
-        owners: parseRepositoryList(owners), exclude_repositories: parseRepositoryList(excluded) },
+        owners: parseRepositoryList(owners), exclude_repositories: parseRepositoryList(excluded),
+        ...(kinds ? { kinds } : {}) },
       acknowledge_gh_ambient_login: true, expected_identity_id: check.identity_id,
       expected_gh_entry_path: check.gh_entry_path, allow_model_context: modelContext,
     }, "PUT"));
@@ -118,8 +123,12 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
   const source = status?.source;
   const active = source?.state === "active";
   const login = check?.identity_login ?? source?.identity_login ?? null;
-  const canEnable = !pending && !!status && !!check && acknowledged && !!ownerSessionId
+  const scopeValid = [...parseRepositoryList(repositories), ...parseRepositoryList(excluded)].every(validRepository)
+    && parseRepositoryList(owners).every(validOwner);
+  const canEnable = !pending && !!status && !!check && acknowledged && !!ownerSessionId && scopeValid
     && (discover || parseRepositoryList(repositories).length > 0);
+  // The full-scope sentence stays visible whenever a source exists or a login was checked.
+  const showSentence = !!check || (!!source && source.state !== "not_connected");
 
   return <section className="space-y-3 px-1" aria-label="GitHub activity for reports">
     <h3>GitHub activity for reports</h3>
@@ -127,7 +136,7 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
     <p role="status">{!status ? "Loading GitHub activity source" : active
       ? `On · @${source?.identity_login ?? "unknown"} · uses your local gh login`
       : status.message || source?.state.replace(/_/g, " ")}</p>
-    {(active || check) && <p>{GITHUB_ACTIVITY_GRANT_SENTENCE}</p>}
+    {showSentence && <p>{GITHUB_ACTIVITY_GRANT_SENTENCE}</p>}
     {status && !status.gh.available && <p>No usable gh command was found ({(status.gh.reason_code ?? "unavailable").replace(/_/g, " ")}). The local gh login only works when Seraph's backend runs directly on your computer.</p>}
     {status?.last_run && <p>Last collection ({status.last_run.report_date}): {status.last_run.message}</p>}
 
@@ -144,6 +153,7 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
         onChange={event => { setOwners(event.target.value); setAcknowledged(false); }} /></label>
       <label className="block">Never read <input aria-label="Excluded repositories" value={excluded} placeholder="owner/name"
         onChange={event => { setExcluded(event.target.value); setAcknowledged(false); }} /></label>
+      {!scopeValid && <p role="note">Use owner/name for repositories and plain account names for owners.</p>}
       <p>Discovery uses GitHub's event feed, which can lag by minutes to hours; listing your main repository makes it reliable.</p>
     </fieldset>
 

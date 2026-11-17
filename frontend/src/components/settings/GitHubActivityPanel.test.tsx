@@ -66,7 +66,8 @@ describe("GitHub activity source panel", () => {
     await screen.findByText(/switched off by the operator/);
     const revoke = fetch.mock.calls.find(([url]) => String(url).endsWith("/revoke"))![1] as RequestInit;
     expect(JSON.parse(revoke.body as string)).toEqual({ expected_revision: 1 });
-    expect(screen.queryByText(GITHUB_ACTIVITY_GRANT_SENTENCE)).toBeNull();
+    // Still shown while switched off, so the grant's nature stays visible.
+    expect(screen.getByText(GITHUB_ACTIVITY_GRANT_SENTENCE)).toBeTruthy();
   });
 
   it("collects now and links only GitHub URLs", async () => {
@@ -118,5 +119,36 @@ describe("githubActivityItems", () => {
   it("drops non-GitHub and malformed URLs", () => {
     const value = githubActivityItems({ items: [{ id: "a", repository: "r/s", kind: "commit", occurred_at: "x", url: "javascript:alert(1)" }] });
     expect(value.items[0].url).toBeNull();
+  });
+});
+
+
+describe("GitHub activity panel scope", () => {
+  it("loads model context and kinds from the source, keeps them on save, and refuses bad repository names", async () => {
+    const stored = { ...on, source: { ...on.source, model_context_allowed: true, state: "stopped", stopped_reason: "gh_login_changed",
+      scope: { ...on.source.scope, kinds: ["commit", "pr_merged"] } }, message: "GitHub source stopped." };
+    const fetch = vi.fn((url: unknown, init?: RequestInit) => {
+      const path = String(url);
+      if (path.endsWith("/gh/check")) return response(checked);
+      if (init?.method === "PUT") return response(on);
+      return response(stored);
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<GitHubActivityPanel ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
+    await screen.findByText("GitHub source stopped.");
+    expect(screen.getByText(GITHUB_ACTIVITY_GRANT_SENTENCE)).toBeTruthy();
+    expect((screen.getByLabelText(/model analysis/) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByText("Check gh login"));
+    await screen.findByText(/logged in as @octo/);
+    fireEvent.click(screen.getByLabelText(/Use my local gh login/));
+    fireEvent.change(screen.getByLabelText("Always read repositories"), { target: { value: "seraph-quest/.." } });
+    expect(screen.getByText("Enable").hasAttribute("disabled")).toBe(true);
+    fireEvent.change(screen.getByLabelText("Always read repositories"), { target: { value: "seraph-quest/seraph" } });
+    fireEvent.click(screen.getByLabelText(/Use my local gh login/));
+    fireEvent.click(screen.getByText("Enable"));
+    await waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
+    const put = JSON.parse((fetch.mock.calls.find(([, init]) => init?.method === "PUT")![1] as RequestInit).body as string);
+    expect(put.scope.kinds).toEqual(["commit", "pr_merged"]);
+    expect(put.allow_model_context).toBe(true);
   });
 });

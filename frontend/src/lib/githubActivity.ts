@@ -136,3 +136,16 @@ export function githubActivityItems(value: unknown): { message: string; items: G
 export function parseRepositoryList(value: string): string[] {
   return value.split(/[\s,]+/).map(item => item.trim()).filter(Boolean);
 }
+
+// The backend's one repository rule (github_cli.valid_repository), mirrored for early feedback.
+const REPOSITORY = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+export function validRepository(value: string): boolean {
+  if (!REPOSITORY.test(value) || value.includes("..")) return false;
+  const [owner, name] = value.split("/");
+  return !(owner.startsWith("-") || owner.startsWith(".") || name.startsWith("-") || name === ".");
+}
+
+const LOGIN = /^[A-Za-z0-9_-]{1,39}$/;
+export function validOwner(value: string): boolean {
+  return LOGIN.test(value) && !value.startsWith("-") && !value.startsWith("_");
+}

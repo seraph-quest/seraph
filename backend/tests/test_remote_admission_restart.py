@@ -499,10 +499,9 @@ async def test_queued_cancelled_job_never_reaches_injected_transport(async_db):
 @pytest.mark.asyncio
 async def test_concurrent_intents_have_one_durable_cas_winner(async_db, monkeypatch, tmp_path):
     """Two workers cannot reserve the same remote effect identity."""
-    # The default async_db fixture intentionally uses StaticPool. Two
-    # concurrent sessions on that single connection can roll back each
-    # other's transaction, so use a temporary file-backed SQLite seam here to
-    # exercise the repository CAS with independent connections.
+    # Two workers on independent connections, so the database itself
+    # arbitrates the CAS. (The default fixture is also a per-test file with a
+    # connection per session since #1222; this engine predates that.)
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path / 'remote-intent-race.db'}",
         connect_args={"timeout": 5},

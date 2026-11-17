@@ -18,7 +18,10 @@ module-level ``if``/``try``):
     A ``dict``/``list``/``set``/``deque``/... (literal, comprehension or
     constructor call) that src mutates: through a mutating method, an item
     assignment or deletion, from its own module or from a module that imports
-    it. A container nothing in src mutates is a constant and is not state.
+    it. Storing it on an attribute (``self._tasks = NAME``) also counts, since
+    the holder then mutates it under another name (#1259). A container
+    nothing in src mutates or hands on that way is a constant and is not
+    state.
 ``rebound``
     A name some function in its module rebinds through ``global``.
 ``primitive``

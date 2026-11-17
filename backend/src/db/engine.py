@@ -2260,7 +2260,7 @@ async def session_scope(
             await session.rollback()
             session.info.pop("work_board_events_after_commit", None)
             raise
-        except BaseException:
+        except BaseException as original:
             # Cancellation (and other BaseExceptions) must also discard the
             # unit of work explicitly instead of relying on the session close
             # (#1256). Drop the pending events first: that step cannot be
@@ -2272,12 +2272,17 @@ async def session_scope(
                 # second cancel interrupts the rollback instead, and the
                 # session close below still discards the transaction.
                 await session.rollback()
-            except (Exception, asyncio.CancelledError):
-                # The original exception (usually CancelledError) is what the
-                # caller must see; a failed rollback must not replace it.
-                logger.warning(
-                    "session rollback after cancellation failed", exc_info=True
-                )
+            except asyncio.CancelledError:
+                # A second cancel only repeats a cancellation already under
+                # way. During GeneratorExit, KeyboardInterrupt or SystemExit
+                # it is new and propagates.
+                if not isinstance(original, asyncio.CancelledError):
+                    raise
+                logger.warning("session rollback was interrupted", exc_info=True)
+            except Exception:
+                # The original exception is what the caller must see; a
+                # failed rollback must not replace it.
+                logger.warning("session rollback failed", exc_info=True)
             raise
 
 

@@ -156,6 +156,37 @@ def test_dynamic_imports_resolve_to_the_named_module(tmp_path: Path) -> None:
         "sleep": 7, "clock-compare": 1, "environ-assign": 2, "popen": 1}}
 
 
+def test_dynamic_import_chain_skips_a_shadowing_from_import(tmp_path: Path) -> None:
+    """``from time import time`` must not rewrite ``__import__("time").sleep`` to ``time.time.sleep``."""
+    found = counts(tmp_path, {"test_a.py": """
+        from time import time
+        from asyncio import sleep as asyncio_sleep
+
+        async def test_a():
+            __import__("time").sleep(1)
+            importlib = __import__("importlib")
+            importlib.import_module("time").sleep(1)
+            started = time()
+            assert __import__("time").monotonic() - started < 1
+    """})
+    assert found == {"backend/tests/test_a.py": {"sleep": 2, "clock-compare": 1}}
+
+    module = tmp_path / "src/adopted.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(textwrap.dedent("""\
+        from datetime import datetime
+        from time import time
+
+        def work():
+            __import__("datetime").datetime.now()
+            __import__("time").monotonic()
+            datetime.now()
+    """), encoding="utf-8")
+    errors = checker.scan_clock_seam(tmp_path / "src", tmp_path, modules=("adopted.py",))
+    assert [int(error.split(":")[1]) for error in errors] == [5, 6, 7]
+    assert "datetime.datetime.now" in errors[0] and "time.monotonic" in errors[1]
+
+
 def test_dynamic_import_with_a_non_literal_name_is_unresolvable(tmp_path: Path) -> None:
     tests, _ = make_tree(tmp_path, {"test_a.py": """
         import importlib
@@ -165,11 +196,28 @@ def test_dynamic_import_with_a_non_literal_name_is_unresolvable(tmp_path: Path) 
             module = importlib.import_module(name)
             __import__(name).sleep(1)
             importlib.import_module(f"{name}").sleep(1)
+            module.sleep(1)
+            assert getattr(importlib.import_module(name), "x") is None
+            importlib.import_module(".clock", package="pkg").sleep(1)
+            later = lambda: importlib.import_module(name).sleep(1)
+
+        def test_b(name):
+            module = importlib.import_module(name)
+            assert hasattr(module, "x")
+
+        def test_c(name, other):
+            module = importlib.import_module(name)
+            module = other
+            module.sleep(1)
     """})
     result = checker.scan(tests, tmp_path)
-    # Only the attribute reads are reported; a bare import of a variable name is not.
-    assert [error.split(":")[1] for error in result.errors] == ["7", "8"]
-    assert all("non-literal module name" in error for error in result.errors)
+    # Attribute reads, directly or through a name bound only to the import in
+    # that scope, are reported; a bare or passed-on import is not, nor a name
+    # with another binding in its scope.
+    assert [error.split(":")[1] for error in result.errors] == ["7", "8", "9", "11", "12"]
+    assert all("relative/unresolvable" in error for error in result.errors)
+    assert ["non-literal" in error for error in result.errors] == [True, True, True, False, True]
+    assert "relative module name" in result.errors[3]
 
     module = tmp_path / "src/adopted.py"
     module.parent.mkdir(parents=True)

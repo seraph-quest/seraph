@@ -278,6 +278,81 @@ async def test_session_scope_rolls_back_explicitly_on_cancellation(db, monkeypat
     assert rows == []
 
 
+async def test_a_second_cancel_during_the_cancellation_rollback_keeps_the_cancellation(db, monkeypatch):
+    rollback_entered = asyncio.Event()
+    never = asyncio.Event()
+    rollbacks: list = []
+
+    def parking_factory():
+        session = db.factory()
+        real_rollback = session.rollback
+
+        async def parking_rollback():
+            rollbacks.append(session)
+            rollback_entered.set()
+            await never.wait()  # interrupted by the second cancel
+            await real_rollback()
+
+        session.rollback = parking_rollback
+        return session
+
+    install_session_factory(monkeypatch, parking_factory)
+    written = asyncio.Event()
+
+    async def unit_of_work():
+        async with db_engine.get_session() as session:
+            session.add(AuditEvent(event_type="cancelled_twice", summary="cancelled"))
+            await session.flush()
+            written.set()
+            await never.wait()
+
+    task = asyncio.create_task(unit_of_work())
+    await written.wait()
+    task.cancel()
+    await rollback_entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled() and len(rollbacks) == 1
+    # The session close still discarded the transaction.
+    async with db() as session:
+        rows = (await session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == "cancelled_twice"))).scalars().all()
+    assert rows == []
+
+
+async def test_a_cancel_during_a_non_cancellation_rollback_propagates(db, monkeypatch):
+    """Only a cancellation absorbs a second cancel; for KeyboardInterrupt it is new."""
+    rollback_entered = asyncio.Event()
+    never = asyncio.Event()
+
+    def parking_factory():
+        session = db.factory()
+
+        async def parking_rollback():
+            rollback_entered.set()
+            await never.wait()
+
+        session.rollback = parking_rollback
+        return session
+
+    install_session_factory(monkeypatch, parking_factory)
+
+    async def unit_of_work():
+        try:
+            async with db_engine.get_session():
+                raise KeyboardInterrupt
+        except KeyboardInterrupt:
+            return "interrupt was swallowed"
+        except asyncio.CancelledError:
+            return "cancel propagated"
+
+    task = asyncio.create_task(unit_of_work())
+    await rollback_entered.wait()
+    task.cancel()
+    assert await task == "cancel propagated"
+
+
 async def test_each_test_database_starts_with_an_open_state_gate_and_restores_it(db, tmp_path):
     assert db_engine.state_gate() == (None, None)
     # Install a second database by hand, leave its gate closed, and undo it

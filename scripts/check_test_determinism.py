@@ -42,9 +42,11 @@ pass. There is no calendar expiry. ``--quarantined-files`` and
 
 Names resolve through imports and aliases, and through dynamic imports
 (#1257): ``__import__("time").sleep`` and ``importlib.import_module("asyncio")``
-count as the named module for every rule, as does a name assigned from one. A
-dynamic import with a non-literal module name whose attribute is read is an
-error, since it could hide any hazard.
+count as the named module for every rule, as does a name assigned from one;
+the import table never rewrites such a chain. An attribute read on a dynamic
+import with a non-literal or relative module name, directly or through a name
+bound only to one in the same scope, is an error, since it could hide any
+hazard.
 
 The per-file, per-category counts must equal the baseline exactly. A count
 above the baseline fails, and so does a count below it until the baseline is
@@ -194,7 +196,7 @@ def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> li
         lines = source.split("\n")
 
         def resolved(node: ast.AST) -> str | None:
-            return imports.resolve(dotted(node))
+            return imports.name_of(node)
 
         found: list[tuple[int, str]] = []
 
@@ -244,8 +246,8 @@ def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> li
                     report(node, "timer " + name)
                 elif name in CLOCK_SEAM_TIMER_VALUES:
                     report(node, "timer " + name + " used as a value")
-        for node in unresolvable_dynamic_imports(tree):
-            report(node, "dynamic import with a non-literal module name (unresolvable)")
+        for node, unresolvable in unresolvable_dynamic_imports(tree):
+            report(node, f"dynamic import with {unresolvable.why} (relative/unresolvable)")
         errors.extend(message for _, message in sorted(found))
     return errors
 
@@ -258,14 +260,22 @@ class Finding:
     snippet: str
 
 
-_UNRESOLVABLE = object()
+class _Unresolvable:
+    """A dynamic import whose module the checker cannot name."""
+
+    def __init__(self, why: str) -> None:
+        self.why = why
 
 
-def dynamic_import(node: ast.AST) -> str | object | None:
+_NON_LITERAL = _Unresolvable("a non-literal module name")
+_RELATIVE = _Unresolvable("a relative module name")
+
+
+def dynamic_import(node: ast.AST) -> str | _Unresolvable | None:
     """The module a ``__import__("m")`` / ``importlib.import_module("m")`` call yields (#1257).
 
-    ``None`` when ``node`` is not such a call, ``_UNRESOLVABLE`` when it is one
-    whose module name is not a string literal. ``__import__("a.b")`` yields the
+    ``None`` when ``node`` is not such a call, an ``_Unresolvable`` when it is
+    one whose module name is not a string literal or is relative. ``__import__("a.b")`` yields the
     top-level package ``a`` unless it is given a ``fromlist``, as at runtime.
     The function is matched by name (``import_module`` under any module alias)
     because ``dotted`` has no import table.
@@ -281,8 +291,10 @@ def dynamic_import(node: ast.AST) -> str | object | None:
         return None
     names = node.args[:1] or [keyword.value for keyword in node.keywords if keyword.arg == "name"]
     if (len(names) != 1 or not isinstance(names[0], ast.Constant) or not isinstance(names[0].value, str)
-            or not names[0].value or names[0].value.startswith(".")):
-        return _UNRESOLVABLE
+            or not names[0].value):
+        return _NON_LITERAL
+    if names[0].value.startswith("."):
+        return _RELATIVE
     module = names[0].value
     if builtin:
         fromlist = node.args[3] if len(node.args) > 3 else next(
@@ -313,15 +325,77 @@ def dotted(node: ast.AST) -> str | None:
     return None
 
 
-def unresolvable_dynamic_imports(tree: ast.AST) -> list[ast.Attribute]:
-    """Attribute reads on a dynamic import whose module name is not a literal.
+def chain_root(node: ast.AST) -> ast.AST:
+    """The node an Attribute chain hangs off (``x`` in ``x.a.b``)."""
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node
 
-    ``importlib.import_module(name).sleep(1)`` could hide any hazard, so it is
-    reported instead of ignored. A bare non-literal import (its result unused
-    or passed on) is not an attribute read and is left alone.
+
+def _scope_nodes(body: list[ast.stmt]):
+    """Walk ``body`` without descending into nested function, class or lambda scopes."""
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    stack = list(body)
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, scopes):
+            # The definition binds its name here; its body is its own scope.
+            # Decorators and defaults are evaluated here, though.
+            stack.extend(getattr(current, "decorator_list", []))
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def unresolvable_dynamic_imports(tree: ast.Module) -> list[tuple[ast.Attribute, _Unresolvable]]:
+    """Attribute reads on a dynamic import the checker cannot name.
+
+    ``importlib.import_module(name).sleep(1)``, and ``m.sleep(1)`` after
+    ``m = importlib.import_module(name)`` in the same scope, could hide any
+    hazard, so they are reported instead of ignored. A bare non-literal import
+    (its result unused or passed on, e.g. to ``getattr``) is left alone. A
+    name counts only in a scope where every binding of it is such an import.
     """
-    return [node for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute) and dynamic_import(node.value) is _UNRESOLVABLE]
+    found: list[tuple[ast.Attribute, _Unresolvable]] = []
+    scopes: list[list[ast.stmt]] = [tree.body]
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            scopes.append(node.body)
+        elif isinstance(node, ast.Lambda):
+            scopes.append([ast.Expr(value=node.body)])
+    for body in scopes:
+        nodes = list(_scope_nodes(body))
+        dynamic: dict[str, _Unresolvable] = {}
+        dynamic_targets: set[int] = set()
+        other: set[str] = set()
+        for node in nodes:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                result = dynamic_import(node.value)
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(result, _Unresolvable) and isinstance(target, ast.Name):
+                        dynamic[target.id] = result
+                        dynamic_targets.add(id(target))
+        for node in nodes:
+            # Any other binding of the name (assignment, loop, ``with``, import,
+            # def) makes it ambiguous in this scope; it is then not reported.
+            if (isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+                    and id(node) not in dynamic_targets):
+                other.add(node.id)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                other.update((alias.asname or alias.name).partition(".")[0] for alias in node.names)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                other.add(node.name)
+        unresolved_names = {name: why for name, why in dynamic.items() if name not in other}
+        for node in nodes:
+            if not isinstance(node, ast.Attribute):
+                continue
+            result = dynamic_import(node.value)
+            if result is None and isinstance(node.value, ast.Name):
+                result = unresolved_names.get(node.value.id)
+            if isinstance(result, _Unresolvable):
+                found.append((node, result))
+    return sorted(found, key=lambda item: (item[0].lineno, item[0].col_offset))
 
 
 class Imports:
@@ -345,6 +419,18 @@ class Imports:
                     if isinstance(target, ast.Name):
                         self.aliases[target.id] = module
 
+    def name_of(self, node: ast.AST) -> str | None:
+        """The resolved dotted name of ``node``.
+
+        A chain rooted at a literal dynamic import already names its module
+        (``__import__("datetime").datetime.now``) and skips the alias table, so
+        ``from datetime import datetime`` cannot rewrite its head.
+        """
+        name = dotted(node)
+        if isinstance(dynamic_import(chain_root(node)), str):
+            return name
+        return self.resolve(name)
+
     def resolve(self, name: str | None) -> str | None:
         if name is None:
             return None
@@ -359,13 +445,14 @@ def is_zero(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and not isinstance(node.value, bool) and node.value == 0
 
 
-def realtime_reason(decorator: ast.AST, resolve=lambda name: name) -> str | None | bool:
+def realtime_reason(decorator: ast.AST, name_of=dotted) -> str | None | bool:
     """Return the reason for a realtime marker, ``False`` if not one, ``None`` if reasonless.
 
-    ``resolve`` maps import aliases (``import pytest as pt``, ``from pytest import mark``).
+    ``name_of`` names a node through import aliases (``import pytest as pt``,
+    ``from pytest import mark``).
     """
     target = decorator.func if isinstance(decorator, ast.Call) else decorator
-    if resolve(dotted(target)) not in {"pytest.mark.realtime", "mark.realtime"}:
+    if name_of(target) not in {"pytest.mark.realtime", "mark.realtime"}:
         return False
     if not isinstance(decorator, ast.Call):
         return None
@@ -377,10 +464,10 @@ def realtime_reason(decorator: ast.AST, resolve=lambda name: name) -> str | None
     return None
 
 
-def quarantine_issue(decorator: ast.AST, resolve=lambda name: name) -> str | None | bool:
+def quarantine_issue(decorator: ast.AST, name_of=dotted) -> str | None | bool:
     """Return the issue for a quarantine marker, ``False`` if not one, ``None`` if it names none."""
     target = decorator.func if isinstance(decorator, ast.Call) else decorator
-    if resolve(dotted(target)) not in {"pytest.mark.quarantine", "mark.quarantine"}:
+    if name_of(target) not in {"pytest.mark.quarantine", "mark.quarantine"}:
         return False
     if not isinstance(decorator, ast.Call):
         return None
@@ -417,7 +504,7 @@ class Scanner(ast.NodeVisitor):
 
     # -- exemption -----------------------------------------------------------------
     def _check_quarantine(self, node: ast.AST, decorator: ast.AST) -> None:
-        issue = quarantine_issue(decorator, self.imports.resolve)
+        issue = quarantine_issue(decorator, self.imports.name_of)
         if issue is False:
             return
         self.accepted_quarantine.add(id(decorator.func if isinstance(decorator, ast.Call) else decorator))
@@ -439,7 +526,7 @@ class Scanner(ast.NodeVisitor):
         issue check, the cap and the quarantine lane, so it is an error."""
         for node in ast.walk(tree):
             if (isinstance(node, ast.Attribute)
-                    and self.imports.resolve(dotted(node)) in {"pytest.mark.quarantine", "mark.quarantine"}
+                    and self.imports.name_of(node) in {"pytest.mark.quarantine", "mark.quarantine"}
                     and id(node) not in self.accepted_quarantine):
                 self.errors.append(
                     f"{self.display_path}:{node.lineno}: pytest.mark.quarantine is only supported as a "
@@ -448,7 +535,7 @@ class Scanner(ast.NodeVisitor):
 
     def _check_marker(self, node: ast.AST, decorator: ast.AST) -> bool:
         self._check_quarantine(node, decorator)
-        reason = realtime_reason(decorator, self.imports.resolve)
+        reason = realtime_reason(decorator, self.imports.name_of)
         if reason is False:
             return False
         if reason is None:
@@ -507,7 +594,7 @@ class Scanner(ast.NodeVisitor):
     def is_clock_read(self, node: ast.AST) -> bool:
         if not isinstance(node, ast.Call):
             return False
-        name = self.imports.resolve(dotted(node.func))
+        name = self.imports.name_of(node.func)
         if name is not None:
             module, _, function = name.rpartition(".")
             if module == "time" and function in CLOCK_FUNCTIONS:
@@ -581,7 +668,7 @@ class Scanner(ast.NodeVisitor):
 
     # -- visitors ------------------------------------------------------------------
     def visit_Call(self, node: ast.Call) -> None:
-        name = self.imports.resolve(dotted(node.func))
+        name = self.imports.name_of(node.func)
         if name == "time.sleep":
             self.record(node, "sleep")
         elif name == "asyncio.sleep":
@@ -600,7 +687,7 @@ class Scanner(ast.NodeVisitor):
             if any(self.reads_clock(argument, self.tainted_stack[-1]) for argument in node.args):
                 self.record(node, "clock-compare")
         if (isinstance(node.func, ast.Attribute) and node.func.attr in ENVIRON_MUTATORS
-                and self.imports.resolve(dotted(node.func.value)) == "os.environ"):
+                and self.imports.name_of(node.func.value) == "os.environ"):
             self.record(node, "environ-assign")
         if dotted(node.func) == "setattr" and node.args and self._is_settings(node.args[0]):
             self.record(node, "settings-assign")
@@ -620,7 +707,7 @@ class Scanner(ast.NodeVisitor):
         return False
 
     def _is_settings(self, node: ast.AST) -> bool:
-        base = self.imports.resolve(dotted(node)) or ""
+        base = self.imports.name_of(node) or ""
         return base == "settings" or base.endswith(".settings")
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
@@ -641,7 +728,7 @@ class Scanner(ast.NodeVisitor):
 
     def _check_targets(self, targets: list[ast.AST], node: ast.AST) -> None:
         for target in targets:
-            if self.imports.resolve(dotted(target)) == "os.environ":
+            if self.imports.name_of(target) == "os.environ":
                 # ``os.environ |= {...}`` or rebinding the mapping itself.
                 self.record(node, "environ-assign")
                 continue
@@ -650,7 +737,7 @@ class Scanner(ast.NodeVisitor):
                     if self._is_settings(element.value):
                         self.record(node, "settings-assign")
                 elif isinstance(element, ast.Subscript):
-                    base = self.imports.resolve(dotted(element.value))
+                    base = self.imports.name_of(element.value)
                     if base == "os.environ":
                         self.record(node, "environ-assign")
 
@@ -660,7 +747,7 @@ class Scanner(ast.NodeVisitor):
 
     def visit_Delete(self, node: ast.Delete) -> None:
         for target in node.targets:
-            if isinstance(target, ast.Subscript) and self.imports.resolve(dotted(target.value)) == "os.environ":
+            if isinstance(target, ast.Subscript) and self.imports.name_of(target.value) == "os.environ":
                 self.record(node, "environ-assign")
         self.generic_visit(node)
 
@@ -710,10 +797,10 @@ def scan(tests_dir: Path, root: Path) -> ScanResult:
         scanner = Scanner(display_path, tree, source, support=relative[:1] == (SUPPORT_PACKAGE,))
         scanner.visit(tree)
         scanner.check_stray_quarantine(tree)
-        for node in unresolvable_dynamic_imports(tree):
+        for node, unresolvable in unresolvable_dynamic_imports(tree):
             errors.append(
-                f"{display_path}:{node.lineno}: dynamic import with a non-literal module name cannot be "
-                "checked for determinism hazards; import the module by name"
+                f"{display_path}:{node.lineno}: dynamic import with {unresolvable.why} is "
+                "relative/unresolvable and cannot be checked for determinism hazards; import the module by name"
             )
         findings.extend(scanner.findings)
         exempt.extend(scanner.exempt)

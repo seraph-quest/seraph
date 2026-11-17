@@ -82,6 +82,7 @@ PROCESS_STATE: dict[str, Entry] = {
     "src.utils.background:_threads": Entry("container", RESTORE),
     "src.vault.refs:_issued_refs": Entry("container", RESTORE),
     "src.work_board.channel_capture:_LIVE_SOURCE_FRAMES": Entry("container", RESTORE),
+    "src.work_board.dispatcher:_ACTIVE_WORKER_TASKS": Entry("container", RESTORE),
     "src.work_board.document_channel_ingest:_ACTIVE_SOURCE_CLAIMS": Entry("container", RESTORE),
     "src.work_board.general_task_runtime_artifacts:_CANCEL_OUTPUT_WITNESSES": Entry("container", RESTORE),
     "src.workflows.delegation_contracts:_EVIDENCE_SOURCES": Entry("container", RESTORE),

@@ -189,6 +189,11 @@ def scan_source_state(src_root: Path = SRC_ROOT) -> dict[str, Finding]:
         for node in ast.walk(tree):
             if isinstance(node, ast.Global):
                 rebound.update((module, name) for name in node.names)
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+                    and any(isinstance(target, ast.Attribute) for target in node.targets)):
+                # ``self._tasks = NAME`` hands the object to an instance that
+                # mutates it through the attribute (#1259): NAME is state.
+                mutated.add(imported.get(node.value.id, (module, node.value.id)))
             for target in _mutated_names(node):
                 # ``NAME[key].append(...)`` mutates a value NAME holds: NAME is state.
                 while isinstance(target, ast.Subscript):

@@ -39,6 +39,7 @@ import pwd
 import re
 import stat
 import subprocess
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
@@ -61,9 +62,12 @@ GH_STDOUT_LIMIT = 1024 * 1024
 GH_STDERR_LIMIT = 16 * 1024
 PER_PAGE = 50
 
-_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_LOGIN = re.compile(r"^[A-Za-z0-9-]{1,39}$")
-_BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
+_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+# GitHub logins; ``_`` appears in Enterprise Managed User logins.
+_LOGIN = re.compile(r"^[A-Za-z0-9_-]{1,39}$")
+# A Git branch name: no whitespace, control characters or the characters Git
+# refuses in refs. Every other character is percent-encoded into the query.
+_BRANCH = re.compile(r"^[^\x00-\x20\x7f~^:?*\[\\]{1,200}$")
 _STATUS_LINE = re.compile(r"^HTTP/\d(?:\.\d)? (\d{3})")
 _KEPT_HEADERS = ("x-ratelimit-remaining", "x-ratelimit-reset", "retry-after")
 _VERSION = re.compile(r"^gh version ([0-9][0-9A-Za-z.+-]{0,40})")
@@ -82,6 +86,9 @@ OPS: dict[str, tuple[str, tuple[str, ...], int, type]] = {
 }
 
 
+_CLEAN = frozenset({"not_requested", "stopped"})
+
+
 class GhCliError(Exception):
     """A typed, fixed-code failure. It never carries gh output or a token."""
 
@@ -92,6 +99,30 @@ class GhCliError(Exception):
         self.exit_code = exit_code
         self.http_status = http_status
         self.headers = dict(headers or {})
+
+
+class GhValueInvalid(GhCliError):
+    """A value was refused before any child started; the caller may skip it."""
+
+    def __init__(self) -> None:
+        super().__init__("github_activity_value_invalid")
+
+
+def valid_repository(value: object) -> bool:
+    """The one repository-name rule (owner/name), shared by scope, discovery and argv."""
+    if not isinstance(value, str) or not _REPOSITORY.fullmatch(value) or ".." in value:
+        return False
+    owner, name = value.split("/", 1)
+    return not (owner.startswith(("-", ".")) or name.startswith("-") or name == ".")
+
+
+def valid_login(value: object) -> bool:
+    return isinstance(value, str) and bool(_LOGIN.fullmatch(value)) and not value.startswith(("-", "_"))
+
+
+def valid_branch(value: object) -> bool:
+    return (isinstance(value, str) and bool(_BRANCH.fullmatch(value)) and ".." not in value
+            and not value.startswith(("-", "/")) and not value.endswith(("/", ".lock")) and "@{" not in value)
 
 
 @dataclass(frozen=True)
@@ -117,16 +148,17 @@ class GhResponse:
 
 class GhRunner(Protocol):
     def __call__(self, argv: list[str], *, cwd: Path, env: dict[str, str], timeout_seconds: float,
-                 cancel_event: threading.Event, stdout_limit: int,
-                 stderr_limit: int) -> process_tools.OwnedRunResult: ...
+                 cancel_event: threading.Event, stdout_limit: int, stderr_limit: int,
+                 cleanup: process_tools.OwnedRunCleanup) -> process_tools.OwnedRunResult: ...
 
 
 def default_runner(argv: list[str], *, cwd: Path, env: dict[str, str], timeout_seconds: float,
-                   cancel_event: threading.Event, stdout_limit: int,
-                   stderr_limit: int) -> process_tools.OwnedRunResult:
+                   cancel_event: threading.Event, stdout_limit: int, stderr_limit: int,
+                   cleanup: process_tools.OwnedRunCleanup) -> process_tools.OwnedRunResult:
+    # stdin is /dev/null: gh can never wait for input.
     return process_tools.run_owned_argv(argv, cwd=cwd, env=env, timeout_seconds=timeout_seconds,
         cancel_event=cancel_event, stdout_limit=stdout_limit, stderr_limit=stderr_limit,
-        stdin=subprocess.DEVNULL)
+        stdin=subprocess.DEVNULL, cleanup=cleanup)
 
 
 def current_account() -> GhAccount:
@@ -145,8 +177,20 @@ def install_prefix_for(entry_path: str) -> str:
     return str(prefix)
 
 
+def _stat(path: Path) -> os.stat_result:
+    return os.stat(path)
+
+
 def _trusted_owner(info: os.stat_result) -> bool:
     return info.st_uid in {os.getuid(), 0}
+
+
+def _forbidden_roots() -> list[Path]:
+    from config.settings import settings
+    roots = [Path(tempfile.gettempdir()).resolve() / "seraph_runtime"]
+    if settings.workspace_dir:
+        roots.append(Path(settings.workspace_dir).resolve())
+    return roots
 
 
 def _within(path: Path, prefix: Path) -> bool:
@@ -167,7 +211,7 @@ def _sha256(path: Path) -> str:
 
 def format_timestamp(value: datetime) -> str:
     if value.tzinfo is None:
-        raise GhCliError("github_activity_value_invalid")
+        raise GhValueInvalid()
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -179,22 +223,19 @@ def build_endpoint(op: str, *, repository: str | None = None, login: str | None 
         raise GhCliError("github_activity_op_unknown")
     template, query_keys, max_pages, _ = OPS[op]
     if type(page) is not int or not 1 <= page <= max_pages:
-        raise GhCliError("github_activity_value_invalid")
+        raise GhValueInvalid()
     values: dict[str, str] = {}
     if "{repository}" in template:
-        if not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository) or ".." in repository:
-            raise GhCliError("github_activity_value_invalid")
-        owner, name = repository.split("/", 1)
-        if owner.startswith(("-", ".")) or name.startswith(("-", ".")):
-            raise GhCliError("github_activity_value_invalid")
+        if not valid_repository(repository):
+            raise GhValueInvalid()
         values["repository"] = repository
     if "{login}" in template or "author" in query_keys:
-        if not isinstance(login, str) or not _LOGIN.fullmatch(login) or login.startswith("-"):
-            raise GhCliError("github_activity_value_invalid")
+        if not valid_login(login):
+            raise GhValueInvalid()
         values["login"] = login
     if "{number}" in template:
         if type(number) is not int or number <= 0:
-            raise GhCliError("github_activity_value_invalid")
+            raise GhValueInvalid()
         values["number"] = str(number)
     path = template.format(**values)
     query: list[tuple[str, str]] = []
@@ -211,24 +252,23 @@ def build_endpoint(op: str, *, repository: str | None = None, login: str | None 
             query.append((key, "desc"))
         elif key == "since":
             if since is None:
-                raise GhCliError("github_activity_value_invalid")
+                raise GhValueInvalid()
             query.append((key, format_timestamp(since)))
         elif key == "until":
             if until is None:
-                raise GhCliError("github_activity_value_invalid")
+                raise GhValueInvalid()
             query.append((key, format_timestamp(until)))
         elif key == "author":
             query.append((key, values["login"]))
         elif key == "sha":
-            if (not isinstance(branch, str) or not _BRANCH.fullmatch(branch) or ".." in branch
-                    or branch.startswith(("-", "/"))):
-                raise GhCliError("github_activity_value_invalid")
+            if not valid_branch(branch):
+                raise GhValueInvalid()
             query.append((key, quote(branch, safe="")))
     endpoint = path + ("?" + "&".join(f"{key}={value}" for key, value in query) if query else "")
     # gh api replaces {owner}, {repo} and {branch} from the working directory's
     # repository; an endpoint with braces is never handed to it.
     if not endpoint.startswith("/") or "{" in endpoint or "}" in endpoint or " " in endpoint:
-        raise GhCliError("github_activity_value_invalid")
+        raise GhValueInvalid()
     return endpoint
 
 
@@ -294,15 +334,20 @@ class GhCliReader:
             raise GhCliError("gh_unavailable")
         return self._trusted(entry_path, install_prefix, digest)
 
+    async def alocate(self, entry_path: str | None = None, *, install_prefix: str | None = None) -> GhBinary:
+        """``locate`` with the hash, off the event loop (gh is tens of MiB)."""
+        return await asyncio.to_thread(self.locate, entry_path, install_prefix=install_prefix)
+
     def _trusted(self, entry_path: str, install_prefix: str | None, digest: bool = True) -> GhBinary:
-        if not isinstance(entry_path, str) or not os.path.isabs(entry_path):
+        if (not isinstance(entry_path, str) or not os.path.isabs(entry_path)
+                or os.path.basename(entry_path) != "gh"):
             raise GhCliError("gh_path_untrusted")
         entry = Path(entry_path)
         try:
             real = entry.resolve(strict=True)
-            info = real.stat()
-            directory_info = real.parent.stat()
-            entry_directory_info = entry.parent.stat()
+            info = _stat(real)
+            directory_info = _stat(real.parent)
+            entry_directory_info = _stat(entry.parent)
         except (OSError, RuntimeError):
             raise GhCliError("gh_unavailable") from None
         prefix = Path(install_prefix or install_prefix_for(entry_path))
@@ -316,6 +361,11 @@ class GhCliReader:
                 raise GhCliError("gh_path_untrusted")
         if not _within(real, prefix.resolve()):
             raise GhCliError("gh_path_untrusted")
+        # Never a gh inside Seraph's own workspace or process runtime, where
+        # agent work could have written it.
+        for root in _forbidden_roots():
+            if _within(Path(os.path.normpath(entry_path)), root) or _within(real, root):
+                raise GhCliError("gh_path_untrusted")
         sha256 = ""
         if digest:
             try:
@@ -356,29 +406,41 @@ class GhCliReader:
     async def _run(self, argv: list[str]) -> process_tools.OwnedRunResult:
         run_dir = self._run_directory()
         cancel_event = threading.Event()
+        # The runner reports its cleanup here on every path, including a
+        # launch or capture-setup failure that raises (#1255).
+        cleanup = process_tools.OwnedRunCleanup()
         try:
             env = self.environment(run_dir)
             worker = asyncio.ensure_future(asyncio.to_thread(
                 self._runner, argv, cwd=run_dir, env=env, timeout_seconds=GH_CALL_TIMEOUT_SECONDS,
-                cancel_event=cancel_event, stdout_limit=GH_STDOUT_LIMIT, stderr_limit=GH_STDERR_LIMIT))
+                cancel_event=cancel_event, stdout_limit=GH_STDOUT_LIMIT, stderr_limit=GH_STDERR_LIMIT,
+                cleanup=cleanup))
             try:
                 result = await asyncio.shield(worker)
             except asyncio.CancelledError:
                 # Stop the child, wait until it is killed and reaped, re-raise.
                 cancel_event.set()
                 try:
-                    stopped = await worker
+                    await worker
                 except Exception:
-                    stopped = None
-                if stopped is not None and stopped.cleanup_status in {"not_requested", "stopped"}:
+                    pass
+                if cleanup.status in _CLEAN:
                     process_tools._delete_runtime_dir(run_dir)
                 raise
-        except OSError:
+        except Exception as exc:
+            # Keep the private directory whenever the child may still be alive.
+            if cleanup.status not in _CLEAN:
+                raise GhCliError("gh_cleanup_unproven") from None
             process_tools._delete_runtime_dir(run_dir)
-            raise GhCliError("gh_unavailable") from None
-        if result.cleanup_status in {"not_requested", "stopped"}:
+            if cleanup.status == "stopped":
+                # The child started and was stopped before it could answer.
+                raise GhCliError("gh_request_failed") from None
+            if isinstance(exc, OSError):
+                raise GhCliError("gh_unavailable") from None
+            raise GhCliError("gh_request_failed") from None
+        if result.cleanup_status in _CLEAN:
             process_tools._delete_runtime_dir(run_dir)
-        if result.cleanup_status not in {"not_requested", "stopped"}:
+        else:
             raise GhCliError("gh_cleanup_unproven")
         if result.timed_out:
             raise GhCliError("gh_timed_out")

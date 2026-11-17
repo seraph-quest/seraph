@@ -2,15 +2,19 @@
 
 Consent: the source is off until the operator checks the ``gh`` login,
 acknowledges that ``gh`` holds their full GitHub access, and enables it in
-Settings. It stops on the operator's toggle and when ``gh`` is logged in as a
-different account. Nothing here expires by time.
+Settings. It stops only on real changes: the operator's toggle or revoke, a
+different ``gh`` account, or an explicit logout/revocation of the Seraph
+login that enabled it. Nothing here expires by time: an idle or absolute
+expiry of that login does not stop the source.
 
 Collection reads only the GET endpoints of ``github_cli.OPS``, one child at a
 time, at most ``MAX_CALLS_PER_RUN`` per run and ``MAX_REPOSITORIES``
 repositories, with no retry and no sleep. Before every ``gh`` start the
 source must still be active at the run's revision, the enabling root must
-still be live, and a ``/repos/...`` read must be inside the saved scope; the
-first two are checked again before a result is kept. Items are stored as
+not have been revoked, and a ``/repos/...`` read must be inside the saved
+scope; the first two are checked again before a result is kept. Items are
+stored only by a run that was not blocked, in the same transaction as a guard
+on the source row (still active at the run's revision). Items are
 provenance-carrying rows whose URLs Seraph builds itself.
 
 This slice collects commits, pull requests opened/merged/closed and issues
@@ -32,11 +36,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.db import engine as db_engine
 from src.db.models import GitHubActivityItem, GitHubActivityRun, GitHubActivitySource
-from src.integrations.github_cli import OPS, GhBinary, GhCliError, GhCliReader, GhResponse
+from src.integrations.github_cli import (
+    OPS, PER_PAGE, GhBinary, GhCliError, GhCliReader, GhResponse, GhValueInvalid, valid_branch, valid_login,
+    valid_repository,
+)
 from src.utils.clock import get_clock
 
 logger = logging.getLogger(__name__)
@@ -55,16 +63,12 @@ CREDENTIAL = {"kind": CREDENTIAL_KIND, "scope": "full_gh_scope", "seraph_request
 ActivityKind = Literal["commit", "pr_opened", "pr_merged", "pr_closed", "issue_opened", "issue_closed"]
 ALL_KINDS: list[str] = ["commit", "pr_opened", "pr_merged", "pr_closed", "issue_opened", "issue_closed"]
 
-_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_OWNER = re.compile(r"^[A-Za-z0-9-]{1,39}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 
-# Codes that end a run at once: a second child would only repeat the failure.
+# Codes that end a run as blocked rather than failed; every other gh error
+# also ends the run at once, since a second child would only repeat it.
 _BLOCKING_CODES = {"gh_not_logged_in"}
-_RUN_ENDING_CODES = {"gh_not_logged_in", "gh_timed_out", "gh_request_failed", "gh_cleanup_unproven",
-                     "github_activity_credential_rejected", "github_activity_response_invalid",
-                     "github_activity_read_failed", "github_activity_rate_limited", "gh_unavailable"}
 _REPOSITORY_CODES = {"github_activity_access_denied", "github_activity_not_found"}
 # Limitations that are information only and do not make a run partial.
 _INFORMATIONAL = {"events_discovery_may_lag", "gh_binary_changed_since_last_run", "unlinked_commit_emails"}
@@ -88,14 +92,14 @@ class GitHubActivityScope(BaseModel):
     @field_validator("repositories", "exclude_repositories")
     @classmethod
     def repository_names(cls, value: list[str]) -> list[str]:
-        if any(not _REPOSITORY.fullmatch(item) or ".." in item for item in value) or len(set(value)) != len(value):
+        if any(not valid_repository(item) for item in value) or len({item.lower() for item in value}) != len(value):
             raise ValueError("repositories must be unique owner/name values")
         return value
 
     @field_validator("owners")
     @classmethod
     def owner_names(cls, value: list[str]) -> list[str]:
-        if any(not _OWNER.fullmatch(item) for item in value) or len(set(value)) != len(value):
+        if any(not valid_login(item) for item in value) or len({item.lower() for item in value}) != len(value):
             raise ValueError("owners must be unique GitHub account names")
         return value
 
@@ -279,7 +283,7 @@ def repository_info(body: Any) -> RepositoryInfo:
     if not isinstance(body, dict):
         raise _invalid()
     name, repo_id, branch = body.get("full_name"), body.get("id"), body.get("default_branch")
-    if (not isinstance(name, str) or not _REPOSITORY.fullmatch(name) or type(repo_id) is not int
+    if (not valid_repository(name) or type(repo_id) is not int
             or not isinstance(branch, str) or not branch):
         raise _invalid()
     return RepositoryInfo(full_name=name, repository_id=repo_id, default_branch=branch,
@@ -382,18 +386,47 @@ class _RepositoryFailed(Exception):
 SessionCheck = Callable[[str, str], Awaitable[None]]
 
 
+def _aware_or_none(value: datetime | None) -> datetime | None:
+    return _aware(value)
+
+
 async def live_owner_session(owner_session_id: str, owner_principal_id: str) -> None:
-    """The enabling root must still be live for the same principal (source_watch rule)."""
-    from src.auth.service import AuthFailure, authenticate_session
+    """The enabling root must not have been revoked by a real change.
+
+    Keyed to real changes only (the operator's standing rule): an explicit
+    logout or revocation of that root, a bearer replacement or tombstone, the
+    local no-login root being retired or its mode switched off, or a different
+    principal. Its idle or absolute expiry does NOT stop the source, so this
+    reads the session row instead of ``authenticate_session`` (which enforces
+    those expiries). No clock is read here.
+
+    The auth owner marks an expired row by setting ``revoked_at`` when it next
+    sees it, at or after the stored expiry. A revocation stamped before both
+    stored expiries can only be an explicit one, which is what stops the
+    source; comparing the two stored instants classifies the cause and is not
+    a validity window.
+    """
+    from src.auth.service import LOCAL_ROOT_TOKEN_MARKER, _is_local_root, local_no_login_active
+    from src.db.models import OperatorSession
     if not owner_session_id:
         raise GitHubActivityError("owner_session_invalid", status_code=403)
-    try:
-        operator = await authenticate_session(owner_session_id, touch=False)
-    except AuthFailure as exc:
-        raise GitHubActivityError("owner_session_invalid", status_code=403) from exc
-    principal = str(getattr(getattr(operator, "principal", None), "principal_id", "") or "")
-    if str(getattr(operator, "session_id", "") or "") != owner_session_id or principal != owner_principal_id:
+    async with db_engine.get_session() as db:
+        record = await db.get(OperatorSession, owner_session_id)
+        if record is not None:
+            db.expunge(record)
+    if (record is None or record.principal_id != owner_principal_id or record.is_bearer_tombstone is not False
+            or record.replaced_by_id is not None):
         raise GitHubActivityError("owner_session_invalid", status_code=403)
+    if _is_local_root(record) and (not local_no_login_active()
+                                   or str(record.token_hash) != LOCAL_ROOT_TOKEN_MARKER):
+        raise GitHubActivityError("owner_session_invalid", status_code=403)
+    revoked = _aware_or_none(record.revoked_at)
+    if revoked is not None:
+        expiries = [value for value in (_aware_or_none(record.idle_expires_at),
+                                        _aware_or_none(record.absolute_expires_at)) if value is not None]
+        expired_then = bool(expiries) and revoked >= min(expiries)
+        if not expired_then:
+            raise GitHubActivityError("owner_session_invalid", status_code=403)
 
 
 def _scope(row: GitHubActivitySource) -> GitHubActivityScope:
@@ -505,6 +538,9 @@ class _Collection:
                                                        number=values.get("number"), branch=values.get("branch"),
                                                        since=values.get("since"), until=values.get("until"),
                                                        page=values.get("page", 1))
+        except GhValueInvalid:
+            # Refused before any child started: the caller decides whether to skip.
+            raise
         except GhCliError as exc:
             self._note_rate_limit(exc.headers)
             if exc.code in _REPOSITORY_CODES and repository is not None:
@@ -520,13 +556,17 @@ class _Collection:
         return response
 
     def _note_rate_limit(self, headers: dict[str, str]) -> None:
-        remaining, reset = headers.get("x-ratelimit-remaining"), headers.get("x-ratelimit-reset")
-        if remaining is not None and remaining.isdigit():
-            self.rate_limit_remaining = int(remaining)
-            if self.rate_limit_remaining == 0:
+        remaining = _small_int(headers.get("x-ratelimit-remaining"))
+        if remaining is not None:
+            self.rate_limit_remaining = remaining
+            if remaining == 0:
                 self.exhausted = True
-        if reset is not None and reset.isdigit():
-            self.rate_limit_reset_at = datetime.fromtimestamp(int(reset), tz=timezone.utc)
+        reset = _small_int(headers.get("x-ratelimit-reset"))
+        if reset is not None:
+            try:
+                self.rate_limit_reset_at = datetime.fromtimestamp(reset, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                self.rate_limit_reset_at = None
 
     def keep(self, records: list[dict[str, Any]]) -> None:
         for record in records:
@@ -571,7 +611,7 @@ class _Collection:
                 repo = event.get("repo") if isinstance(event.get("repo"), dict) else {}
                 name = repo.get("name")
                 if (actor is None or actor[0] != self.source.identity_id or not (self.start <= created < self.until)
-                        or not isinstance(name, str) or not _REPOSITORY.fullmatch(name)):
+                        or not valid_repository(name)):
                     continue
                 key = name.lower()
                 names[key] = name
@@ -582,7 +622,7 @@ class _Collection:
                     branch = ref.removeprefix("refs/heads/")
                     if branch and branch not in branches.setdefault(key, []):
                         branches[key].append(branch)
-            if len(body) < 50 or (oldest is not None and oldest < self.start):
+            if len(body) < PER_PAGE or (oldest is not None and oldest < self.start):
                 break
             if page == max_pages:
                 self.limit("events_truncated")
@@ -615,7 +655,7 @@ class _Collection:
         for page in range(1, max_pages + 1):
             body = (await self.call(op, repository=repository, discovered=discovered, page=page, **values)).body
             rows.extend(body)
-            if len(body) < 50 or (stop is not None and stop(body)):
+            if len(body) < PER_PAGE or (stop is not None and stop(body)):
                 break
             if page == max_pages:
                 self.limit(f"{op}_truncated", repository)
@@ -648,12 +688,14 @@ class _Collection:
             if len([b for b in pushed if b != repo.default_branch]) > MAX_PUSHED_BRANCHES:
                 self.limit("pushed_branches_truncated", repository)
             for branch in branches:
+                # A branch name Seraph cannot send is skipped and named, never fatal.
+                if not valid_branch(branch):
+                    self.limit("branch_name_skipped", repository)
+                    continue
                 try:
                     commits = await self._pages("commits", repository, discovered=discovered, branch=branch,
                                                 login=self.identity_login, since=self.start, until=self.until)
-                except GhCliError as exc:
-                    if exc.code != "github_activity_value_invalid":
-                        raise
+                except GhValueInvalid:
                     self.limit("branch_name_skipped", repository)
                     continue
                 self._keep_commits(repo, commits, OPS["commits"][0])
@@ -679,6 +721,13 @@ class _Collection:
             self.keep([record])
         if unlinked:
             self.limit("unlinked_commit_emails", repo.full_name)
+
+
+def _small_int(value: str | None) -> int | None:
+    """An ASCII decimal header value of at most 12 digits, else None."""
+    if not value or len(value) > 12 or not value.isascii() or not value.isdigit():
+        return None
+    return int(value)
 
 
 def _invalid_end() -> _RunEnded:
@@ -758,7 +807,7 @@ class GitHubActivityService:
 
     async def check_gh_login(self, *, gh_entry_path: str | None = None) -> dict[str, Any]:
         """One operator-permitted use: gh --version and GET /user. Stores nothing."""
-        binary = self._locate_or_raise(gh_entry_path)
+        binary = await self._locate_or_raise(gh_entry_path)
 
         async def permitted(op: str, repository: str | None) -> None:
             if op != "identity" or repository is not None:
@@ -775,9 +824,9 @@ class GitHubActivityService:
                 "identity_id": identity[0], "identity_login": identity[1], "credential": dict(CREDENTIAL),
                 "grant_sentence": GRANT_SENTENCE}
 
-    def _locate_or_raise(self, gh_entry_path: str | None, install_prefix: str | None = None) -> GhBinary:
+    async def _locate_or_raise(self, gh_entry_path: str | None, install_prefix: str | None = None) -> GhBinary:
         try:
-            return self._reader.locate(gh_entry_path, install_prefix=install_prefix)
+            return await self._reader.alocate(gh_entry_path, install_prefix=install_prefix)
         except GhCliError as exc:
             raise GitHubActivityError(exc.code, status_code=409) from None
 
@@ -786,7 +835,7 @@ class GitHubActivityService:
                             expected_gh_entry_path: str, allow_model_context: bool) -> dict[str, Any]:
         if acknowledged is not True:
             raise GitHubActivityError("gh_ambient_login_acknowledgement_required", status_code=422)
-        binary = self._locate_or_raise(expected_gh_entry_path)
+        binary = await self._locate_or_raise(expected_gh_entry_path)
 
         async def permitted(op: str, repository: str | None) -> None:
             if op != "identity" or repository is not None:
@@ -816,6 +865,11 @@ class GitHubActivityService:
                     raise GitHubActivityError("github_activity_revision_conflict", status_code=409)
                 db.add(GitHubActivitySource(owner_principal_id=owner_principal_id, revision=1, created_at=now,
                                             **values))
+                try:
+                    await db.flush()
+                except IntegrityError:
+                    # A concurrent first enable won the unique owner row.
+                    raise GitHubActivityError("github_activity_revision_conflict", status_code=409) from None
             else:
                 changed = await db.execute(update(GitHubActivitySource).where(
                     GitHubActivitySource.id == row.id,
@@ -851,7 +905,10 @@ class GitHubActivityService:
             return {"status": source.state, "reason_code": source.stopped_reason, "run": None,
                     "message": activity_status_message(source.state, source.stopped_reason,
                                                        login=source.identity_login)}
-        start, end = local_day_window(report_day, tz)
+        try:
+            start, end = local_day_window(report_day, tz)
+        except (OverflowError, ValueError):
+            raise GitHubActivityError("report_date_invalid", status_code=422) from None
         now = get_clock().now(timezone.utc)
         until = min(end, now)
         if until <= start:
@@ -863,72 +920,92 @@ class GitHubActivityService:
                                 window_end_utc=end, collected_until_utc=until, status="running",
                                 identity_id=source.identity_id, identity_login=source.identity_login,
                                 started_at=now)
-        blocked: tuple[str, str] | None = None
-        binary: GhBinary | None = None
-        try:
-            binary = self._reader.locate(source.gh_entry_path, install_prefix=source.gh_install_prefix)
-            run.gh_real_path, run.gh_sha256 = binary.real_path, binary.sha256
-        except GhCliError as exc:
-            blocked = ("blocked", exc.code)
-        if blocked is None:
-            try:
-                await self._session_check(source.owner_session_id, owner_principal_id)
-            except GitHubActivityError as exc:
-                blocked = ("blocked", exc.code)
         async with db_engine.get_session() as db:
             db.add(run)
             await db.flush()
             run_id = run.id
             db.expunge(run)
-        if blocked is not None or binary is None:
-            status, code = blocked or ("blocked", "gh_unavailable")
-            return await self._finish(run_id, owner_principal_id, source, tz, status=status, reason_code=code,
-                                      calls=0, collection=None)
-        collection = _Collection(service=self, source=source, scope=_scope(source), binary=binary, run_id=run_id,
-                                 start=start, until=until, now=now)
-        if previous is not None and previous.gh_sha256 and previous.gh_sha256 != binary.sha256:
-            collection.limit("gh_binary_changed_since_last_run")
-        status, code = "complete", None
+        collection: _Collection | None = None
         detail: dict[str, Any] = {}
         try:
-            await collection.execute()
-        except _RunEnded as ended:
-            status, code = ended.status, ended.reason_code
-            if ended.current_login:
-                detail["current_login"] = ended.current_login
-            if ended.exit_code is not None:
-                detail["exit_code"] = ended.exit_code
-        incomplete = any(item["code"] not in _INFORMATIONAL for item in collection.limitations)
-        if code is None:
-            status = "partial" if incomplete else "complete"
-        elif status != "blocked":
-            if code == "call_budget_exhausted":
-                collection.limit("call_budget_exhausted")
-                status = "partial"
-            else:
-                if code == "github_activity_rate_limited":
-                    collection.limit("rate_limited")
-                # Items already read are kept; the run says what stopped it.
-                status = "partial" if collection.items else "failed"
+            status, code, binary = "complete", None, None
+            try:
+                binary = await self._reader.alocate(source.gh_entry_path, install_prefix=source.gh_install_prefix)
+            except GhCliError as exc:
+                status, code = "blocked", exc.code
+            if binary is not None:
+                try:
+                    await self._session_check(source.owner_session_id, owner_principal_id)
+                except GitHubActivityError as exc:
+                    status, code = "blocked", exc.code
+            if code is None and binary is not None:
+                collection = _Collection(service=self, source=source, scope=_scope(source), binary=binary,
+                                         run_id=run_id, start=start, until=until, now=now)
+                if previous is not None and previous.gh_sha256 and previous.gh_sha256 != binary.sha256:
+                    collection.limit("gh_binary_changed_since_last_run")
+                try:
+                    await collection.execute()
+                except _RunEnded as ended:
+                    status, code = ended.status, ended.reason_code
+                    if ended.current_login:
+                        detail["current_login"] = ended.current_login
+                    if ended.exit_code is not None:
+                        detail["exit_code"] = ended.exit_code
+                incomplete = any(item["code"] not in _INFORMATIONAL for item in collection.limitations)
+                if code is None:
+                    status = "partial" if incomplete else "complete"
+                elif status != "blocked":
+                    if code == "call_budget_exhausted":
+                        collection.limit("call_budget_exhausted")
+                        status = "partial"
+                    else:
+                        if code == "github_activity_rate_limited":
+                            collection.limit("rate_limited")
+                        # Items already read are kept; the run says what stopped it.
+                        status = "partial" if collection.items else "failed"
+            if binary is not None:
+                await self._record_binary(run_id, binary)
+        except Exception as exc:
+            # Never leave a run "running": an unexpected error ends it failed.
+            logger.warning("GitHub activity collection failed (%s)", type(exc).__name__)
+            status, code = "failed", "github_activity_internal_error"
+            if collection is not None:
+                collection.items.clear()
         return await self._finish(run_id, owner_principal_id, source, tz, status=status, reason_code=code,
-                                  calls=collection.calls, collection=collection, detail=detail)
+                                  calls=collection.calls if collection else 0, collection=collection,
+                                  detail=detail)
+
+    async def _record_binary(self, run_id: str, binary: GhBinary) -> None:
+        async with db_engine.get_session() as db:
+            await db.execute(update(GitHubActivityRun).where(GitHubActivityRun.id == run_id).values(
+                gh_real_path=binary.real_path, gh_sha256=binary.sha256))
 
     async def _finish(self, run_id: str, owner_principal_id: str, source: GitHubActivitySource, tz: ZoneInfo, *,
                       status: str, reason_code: str | None, calls: int, collection: _Collection | None,
                       detail: dict[str, Any] | None = None) -> dict[str, Any]:
         now = get_clock().now(timezone.utc)
-        counts: dict[str, int] = {}
-        records = list(collection.items.values()) if collection else []
-        for record in records:
-            counts[record["kind"]] = counts.get(record["kind"], 0) + 1
+        # A blocked run stores nothing: authority changed (or never held) while it ran.
+        records = list(collection.items.values()) if collection and status != "blocked" else []
         repositories = {"read": collection.repositories_read if collection else [],
                         "failed": collection.repositories_failed if collection else [],
                         "skipped": collection.repositories_skipped if collection else [],
                         "detail": detail or {}}
         limitations = collection.limitations if collection else []
+        counts: dict[str, int] = {}
         try:
             async with db_engine.get_session() as db:
+                if records:
+                    # Guard and upsert in one transaction. The no-op UPDATE takes
+                    # the write lock, so a revoke or scope edit either commits
+                    # before it (no match: nothing is stored) or waits for it.
+                    guard = await db.execute(update(GitHubActivitySource).where(
+                        GitHubActivitySource.id == source.id, GitHubActivitySource.state == "active",
+                        GitHubActivitySource.revision == int(source.revision)).values(id=GitHubActivitySource.id))
+                    if guard.rowcount != 1:
+                        records = []
+                        status, reason_code = "blocked", "source_changed"
                 for record in records:
+                    counts[record["kind"]] = counts.get(record["kind"], 0) + 1
                     values = {key: value for key, value in record.items() if key != "detail"}
                     values.update(id=_new_id(), owner_principal_id=owner_principal_id, source_id=source.id,
                                   detail_json=json.dumps(record["detail"], sort_keys=True),
@@ -938,6 +1015,7 @@ class GitHubActivityService:
                         index_elements=["owner_principal_id", "dedupe_key"],
                         set_={"title": statement.excluded.title, "detail_json": statement.excluded.detail_json,
                               "content_digest": statement.excluded.content_digest,
+                              "html_url": statement.excluded.html_url,
                               "last_run_id": statement.excluded.last_run_id,
                               "last_seen_at": statement.excluded.last_seen_at,
                               "repository": statement.excluded.repository}))
@@ -952,6 +1030,13 @@ class GitHubActivityService:
         except Exception as exc:
             logger.warning("GitHub activity storage failed (%s)", type(exc).__name__)
             status, reason_code = "failed", "github_activity_storage_error"
+            try:
+                # Record the failure on its own so the run is not left "running".
+                async with db_engine.get_session() as db:
+                    await db.execute(update(GitHubActivityRun).where(GitHubActivityRun.id == run_id).values(
+                        status=status, reason_code=reason_code, call_count=calls, finished_at=now))
+            except Exception as again:
+                logger.warning("GitHub activity run finalisation failed (%s)", type(again).__name__)
             await self._audit(owner_principal_id, status, reason_code, calls, {})
             return {"status": status, "reason_code": reason_code, "run": None,
                     "message": activity_status_message(status, reason_code)}
@@ -980,7 +1065,10 @@ class GitHubActivityService:
             logger.warning("GitHub activity audit failed (%s)", type(exc).__name__)
 
     async def activity_for_day(self, *, owner_principal_id: str, report_day: date, tz: ZoneInfo) -> dict[str, Any]:
-        start, end = local_day_window(report_day, tz)
+        try:
+            start, end = local_day_window(report_day, tz)
+        except (OverflowError, ValueError):
+            raise GitHubActivityError("report_date_invalid", status_code=422) from None
         source = await self._source_row(owner_principal_id)
         async with db_engine.get_session() as db:
             rows = (await db.execute(select(GitHubActivityItem).where(
@@ -1132,4 +1220,8 @@ async def get_github_activity_items(request: Request,
                                     report_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")):
     principal, _ = _owner(request)
     tz = user_timezone()
-    return await _service().activity_for_day(owner_principal_id=principal, report_day=_day(report_date, tz), tz=tz)
+    try:
+        return await _service().activity_for_day(owner_principal_id=principal, report_day=_day(report_date, tz),
+                                                 tz=tz)
+    except GitHubActivityError as exc:
+        raise _http(exc) from exc

@@ -97,17 +97,45 @@ def test_endpoints_are_built_from_the_closed_table():
     ("repository", "seraph quest/seraph"), ("repository", "../etc"), ("repository", "a/b?x=1"),
     ("repository", "a/{repo}"), ("repository", "-a/b"), ("repository", "a/b&c"),
     ("login", "oc to"), ("login", "-octo"), ("login", "oc{to}"), ("login", "a" * 40),
-    ("branch", "a..b"), ("branch", "a b"), ("branch", "{branch}"), ("branch", "-x"), ("branch", "a?b"),
-    ("branch", "a&b"), ("branch", "$(id)"), ("branch", "a;b"),
+    ("repository", "a/.."), ("repository", "./b"), ("repository", "a/b/c"), ("repository", "a..b/c"),
+    ("login", "_octo"), ("login", "oc.to"),
+    ("branch", "a..b"), ("branch", "a b"), ("branch", "-x"), ("branch", "a?b"), ("branch", "@{u}"),
+    ("branch", "x.lock"), ("branch", "a~b"), ("branch", "a:b"), ("branch", "a\\b"), ("branch", "a\nb"),
+    ("branch", "/a"), ("branch", ""),
     ("number", 0), ("number", -1), ("number", "7"), ("number", True),
 ])
 def test_endpoint_values_are_validated_and_encoded(field, value):
     op = {"repository": "pull_commits", "login": "commits", "branch": "commits", "number": "pull_commits"}[field]
     values = op_values(op)
     values[field] = value
-    with pytest.raises(GhCliError) as raised:
+    with pytest.raises(github_cli.GhValueInvalid) as raised:
         build_endpoint(op, **values)
     assert raised.value.code == "github_activity_value_invalid"
+
+
+@pytest.mark.parametrize("branch,encoded", [
+    ("fix/@scope+thing", "fix%2F%40scope%2Bthing"), ("główna", "g%C5%82%C3%B3wna"), ("$(id)", "%24%28id%29"),
+    ("a;b", "a%3Bb"), ("a&b", "a%26b"), ("{branch}", "%7Bbranch%7D"),
+])
+def test_unusual_branch_names_are_percent_encoded_into_one_query_value(branch, encoded):
+    endpoint = build_endpoint("commits", **{**op_values("commits"), "branch": branch})
+    assert f"?sha={encoded}&author=" in endpoint
+    assert "{" not in endpoint and "}" not in endpoint and " " not in endpoint
+
+
+def test_emu_logins_with_underscore_are_accepted():
+    assert build_endpoint("events", login="octo_corp", page=1) == "/users/octo_corp/events?per_page=50&page=1"
+
+
+def test_one_repository_rule_is_shared():
+    from src.integrations.github_activity import GitHubActivityScope
+    for name in ("seraph-quest/seraph", "org/.github", "a_b/c.d"):
+        assert github_cli.valid_repository(name)
+        GitHubActivityScope(repositories=[name])
+    for name in ("a/..", "a..b/c", "-a/b", "a/-b", "a b/c", "a/b/c", ".a/b"):
+        assert not github_cli.valid_repository(name)
+        with pytest.raises(ValueError):
+            GitHubActivityScope(repositories=[name])
 
 
 @pytest.mark.parametrize("page", [0, 7, "1"])
@@ -334,8 +362,12 @@ def test_entry_symlink_retargeted_inside_prefix_is_accepted_and_outside_is_refus
 
 @pytest.mark.asyncio
 async def test_resolved_path_is_what_gets_executed(tmp_path):
-    target = install_gh_file(tmp_path)
-    link = tmp_path / "gh-prefix" / "bin" / "gh-link"
+    target = tmp_path / "gh-prefix" / "libexec" / "gh-2.89.0"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    link = tmp_path / "gh-prefix" / "bin" / "gh"
+    link.parent.mkdir(parents=True)
     link.symlink_to(target)
     runner = FakeGhRunner(FakeGitHubWorld())
     reader = make_reader(tmp_path, runner, gh=link)
@@ -387,7 +419,7 @@ async def test_child_gets_no_stdin_and_no_shell(tmp_path):
     response = await reader.read(reader.locate(), op="commits", authority_check=allow, **op_values("commits"))
     assert response.body == []
     (call,) = read_calls(gh)
-    assert call["stdin_at_eof"] is True
+    assert call["stdin_at_eof"] is True and call["stdin_is_dev_null"] is True
     # The endpoint arrives as one argv element, with '&' untouched by any shell.
     assert call["argv"][-1] == endpoint and "&" in endpoint
 
@@ -399,3 +431,89 @@ async def test_child_is_reaped_and_run_directory_removed(tmp_path):
     assert await reader.version(reader.locate()) == "2.89.0"
     await reader.read(reader.locate(), op="identity", authority_check=allow)
     assert list((tmp_path / "gh-runs").iterdir()) == []
+
+
+@pytest.mark.parametrize("which", ["file", "directory"])
+def test_foreign_owned_binary_or_directory_is_refused(tmp_path, monkeypatch, which):
+    gh = install_gh_file(tmp_path)
+    reader = github_cli.GhCliReader(runner=FakeGhRunner(FakeGitHubWorld()), candidates=(str(gh),))
+    assert reader.locate().real_path == str(gh.resolve())
+    target = {"file": gh.resolve(), "directory": gh.resolve().parent}[which]
+    real_stat = github_cli._stat
+
+    def foreign(path):
+        info = real_stat(path)
+        if Path(path) == target:
+            values = list(info[:10])
+            values[4] = os.getuid() + 4242  # st_uid: neither this user nor root
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(github_cli, "_stat", foreign)
+    with pytest.raises(GhCliError) as raised:
+        reader.locate()
+    assert raised.value.code == "gh_path_untrusted"
+
+
+def test_entry_path_must_be_named_gh_and_live_outside_seraph_roots(tmp_path, monkeypatch):
+    other = tmp_path / "gh-prefix" / "bin" / "hub"
+    other.parent.mkdir(parents=True)
+    other.write_text("#!/bin/sh\n", encoding="utf-8")
+    other.chmod(0o755)
+    reader = github_cli.GhCliReader(runner=FakeGhRunner(FakeGitHubWorld()), candidates=())
+    with pytest.raises(GhCliError) as raised:
+        reader.locate(str(other))
+    assert raised.value.code == "gh_path_untrusted"
+    from config.settings import settings
+    workspace = tmp_path / "workspace"
+    gh = install_gh_file(workspace)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    with pytest.raises(GhCliError) as raised:
+        reader.locate(str(gh))
+    assert raised.value.code == "gh_path_untrusted"
+
+
+@pytest.mark.asyncio
+async def test_stdin_is_dev_null_even_when_the_backend_has_a_live_stdin(tmp_path):
+    """fd 0 is a pipe for the duration: an inherited stdin would not be /dev/null."""
+    gh = fake_gh_executable(tmp_path, {"/user": http_output(200, {"id": 101, "login": "octo"})})
+    reader = make_reader(tmp_path, github_cli.default_runner, gh=gh)
+    saved = os.dup(0)
+    read_end, write_end = os.pipe()
+    try:
+        os.dup2(read_end, 0)
+        os.close(write_end)
+        write_end = -1
+        await reader.read(reader.locate(), op="identity", authority_check=allow)
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        os.close(read_end)
+        if write_end != -1:
+            os.close(write_end)
+    (call,) = read_calls(gh)
+    assert call["stdin_is_dev_null"] is True
+
+
+class _LaunchFailure(OSError):
+    def __init__(self, cleanup_status):
+        super().__init__(24, "injected launch or capture failure")
+        self.cleanup_status = cleanup_status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_status,code,kept", [
+    ("not_requested", "gh_unavailable", False),
+    ("stopped", "gh_request_failed", False),
+    ("unknown", "gh_cleanup_unproven", True),
+    ("failed", "gh_cleanup_unproven", True),
+])
+async def test_launch_and_capture_failures_report_their_cleanup(tmp_path, cleanup_status, code, kept):
+    runner = FakeGhRunner(FakeGitHubWorld())
+    runner.inject("/user", _LaunchFailure(cleanup_status))
+    reader = make_reader(tmp_path, runner)
+    with pytest.raises(GhCliError) as raised:
+        await reader.read(reader.locate(), op="identity", authority_check=allow)
+    assert raised.value.code == code
+    remaining = list((tmp_path / "gh-runs").iterdir())
+    assert (len(remaining) == 1) is kept

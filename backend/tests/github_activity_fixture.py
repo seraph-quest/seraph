@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from src.extensions.github_followthrough import GITHUB_API_VERSION
 from src.integrations.github_cli import GhAccount, GhCliReader
-from src.tools.process_tools import OwnedRunResult
+from src.tools.process_tools import OwnedRunCleanup, OwnedRunResult
 
 ALLOWED_ENV_KEYS = {"HOME", "USER", "LOGNAME", "PATH", "LANG", "TMPDIR", "GH_PROMPT_DISABLED",
                     "GH_NO_UPDATE_NOTIFIER", "GH_NO_EXTENSION_UPDATE_NOTIFIER", "NO_COLOR", "CLICOLOR",
@@ -177,7 +177,8 @@ class FakeGhRunner:
         return [call["endpoint"] for call in self.calls if call["endpoint"] is not None]
 
     def __call__(self, argv: list[str], *, cwd: Path, env: dict[str, str], timeout_seconds: float,
-                 cancel_event: threading.Event, stdout_limit: int, stderr_limit: int) -> OwnedRunResult:
+                 cancel_event: threading.Event, stdout_limit: int, stderr_limit: int,
+                 cleanup: OwnedRunCleanup) -> OwnedRunResult:
         assert Path(argv[0]).is_absolute()
         assert set(env) <= ALLOWED_ENV_KEYS, sorted(set(env) - ALLOWED_ENV_KEYS)
         for key, value in FIXED_ENV.items():
@@ -191,7 +192,8 @@ class FakeGhRunner:
             assert argv[1:-1] == API_PREFIX, argv
             endpoint = argv[-1]
             assert endpoint.startswith("/") and "{" not in endpoint and "}" not in endpoint
-        call = {"argv": list(argv), "env": dict(env), "cwd": cwd, "endpoint": endpoint, "cancel_event": cancel_event}
+        call = {"argv": list(argv), "env": dict(env), "cwd": cwd, "endpoint": endpoint, "cancel_event": cancel_event,
+                "cleanup": cleanup}
         with self.lock:
             self.calls.append(call)
         if self.on_call is not None:
@@ -201,7 +203,13 @@ class FakeGhRunner:
         path = urlsplit(endpoint).path
         queued = self.outcomes.get(path)
         if queued:
-            return _result(queued.pop(0))
+            outcome = queued.pop(0)
+            if isinstance(outcome, BaseException):
+                # A launch or capture-setup failure: the runner records its cleanup, then raises.
+                cleanup.status = getattr(outcome, "cleanup_status", "not_requested")
+                raise outcome
+            cleanup.status = outcome.cleanup_status
+            return _result(outcome)
         status, body, headers = self.world.respond(endpoint)
         return _result(Outcome(exit_code=0 if status == 200 else 1, stdout=http_output(status, body, headers)))
 
@@ -243,9 +251,12 @@ from pathlib import Path
 here = Path(__file__).resolve().parent
 answers = json.loads((here / "world.json").read_text())
 stdin_at_eof = sys.stdin.read() == "" if sys.stdin is not None else True
+fd0, null = os.fstat(0), os.stat("/dev/null")
+stdin_is_dev_null = (fd0.st_dev, fd0.st_ino) == (null.st_dev, null.st_ino)
 with open(here / "calls.jsonl", "a") as log:
     log.write(json.dumps({{"argv": sys.argv, "env": dict(os.environ), "cwd": os.getcwd(),
-        "cwd_entries": os.listdir("."), "stdin_at_eof": stdin_at_eof}}) + "\\n")
+        "cwd_entries": os.listdir("."), "stdin_at_eof": stdin_at_eof,
+        "stdin_is_dev_null": stdin_is_dev_null}}) + "\\n")
 if sys.argv[1:] == ["--version"]:
     print("gh version 2.89.0 (2026-01-01)")
     sys.exit(0)

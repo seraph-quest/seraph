@@ -403,6 +403,8 @@ async def test_toggle_off_stops_all_gh_starts(db, clock, service, runner):
 @pytest.mark.asyncio
 async def test_toggle_off_during_a_call_discards_that_result(db, clock, service, world, runner):
     world.commit(REPO, SHA[0], at(1))
+    # Read (and kept in memory) before the parked call: it must not be stored either.
+    world.issue(REPO, 10, created=at(2), pull=True)
     status = await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
     gate = Gate("commits call")
 
@@ -417,7 +419,9 @@ async def test_toggle_off_during_a_call_discards_that_result(db, clock, service,
     gate.release()
     result = await task
     assert result["status"] == "blocked" and result["reason_code"] == "source_revoked"
+    assert any(endpoint.startswith(f"/repos/{REPO}/issues") for endpoint in runner.endpoints)
     assert await items() == []
+    assert result["run"]["counts"] == {}
     assert not any("/commits?" in endpoint for endpoint in runner.endpoints[runner.endpoints.index(
         next(e for e in runner.endpoints if "/commits?" in e)) + 1:])
 
@@ -710,3 +714,189 @@ async def test_audit_event_is_written_per_run(db, clock, service, monkeypatch):
     assert event["integration_type"] == "github_activity" and event["name"] == "gh_cli"
     assert event["outcome"] == "complete" and event["details"]["credential"] == "local_gh_cli_login"
     assert "token" not in json.dumps(event).lower()
+
+
+async def park_at(runner, endpoint_prefix):
+    gate = Gate(endpoint_prefix)
+
+    def park(call):
+        if call["endpoint"] and call["endpoint"].split("?")[0] == endpoint_prefix:
+            gate.arrive_blocking()
+
+    runner.on_call = park
+    return gate
+
+
+def calls_after(runner, endpoint_prefix):
+    endpoints = [endpoint.split("?")[0] for endpoint in runner.endpoints]
+    return endpoints[endpoints.index(endpoint_prefix) + 1:]
+
+
+@pytest.mark.asyncio
+async def test_revoke_after_the_last_call_drops_items_at_the_storage_guard(db, clock, service, world, monkeypatch):
+    world.commit(REPO, SHA[0], at(1))
+    status = await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
+    real_record = service._record_binary
+
+    async def revoke_then_record(run_id, binary):
+        # Every gh call has finished and passed its checks; the source changes now.
+        await service.revoke_source(owner_principal_id=OWNER, expected_revision=status["source"]["revision"])
+        await real_record(run_id, binary)
+
+    monkeypatch.setattr(service, "_record_binary", revoke_then_record)
+    result = await collect(service)
+    assert result["status"] == "blocked" and result["reason_code"] == "source_changed"
+    assert await items() == []
+
+
+@pytest.mark.asyncio
+async def test_root_death_between_two_calls_stops_the_run_before_the_next_start(db, clock, service, world, runner,
+                                                                                sessions):
+    world.issue(REPO, 10, created=at(2), pull=True)
+    await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
+
+    def kill_root(call):
+        if call["endpoint"] == f"/repos/{REPO}":
+            sessions.dead.add(ROOT)
+
+    runner.on_call = kill_root
+    runner.calls.clear()
+    result = await collect(service)
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_session_invalid"
+    assert calls_after(runner, f"/repos/{REPO}") == []
+    assert await items() == []
+
+
+@pytest.mark.asyncio
+async def test_pre_run_session_check_alone_blocks_before_any_start(db, clock, service, runner, sessions, monkeypatch):
+    await enable(service)
+
+    async def no_per_call_checks(self, op, repository, *, discovered=True):
+        return None
+
+    monkeypatch.setattr(github_activity._Collection, "authority", no_per_call_checks)
+    sessions.dead.add(ROOT)
+    runner.calls.clear()
+    result = await collect(service)
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_session_invalid"
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_scope_edit_between_two_calls_stops_the_run(db, clock, service, world, runner):
+    world.commit(REPO, SHA[0], at(1))
+    first = await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
+    gate = await park_at(runner, f"/repos/{REPO}")
+    task = asyncio.create_task(collect(service))
+    await gate.wait_reached(task=task)
+    edited = await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO],
+                                                             owners=["seraph-quest"]),
+                          expected_revision=first["source"]["revision"])
+    assert edited["source"]["state"] == "active"
+    gate.release()
+    result = await task
+    assert result["status"] == "blocked" and result["reason_code"] == "source_changed"
+    # The edit itself checked the login (/user); the run started nothing more.
+    assert [endpoint for endpoint in calls_after(runner, f"/repos/{REPO}") if endpoint != "/user"] == []
+    assert await items() == []
+
+
+@pytest.mark.asyncio
+async def test_unusual_branch_names_are_read_and_unsendable_ones_skipped(db, clock, service, world, runner):
+    world.repo(REPO, 1, default_branch="główna")
+    world.event(REPO, at(1), ref="refs/heads/fix/@scope+thing")
+    world.event(REPO, at(1.5), ref="refs/heads/bad..name")
+    world.commit(REPO, SHA[0], at(1), branch="główna")
+    world.commit(REPO, SHA[1], at(2), branch="fix/@scope+thing")
+    await enable(service)
+    result = await collect(service)
+    assert {row.external_id for row in await items()} == {SHA[0], SHA[1]}
+    assert result["status"] == "partial" and result["reason_code"] is None
+    assert {"code": "branch_name_skipped", "repository": REPO} in result["run"]["limitations"]
+    assert any("sha=g%C5%82%C3%B3wna" in endpoint for endpoint in runner.endpoints)
+    assert any("sha=fix%2F%40scope%2Bthing" in endpoint for endpoint in runner.endpoints)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset", ["\uff19\uff19", "9" * 40, "-1", "1e9", ""])
+async def test_odd_rate_limit_headers_do_not_break_a_run(db, clock, service, world, reset):
+    await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
+    world.override(f"/repos/{REPO}", 200, world.repos[REPO.lower()],
+                   {"X-Ratelimit-Reset": reset, "X-Ratelimit-Remaining": "\uff10"})
+    result = await collect(service)
+    assert result["status"] == "complete"
+    # The odd value is ignored; later well-formed answers still record theirs.
+    assert result["run"]["rate_limit_reset_at"] == "2026-09-21T14:13:20+00:00"
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_ends_the_run_failed_never_running(db, clock, service, monkeypatch):
+    await enable(service)
+    recorded = []
+
+    async def record(**kwargs):
+        recorded.append(kwargs)
+        return True
+
+    async def explode(self):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr("src.audit.runtime.log_integration_event", record)
+    monkeypatch.setattr(github_activity._Collection, "execute", explode)
+    result = await collect(service)
+    assert result["status"] == "failed" and result["reason_code"] == "github_activity_internal_error"
+    async with db_engine.get_session() as session:
+        (run,) = (await session.execute(select(GitHubActivityRun))).scalars().all()
+    assert run.status == "failed" and run.finished_at is not None
+    assert [event["outcome"] for event in recorded] == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_enables_leave_one_source_and_one_conflict(db, clock, service):
+    results = await asyncio.gather(enable(service), enable(service), return_exceptions=True)
+    errors = [value for value in results if isinstance(value, BaseException)]
+    assert len(errors) == 1 and isinstance(errors[0], GitHubActivityError)
+    assert errors[0].status_code == 409
+    async with db_engine.get_session() as session:
+        assert len((await session.execute(select(GitHubActivitySource))).scalars().all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_report_date_is_refused(db, clock, service):
+    await enable(service)
+    for day in (date.max, date.min):
+        with pytest.raises(GitHubActivityError) as raised:
+            await collect(service, day)
+        assert raised.value.code in {"report_date_invalid", "report_day_in_future"}
+        assert raised.value.status_code == 422
+    with pytest.raises(GitHubActivityError) as raised:
+        await service.activity_for_day(owner_principal_id=OWNER, report_day=date.max, tz=WARSAW)
+    assert raised.value.code == "report_date_invalid"
+
+
+@pytest.mark.asyncio
+async def test_renamed_repository_updates_stored_urls(db, clock, service, world):
+    world.commit(REPO, SHA[0], at(1))
+    await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
+    await collect(service)
+    world.repos[REPO.lower()]["full_name"] = "seraph-quest/renamed"
+    clock.advance(60)
+    await collect(service)
+    (row,) = await items()
+    assert row.repository == "seraph-quest/renamed"
+    assert row.html_url == f"https://github.com/seraph-quest/renamed/commit/{SHA[0]}"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_value_is_not_a_run_ending_failure(db, clock, service, runner):
+    from src.integrations.github_cli import GhValueInvalid
+    await enable(service, scope=GitHubActivityScope(discover_from_activity=False, repositories=[REPO]))
+    source = await source_row()
+    collection = github_activity._Collection(service=service, source=source, scope=github_activity._scope(source),
+                                             binary=service._reader.locate(), run_id="run", start=START, until=NOW,
+                                             now=NOW)
+    runner.calls.clear()
+    with pytest.raises(GhValueInvalid):
+        await collection.call("commits", repository=REPO, discovered=False, branch="bad..name", login="octo",
+                              since=START, until=NOW)
+    assert runner.calls == [] and collection.calls == 0

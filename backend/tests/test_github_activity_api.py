@@ -161,7 +161,8 @@ async def test_a_new_login_does_not_inherit_the_source_and_the_old_root_blocks(c
     await login(client)
     runner.calls.clear()
     result = (await client.post("/api/capabilities/github/activity/collect", headers=HEADERS, json={})).json()
-    assert result["status"] in {"not_connected", "blocked"} and runner.calls == []
+    # A new password login is a new principal: it has no source of its own.
+    assert result["status"] == "not_connected" and runner.calls == []
     # The enabling root is no longer live, so the old principal's source blocks before gh starts.
     old = await github_activity._service().collect_day(
         owner_principal_id=first["principal_id"], report_day=NOW.date(),
@@ -200,3 +201,82 @@ async def test_routes_require_an_authenticated_operator(client, async_db, clock,
     response = await client.get("/api/capabilities/github/activity")
     assert response.status_code in {401, 403}
     assert runner.calls == []
+
+
+async def _expire_session_row(session_id):
+    """Put both stored expiries in the past, then let the auth owner mark it expired."""
+    from datetime import timedelta
+    from sqlalchemy import update
+    from src.auth.service import AuthFailure, authenticate_session
+    from src.db import engine as db_engine
+    from src.db.models import OperatorSession
+    past = datetime.now(timezone.utc) - timedelta(days=3)
+    async with db_engine.get_session() as db:
+        await db.execute(update(OperatorSession).where(OperatorSession.id == session_id).values(
+            idle_expires_at=past, absolute_expires_at=past + timedelta(hours=1)))
+    with pytest.raises(AuthFailure) as raised:
+        await authenticate_session(session_id, touch=False)
+    assert raised.value.code == "session_expired"
+    async with db_engine.get_session() as db:
+        row = await db.get(OperatorSession, session_id)
+        assert row.revoked_at is not None
+
+
+@pytest.mark.asyncio
+async def test_an_idle_or_absolute_expired_login_does_not_stop_the_source(client, async_db, clock, gh_service, runner):
+    """No time-based gate: only real changes stop the source (operator's standing rule)."""
+    owner = await login(client)
+    await check_and_enable(client)
+    await _expire_session_row(owner["session_id"])
+    runner.calls.clear()
+    result = await github_activity._service().collect_day(
+        owner_principal_id=owner["principal_id"], report_day=NOW.date(), tz=github_activity.user_timezone(),
+        trigger="scheduled")
+    assert result["status"] == "complete", result
+    assert runner.endpoints[0] == "/user"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_logout_stops_the_source(client, async_db, clock, gh_service, runner):
+    owner = await login(client)
+    await check_and_enable(client)
+    assert (await client.post("/api/auth/logout", headers=HEADERS)).status_code in {200, 204}
+    runner.calls.clear()
+    result = await github_activity._service().collect_day(
+        owner_principal_id=owner["principal_id"], report_day=NOW.date(), tz=github_activity.user_timezone(),
+        trigger="scheduled")
+    assert result["status"] == "blocked" and result["reason_code"] == "owner_session_invalid"
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_live_owner_session_is_keyed_to_real_changes(client, async_db, clock):
+    from datetime import timedelta
+    from sqlalchemy import update
+    from src.db import engine as db_engine
+    from src.db.models import OperatorSession
+    from src.integrations.github_activity import GitHubActivityError, live_owner_session
+    owner = await login(client)
+    await live_owner_session(owner["session_id"], owner["principal_id"])
+    for bad_principal in ("operator:root:someone-else", ""):
+        with pytest.raises(GitHubActivityError):
+            await live_owner_session(owner["session_id"], bad_principal)
+    with pytest.raises(GitHubActivityError):
+        await live_owner_session("no-such-session", owner["principal_id"])
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    async with db_engine.get_session() as db:
+        await db.execute(update(OperatorSession).where(OperatorSession.id == owner["session_id"]).values(
+            is_bearer_tombstone=True, idle_expires_at=future, absolute_expires_at=future))
+    with pytest.raises(GitHubActivityError):
+        await live_owner_session(owner["session_id"], owner["principal_id"])
+
+
+@pytest.mark.asyncio
+async def test_items_route_refuses_out_of_range_dates(client, async_db, clock, gh_service, runner):
+    await login(client)
+    await check_and_enable(client)
+    assert (await client.get("/api/capabilities/github/activity/items?report_date=9999-12-31")).status_code == 422
+    assert (await client.get("/api/capabilities/github/activity/items?report_date=2026-02-30")).status_code == 422
+    collect = await client.post("/api/capabilities/github/activity/collect", headers=HEADERS,
+                                json={"report_date": "9999-12-31"})
+    assert collect.status_code == 422 and collect.json()["detail"]["code"] == "report_date_invalid"

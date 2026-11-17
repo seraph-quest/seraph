@@ -1104,7 +1104,10 @@ class GitHubActivitySource(SQLModel, table=True):
     There is no token column and no vault reference: ``gh`` keeps its own
     login. The row records the operator's acknowledgement, the pinned account
     and the pinned ``gh`` entry path. ``revision`` changes on every state or
-    scope change; nothing here expires by time.
+    scope change. Nothing here expires by time: the source stops only on real
+    changes (toggle-off or revoke, a different gh account, an explicit logout
+    or revocation of ``owner_session_id``), never on that login's idle or
+    absolute expiry.
     """
 
     __tablename__ = "github_activity_sources"

@@ -8,6 +8,10 @@ then reaches the test database through the real ``get_session``: the state
 provider gate and post-commit work-board publication included. There is no
 list of import sites to keep in step with ``src``.
 
+A test that needs a failing or hand-written session installs it with
+``install_session_factory`` or ``install_fake_session`` (#1241) rather than
+patching ``get_session``, so the real gate and ``session_scope`` still run.
+
 ``override_session_factory`` keeps its meaning: a task-scoped, named bypass of
 the default database. A test that runs code against a second database enters
 it around that code; it is not the routing for the default database because
@@ -15,7 +19,9 @@ it bypasses the state gate and does not reach other threads.
 
 A sentinel on the canonical engine (the one ``src.db.engine`` builds at import
 for the session workspace) refuses every connection. A test that reaches it
-fails, even when the code under test swallows the refusal.
+fails, even when the code under test swallows the refusal; a connection made
+after a test's teardown fails the next test's setup (or the run, after the
+last test) and names the test that finished before it.
 
 Schemas are created once per process in a template file and copied per test,
 so a test pays for a file copy instead of ``create_all``. The copy is deleted
@@ -92,6 +98,32 @@ def take_canonical_engine_violations() -> list[str]:
     taken = list(_violations)
     _violations.clear()
     return taken
+
+
+# The last test whose teardown finished, so a connection made after it (by
+# work it left running) is reported against it rather than dropped (#1241).
+_finished_test: list[str | None] = [None]
+
+
+def note_test_finished(nodeid: str) -> None:
+    _finished_test[0] = nodeid
+
+
+def take_late_canonical_engine_violations() -> str | None:
+    """Describe the refused connections made since the last test finished.
+
+    The conftest calls this before each test's setup and at session end, so a
+    canonical-engine connection made after a test's teardown fails the run
+    instead of being cleared silently. Returns ``None`` when there were none.
+    """
+    violations = take_canonical_engine_violations()
+    if not violations:
+        return None
+    after = _finished_test[0]
+    when = f"after {after} finished its teardown" if after else "before the first test"
+    return (f"{len(violations)} connection(s) to the canonical database engine {when}; work a test "
+            "left running reached it. Request the `db` fixture and stop or drain that work. "
+            "First attempt:\n" + violations[0])
 
 
 @dataclass
@@ -174,3 +206,57 @@ def install_database(monkeypatch, database_engine: AsyncEngine) -> Callable[[], 
     # it, so a gate a test leaves closed cannot fail later tests.
     monkeypatch.setattr(db_engine, "_STATE_GATE", [None, None])
     return factory
+
+
+def install_session_factory(monkeypatch, factory: Callable[[], AsyncSession]) -> None:
+    """Make every default ``get_session`` open its session from ``factory``.
+
+    For a test that injects a fake or failing session (#1241). The code under
+    test still calls the real ``get_session``, so the state gate and
+    ``session_scope`` (commit on success, rollback on error, post-commit
+    publication) run as in production; only the session it opens is the
+    test's. ``factory()`` must return an async context manager whose session
+    offers ``commit``, ``rollback`` and an ``info`` dict. ``monkeypatch``
+    restores the previous factory at teardown. Do not patch ``get_session``.
+    """
+    monkeypatch.setattr(db_engine, "async_session_factory", factory)
+    monkeypatch.setattr(db_engine, "_STATE_GATE", [None, None])
+
+
+class _FakeSessionContext:
+    """Open a test's fake session the way a session factory opens a real one."""
+
+    def __init__(self, session) -> None:
+        self.session = session
+
+    async def __aenter__(self):
+        session = self.session
+        # session_scope needs these; a fake that does not model them gets inert ones.
+        if not hasattr(session, "info"):
+            session.info = {}
+        for name in ("commit", "rollback"):
+            if not hasattr(session, name):
+                setattr(session, name, _inert)
+        return session
+
+    async def __aexit__(self, *_exc) -> bool:
+        return False
+
+
+async def _inert() -> None:
+    return None
+
+
+def install_fake_session(monkeypatch, make_session: Callable[[], object]) -> None:
+    """Make every default ``get_session`` yield ``make_session()`` (#1241).
+
+    For a test that drives code against a hand-written fake session (scripted
+    results, injected lock errors). The real ``get_session`` and
+    ``session_scope`` still run around it: the fake's ``commit`` runs when the
+    unit of work succeeds and its ``rollback`` when it raises. A fake without
+    ``commit``, ``rollback`` or ``info`` gets inert ones. A ``MagicMock`` has
+    every attribute, so give it an awaitable ``commit``/``rollback`` and a real
+    ``info`` dict; an ``object()`` cannot take attributes, so use a class or
+    ``SimpleNamespace``.
+    """
+    install_session_factory(monkeypatch, lambda: _FakeSessionContext(make_session()))

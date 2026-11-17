@@ -15,6 +15,7 @@ from tests.support.db import (
     CanonicalEngineReached,
     create_test_database,
     install_database,
+    install_session_factory,
     remove_test_database,
     take_canonical_engine_violations,
 )
@@ -142,6 +143,54 @@ async def test_sentinel_refuses_and_records_a_canonical_connection():
     violations = take_canonical_engine_violations()  # taken, so this test does not fail
     assert len(violations) == 1
     assert "test_db_seam.py" in violations[0]
+
+
+async def test_a_connection_after_teardown_is_reported_against_the_finished_test(monkeypatch):
+    from tests.support import db as support_db
+
+    monkeypatch.setattr(support_db, "_finished_test", ["tests/test_probe.py::test_finished"])
+    with pytest.raises(CanonicalEngineReached):
+        async with CANONICAL_ENGINE.connect():
+            pass
+    report = support_db.take_late_canonical_engine_violations()
+    assert report is not None
+    assert report.startswith("1 connection(s) to the canonical database engine after "
+                             "tests/test_probe.py::test_finished finished its teardown")
+    assert "test_db_seam.py" in report
+    # Taken once: the next check has nothing to report.
+    assert support_db.take_late_canonical_engine_violations() is None
+    assert take_canonical_engine_violations() == []
+
+
+async def test_an_injected_session_factory_still_runs_the_production_scope(db, monkeypatch):
+    opened = []
+
+    def failing_commit_factory():
+        session = db.factory()
+        opened.append(session)
+
+        async def refuse_commit():
+            raise RuntimeError("injected commit failure")
+
+        session.commit = refuse_commit
+        return session
+
+    install_session_factory(monkeypatch, failing_commit_factory)
+    with pytest.raises(RuntimeError, match="injected commit failure"):
+        async with db_engine.get_session() as session:
+            session.add(AuditEvent(event_type="probe", summary="never committed"))
+    assert len(opened) == 1
+    async with db() as session:
+        assert (await session.execute(select(AuditEvent))).scalars().all() == []
+    # The state gate still applies to the injected factory.
+    db_engine.set_state_gate("failed", "seam_gate_probe")
+    try:
+        with pytest.raises(db_engine.StateProviderUnavailable):
+            async with db_engine.get_session():
+                pass
+    finally:
+        db_engine.set_state_gate(None)
+    assert len(opened) == 1
 
 
 async def test_session_scope_publishes_work_board_events_only_after_commit(db, monkeypatch):

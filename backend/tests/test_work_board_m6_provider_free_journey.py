@@ -13,18 +13,15 @@ import json
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session as SyncSession
 from sqlmodel import select
-from sqlmodel import SQLModel
 
 from config.settings import settings
 from src.db import engine as db_engine
@@ -43,7 +40,6 @@ from src.db.models import (
 from src.goals.contracts import GoalAdmissionBudget
 from src.goals.repository import serialize_admission_budget
 from src.approval import repository as approval_repository_module
-from src.audit import repository as audit_repository_module
 from src.vault import repository as vault_repository_module
 from src.guardian.source_watch import SourceWatchService
 from src.work_board.dispatcher import WorkBoardDispatcher
@@ -56,9 +52,7 @@ from src.work_board.contracts import (
 from src.work_board.repository import WorkBoardRepository
 from src.security.trust_contract import AuthorityGrant, PrincipalType, TrustPrincipal
 from src.api import work_board as work_board_api
-from src.workflows import durable_state
 from src.workflows.job_runtime import durable_job_repository
-from src.workflows import job_runtime
 from src.workflows.routines import (
     RoutineActivateRequest,
     RoutineError,
@@ -104,147 +98,31 @@ def _write_typed_input(workspace: Path, capability_id: str, name: str, inputs: d
     return f"workspace-json:{relative}", _sha(content)
 
 
-@pytest.fixture
-def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Use a private synchronous SQLite file behind the real async contracts.
+@pytest_asyncio.fixture
+async def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db):
+    """The test's own database (``db``) behind the real ``get_session``, plus a workspace.
 
-    The repository's normal async SQLite driver is unavailable in the
-    restricted test runner because its worker-thread callback never resumes
-    SQLAlchemy's greenlet bridge.  This adapter preserves the production
-    session contract while keeping every query, transaction, and model write
-    on a real temporary SQLite database.
+    Every ``get_session`` caller reaches the per-test database through the
+    production path (#1222, #1241). Yields ``(sessions, workspace)``, where
+    ``sessions()`` opens a session on that database like ``get_session``.
     """
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    database = tmp_path / "workspace.sqlite"
     monkeypatch.setattr(settings, "vault_encryption_key", Fernet.generate_key().decode())
     monkeypatch.setattr("src.vault.crypto._fernet", None)
-    sync_engine = create_engine(
-        f"sqlite:///{database}",
-        connect_args={"check_same_thread": False},
-    )
-    SQLModel.metadata.create_all(sync_engine)
-
-    class AsyncSessionAdapter:
-        def __init__(self, session: SyncSession):
-            self._session = session
-            self.info = session.info
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc_value, traceback):
-            self._session.close()
-
-        def add(self, instance):
-            return self._session.add(instance)
-
-        def add_all(self, instances):
-            return self._session.add_all(instances)
-
-        def expunge(self, instance):
-            return self._session.expunge(instance)
-
-        def get_bind(self):
-            return self._session.get_bind()
-
-        def in_transaction(self):
-            return self._session.in_transaction()
-
-        @property
-        def new(self):
-            return self._session.new
-
-        @property
-        def dirty(self):
-            return self._session.dirty
-
-        @property
-        def deleted(self):
-            return self._session.deleted
-
-        async def execute(self, statement, *args, **kwargs):
-            return self._session.execute(statement, *args, **kwargs)
-
-        async def scalar(self, statement, *args, **kwargs):
-            return self._session.scalar(statement, *args, **kwargs)
-
-        async def get(self, entity, identity, *args, **kwargs):
-            return self._session.get(entity, identity, *args, **kwargs)
-
-        async def run_sync(self, function, *args, **kwargs):
-            return function(self._session, *args, **kwargs)
-
-        async def flush(self, *args, **kwargs):
-            return self._session.flush(*args, **kwargs)
-
-        async def commit(self):
-            return self._session.commit()
-
-        async def rollback(self):
-            return self._session.rollback()
-
-        async def refresh(self, instance, *args, **kwargs):
-            return self._session.refresh(instance, *args, **kwargs)
-
-        async def delete(self, instance):
-            return self._session.delete(instance)
-
-        class _NestedTransaction:
-            def __init__(self, session):
-                self._session = session
-                self._transaction = None
-
-            async def __aenter__(self):
-                self._transaction = self._session.begin_nested()
-                return self
-
-            async def __aexit__(self, exc_type, exc_value, traceback):
-                if self._transaction is None:
-                    return None
-                if exc_type is None:
-                    self._transaction.commit()
-                else:
-                    self._transaction.rollback()
-                return None
-
-        def begin_nested(self):
-            return self._NestedTransaction(self._session)
-
-    @asynccontextmanager
-    async def get_session():
-        db = AsyncSessionAdapter(SyncSession(sync_engine, expire_on_commit=False))
-        try:
-            yield db
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
-        finally:
-            await db.__aexit__(None, None, None)
-
-    monkeypatch.setattr(db_engine, "get_session", get_session)
-    monkeypatch.setattr(durable_state, "get_session", get_session)
-    monkeypatch.setattr(job_runtime, "get_session", get_session)
-    monkeypatch.setattr(approval_repository_module, "get_session", get_session)
-    monkeypatch.setattr(audit_repository_module, "get_session", get_session)
-    monkeypatch.setattr(vault_repository_module, "get_session", get_session)
-    monkeypatch.setattr(auth_service_module, "get_session", get_session)
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
     # Standing public watches retain the actual original Root identity and a
     # finite reviewed grant. A data-only Goal/session fixture cannot authorize
     # reads through the current SourceWatchService authority contract.
     now = datetime.now(timezone.utc)
-    with SyncSession(sync_engine) as db:
-        db.add(OperatorSession(
+    async with db() as session:
+        session.add(OperatorSession(
             id=SESSION, principal_id=OWNER, token_hash=_sha("m6-provider-free-root"),
             idle_expires_at=now + timedelta(hours=1),
             absolute_expires_at=now + timedelta(hours=2),
         ))
-        db.commit()
-    yield get_session, workspace
-    sync_engine.dispose()
+    yield db, workspace
 
 
 def _goal(goal_id: str, title: str) -> Goal:
@@ -994,7 +872,6 @@ async def test_reviewed_routine_second_goal_runs_through_board_dispatch_and_read
     # loading the wrong local key makes canonical Vault decryption fail; no
     # ciphertext, consent, revision or admitted authority is changed. Restoring
     # that exact prerequisite permits recovery of the same uncontacted attempt.
-    monkeypatch.setattr(work_board_api, "get_session", get_session)
     monkeypatch.setattr(work_board_api, "dispatcher", dispatcher)
 
     def publication_request(grants: tuple[str, ...]):

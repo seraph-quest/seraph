@@ -1135,12 +1135,6 @@ async def test_source_watch_approval_has_exact_visible_scope_without_source_cont
         captured["transition"] = (job_id, status, kwargs)
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
         async def execute(self, _statement):
             return SimpleNamespace(
                 scalars=lambda: SimpleNamespace(first=lambda: packet),

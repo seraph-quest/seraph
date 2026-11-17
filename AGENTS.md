@@ -157,8 +157,11 @@ built by the production engine factory, as the default database, so every
 `get_session` caller reaches it through the real gated path. Do not patch
 `get_session`: inject a failing or fake session with `install_session_factory`
 or `install_fake_session` from the same module, so the real `get_session` and
-`session_scope` still run (#1241). A test that connects to the canonical
-engine fails, including through work it leaves running after its teardown.
+`session_scope` still run (#1241). The injected factory serves every caller,
+request authentication included, so a failure aimed at one unit of work must
+check which session it is in and assert that it fired. A test that connects to
+the canonical engine fails; a connection made after its teardown fails the next
+test's setup (or the run) and names the test that left the work running.
 Pytest runs with `--strict-markers`. ResourceWarning, unraisable exceptions and
 never-awaited coroutines are errors. A per-test watchdog dumps stacks after
 240 s and fails the test after 420 s. Any `filterwarnings` exception must be

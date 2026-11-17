@@ -89,9 +89,13 @@ def pytest_runtest_setup(item):
     try:
         return (yield)
     finally:
-        _fail_on_canonical_engine_violations("setup")
-        if late:
-            pytest.fail(late, pytrace=False)
+        try:
+            _fail_on_canonical_engine_violations("setup")
+        finally:
+            # Reported even when setup itself failed: the late connection
+            # belongs to the previous test and must not be lost.
+            if late:
+                pytest.fail(late, pytrace=False)
 
 
 @pytest.hookimpl(wrapper=True)
@@ -125,7 +129,8 @@ def pytest_sessionfinish(session, exitstatus):
             reporter.write_line(late, red=True)
         else:
             sys.stderr.write(late + "\n")
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        if session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 # ── Database seam (#1222) ───────────────────────────────

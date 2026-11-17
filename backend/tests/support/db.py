@@ -218,9 +218,14 @@ def install_session_factory(monkeypatch, factory: Callable[[], AsyncSession]) ->
     test's. ``factory()`` must return an async context manager whose session
     offers ``commit``, ``rollback`` and an ``info`` dict. ``monkeypatch``
     restores the previous factory at teardown. Do not patch ``get_session``.
+
+    The factory serves every default ``get_session`` caller, request
+    authentication included, not one module. A failure meant for one unit of
+    work must check which session it is in (for example by the rows it is
+    about to commit) and assert that it fired, or the test can fail early,
+    for the wrong reason, and still pass.
     """
     monkeypatch.setattr(db_engine, "async_session_factory", factory)
-    monkeypatch.setattr(db_engine, "_STATE_GATE", [None, None])
 
 
 class _FakeSessionContext:

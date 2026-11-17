@@ -347,16 +347,25 @@ async def test_atomic_claim_failure_no_partial_scope_and_idempotency_conflict(cl
     preview = (await client.post("/api/auth/ownership/recovery/preview", headers=HEADERS, json={"selections": selections})).json()
     body = {"selections": selections, "idempotency_key": "crash-proof", "preview_digest": preview["preview_digest"], "acknowledge_read_only": True}
     from tests.support.db import install_session_factory
+    crashed = []
     def fail_before_commit():
+        # Every get_session caller (request auth included) opens sessions here;
+        # crash only the unit of work that is about to commit the claim.
         db = async_db.factory()
-        async def crash_before_commit():
-            raise RuntimeError("injected precommit crash")
-        db.commit = crash_before_commit
+        real_commit = db.commit
+        async def crash_claim_before_commit():
+            # The claim flushes its journal before the unit of work commits.
+            if any(isinstance(row, OperatorRecoveryJournal) for row in db.identity_map.values()):
+                crashed.append(True)
+                raise RuntimeError("injected precommit crash")
+            await real_commit()
+        db.commit = crash_claim_before_commit
         return db
     with monkeypatch.context() as crashing:
         install_session_factory(crashing, fail_before_commit)
         with pytest.raises(RuntimeError, match="injected"):
             await client.post("/api/auth/ownership/recovery/confirm", headers=HEADERS, json=body)
+    assert crashed == [True]
     async with async_db() as db:
         assert (await db.execute(select(OperatorRecoveryJournal))).scalars().all() == []
         assert (await db.get(Goal, g["id"])).owner_session_id == first["session_id"]

@@ -8,16 +8,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
-import pytest_asyncio
 import yaml
 from pydantic import ValidationError
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
 from sqlmodel import select
 
 from config.settings import settings
@@ -28,7 +23,6 @@ from src.db.models import (
     ProcedureV2Binding,
     GuardianDecisionPacket,
     Goal,
-    SQLModel,
     WorkBoardAttempt,
     WorkBoardLink,
     WorkBoardRoutineBinding,
@@ -37,8 +31,6 @@ from src.db.models import (
     WorkBoardStatus,
     Session,
 )
-from src.db import engine as db_engine
-import src.approval.repository as approval_repository_module
 from src.extensions.capability_pack import CapabilityPackLifecycle, parse_capability_pack_manifest
 from src.extensions.github_followthrough import _operation_id
 from src.workflows.routines import (
@@ -63,61 +55,17 @@ from src.workflows.routines import (
 )
 import src.workflows.routines as routines_module
 from src.work_board.repository import WorkBoardRepository
+from tests.support.db import install_fake_session
 
 
 OWNER = "operator:m6"
 SESSION = "session:m6"
 
 
-@pytest_asyncio.fixture
-async def m6_db(monkeypatch, tmp_path):
-    """Create only the M6 persistence subset; full metadata is a slow control."""
-
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'm6.db'}",
-        connect_args={"check_same_thread": False},
-        pool_size=5,
-        max_overflow=5,
-    )
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-    tables = [
-        Session.__table__,
-        ApprovalRequest.__table__,
-        Goal.__table__,
-        GuardianDecisionPacket.__table__,
-        GuardianRoutine.__table__,
-        GuardianRoutineVersion.__table__,
-        ProcedureV2Binding.__table__,
-        WorkBoardRoutineBinding.__table__,
-        WorkBoardTask.__table__,
-        WorkBoardAttempt.__table__,
-        WorkBoardLink.__table__,
-        WorkBoardEvent.__table__,
-    ]
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync: SQLModel.metadata.create_all(sync, tables=tables))
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    monkeypatch.setattr(db_engine, "get_session", _get_session)
-    monkeypatch.setattr(approval_repository_module, "get_session", _get_session)
-    yield _get_session
-    await engine.dispose()
+@pytest.fixture
+def m6_db(db):
+    """The test's own production-configured database (``db``); every get_session reaches it."""
+    return db
 
 
 @pytest.mark.asyncio
@@ -2051,11 +1999,7 @@ def _mock_source_packet_session(monkeypatch, packet):
         def expunge(self, _row):
             return None
 
-    @asynccontextmanager
-    async def _get_session():
-        yield _PacketSession()
-
-    monkeypatch.setattr(db_engine, "get_session", _get_session)
+    install_fake_session(monkeypatch, _PacketSession)
 
 
 @pytest.mark.asyncio

@@ -2903,7 +2903,7 @@ async def test_racing_passes_create_one_attempt(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkeypatch):
+async def test_pending_admission_reconciles_after_restart(async_db, tmp_path: Path, monkeypatch):
     """A claimed pending row links an existing exact durable admission after restart."""
 
     workspace = tmp_path / "workspace"
@@ -2920,41 +2920,9 @@ async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkey
     (workspace / "inputs" / "restart.json").write_bytes(raw)
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
 
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{tmp_path / 'pending-admission.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    runtime_tables = [
-        Session.__table__,
-        Goal.__table__,
-        WorkBoardTask.__table__,
-        WorkBoardAttempt.__table__,
-        WorkBoardEvent.__table__,
-        WorkBoardLink.__table__,
-        WorkflowRunState.__table__,
-        Secret.__table__,
-        WorkBoardProposal.__table__,
-        WorkBoardEvidenceDependency.__table__,
-    ]
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync: SQLModel.metadata.create_all(sync, tables=runtime_tables)
-        )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def durable_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", durable_session)
-    monkeypatch.setattr("src.vault.repository.get_session", durable_session)
+    # The test's own database; job runtime and vault reach it through get_session.
+    factory = async_db.factory
+    durable_session = async_db
     repository = WorkBoardRepository()
     jobs = DurableJobRepository()
     task = WorkBoardTask(
@@ -3023,7 +2991,6 @@ async def test_pending_admission_reconciles_after_restart(tmp_path: Path, monkey
             )
         ).scalar_one()
     assert linked.workflow_run_id == expected_job_id
-    await engine.dispose()
 
 
 @pytest.mark.asyncio

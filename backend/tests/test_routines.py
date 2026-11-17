@@ -4,7 +4,6 @@ import asyncio
 import json
 import hashlib
 from datetime import datetime, timedelta, timezone
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,11 +12,9 @@ import uuid
 
 import pytest
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
-from src.db.models import GuardianRoutine, GuardianRoutineVersion, SQLModel, WorkflowRunState
+from src.db.models import GuardianRoutine, GuardianRoutineVersion, WorkflowRunState
+from tests.support.db import install_fake_session
 from sqlmodel import select
 from src.workflows.routine_steps import RoutineStepContext, guardian_watch_run
 from src.workflows.routine_templates import (
@@ -46,33 +43,6 @@ def _async_value(value):
         return value
 
     return _value()
-
-
-@asynccontextmanager
-async def _local_table_database(model):
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(model.__table__.create)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    try:
-        yield _get_session
-    finally:
-        await engine.dispose()
 
 
 def _locked_install_job(routine_id: str, version: GuardianRoutineVersion) -> dict:
@@ -556,16 +526,7 @@ async def test_install_lock_observes_revoke_winner_before_any_package_write(monk
 
     db = FakeDb()
 
-    @asynccontextmanager
-    async def get_session():
-        try:
-            yield db
-        except Exception:
-            raise
-        else:
-            await db.commit()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, lambda: db)
     with pytest.raises(RoutineError, match="routine_revoked_terminal"):
         await RoutineService()._install_package_under_routine_lock(
             job=job,
@@ -644,16 +605,7 @@ async def test_install_lock_commits_package_before_revoke_can_commit(monkeypatch
 
     db = FakeDb()
 
-    @asynccontextmanager
-    async def get_session():
-        try:
-            yield db
-        except Exception:
-            raise
-        else:
-            await db.commit()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, lambda: db)
     original_create = routines_module._create_once_workspace_text
 
     def create_and_request_revoke(*args, **kwargs):
@@ -689,28 +641,15 @@ async def test_install_lock_commits_package_before_revoke_can_commit(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_install_lock_real_sqlite_writer_fence_serializes_revoke(monkeypatch, tmp_path):
+async def test_install_lock_real_sqlite_writer_fence_serializes_revoke(monkeypatch, tmp_path, async_db):
     """A real SQLite writer cannot revoke between the locked read and commit."""
 
     import src.workflows.routines as routines_module
 
     workspace_root, package_root, writes, published_writes = _patch_locked_install_files(monkeypatch, tmp_path)
     routine, version, job = _locked_install_rows("0123456789abcdef0123456789abcdee")
-    database_path = tmp_path / "routine-lock-race.db"
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{database_path}",
-        connect_args={"check_same_thread": False, "timeout": 5},
-        pool_size=5,
-        max_overflow=5,
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync: SQLModel.metadata.create_all(
-                sync,
-                tables=[GuardianRoutine.__table__, GuardianRoutineVersion.__table__, WorkflowRunState.__table__],
-            )
-        )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    # The test's own production-configured database; get_session reaches it unpatched.
+    factory = async_db.factory
     async with factory() as db:
         db.add(routine)
         db.add(version)
@@ -758,17 +697,7 @@ async def test_install_lock_real_sqlite_writer_fence_serializes_revoke(monkeypat
         original_create(path, content)
 
     monkeypatch.setattr(routines_module, "_create_once_workspace_text", create_and_queue_revoke)
-    @asynccontextmanager
-    async def get_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
 
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
     try:
         result = await RoutineService()._install_package_under_routine_lock(
             job=job,
@@ -794,7 +723,6 @@ async def test_install_lock_real_sqlite_writer_fence_serializes_revoke(monkeypat
     finally:
         if revoke_task is not None and not revoke_task.done():
             revoke_task.cancel()
-        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -838,11 +766,7 @@ async def test_install_lock_rejects_reclaimed_durable_job_fence_before_selector_
                 )
             raise AssertionError(f"unexpected statement: {statement}")
 
-    @asynccontextmanager
-    async def get_session():
-        yield FakeDb()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     with pytest.raises(RoutineError, match="routine_install_job_fence_stale"):
         await RoutineService()._install_package_under_routine_lock(
             job=job,
@@ -912,12 +836,8 @@ async def test_recover_pending_install_removes_uncommitted_staging_without_live_
         def expunge(self, _row):
             return None
 
-    @asynccontextmanager
-    async def get_session():
-        yield FakeDb()
-
     monkeypatch.setattr(routines_module, "_safe_resolve", lambda _path: staging_root)
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     publish = AsyncMock(side_effect=AssertionError("uncommitted staging must not publish"))
     monkeypatch.setattr(RoutineService, "_publish_staged_install", publish)
 
@@ -979,13 +899,8 @@ async def test_recover_pending_install_republishes_canonical_commit(monkeypatch,
         def expunge(self, _row):
             return None
 
-    @asynccontextmanager
-    async def get_session():
-        db = FakeDb()
-        yield db
-
     monkeypatch.setattr(routines_module, "_safe_resolve", lambda _path: staging_root)
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     job_id = f"routine-install:{token}:v1"
 
     class FakeJobs:
@@ -1073,11 +988,7 @@ async def test_publication_lock_rechecks_committed_revoke_before_any_public_file
                 return FakeResult(version)
             raise AssertionError(statement)
 
-    @asynccontextmanager
-    async def get_session():
-        yield FakeDb()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
 
     with pytest.raises(RoutineError, match="routine_install_publication_stale"):
         await RoutineService()._publish_staged_install_under_routine_lock(
@@ -1102,6 +1013,7 @@ async def test_publication_lock_rechecks_committed_revoke_before_any_public_file
 async def test_publication_rejects_reclaimed_durable_job_fence_in_real_sqlite_before_public_write(
     monkeypatch,
     tmp_path,
+    async_db,
 ):
     import src.workflows.routines as routines_module
 
@@ -1117,19 +1029,8 @@ async def test_publication_rejects_reclaimed_durable_job_fence_in_real_sqlite_be
     (staging_root / "workspace" / "workflows" / "lock-race.md").write_text("workflow", encoding="utf-8")
     (staging_root / "workspace" / "runbooks" / "lock-race.yaml").write_text("runbook", encoding="utf-8")
     (staging_root / "package").mkdir()
-    database_path = tmp_path / "publication-stale-fence.db"
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{database_path}",
-        connect_args={"check_same_thread": False, "timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync: SQLModel.metadata.create_all(
-                sync,
-                tables=[GuardianRoutine.__table__, GuardianRoutineVersion.__table__, WorkflowRunState.__table__],
-            )
-        )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    # The test's own production-configured database; get_session reaches it unpatched.
+    factory = async_db.factory
     async with factory() as db:
         db.add(routine)
         db.add(version)
@@ -1153,36 +1054,22 @@ async def test_publication_rejects_reclaimed_durable_job_fence_in_real_sqlite_be
         )
         await db.commit()
 
-    @asynccontextmanager
-    async def get_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
-    try:
-        with pytest.raises(RoutineError, match="routine_install_job_fence_stale"):
-            await RoutineService()._publish_staged_install_under_routine_lock(
-                job=job,
-                routine_id=routine.id,
-                version_number=1,
-                owner_principal_id=routine.owner_principal_id,
-                owner_session_id=routine.owner_session_id,
-                staging_root=staging_root,
-                package_digest="package-digest",
-                workflow_name="lock-race.md",
-                runbook_name="lock-race.yaml",
-            )
-        assert published_writes == []
-        assert not any(path.is_file() for path in workspace_root.rglob("*"))
-        assert not any(path.is_file() for path in package_root.rglob("*"))
-        assert staging_root.exists()
-    finally:
-        await engine.dispose()
+    with pytest.raises(RoutineError, match="routine_install_job_fence_stale"):
+        await RoutineService()._publish_staged_install_under_routine_lock(
+            job=job,
+            routine_id=routine.id,
+            version_number=1,
+            owner_principal_id=routine.owner_principal_id,
+            owner_session_id=routine.owner_session_id,
+            staging_root=staging_root,
+            package_digest="package-digest",
+            workflow_name="lock-race.md",
+            runbook_name="lock-race.yaml",
+        )
+    assert published_writes == []
+    assert not any(path.is_file() for path in workspace_root.rglob("*"))
+    assert not any(path.is_file() for path in package_root.rglob("*"))
+    assert staging_root.exists()
 
 
 @pytest.mark.asyncio
@@ -1236,13 +1123,7 @@ async def test_publication_lock_wins_before_revoke_and_commits_public_bytes(monk
             if "revoke_waiting" in events:
                 revoke_outcome.append("stale")
 
-    @asynccontextmanager
-    async def get_session():
-        db = FakeDb()
-        yield db
-        await db.commit()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     original_save = routines_module.save_workspace_contribution
 
     def save_and_queue_revoke(*args, **kwargs):
@@ -1318,17 +1199,7 @@ async def test_publication_failure_restores_manifest_and_keeps_private_staging(m
         async def commit(self):
             raise AssertionError("publication must fail before commit")
 
-    @asynccontextmanager
-    async def get_session():
-        db = FakeDb()
-        try:
-            yield db
-        except Exception:
-            raise
-        else:
-            await db.commit()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     original_save = routines_module.save_workspace_contribution
     save_calls = 0
 
@@ -1403,11 +1274,7 @@ async def test_publication_post_move_failure_restores_private_package_for_retry(
                 return FakeResult(version)
             raise AssertionError(statement)
 
-    @asynccontextmanager
-    async def get_session():
-        yield FakeDb()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     service = RoutineService()
     original_verified = service._verified_public_install
     fail_once = True
@@ -1521,11 +1388,7 @@ async def test_publication_recovers_after_process_death_after_package_move(monke
         def expunge(self, _row):
             return None
 
-    @asynccontextmanager
-    async def get_session():
-        yield FakeDb()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     service = RoutineService()
     original_verified = service._verified_public_install
     process_died = True
@@ -2042,11 +1905,7 @@ async def test_install_receipt_failure_enters_local_finalize_recovery_and_comple
         def expunge(self, _row):
             return None
 
-    @asynccontextmanager
-    async def get_session():
-        yield FakeDb()
-
-    monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, FakeDb)
     receipts = await service.recover_pending_installs()
 
     assert receipts == [
@@ -2169,7 +2028,7 @@ async def test_reconcile_committed_install_does_not_write_receipts_with_live_lea
 
 
 @pytest.mark.asyncio
-async def test_pause_scan_reads_all_owner_bound_routine_jobs_beyond_page_limit(monkeypatch):
+async def test_pause_scan_reads_all_owner_bound_routine_jobs_beyond_page_limit(async_db):
     rows = [
         WorkflowRunState(
             run_identity=f"routine-child:{index}",
@@ -2186,21 +2045,19 @@ async def test_pause_scan_reads_all_owner_bound_routine_jobs_beyond_page_limit(m
     ]
     import src.workflows.routines as routines_module
 
-    async with _local_table_database(WorkflowRunState) as get_session:
-        monkeypatch.setattr(routines_module.db_engine, "get_session", get_session)
-        async with get_session() as db:
-            db.add_all(rows)
+    async with async_db() as db:
+        db.add_all(rows)
 
-        jobs = [
-            job
-            async for job in RoutineService()._list_routine_jobs(
-                "routine-1",
-                owner_principal_id="principal-1",
-                owner_session_id="session-1",
-            )
-        ]
-        assert len(jobs) == 101
-        assert {item["job_id"] for item in jobs} == {f"routine-child:{index}" for index in range(101)}
+    jobs = [
+        job
+        async for job in RoutineService()._list_routine_jobs(
+            "routine-1",
+            owner_principal_id="principal-1",
+            owner_session_id="session-1",
+        )
+    ]
+    assert len(jobs) == 101
+    assert {item["job_id"] for item in jobs} == {f"routine-child:{index}" for index in range(101)}
 
 
 @pytest.mark.asyncio

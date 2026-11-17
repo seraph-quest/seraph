@@ -8,7 +8,6 @@ HTTP is intercepted; no model/provider or external network call is used.
 from __future__ import annotations
 
 from dataclasses import replace
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -77,6 +76,7 @@ from src.workflows.procedure_v2_runtime import (
     deterministic_child_job_id,
 )
 
+from tests.support.db import install_fake_session
 from tests.test_browser_task_lifecycle import _html_responses
 from tests.test_browser_task_runtime import _input
 
@@ -1530,11 +1530,7 @@ async def test_source_watch_material_replay_rechecks_files_and_rejects_tamper_or
             self.calls += 1
             return Result((watch, goal, packet)[self.calls - 1])
 
-    @asynccontextmanager
-    async def get_session():
-        yield DB()
-
-    monkeypatch.setattr(source_watch_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, DB)
     monkeypatch.setattr(source_watch_module.durable_job_repository, "get_job", lambda _job_id: _async_result(job))
     service = source_watch_module.SourceWatchService()
     refs = [
@@ -1632,11 +1628,7 @@ async def test_source_watch_no_change_replay_uses_packet_without_external_contac
             self.calls += 1
             return Result((watch, goal, packet)[self.calls - 1])
 
-    @asynccontextmanager
-    async def get_session():
-        yield DB()
-
-    monkeypatch.setattr(source_watch_module.db_engine, "get_session", get_session)
+    install_fake_session(monkeypatch, DB)
     monkeypatch.setattr(source_watch_module.durable_job_repository, "get_job", lambda _job_id: _async_result(job))
     result = await source_watch_module.SourceWatchService().verify_procedure_replay(
         watch_id=watch_id,

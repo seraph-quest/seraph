@@ -1,6 +1,5 @@
 """Authenticated same-card recovery for governed routine publication."""
 
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,6 +17,7 @@ from src.work_board.contracts import (
     WorkBoardRoutinePublicationRecoverRequest,
 )
 from src.work_board.repository import BoardRevisionConflict
+from tests.support.db import install_fake_session
 
 
 def _operator() -> AuthenticatedOperator:
@@ -102,11 +102,7 @@ async def test_publication_prepare_approval_and_resume_reconcile_same_card(monke
     async def context(*_args, **_kwargs):
         return next(contexts)
 
-    @asynccontextmanager
-    async def fake_session():
-        yield SimpleNamespace()
-
-    monkeypatch.setattr(work_board_api, "get_session", fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr(work_board_api, "_routine_publication_context", context)
     monkeypatch.setattr(
         work_board_api,
@@ -186,11 +182,7 @@ async def test_publication_rejects_stale_revision_and_caller_selected_bindings(m
     async def stale_context(*_args, **_kwargs):
         raise BoardRevisionConflict("task-publication", 6, 7)
 
-    @asynccontextmanager
-    async def fake_session():
-        yield SimpleNamespace()
-
-    monkeypatch.setattr(work_board_api, "get_session", fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr(work_board_api, "_routine_publication_context", stale_context)
 
     with pytest.raises(HTTPException) as stale:
@@ -277,10 +269,7 @@ async def test_publication_context_rejects_cross_owner_parent(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_publication_protocol_rejects_missing_current_consent(monkeypatch):
-    @asynccontextmanager
-    async def fake_session():
-        yield SimpleNamespace()
-    monkeypatch.setattr(work_board_api,"get_session",fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr(work_board_api,"_routine_publication_context",AsyncMock(return_value=_context()))
     monkeypatch.setattr(work_board_api,"_operator_has_github_consent",AsyncMock(return_value=False))
     monkeypatch.setattr(work_board_api,"_block_routine_for_missing_external_authority",AsyncMock(return_value=False))

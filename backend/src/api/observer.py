@@ -797,6 +797,8 @@ async def upload_local_capture(request: Request):
     if result.pruned_files:
         upload_details["pruned_files"] = result.pruned_files
         upload_details["pruned_bytes"] = result.pruned_bytes
+    if result.capture_store_over_cap:
+        upload_details["capture_store_over_cap"] = True
     await log_integration_event(
         integration_type="observer_daemon",
         name="local_capture_upload",
@@ -818,6 +820,9 @@ async def upload_local_capture(request: Request):
             "capture_id": result.capture_id,
             "observation_id": result.observation_id,
             "content_hash": f"sha256:{result.image_sha256}",
+            # True when the private store is still above archive_max_mb after
+            # this request's bounded prune (or the prune was cut short).
+            "capture_store_over_cap": result.capture_store_over_cap,
         },
         status_code=201 if result.status == "accepted" else 200,
     )
@@ -894,7 +899,9 @@ def _screen_artifact_image_available(artifacts: dict[str, Any]) -> bool:
         return False
     try:
         return _artifact_path_if_present(raw_path, allowed_roots=_artifact_allowed_roots(artifacts)) is not None
-    except HTTPException:
+    except (HTTPException, OSError, RuntimeError, ValueError):
+        # One malformed stored path (``~nouser/...``, a NUL byte) must not
+        # break the whole artifact list.
         return False
 
 

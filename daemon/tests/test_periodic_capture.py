@@ -596,9 +596,10 @@ async def _run_periodic_once(runtime) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_capture_stored_by_backend_is_not_archived_again(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stored_status", ["accepted", "duplicate", "suppressed"])
+async def test_capture_stored_by_backend_is_not_archived_again(tmp_path, monkeypatch, stored_status):
     monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
-    runtime = _uploading_runtime(tmp_path, CaptureUploadResult(status="accepted", reason="capture_accepted"))
+    runtime = _uploading_runtime(tmp_path, CaptureUploadResult(status=stored_status, reason="stored"))
 
     posts = await _run_periodic_once(runtime)
 
@@ -698,3 +699,88 @@ def test_day_rollover_prunes_groups_that_crossed_retention(tmp_path, monkeypatch
     assert not any(path.exists() for path in group)
     assert status["archive_prune"]["trigger"] == "day_rollover"
     assert status["daily_capture_date"] == "2026-11-18"
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_upload_is_still_archived(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
+    runtime = _uploading_runtime(tmp_path, CaptureUploadResult(status="unconfirmed", reason="upload_status_unconfirmed"))
+
+    posts = await _run_periodic_once(runtime)
+
+    artifacts = posts[0]["observation"]["capture_artifacts"]
+    assert Path(artifacts["image_path"]).read_bytes() == b"png bytes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"detail": "Not authenticated"},
+        {"enabled": True, "provider": "apple-vision", "archive_retention_days": 30},
+        {"enabled": True, "provider": "apple-vision", "archive_max_mb": 8},
+        {"enabled": True, "provider": "apple-vision", "archive_retention_days": "30", "archive_max_mb": 8},
+        {"enabled": True, "provider": "apple-vision", "archive_retention_days": None, "archive_max_mb": 8},
+    ],
+)
+async def test_200_without_both_integer_limits_keeps_last_limits_and_prunes_nothing(tmp_path, monkeypatch, payload):
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
+    archive = tmp_path / "archive"
+    ancient = _old_group(archive, "2024-11-01", 1, mtime=_NOW - timedelta(days=2 * 365))
+    runtime = ScreenAnalysisRuntime(
+        enabled=True,
+        provider="apple-vision",
+        model=None,
+        preserve_captures=True,
+        archive_dir=str(archive),
+        blocklist_file=None,
+        now=lambda: _NOW,
+    )
+    payload = {**payload, "archive_dir": str(archive)} if "detail" not in payload else payload
+
+    with patch("ocr.create_provider", side_effect=lambda **_kwargs: _FakeProvider()), patch(
+        "blocklist.load_blocklist", return_value=set()
+    ):
+        await runtime.refresh(_RuntimeSettingsClient(payload), "http://localhost:8004", force=True)
+
+    assert all(path.exists() for path in ancient)
+    assert runtime._archive_limits_known is False
+    assert runtime.budget_status()["archive_prune"] is None
+    assert runtime.archive_retention_days == 365
+    assert runtime.archive_max_mb == 0
+
+
+@pytest.mark.asyncio
+async def test_200_without_limits_after_received_limits_keeps_them_without_pruning(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
+    archive = tmp_path / "archive"
+    runtime = ScreenAnalysisRuntime(
+        enabled=True,
+        provider="apple-vision",
+        model=None,
+        preserve_captures=True,
+        archive_dir=str(archive),
+        blocklist_file=None,
+        now=lambda: _NOW,
+    )
+    base = {"enabled": True, "provider": "apple-vision", "preserve_captures": True, "archive_dir": str(archive)}
+    with patch("ocr.create_provider", side_effect=lambda **_kwargs: _FakeProvider()), patch(
+        "blocklist.load_blocklist", return_value=set()
+    ):
+        await runtime.refresh(
+            _RuntimeSettingsClient({**base, "archive_retention_days": 180, "archive_max_mb": 64}),
+            "http://localhost:8004",
+            force=True,
+        )
+        first_prune = runtime.budget_status()["archive_prune"]
+        # The backend's settings file became unreadable: it omits both limits.
+        await runtime.refresh(
+            _RuntimeSettingsClient({**base, "settings_unreadable": True, "min_seconds_between_captures": 5}),
+            "http://localhost:8004",
+            force=True,
+        )
+
+    assert runtime.archive_retention_days == 180
+    assert runtime.archive_max_mb == 64
+    assert runtime.min_seconds_between_captures == 5
+    assert runtime.budget_status()["archive_prune"] is first_prune

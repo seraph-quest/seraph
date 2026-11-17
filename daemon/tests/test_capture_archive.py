@@ -156,3 +156,39 @@ def test_archive_file_pattern_accepts_writer_names_and_rejects_others():
         assert ARCHIVE_FILE_RE.fullmatch(name), name
     for name in ("Screenshot 2026.png", f"{stem}.jpg", f"x{stem}.png", "235959-code-0123.png"):
         assert ARCHIVE_FILE_RE.fullmatch(name) is None, name
+
+
+def test_age_pass_cut_short_by_delete_bound_reports_over_cap(tmp_path):
+    groups = [_capture(tmp_path, "2026-01-01", index, age=timedelta(days=300, minutes=index)) for index in range(3)]
+
+    result = prune_capture_archive(str(tmp_path), max_bytes=0, retention_days=30, now=NOW, max_delete=2)
+
+    assert result.deleted_captures == 2
+    assert sum(all(path.exists() for path in group) for group in groups) == 1
+    assert result.over_cap is True
+
+
+def test_truncated_scan_never_deletes_a_partial_group(tmp_path):
+    # Names sort: <stem>.analysis.json, <stem>.apple-vision.json, <stem>.png.
+    # Scan entries: 1 day dir + 3 files of group 0 + 2 files of group 1 = 6,
+    # so group 1's PNG is never seen.
+    groups = [_capture(tmp_path, "2026-01-01", index, age=timedelta(days=300 - index)) for index in range(2)]
+
+    result = prune_capture_archive(str(tmp_path), max_bytes=1, retention_days=30, now=NOW, max_scan=6)
+
+    assert not any(path.exists() for path in groups[0])
+    assert all(path.exists() for path in groups[1])
+    assert result.deleted_captures == 1
+    assert result.over_cap is True
+
+
+def test_only_day_directories_emptied_by_this_run_are_removed(tmp_path):
+    already_empty = tmp_path / "2026-01-02"
+    already_empty.mkdir()
+    group = _capture(tmp_path, "2026-01-01", 1, age=timedelta(days=300))
+
+    prune_capture_archive(str(tmp_path), max_bytes=0, retention_days=30, now=NOW)
+
+    assert not any(path.exists() for path in group)
+    assert not (tmp_path / "2026-01-01").exists()
+    assert already_empty.is_dir()

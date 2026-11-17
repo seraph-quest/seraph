@@ -64,10 +64,11 @@ interface VlmProbeEndpoint {
 interface CaptureStoreUsage {
   bytes: number | null;
   file_count: number | null;
-  max_mb: number;
-  retention_days: number;
+  max_mb: number | null;
+  retention_days: number | null;
   cap_scope?: string;
   enforced_by?: string;
+  limits_status?: string;
 }
 
 interface ArtifactStorageSettings {
@@ -523,19 +524,31 @@ function ArtifactRow({
   );
 }
 
+function formatStoreBytes(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  if (bytes === 0) return "0 MiB";
+  if (mib < 1) return `${Math.max(1, Math.round(bytes / 1024))} KiB`;
+  if (mib < 10) return `${mib.toFixed(1)} MiB`;
+  return `${Math.round(mib)} MiB`;
+}
+
 export function captureStoreLabel(store: CaptureStoreUsage): string {
-  const kept = `kept ${store.retention_days} days`;
-  if (store.bytes === null || store.bytes === undefined) {
-    return `usage unavailable · ${store.max_mb > 0 ? `${store.max_mb} MB cap` : "no size cap"} · ${kept}`;
+  if (store.max_mb === null || store.retention_days === null) {
+    const used = store.bytes === null || store.bytes === undefined ? "usage unavailable" : formatStoreBytes(store.bytes);
+    return `${used} · limits unavailable (settings file unreadable) · nothing pruned`;
   }
-  const usedMb = Math.round(store.bytes / (1024 * 1024));
+  const kept = `kept ${store.retention_days} days`;
+  const cap = store.max_mb > 0 ? `${store.max_mb} MiB cap` : "no size cap";
+  if (store.bytes === null || store.bytes === undefined) {
+    return `usage unavailable · ${cap} · ${kept}`;
+  }
   return store.max_mb > 0
-    ? `${usedMb} MB of ${store.max_mb} MB cap · ${kept}`
-    : `${usedMb} MB · no size cap · ${kept}`;
+    ? `${formatStoreBytes(store.bytes)} of ${cap} · ${kept}`
+    : `${formatStoreBytes(store.bytes)} · ${cap} · ${kept}`;
 }
 
 function captureStoreTone(store: CaptureStoreUsage): "normal" | "good" | "warn" {
-  if (store.bytes === null || store.bytes === undefined) return "warn";
+  if (store.bytes === null || store.bytes === undefined || store.max_mb === null) return "warn";
   return store.max_mb > 0 && store.bytes > store.max_mb * 1024 * 1024 ? "warn" : "normal";
 }
 

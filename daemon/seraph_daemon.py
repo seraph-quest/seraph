@@ -481,6 +481,21 @@ async def mark_display_attempted(
     return False
 
 
+def _received_archive_limits(payload: dict | None) -> tuple[int, int] | None:
+    """``(retention_days, max_mb)`` only when the backend sent both as integers."""
+    if not isinstance(payload, dict):
+        return None
+    retention = payload.get("archive_retention_days")
+    max_mb = payload.get("archive_max_mb")
+    if isinstance(retention, bool) or isinstance(max_mb, bool):
+        return None
+    if not isinstance(retention, int) or not isinstance(max_mb, int):
+        return None
+    if retention < 1 or max_mb < 0:
+        return None
+    return retention, max_mb
+
+
 class ScreenAnalysisRuntime:
     """Runtime screen-analysis config that follows backend Settings."""
 
@@ -553,16 +568,17 @@ class ScreenAnalysisRuntime:
         archive_dir = str(payload.get("archive_dir") or self._fallback["archive_dir"])
         min_seconds = max(0, int(payload.get("min_seconds_between_captures") or 0))
         max_daily = max(0, int(payload.get("max_daily_captures") or 0))
-        if fetched:
-            retention_days = max(1, int(fetched.get("archive_retention_days") or 365))
-            archive_max_mb = max(0, int(fetched.get("archive_max_mb") or 0))
+        received = _received_archive_limits(fetched)
+        if received is not None:
+            retention_days, archive_max_mb = received
             self._archive_limits_known = True
         else:
-            # Keep the last received limits through a backend outage instead
-            # of dropping to "no cap" (the CLI has no archive limits).
+            # No usable limits (failed fetch, or a 200 without both keys, e.g.
+            # an error body or a backend whose settings file is unreadable):
+            # keep the last received limits instead of dropping to defaults.
             retention_days = self.archive_retention_days
             archive_max_mb = self.archive_max_mb
-        self._archive_limits_fetched_now = bool(fetched)
+        self._archive_limits_fetched_now = received is not None
         signature = (
             enabled,
             provider_name,

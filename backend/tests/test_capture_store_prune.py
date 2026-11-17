@@ -130,23 +130,63 @@ def test_equal_mtimes_are_deleted_in_path_order(tmp_path):
     assert [path.exists() for path in paths] == [True, False, False]
 
 
-def test_partial_is_age_pruned_but_never_size_pruned(tmp_path):
+def test_partial_leftovers_are_pruned_by_age_and_size_oldest_first(tmp_path):
+    # Every prune runs under the ingest lock, so a ``.partial`` is a crash
+    # leftover, never an in-flight write.
     day = _store(tmp_path) / "2026-11-17"
-    fresh_partial = _write(day / ".upload-fresh.partial", 900, age=timedelta(minutes=10))
     expired_partial = _write(day / ".upload-old.partial", 900, age=timedelta(days=40))
+    stale_partial = _write(day / ".upload-stale.partial", 900, age=timedelta(minutes=10))
     capture = _write(day / "cap-a.png", 100, age=timedelta(minutes=1))
 
     result = prune_local_capture_uploads(retention_days=30, max_bytes=500, screenshot_root=tmp_path, now=NOW)
 
     assert not expired_partial.exists()
-    assert fresh_partial.exists()
-    # The in-flight write still counts toward the total, so the capture goes
-    # and the store reports it is still over the cap.
-    assert not capture.exists()
+    assert not stale_partial.exists()
+    assert capture.exists()
     assert result.deleted_expired == 1
     assert result.deleted_for_size == 1
-    assert result.remaining_bytes == 900
+    assert result.remaining_bytes == 100
+    assert result.over_cap is False
+
+
+def test_keep_protects_the_file_just_written(tmp_path):
+    files = _five_captures(tmp_path)
+
+    # Even when the newest file alone is over the cap it is never deleted by
+    # the request that wrote it; everything older goes.
+    result = prune_local_capture_uploads(
+        retention_days=None, max_bytes=100, screenshot_root=tmp_path, now=NOW, keep=files[-1]
+    )
+
+    assert [path.exists() for path in files] == [False, False, False, False, True]
+    assert result.remaining_bytes == 400
     assert result.over_cap is True
+
+
+def test_age_pass_cut_short_by_delete_bound_reports_over_cap(tmp_path):
+    day = _store(tmp_path) / "2026-09-01"
+    expired = [_write(day / f"cap-{index}.png", 10, age=timedelta(days=60, minutes=index)) for index in range(3)]
+
+    result = prune_local_capture_uploads(
+        retention_days=30, max_bytes=0, screenshot_root=tmp_path, now=NOW, max_files=2
+    )
+
+    assert result.deleted_expired == 2
+    assert sum(path.exists() for path in expired) == 1
+    assert result.over_cap is True
+
+
+def test_only_day_directories_emptied_by_this_run_are_removed(tmp_path):
+    store = _store(tmp_path)
+    already_empty = store / "2026-01-01"
+    already_empty.mkdir()
+    pruned = _write(store / "2026-02-01" / "cap-old.png", 10, age=timedelta(days=60))
+
+    prune_local_capture_uploads(retention_days=30, max_bytes=0, screenshot_root=tmp_path, now=NOW)
+
+    assert not pruned.exists()
+    assert not (store / "2026-02-01").exists()
+    assert already_empty.is_dir()
 
 
 def test_age_pass_runs_before_size_pass(tmp_path):

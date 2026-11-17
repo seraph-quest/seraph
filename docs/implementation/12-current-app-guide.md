@@ -4310,7 +4310,16 @@ size when the limits received from the backend change, and at UTC day
 rollover. It deletes only under limits received from the backend in that
 process, nothing before the first successful settings fetch, and keeps the
 last received limits through a backend outage; its last result is in
-`daemon-status.json` as `capture_budget.archive_prune`. After a topology
+`daemon-status.json` as `capture_budget.archive_prune`. The daemon reads
+the limits from `GET /api/settings/screen-analysis` without an operator
+session, so unless local no-login mode is on that read returns 401 and the
+daemon never receives limits: its archive is then never pruned. A 200 that
+lacks either limit, or a backend whose `screen-analysis-settings.json` is
+unreadable (the GET then omits both limits), also leaves the last received
+limits in force; the backend skips its own pruning with `settings_unreadable`
+and reports `capture_store.limits_status`. A non-zero `archive_max_mb` below 8
+(one capture can be 8 MiB) is refused with 422, and the file a request just
+wrote is never pruned by that request. The settings file is written atomically. After a topology
 switch or a long run of failed uploads, the two stores together can hold up
 to twice the cap until retention ages the idle store out. A record whose
 image was pruned stays readable: `GET /api/observer/screen-artifacts` reports

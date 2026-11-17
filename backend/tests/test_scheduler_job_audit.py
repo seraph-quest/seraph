@@ -290,6 +290,38 @@ async def test_screen_cleanup_applies_archive_retention_days_to_capture_store(as
 
 
 @pytest.mark.asyncio
+async def test_screen_cleanup_skips_capture_prune_when_settings_unreadable(async_db, tmp_path, monkeypatch):
+    from config.settings import settings
+
+    workspace, shots = _isolated_screen_cleanup(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    (workspace / "screen-analysis-settings.json").write_text("[truncated", encoding="utf-8")
+    ancient = datetime.now().timestamp() - 400 * 24 * 3600
+    files = [
+        _upload_store_file(shots, f"2025-01-01/cap-{index}.png", 600 * 1024, mtime=ancient + index)
+        for index in range(3)
+    ]
+    mock_repo = MagicMock()
+    mock_repo.cleanup_old = AsyncMock(return_value=0)
+
+    with patch("src.observer.screen_repository.screen_observation_repo", mock_repo):
+        from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
+
+        await run_screen_cleanup()
+
+    # Limits are unknown: nothing is pruned on defaults, and the skip says why.
+    assert all(path.exists() for path in files)
+    events = await audit_repository.list_events(limit=10)
+    [event] = [
+        event for event in events
+        if event["event_type"] == "scheduler_job_skipped" and event["tool_name"] == "screen_cleanup"
+    ]
+    assert event["details"]["reason"] == "no_expired_observations"
+    assert event["details"]["capture_prune_skipped_reason"] == "settings_unreadable"
+    assert event["details"]["capture_prune_over_cap"] is False
+
+
+@pytest.mark.asyncio
 async def test_weekly_activity_review_logs_success(async_db):
     mock_repo = MagicMock()
     mock_repo.get_weekly_summary = AsyncMock(

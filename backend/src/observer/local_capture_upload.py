@@ -118,6 +118,7 @@ class LocalCaptureResult:
     pruned_files: int = 0
     pruned_bytes: int = 0
     prune_skipped_reason: str | None = None
+    capture_store_over_cap: bool = False
 
 
 @dataclass(frozen=True)
@@ -409,7 +410,7 @@ async def ingest_local_capture(
         # Still inside the ingest lock: no other write, rename or capture-id
         # check can interleave with this prune. A prune failure never fails
         # the accepted capture.
-        prune = await _enforce_store_cap(screenshot_root)
+        prune = await _enforce_store_cap(screenshot_root, keep=final_path)
         return LocalCaptureResult(
             status="accepted",
             reason="capture_accepted",
@@ -419,6 +420,7 @@ async def ingest_local_capture(
             pruned_files=prune.deleted_files,
             pruned_bytes=prune.freed_bytes,
             prune_skipped_reason=prune.skipped_reason,
+            capture_store_over_cap=prune.over_cap,
         )
 
 
@@ -449,28 +451,43 @@ def _local_summary(analysis: dict[str, object]) -> str | None:
     return summary[:512] or None
 
 
-def capture_store_limits() -> tuple[int, int]:
+SETTINGS_UNREADABLE = "settings_unreadable"
+# The smallest non-zero cap: one capture may be up to 8 MiB, so a smaller cap
+# would delete every new file immediately.
+MIN_CAPTURE_STORE_CAP_MB = MAX_CAPTURE_BYTES // (1024 * 1024)
+
+
+def capture_store_limits() -> tuple[int, int] | None:
     """Return ``(max_bytes, retention_days)`` for the private upload store.
 
     ``archive_max_mb`` caps this store on its own (per store; ``0`` keeps no
     size cap). When the daemon is paired the upload store is the screenshot
     archive, so ``archive_retention_days`` bounds it too: the shorter of it
     and the observation retention applies.
+
+    ``None`` when the screen-analysis settings file exists but cannot be
+    read: the limits are then unknown and nothing may be pruned on defaults.
     """
     from config.settings import settings
     from src.observer.screen_analysis_settings import read_screen_analysis_settings
 
     current = read_screen_analysis_settings()
+    if current.get("settings_unreadable"):
+        return None
     max_mb = max(0, int(current.get("archive_max_mb") or 0))
     archive_days = max(1, int(current.get("archive_retention_days") or 365))
     observation_days = max(1, int(settings.screen_observation_retention_days))
     return max_mb * MIB, min(observation_days, archive_days)
 
 
-async def _enforce_store_cap(screenshot_root: Path) -> CaptureStorePruneResult:
+async def _enforce_store_cap(screenshot_root: Path, *, keep: Path | None = None) -> CaptureStorePruneResult:
     """Size-prune the upload store after a write; returns without a walk when uncapped."""
     try:
-        max_bytes, _retention_days = capture_store_limits()
+        limits = capture_store_limits()
+        if limits is None:
+            logger.warning("capture store prune skipped: screen-analysis settings are unreadable")
+            return CaptureStorePruneResult(skipped_reason=SETTINGS_UNREADABLE)
+        max_bytes, _retention_days = limits
         if max_bytes <= 0:
             return CaptureStorePruneResult()
         return await asyncio.to_thread(
@@ -478,6 +495,7 @@ async def _enforce_store_cap(screenshot_root: Path) -> CaptureStorePruneResult:
             retention_days=None,
             max_bytes=max_bytes,
             screenshot_root=screenshot_root,
+            keep=keep,
         )
     except Exception:
         logger.warning("capture store prune after upload failed", exc_info=True)
@@ -490,11 +508,9 @@ class _StoreEntry:
     relative: str
     size: int
     mtime_ns: int
-    prunable: bool
 
 
-_PRUNABLE_SUFFIXES = frozenset({".png", ".jpg"})
-_COUNTED_SUFFIXES = _PRUNABLE_SUFFIXES | {".partial"}
+_COUNTED_SUFFIXES = frozenset({".png", ".jpg", ".partial"})
 
 
 def _scan_capture_store(upload_root: Path, *, max_scan: int) -> tuple[list[_StoreEntry], bool]:
@@ -535,7 +551,6 @@ def _scan_capture_store(upload_root: Path, *, max_scan: int) -> tuple[list[_Stor
                     relative=path.relative_to(upload_root).as_posix(),
                     size=int(info.st_size),
                     mtime_ns=int(info.st_mtime_ns),
-                    prunable=suffix in _PRUNABLE_SUFFIXES,
                 )
             )
         if truncated:
@@ -572,14 +587,17 @@ def prune_local_capture_uploads(
     now: datetime | None = None,
     max_files: int = 5_000,
     max_scan: int = 200_000,
+    keep: Path | None = None,
 ) -> CaptureStorePruneResult:
     """Bounded age and size prune of the private upload store; oldest first.
 
     Only regular ``.png``/``.jpg``/``.partial`` files inside the private
     upload subdirectory are counted or deleted: never the operator's own
-    screenshot-folder images, never a symlink or its target. ``.partial``
-    files (in-flight writes) are removed by age only. ``max_bytes`` of ``0``
-    keeps no size cap. Every failure deletes less, never more.
+    screenshot-folder images, never a symlink or its target. Every caller
+    holds the screenshot ingest lock, so no write is in flight and any
+    ``.partial`` is a crash leftover, pruned like a capture. ``keep`` (the
+    file the current request just wrote) is never deleted. ``max_bytes`` of
+    ``0`` keeps no size cap. Every failure deletes less, never more.
     """
     upload_root = local_capture_upload_root(screenshot_root)
     try:
@@ -591,22 +609,38 @@ def prune_local_capture_uploads(
     if retention_days is None and max_bytes <= 0:
         return CaptureStorePruneResult()
 
+    keep_path = keep.resolve() if keep is not None else None
     entries, truncated = _scan_capture_store(upload_root, max_scan=max_scan)
     entries.sort(key=lambda entry: (entry.mtime_ns, entry.relative))
     deleted_expired = 0
     deleted_for_size = 0
     freed = 0
-    survivors: list[_StoreEntry] = []
+    bound_hit = False
+    touched_dirs: set[Path] = set()
 
+    def protected(entry: _StoreEntry) -> bool:
+        return keep_path is not None and entry.path.resolve() == keep_path
+
+    def delete(entry: _StoreEntry) -> bool:
+        nonlocal freed
+        if not _unlink_regular_file(entry.path):
+            return False
+        freed += entry.size
+        touched_dirs.add(entry.path.parent)
+        return True
+
+    survivors: list[_StoreEntry] = []
     if retention_days is not None:
         current = now or datetime.now(timezone.utc)
         cutoff_ns = int((current - timedelta(days=max(1, retention_days))).timestamp() * 1_000_000_000)
         for entry in entries:
-            if entry.mtime_ns < cutoff_ns and deleted_expired < max_files and _unlink_regular_file(entry.path):
-                deleted_expired += 1
-                freed += entry.size
-            else:
-                survivors.append(entry)
+            if entry.mtime_ns < cutoff_ns and not protected(entry):
+                if deleted_expired >= max_files:
+                    bound_hit = True  # expired files remain: report it
+                elif delete(entry):
+                    deleted_expired += 1
+                    continue
+            survivors.append(entry)
     else:
         survivors = list(entries)
 
@@ -614,23 +648,22 @@ def prune_local_capture_uploads(
     remaining: list[_StoreEntry] = []
     if max_bytes > 0:
         for entry in survivors:
-            if (
-                total > max_bytes
-                and entry.prunable
-                and deleted_expired + deleted_for_size < max_files
-                and _unlink_regular_file(entry.path)
-            ):
-                deleted_for_size += 1
-                freed += entry.size
-                total -= entry.size
-            else:
-                remaining.append(entry)
+            if total > max_bytes and not protected(entry):
+                if deleted_expired + deleted_for_size >= max_files:
+                    bound_hit = True
+                elif delete(entry):
+                    deleted_for_size += 1
+                    total -= entry.size
+                    continue
+            remaining.append(entry)
     else:
         remaining = survivors
 
-    for directory in sorted((p for p in upload_root.iterdir() if p.is_dir() and not p.is_symlink()), reverse=True):
-        with contextlib.suppress(OSError):
-            directory.rmdir()  # only succeeds when empty
+    # Remove only the day directories this run emptied.
+    for directory in sorted(touched_dirs, reverse=True):
+        if directory != upload_root and directory.parent == upload_root and not directory.is_symlink():
+            with contextlib.suppress(OSError):
+                directory.rmdir()  # only succeeds when empty
     return CaptureStorePruneResult(
         deleted_files=deleted_expired + deleted_for_size,
         deleted_expired=deleted_expired,
@@ -638,7 +671,7 @@ def prune_local_capture_uploads(
         freed_bytes=freed,
         remaining_bytes=total,
         remaining_files=len(remaining),
-        over_cap=(max_bytes > 0 and total > max_bytes) or truncated,
+        over_cap=(max_bytes > 0 and total > max_bytes) or truncated or bound_hit,
     )
 
 

@@ -1252,6 +1252,33 @@ async def test_legacy_artifact_with_removed_files_returns_degraded_analysis(asyn
     assert image.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_one_malformed_artifact_path_does_not_break_the_list(async_db, client, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
+    good = tmp_path / "good.png"
+    good.write_bytes(b"png bytes")
+    rows = [
+        {"id": "unknown-user", "image_path": "~seraph-no-such-user-1263/capture.png"},
+        {"id": "nul-byte", "image_path": str(tmp_path / "bad\x00name.png")},
+        {"id": "good", "image_path": str(good)},
+    ]
+    async with async_db() as db:
+        for index, artifacts in enumerate(rows):
+            db.add(
+                ScreenObservation(
+                    app_name=f"Capture {index}",
+                    timestamp=datetime(2026, 11, 17, 12, index, tzinfo=timezone.utc),
+                    details_json=json.dumps(["capture_artifacts:" + json.dumps(artifacts)]),
+                )
+            )
+
+    listing = await client.get("/api/observer/screen-artifacts")
+
+    assert listing.status_code == 200
+    available = {item["artifacts"]["id"]: item["artifacts"]["image_available"] for item in listing.json()["items"]}
+    assert available == {"unknown-user": False, "nul-byte": False, "good": True}
+
+
 def _write_screenshot(root: Path, *, name: str, data: bytes = b"png bytes") -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image = root / name

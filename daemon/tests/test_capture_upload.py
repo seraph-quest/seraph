@@ -261,6 +261,31 @@ async def test_upload_sends_authenticated_local_request_with_metadata():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "status", "stored"),
+    [
+        ({"status": "accepted", "reason_code": "capture_accepted"}, "accepted", True),
+        ({"status": "duplicate", "reason_code": "capture_already_accepted"}, "duplicate", True),
+        ({"status": "suppressed", "reason_code": "exact_hash_duplicate"}, "suppressed", True),
+        ({}, "unconfirmed", False),
+        ({"status": "ok"}, "unconfirmed", False),
+        ({"status": None}, "unconfirmed", False),
+    ],
+)
+async def test_only_an_explicit_stored_status_counts_as_stored(body, status, stored):
+    # #1263: the daemon skips its local archive only when the backend says it
+    # holds the capture; any other 2xx keeps the local copy.
+    def handler(request):
+        return httpx.Response(200, json=body)
+
+    uploader = _uploader()
+    async with _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler)) as client:
+        result = await uploader.upload(client, b"\x89PNG\r\n\x1a\nbytes", app_name="Code", window_title="", blocklist=set())
+    assert result.status == status
+    assert result.stored is stored
+
+
+@pytest.mark.asyncio
 async def test_blocked_app_never_uploads():
     backend = _GuardedBackend()
     async with backend.client_factory()() as client:

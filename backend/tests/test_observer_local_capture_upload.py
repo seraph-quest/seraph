@@ -651,6 +651,7 @@ async def test_upload_past_cap_prunes_oldest_and_keeps_records_readable(capture_
 
     assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-cap-00002.png", "cap-cap-00003.png"]
     assert sum(path.stat().st_size for path in _stored_files(capture_env["shots"])) <= 1024 * 1024
+    assert [item["capture_store_over_cap"] for item in responses] == [False, False, False]
     assert len(await _observations(capture_env["db"])) == 3
 
     operator_client = capture_env["operator_client"]
@@ -683,6 +684,53 @@ async def test_upload_past_cap_prunes_oldest_and_keeps_records_readable(capture_
     assert again.status_code == 200
     assert again.json()["status"] == "duplicate"
     assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-cap-00002.png", "cap-cap-00003.png"]
+
+
+@pytest.mark.asyncio
+async def test_capture_larger_than_cap_is_kept_and_reported_over_cap(capture_env, monkeypatch):
+    from src.audit.repository import audit_repository
+
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    big = _noise_png(9, side=700)
+    assert len(big) > 1024 * 1024
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(big, capture_id="cap-big-00009")
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["capture_store_over_cap"] is True
+    # The file this request wrote is never pruned by the same request.
+    assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-big-00009.png"]
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        (event.get("details") or {}).get("name") == "local_capture_upload"
+        and event["details"].get("capture_store_over_cap") is True
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_settings_file_skips_capture_store_prune(capture_env, tmp_path, monkeypatch):
+    from src.audit.repository import audit_repository
+
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    (tmp_path / "workspace" / "screen-analysis-settings.json").write_text("{not json", encoding="utf-8")
+
+    def must_not_prune(**_kwargs):
+        raise AssertionError("limits are unknown: nothing may be pruned on defaults")
+
+    monkeypatch.setattr(local_capture_upload, "prune_local_capture_uploads", must_not_prune)
+    assert local_capture_upload.capture_store_limits() is None
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((90, 91, 92)))
+    )
+    assert response.status_code == 201, response.text
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        (event.get("details") or {}).get("name") == "capture_store_prune"
+        and event["details"].get("reason") == "settings_unreadable"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

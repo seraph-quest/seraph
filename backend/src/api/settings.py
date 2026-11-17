@@ -519,7 +519,7 @@ def _strip_derived_screen_fields(payload: dict[str, object], *, explicit_provide
     state and is never persisted here."""
     selected = payload.pop("provider_selected", None)
     for derived in ("provider_blocked_reason", "daemon_cloud_provider", "daemon_capture_handoff",
-            "near_tee_vision_available"):
+            "near_tee_vision_available", "settings_unreadable"):
         payload.pop(derived, None)
     if payload.get("provider") in {"", None} and selected == "near_tee" and not explicit_provider:
         # Keep the operator's NEAR TEE choice across a temporarily unavailable slot.
@@ -1141,7 +1141,13 @@ async def set_interruption_mode(body: InterruptionModeRequest):
 @router.get("/settings/screen-analysis")
 async def get_screen_analysis_settings():
     """Return screenshot analysis settings for local image-folder ingestion."""
-    return _read_screen_analysis_settings()
+    payload = _read_screen_analysis_settings()
+    if payload.get("settings_unreadable"):
+        # The stored limits are unknown: omit them so the daemon keeps the last
+        # limits it received instead of pruning its archive on defaults.
+        payload.pop("archive_retention_days", None)
+        payload.pop("archive_max_mb", None)
+    return payload
 
 
 @router.put("/settings/screen-analysis")
@@ -1205,6 +1211,14 @@ async def set_screen_analysis_settings(body: ScreenAnalysisSettingsRequest):
             if value < 0:
                 raise HTTPException(status_code=422, detail=f"{field_name} must be >= 0")
             payload[field_name] = value
+    from src.observer.local_capture_upload import MIN_CAPTURE_STORE_CAP_MB
+
+    if body.archive_max_mb is not None and 0 < body.archive_max_mb < MIN_CAPTURE_STORE_CAP_MB:
+        # One capture may be up to 8 MiB: a smaller cap would delete every new file.
+        raise HTTPException(
+            status_code=422,
+            detail=f"archive_max_mb must be 0 (no cap) or at least {MIN_CAPTURE_STORE_CAP_MB}",
+        )
     if body.archive_retention_days is not None:
         if body.archive_retention_days < 1:
             raise HTTPException(status_code=422, detail="archive_retention_days must be >= 1")
@@ -1325,8 +1339,9 @@ async def get_artifact_storage_settings():
     screen_analysis = await get_screen_analysis_settings()
     from src.observer.local_capture_upload import MIB, capture_store_limits
 
-    capture_store_max_bytes, capture_store_retention_days = capture_store_limits()
-    capture_store_max_mb = capture_store_max_bytes // MIB
+    capture_store_limit_values = capture_store_limits()
+    capture_store_max_mb = capture_store_limit_values[0] // MIB if capture_store_limit_values else None
+    capture_store_retention_days = capture_store_limit_values[1] if capture_store_limit_values else None
     vlm_status = effective_vlm_status(live_probe=deferred_vlm_live_probe())
     chat_policy = effective_workload_policy("chat_agent")
     inference_policy = {
@@ -1390,6 +1405,8 @@ async def get_artifact_storage_settings():
                 "retention_days": capture_store_retention_days,
                 "cap_scope": "per_store",
                 "enforced_by": "backend",
+                # "settings_unreadable": limits unknown, so nothing is pruned.
+                "limits_status": "ready" if capture_store_limit_values else "settings_unreadable",
             },
             "analysis": {
                 "provider": effective_screen_analysis_provider() or "not_configured",

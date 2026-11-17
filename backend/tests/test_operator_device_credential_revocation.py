@@ -1,17 +1,15 @@
 """Pinned old device readers cannot revive exact legacy transport secrets."""
 import ast,json,os,subprocess,sys
 from datetime import datetime,timedelta,timezone
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 import pytest
 from cryptography.fernet import Fernet,InvalidToken
-from sqlalchemy.ext.asyncio import create_async_engine,AsyncSession
-from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 from src.db.models import Secret,TelegramTransportState
-from src.db.engine import _ensure_operator_session_columns,_ensure_operator_principals,_ensure_vault_owner
+from sqlalchemy.ext.asyncio import create_async_engine
+from src.db.engine import _ensure_operator_session_columns,_ensure_operator_principals,_ensure_vault_owner,get_session
+from tests.support.db import install_database
 from src.extensions import paired_edge,telegram_transport
 from src.vault import repository,crypto
 from tests.test_operator_principal_migration import OLD_SCHEMA
@@ -23,21 +21,20 @@ async def test_old_device_auth_rejects_revoked_ciphertext_and_unrelated_keys_sur
     root=_workspace(tmp_path)
     monkeypatch.setattr(crypto,'_fernet',Fernet(Fernet.generate_key()))
     now=datetime.now(timezone.utc)
-    engine=create_async_engine('sqlite+aiosqlite:///'+str(root/'seraph.db'))
+    # The workspace file is the default database (#1241); a managed restore
+    # reopens it with a fresh engine.
+    def reopen():
+        # A rollback-journal engine, as before: the managed backup refuses a
+        # live workspace with WAL siblings beside it.
+        engine=create_async_engine('sqlite+aiosqlite:///'+str(root/'seraph.db'))
+        install_database(monkeypatch,engine)
+        return engine
+    engine=reopen()
     async with engine.begin() as db:
         await db.exec_driver_sql(OLD_SCHEMA)
         await db.exec_driver_sql("INSERT INTO operator_sessions VALUES ('legacy-root','hash',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'2099-01-01','2099-01-01',NULL,NULL,0)")
         await db.run_sync(SQLModel.metadata.create_all)
-    factory=sessionmaker(engine,class_=AsyncSession,expire_on_commit=False)
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
+    sessions=get_session
     ns=dict(vars(repository),get_session=sessions)
     async def quiet(*args,**kwargs): pass
     ns['_log_vault_event']=quiet
@@ -79,32 +76,30 @@ async def test_old_device_auth_rejects_revoked_ciphertext_and_unrelated_keys_sur
         return await edge_ns['authenticate_edge_request'](payload,extension_id=extension,reference=reference,name='edge',device_id=device,pairing_id=pairing,
             request_id='request-1',sequence=1,captured_at=now,content_hash='a'*64,media_type='application/json',content_size=0,
             capability_scope='media.ingest',data_purpose='screen_capture',policy_version=paired_edge.DEFAULT_POLICY_VERSION,presented_credential=edge_token)
-    with patch('src.db.engine.get_session',sessions):
-        assert (await edge_read()).owner_principal_id=='operator:single'
-        await adapter.poll_updates(owner_principal_id='operator:single',operator_session_id='legacy-root')
-        if transition=='migration':
-            async with engine.begin() as db:
-                await db.exec_driver_sql('BEGIN IMMEDIATE')
-                await _ensure_operator_session_columns(db)
-                await _ensure_vault_owner(db)
-                await _ensure_operator_principals(db)
-        else:
-            env={**os.environ,**_env(root),'PYTHONPATH':str(ROOT/'backend')}
-            def managed(*args):
-                result=subprocess.run([sys.executable,str(CLI),'--base-dir',str(tmp_path),*args],env=env,cwd=ROOT,capture_output=True,text=True)
-                assert result.returncode==0,result.stdout+result.stderr
-                return json.loads(result.stdout)
-            archive=managed('backup','--archive','old-devices.zip')['archive_path']
-            await engine.dispose()
-            managed('restore','--archive',archive,'--confirm')
-            engine=create_async_engine('sqlite+aiosqlite:///'+str(root/'seraph.db'))
-            factory=sessionmaker(engine,class_=AsyncSession,expire_on_commit=False)
-        with pytest.raises(InvalidToken): await edge_read()
-        with pytest.raises(InvalidToken): await adapter.poll_updates(owner_principal_id='operator:single',operator_session_id='legacy-root')
-        assert await get_old('openrouter_api_key')==edge_token
-        assert await get_old('seraph-node-pairing-not-a-credential')==edge_token
-        async with sessions() as db:
-            for identifier in ('edge-original','telegram-original'):
-                original=await db.get(Secret,identifier)
-                assert original.description=='metadata retained' and original.revoked_at is not None
+    assert (await edge_read()).owner_principal_id=='operator:single'
+    await adapter.poll_updates(owner_principal_id='operator:single',operator_session_id='legacy-root')
+    if transition=='migration':
+        async with engine.begin() as db:
+            await db.exec_driver_sql('BEGIN IMMEDIATE')
+            await _ensure_operator_session_columns(db)
+            await _ensure_vault_owner(db)
+            await _ensure_operator_principals(db)
+    else:
+        env={**os.environ,**_env(root),'PYTHONPATH':str(ROOT/'backend')}
+        def managed(*args):
+            result=subprocess.run([sys.executable,str(CLI),'--base-dir',str(tmp_path),*args],env=env,cwd=ROOT,capture_output=True,text=True)
+            assert result.returncode==0,result.stdout+result.stderr
+            return json.loads(result.stdout)
+        archive=managed('backup','--archive','old-devices.zip')['archive_path']
+        await engine.dispose()
+        managed('restore','--archive',archive,'--confirm')
+        engine=reopen()
+    with pytest.raises(InvalidToken): await edge_read()
+    with pytest.raises(InvalidToken): await adapter.poll_updates(owner_principal_id='operator:single',operator_session_id='legacy-root')
+    assert await get_old('openrouter_api_key')==edge_token
+    assert await get_old('seraph-node-pairing-not-a-credential')==edge_token
+    async with sessions() as db:
+        for identifier in ('edge-original','telegram-original'):
+            original=await db.get(Secret,identifier)
+            assert original.description=='metadata retained' and original.revoked_at is not None
     await engine.dispose()

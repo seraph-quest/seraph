@@ -1,7 +1,6 @@
 """Tests for the async DB-backed SessionManager (src/agent/session.py)."""
 
 import json
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +16,7 @@ from src.agent.session import (
     SessionOwnerMismatchError,
 )
 from src.audit.repository import audit_repository
+from tests.support.db import install_fake_session
 from src.scheduler.scheduled_jobs import scheduled_job_repository
 from src.security.trust_contract import canonical_digest
 
@@ -175,7 +175,7 @@ class TestGetOrCreate:
                 owner_principal_id="operator:single",
             )
 
-    async def test_explicit_id_integrity_race_rereads_existing_owner(self, sm):
+    async def test_explicit_id_integrity_race_rereads_existing_owner(self, sm, monkeypatch):
         from src.db.models import Session
 
         existing = Session(
@@ -219,15 +219,11 @@ class TestGetOrCreate:
 
         db = _Db()
 
-        @asynccontextmanager
-        async def _get_session():
-            yield db
-
-        with patch("src.agent.session.get_session", _get_session):
-            result = await sm.get_or_create(
-                "raced-session",
-                owner_principal_id="operator:single",
-            )
+        install_fake_session(monkeypatch, lambda: db)
+        result = await sm.get_or_create(
+            "raced-session",
+            owner_principal_id="operator:single",
+        )
 
         assert result is existing
         assert db.flush_calls == 1

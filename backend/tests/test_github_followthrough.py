@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from contextlib import asynccontextmanager
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -13,9 +12,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from src.extensions.github_followthrough import (
     ACTION_CREATE_COMMENT,
@@ -35,9 +31,9 @@ from src.extensions.github_followthrough import (
 )
 from src.approval.repository import fingerprint_tool_call
 from src.db.models import GitHubFollowthroughConnection
-from src.db import engine as db_engine
 from src.extensions.github_consent import GitHubConsentRequest
 from src.vault.repository import vault_repository
+from tests.support.db import install_fake_session
 from tests.test_github_connection_consent import active_connection, ORIGIN
 from src.workflows.job_runtime import (
     DurableJobLeaseError,
@@ -48,33 +44,6 @@ from src.workflows.job_runtime import (
 
 async def _public_resolver(_hostname: str, _port: int) -> list[str]:
     return ["93.184.216.34"]
-
-
-@asynccontextmanager
-async def _local_table_database(model):
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(model.__table__.create)
-
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    try:
-        yield _get_session
-    finally:
-        await engine.dispose()
 
 
 def _prepared(
@@ -752,11 +721,7 @@ async def test_current_routine_binding_requires_recovered_child_approval_checkpo
                 else SimpleNamespace(installed_package_digest=package_digest)
             )
 
-    @asynccontextmanager
-    async def fake_session():
-        yield _Session()
-
-    monkeypatch.setattr("src.extensions.github_followthrough.db_engine.get_session", fake_session)
+    install_fake_session(monkeypatch, _Session)
     monkeypatch.setattr(
         "src.extensions.github_followthrough.CapabilityPackLifecycle.status",
         lambda _self, *_args, **_kwargs: {

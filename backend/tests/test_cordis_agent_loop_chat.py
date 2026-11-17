@@ -14,15 +14,14 @@ propagation are the production ones (#1107).
 from __future__ import annotations
 
 import asyncio
-from contextlib import ExitStack, asynccontextmanager, contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from starlette.testclient import TestClient
 
@@ -31,16 +30,12 @@ from tests.cordis_agent_loop import (AGENT_LOOP, ScriptedModel, call, cutover_ag
                                      near_scripted_gateway, text, tools)
 from tests.cordis_research import NODE, needs_cordis, seed_composition_inventory
 from tests.test_research_native_vertical import real_auth  # noqa: F401
+from tests.support.db import install_database
 from tests.support.sync import Signal, wait_until_blocking
 
 pytestmark = [needs_cordis]
 SECRET = "VAULT_SECRET_CANARY_1019_value"
 ORIGIN = {"origin": "http://localhost:3001"}
-TARGETS = ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",
-           "src.db.engine.get_session", "src.auth.service.get_session", "src.model_fabric.repository.get_session",
-           "src.vault.repository.get_session", "src.audit.repository.get_session", "src.goals.repository.get_session",
-           "src.agent.session.get_session", "src.approval.repository.get_session", "src.api.ws.get_session",
-           "src.memory.repository.get_session", "src.profile.service.get_db", "src.api.profile.get_db")
 
 
 class Env:
@@ -99,19 +94,8 @@ def chat_env(tmp_path, monkeypatch, script, *, loop: str, onboarded: bool = True
     from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
     prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
     engine = create_async_engine(f"sqlite+aiosqlite:///{workspace / 'seraph.db'}", connect_args={"timeout": 5})
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except BaseException:
-                await session.rollback()
-                raise
-    for target in TARGETS:
-        monkeypatch.setattr(target, sessions)
+    # This environment's database is the default for every get_session caller (#1241).
+    install_database(monkeypatch, engine)
     if governed:
         # ADR-035: the chat route is the NEAR TEE text slot; the scripted
         # conversation is answered by the intercepted NEAR gateway.

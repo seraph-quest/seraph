@@ -37,7 +37,6 @@ async def api(task_runtime, monkeypatch):
     from src.work_board.dispatcher import WorkBoardDispatcher
     dispatcher = WorkBoardDispatcher(session_provider=sessions, general_tasks=service)
     monkeypatch.setattr(module, "dispatcher", dispatcher)
-    monkeypatch.setattr(module, "get_session", sessions)
     principal = TrustPrincipal(principal_id=OWNER, principal_type=PrincipalType.OPERATOR,
         session_id=SESSION, operator_session_id=SESSION,
         grants=(AuthorityGrant.CAPABILITY_EXECUTE, AuthorityGrant.MODEL_INFERENCE))

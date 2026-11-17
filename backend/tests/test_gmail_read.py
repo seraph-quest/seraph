@@ -11,25 +11,21 @@ import asyncio
 import base64
 import json
 from datetime import datetime, timedelta, timezone
-from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 import pytest
-import pytest_asyncio
 from fastapi import HTTPException
 from starlette.requests import Request
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
 
 from src.api import mail as mail_api
 from src.api.mail import ConnectionCreate, ModelConsent
 from src.auth.service import AuthenticatedOperator
-from src.db.models import Goal, GoogleServiceConnection, MailMessageBinding, MailReadConsent, Session, WorkBoardTask, WorkflowRunState
+from src.db.models import Goal, GoogleServiceConnection, MailMessageBinding, MailReadConsent, Session, WorkflowRunState
 from src.db.engine import _ensure_mail_columns
 from src.integrations.gmail_controls import (
     GmailControlError,
@@ -142,37 +138,10 @@ def _request_with_body(body: bytes, operator: AuthenticatedOperator) -> Request:
     return request
 
 
-@pytest_asyncio.fixture
-async def durable_job_db(monkeypatch):
-    """Small canonical durable-job schema for fast control-root tests."""
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(
-            lambda sync_connection: SQLModel.metadata.create_all(
-                sync_connection,
-                # Include the table referenced by Session.continuity_task_id.
-                tables=[Session.__table__, WorkBoardTask.__table__, WorkflowRunState.__table__],
-            )
-        )
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    @asynccontextmanager
-    async def get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", get_session)
-    yield
-    await engine.dispose()
+@pytest.fixture
+def durable_job_db(db):
+    """The test's own database (``db``): durable jobs reach it through the real get_session (#1241)."""
+    return db
 
 
 @pytest.mark.asyncio

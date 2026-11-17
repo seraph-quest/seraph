@@ -1,5 +1,4 @@
 import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import sqlite3
 import threading
@@ -14,6 +13,7 @@ from sqlmodel import SQLModel
 
 from config.settings import settings
 import src.db.engine as db_engine
+from tests.support.db import install_session_factory
 from src.db.engine import (
     _configure_sqlite_connection,
     _ensure_calendar_columns,
@@ -933,17 +933,8 @@ async def _run_file_backed_sqlite_auth_pool_is_bounded(
     setup_factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     factory = sessionmaker(engine, class_=BarrierSession, expire_on_commit=False)
 
-    @asynccontextmanager
-    async def _get_session():
-        async with factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    monkeypatch.setattr("src.auth.service.get_session", _get_session)
+    # The real get_session opens its sessions from this factory (#1241).
+    install_session_factory(monkeypatch, factory)
     from src.auth.service import authenticate_session
 
     try:
@@ -1079,17 +1070,8 @@ async def _run_file_backed_sqlite_auth_touch_is_coalesced(
 
     request_factory = sessionmaker(engine, class_=BarrierSession, expire_on_commit=False)
 
-    @asynccontextmanager
-    async def _get_session():
-        async with request_factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
-
-    monkeypatch.setattr("src.auth.service.get_session", _get_session)
+    # The real get_session opens its sessions from this factory (#1241).
+    install_session_factory(monkeypatch, request_factory)
     from src.auth import service as auth_service
     from src.auth.service import authenticate_session
 

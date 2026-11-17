@@ -169,7 +169,6 @@ async def charged_parent(task_runtime, monkeypatch, registry, mcp_descriptor):
 
     sessions, workspace = task_runtime
     monkeypatch.setattr(settings, "use_delegation", True)
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", sessions)
     owner = WorkBoardOwner(principal_id=OWNER, session_id=SESSION)
     service = GeneralTaskService(registry)
     service.start()

@@ -8,6 +8,7 @@ from sqlmodel import select
 
 from src.db.models import ScreenObservation
 from src.observer.screenshot_folder_source import ScreenshotFolderAnalysisResult
+from tests.support.db import install_fake_session
 
 
 def test_screenshot_folder_analysis_job_timeout_scales_with_batches(monkeypatch):
@@ -170,12 +171,6 @@ async def test_screenshot_folder_analysis_selection_retries_database_lock(monkey
             return FakeScalars()
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_exc):
-            return False
-
         async def execute(self, _statement):
             nonlocal attempts
             attempts += 1
@@ -186,7 +181,7 @@ async def test_screenshot_folder_analysis_selection_retries_database_lock(monkey
     async def no_sleep(_seconds):
         return None
 
-    monkeypatch.setattr(source, "get_session", lambda: FakeSession())
+    install_fake_session(monkeypatch, FakeSession)
     monkeypatch.setattr(source.asyncio, "sleep", no_sleep)
 
     result = await source._select_analysis_candidates_with_retry(limit=10)
@@ -206,12 +201,6 @@ async def test_screenshot_folder_analysis_persistence_retries_database_lock(monk
     attempts = 0
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_exc):
-            return False
-
         async def execute(self, _statement):
             nonlocal attempts
             attempts += 1
@@ -221,7 +210,7 @@ async def test_screenshot_folder_analysis_persistence_retries_database_lock(monk
     async def no_sleep(_seconds):
         return None
 
-    monkeypatch.setattr(source, "get_session", lambda: FakeSession())
+    install_fake_session(monkeypatch, FakeSession)
     monkeypatch.setattr(source.asyncio, "sleep", no_sleep)
 
     await source._persist_analysis_details_with_retry("obs-1", ["capture_artifacts:{}"])
@@ -240,19 +229,13 @@ async def test_screenshot_folder_analysis_persistence_reports_exhausted_database
         monkeypatch.setitem(source._PERSISTENCE_STATS, key, 0)
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_exc):
-            return False
-
         async def execute(self, _statement):
             raise OperationalError("update", {}, Exception("database is locked"))
 
     async def no_sleep(_seconds):
         return None
 
-    monkeypatch.setattr(source, "get_session", lambda: FakeSession())
+    install_fake_session(monkeypatch, FakeSession)
     monkeypatch.setattr(source.asyncio, "sleep", no_sleep)
 
     with pytest.raises(source.ScreenshotFolderPersistenceError):

@@ -1,6 +1,5 @@
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -19,6 +18,7 @@ from src.db.models import (
     MemoryTombstone,
 )
 from src.memory.repository import memory_repository
+from tests.support.db import install_fake_session
 from src.memory.retrieval_planner import plan_memory_retrieval
 from src.memory.snapshots import render_bounded_guardian_snapshot
 
@@ -750,7 +750,7 @@ async def test_cas_scoped_memory_suppresses_tombstone_winning_interleaving():
 
 
 @pytest.mark.asyncio
-async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone():
+async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone(monkeypatch):
     scope = dict(_SCOPED_LEARNING_SCOPE)
     scope_key = memory_repository._scoped_memory_key(
         kind=MemoryKind.procedural,
@@ -841,19 +841,15 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
 
     db = _RecoverySession()
 
-    @asynccontextmanager
-    async def fake_get_session():
-        yield db
-
-    with patch("src.memory.repository.get_session", fake_get_session):
-        result = await memory_repository.sync_scoped_memory(
-            kind=MemoryKind.procedural,
-            scope=scope,
-            content="Provider echo must not overwrite the recovered tombstone.",
-            summary="Provider echo",
-            source_session_id="provider-echo-session",
-            metadata={"unsafe": "revival"},
-        )
+    install_fake_session(monkeypatch, lambda: db)
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=scope,
+        content="Provider echo must not overwrite the recovered tombstone.",
+        summary="Provider echo",
+        source_session_id="provider-echo-session",
+        metadata={"unsafe": "revival"},
+    )
 
     assert result is None
     assert db.flush_calls == 1
@@ -866,7 +862,7 @@ async def test_sync_scoped_memory_integrity_error_recovery_preserves_tombstone()
 
 
 @pytest.mark.asyncio
-async def test_sync_scoped_memory_empty_echo_preserves_metadata_only_tombstone():
+async def test_sync_scoped_memory_empty_echo_preserves_metadata_only_tombstone(monkeypatch):
     scope = dict(_SCOPED_LEARNING_SCOPE)
     scope_key = memory_repository._scoped_memory_key(
         kind=MemoryKind.procedural,
@@ -921,18 +917,14 @@ async def test_sync_scoped_memory_empty_echo_preserves_metadata_only_tombstone()
 
     db = _Session()
 
-    @asynccontextmanager
-    async def fake_get_session():
-        yield db
-
-    with patch("src.memory.repository.get_session", fake_get_session):
-        result = await memory_repository.sync_scoped_memory(
-            kind=MemoryKind.procedural,
-            scope=scope,
-            content=None,
-            summary=None,
-            metadata={"unsafe": "metadata overwrite"},
-        )
+    install_fake_session(monkeypatch, lambda: db)
+    result = await memory_repository.sync_scoped_memory(
+        kind=MemoryKind.procedural,
+        scope=scope,
+        content=None,
+        summary=None,
+        metadata={"unsafe": "metadata overwrite"},
+    )
 
     assert result is None
     assert db.execute_calls == 2

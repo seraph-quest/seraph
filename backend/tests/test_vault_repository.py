@@ -1,12 +1,12 @@
 """Tests for VaultRepository (src/vault/repository.py)."""
 
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.audit.repository import audit_repository
 from src.vault.repository import VaultRepository
+from tests.support.db import install_fake_session
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ class TestStore:
         keys = await repo.list_keys()
         assert keys[0]["description"] == "v2"
 
-    async def test_commit_failure_logs_failed_not_success(self, repo):
+    async def test_commit_failure_logs_failed_not_success(self, repo, monkeypatch):
         result = MagicMock()
         result.scalars.return_value.first.return_value = None
         fake_db = MagicMock()
@@ -67,15 +67,13 @@ class TestStore:
         fake_db.flush = AsyncMock()
         fake_db.add = MagicMock()
 
-        @asynccontextmanager
-        async def _failing_get_session():
-            yield fake_db
-            raise RuntimeError("commit failed")
+        # The real get_session commits the fake's unit of work, and the commit fails.
+        fake_db.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+        fake_db.rollback = AsyncMock()
+        fake_db.info = {}
+        install_fake_session(monkeypatch, lambda: fake_db)
 
-        with (
-            patch("src.vault.repository.get_session", _failing_get_session),
-            patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event,
-        ):
+        with patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event:
             with pytest.raises(RuntimeError, match="commit failed"):
                 await repo.store("token", "value")
 
@@ -179,22 +177,20 @@ class TestDelete:
     async def test_nonexistent(self, async_db, repo):
         assert await repo.delete("nope") is False
 
-    async def test_commit_failure_logs_failed_not_success(self, repo):
+    async def test_commit_failure_logs_failed_not_success(self, repo, monkeypatch):
         result = MagicMock()
         result.scalars.return_value.first.return_value = MagicMock()
         fake_db = MagicMock()
         fake_db.execute = AsyncMock(return_value=result)
         fake_db.delete = AsyncMock()
 
-        @asynccontextmanager
-        async def _failing_get_session():
-            yield fake_db
-            raise RuntimeError("commit failed")
+        # The real get_session commits the fake's unit of work, and the commit fails.
+        fake_db.commit = AsyncMock(side_effect=RuntimeError("commit failed"))
+        fake_db.rollback = AsyncMock()
+        fake_db.info = {}
+        install_fake_session(monkeypatch, lambda: fake_db)
 
-        with (
-            patch("src.vault.repository.get_session", _failing_get_session),
-            patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event,
-        ):
+        with patch("src.vault.repository._log_vault_event", new=AsyncMock()) as mock_log_event:
             with pytest.raises(RuntimeError, match="commit failed"):
                 await repo.delete("token")
 

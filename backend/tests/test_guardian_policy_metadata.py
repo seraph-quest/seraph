@@ -17,10 +17,6 @@ from tests.test_operator_identity import enroll, login, recover, HEADERS, PASSWO
 
 @pytest.fixture
 async def metadata_client(isolated_runtime, app, monkeypatch):
-    sessions, _ = isolated_runtime
-    async with sessions() as db:
-        monkeypatch.setattr(type(db), "bind", property(lambda session: session.get_bind()), raising=False)
-    monkeypatch.setattr("src.goals.repository.get_session", sessions)
     monkeypatch.setattr(settings, "operator_auth_secret", PASSWORD)
     monkeypatch.setattr(settings, "operator_auth_secret_hash", "")
     monkeypatch.setattr(settings, "operator_auth_allow_unauthenticated_tests", False)

@@ -11,9 +11,8 @@ async def prepare_literal_planner(sessions, workspace, monkeypatch, owner, plan)
     from src.workspace.production import ProductionWorkspace, prepare_lifecycle_directory
     monkeypatch.setenv("SERAPH_WORKSPACE_LIFECYCLE_PATH", str(workspace.parent / "planning-deployment-lifecycle"))
     prepare_lifecycle_directory(ProductionWorkspace(host_root=workspace))
-    for target in ("src.model_fabric.repository.get_session", "src.api.settings.get_db",
-                   "src.work_board.dispatcher.get_session", "src.api.work_board.get_session"):
-        monkeypatch.setattr(target, sessions)
+    # ``sessions`` opens the test's default database, which every get_session
+    # caller already reaches through the production path (#1222, #1241).
     await prepare((workspace, None, sessions), monkeypatch, existing_owner=owner)
     state = {"content": json.dumps(plan.model_dump(mode="json")), "contacts": []}
     class Bytes(httpx.AsyncByteStream):

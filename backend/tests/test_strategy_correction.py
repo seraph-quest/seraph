@@ -1,7 +1,6 @@
 """Focused proof for bounded, reversible goal strategy correction."""
 
 from datetime import datetime, timezone
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +19,7 @@ from src.db.models import Goal, StrategyDelta
 from src.goals.contracts import CriterionVerifierKind, GoalSuccessCriterion
 from src.memory.control import StrategyDeltaReceipt
 from src.memory.control import record_strategy_delta_proposal
+from tests.support.db import install_fake_session
 from src.scheduler.jobs.strategist_tick import _run_opted_in_goal_web_brief, _web_brief_target
 from src.guardian.web_brief_to_file import WebBriefToFileResult
 
@@ -94,7 +94,7 @@ def test_strategy_delta_table_is_registered_with_unique_replay_fence():
 
 
 @pytest.mark.asyncio
-async def test_strategy_delta_persistence_receipt_keeps_supplied_deterministic_id():
+async def test_strategy_delta_persistence_receipt_keeps_supplied_deterministic_id(monkeypatch):
     captured = []
 
     class _Result:
@@ -117,21 +117,17 @@ async def test_strategy_delta_persistence_receipt_keeps_supplied_deterministic_i
         def expunge(self, _delta):
             return None
 
-    @asynccontextmanager
-    async def _session():
-        yield _DB()
-
-    with patch("src.memory.control.get_session", _session):
-        receipt = await record_strategy_delta_proposal(
-            goal_id="goal-1",
-            source_event_id="corr-1",
-            before={"query": "old"},
-            after={"query": "new"},
-            author_id="operator:test",
-            goal_revision_before=1,
-            reason="operator correction",
-            delta_id="deterministic-delta",
-        )
+    install_fake_session(monkeypatch, _DB)
+    receipt = await record_strategy_delta_proposal(
+        goal_id="goal-1",
+        source_event_id="corr-1",
+        before={"query": "old"},
+        after={"query": "new"},
+        author_id="operator:test",
+        goal_revision_before=1,
+        reason="operator correction",
+        delta_id="deterministic-delta",
+    )
 
     assert captured[0].delta_id == "deterministic-delta"
     assert receipt.delta_id == "deterministic-delta"

@@ -7,7 +7,7 @@ No model, embedding, provider, or network seam is involved.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -19,10 +19,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import sessionmaker
-from sqlmodel import SQLModel, select
-from sqlmodel.orm.session import Session
+from sqlalchemy import text
+from sqlmodel import select
 
 from config.settings import settings
 from src.api import memory as memory_api
@@ -31,23 +29,18 @@ from src.db.models import (
     AuditEvent,
     Memory,
     MemoryCategory,
-    MemoryEntity,
     MemoryKind,
     MemoryProposal,
     MemoryProposalDecisionEffect,
     MemoryProposalPrivacyState,
     MemoryProposalProviderContactState,
     MemoryProposalStatus,
-    MemorySnapshot,
-    MemorySource,
     MemoryStatus,
     MemoryTombstone,
-    Session as SessionModel,
     WorkBoardDecisionAdmissionStatus,
     WorkBoardDecisionReceipt,
     WorkBoardDecisionReceiptStage,
     WorkBoardDecisionStatus,
-    WorkBoardTask,
 )
 from src.extensions.capability_execution import CapabilityJournalError
 from src.memory.repository import (
@@ -87,97 +80,17 @@ def _runtime_operator(operator, *, revoked: bool | None = None):
         reset_runtime_context(tokens)
 
 
-class _SyncAsyncSession:
-    """Small async-shaped adapter around a real synchronous SQLite session.
-
-    The project fixture's aiosqlite worker can stall in constrained hosts.  A
-    synchronous SQLModel session still exercises the repository's SQL/CAS and
-    tombstone code against a real file-backed SQLite database.
-    """
-
-    def __init__(self, session: Session):
-        self._session = session
-
-    @property
-    def bind(self):
-        """Expose the wrapped SQLAlchemy engine for dialect-aware helpers."""
-        return self._session.get_bind()
-
-    async def execute(self, statement, *args, **kwargs):
-        return self._session.execute(statement, *args, **kwargs)
-
-    async def flush(self):
-        self._session.flush()
-
-    async def commit(self):
-        self._session.commit()
-
-    async def rollback(self):
-        self._session.rollback()
-
-    def add(self, value):
-        self._session.add(value)
-
-    def expunge(self, value):
-        self._session.expunge(value)
-
-
 @pytest.fixture
-def local_memory_db(tmp_path, monkeypatch):
+def local_memory_db(tmp_path, monkeypatch, db):
+    """The test's own file database (``db``) behind the real ``get_session`` (#1241).
+
+    Yields ``(sessions, database_path)``; tests also inspect the file with
+    ``sqlite3`` directly.
+    """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(settings, "workspace_dir", str(workspace))
-    database_path = tmp_path / "canonical-memory.db"
-    engine = create_engine(
-        f"sqlite:///{database_path}",
-        connect_args={"check_same_thread": False, "timeout": 5},
-    )
-
-    @event.listens_for(engine, "connect")
-    def _configure_sqlite(dbapi_connection, _connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.close()
-
-    factory = sessionmaker(engine, class_=Session, expire_on_commit=False)
-    SQLModel.metadata.create_all(
-        engine,
-        tables=[
-            MemoryEntity.__table__,
-            Memory.__table__,
-            MemorySource.__table__,
-            MemoryTombstone.__table__,
-            MemoryProposal.__table__,
-            WorkBoardDecisionReceipt.__table__,
-            MemorySnapshot.__table__,
-            AuditEvent.__table__,
-            SessionModel.__table__,
-            # Required by Session.continuity_task_id even for null inserts.
-            WorkBoardTask.__table__,
-        ],
-    )
-
-    @asynccontextmanager
-    async def get_session():
-        session = factory()
-        wrapped = _SyncAsyncSession(session)
-        try:
-            yield wrapped
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
-    with (
-        patch("src.memory.repository.get_session", get_session),
-        patch("src.audit.repository.get_session", get_session),
-    ):
-        yield get_session, database_path
-    engine.dispose()
+    yield db, db.path
 
 
 async def _memory_row(get_session, memory_id: str) -> Memory | None:
@@ -1839,12 +1752,11 @@ async def test_owner_memory_surfaces_redact_other_owner_reconciliation_content(l
     )
     request = SimpleNamespace(state=SimpleNamespace(operator=operator))
 
-    with patch("src.memory.decay.get_session", get_session):
-        snapshot = await memory_control.get_memory_live_controls_snapshot(
-            limit=8,
-            owner_session_id=owner_session,
-        )
-        providers = await memory_api.list_memory_providers_route(request)
+    snapshot = await memory_control.get_memory_live_controls_snapshot(
+        limit=8,
+        owner_session_id=owner_session,
+    )
+    providers = await memory_api.list_memory_providers_route(request)
 
     serialized = json.dumps({"snapshot": snapshot, "providers": providers}, sort_keys=True)
     assert "OTHER_OWNER_SECRET" not in serialized

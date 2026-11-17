@@ -1,7 +1,6 @@
 """Authenticated work-board WebSocket cursor ordering checks."""
 
 import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,6 +13,7 @@ from src.scheduler.connection_manager import ws_manager
 from src.work_board.contracts import WorkBoardOwner
 from src.work_board.repository import BoardEventPage
 from src.work_board.time import serialize_utc_datetime
+from tests.support.db import install_fake_session
 
 
 OWNER = WorkBoardOwner(
@@ -87,13 +87,9 @@ def _payload(event_id: int):
 
 
 def _patch_websocket(monkeypatch, list_events, queue):
-    @asynccontextmanager
-    async def fake_session():
-        yield object()
-
     monkeypatch.setattr("src.api.ws.authenticate_websocket", AsyncMock(return_value=_operator()))
     monkeypatch.setattr("src.api.ws.auth_enabled", lambda: False)
-    monkeypatch.setattr("src.api.ws.get_session", fake_session)
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr("src.api.work_board.repository.list_events", list_events)
     monkeypatch.setattr("src.api.ws.ws_manager.connect_work_board", lambda *_args, **_kwargs: queue)
     monkeypatch.setattr("src.api.ws.ws_manager.disconnect_work_board", lambda _websocket: None)

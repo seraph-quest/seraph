@@ -11,6 +11,7 @@ import pytest
 from sqlmodel import select
 
 from src.db.models import Goal, GuardianDecisionPacket, GuardianSourceBaseline, GuardianSourceWatch, Session
+from tests.support.db import install_fake_session
 from src.guardian.source_watch import (
     CAPABILITY_ID,
     SourceWatchError,
@@ -1134,12 +1135,6 @@ async def test_source_watch_approval_has_exact_visible_scope_without_source_cont
         captured["transition"] = (job_id, status, kwargs)
 
     class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
         async def execute(self, _statement):
             return SimpleNamespace(
                 scalars=lambda: SimpleNamespace(first=lambda: packet),
@@ -1152,7 +1147,7 @@ async def test_source_watch_approval_has_exact_visible_scope_without_source_cont
     monkeypatch.setattr(source_watch_module.approval_repository, "update_pending_details", update_pending)
     monkeypatch.setattr(source_watch_module.durable_job_repository, "bind_approval_id", bind_approval)
     monkeypatch.setattr(source_watch_module.durable_job_repository, "transition_job", transition)
-    monkeypatch.setattr(source_watch_module.db_engine, "get_session", FakeSession)
+    install_fake_session(monkeypatch, FakeSession)
 
     result = await SourceWatchService()._hold_for_approval(watch, packet, current)
 

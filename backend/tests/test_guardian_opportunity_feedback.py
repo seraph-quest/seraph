@@ -168,6 +168,12 @@ def test_empty_feedback_reason_and_revision_zero_recommendation_are_valid():
     assert OpportunityRecommendationRequest(expected_opportunity_revision=1,expected_feedback_revision=0,idempotency_key=uuid4()).expected_feedback_revision==0
 
 
+async def _sqlite_in_transaction(db):
+    """Whether SQLite itself has an open transaction on this session's connection."""
+    connection = await db.connection()
+    return (await connection.get_raw_connection()).driver_connection.in_transaction
+
+
 @pytest.mark.parametrize('has_feedback_at',[True,False])
 async def test_populated_previous_schema_migration_repeat_is_additive(tmp_path,has_feedback_at):
     from src.db.engine import _ensure_legacy_columns
@@ -205,7 +211,7 @@ async def test_optional_publication_effect_rechecks_before_any_candidate_write(i
     phases = []
     async def stage(db, **scope):
         phases.append('stage')
-        assert db._session.connection().connection.driver_connection.in_transaction is False
+        assert await _sqlite_in_transaction(db) is False
         assert scope['watch_id'] == watch['id'] and scope['watch_revision'] == 1
         assert scope['goal_id'] == goal.id and scope['goal_revision'] == 1
         if preference_state == 'key_missing':
@@ -216,7 +222,7 @@ async def test_optional_publication_effect_rechecks_before_any_candidate_write(i
         return witnessed
     async def recheck(db, *, witness):
         phases.append('recheck')
-        assert witness is witnessed and db._session.connection().connection.driver_connection.in_transaction is True
+        assert witness is witnessed and await _sqlite_in_transaction(db) is True
         if preference_state == 'rolled_back':
             raise BoardError('opportunity_review_stale', 'Preference rolled back')
         return {'status':'active', 'scope':{'action':'suppress_watch'}, 'proposal_id':'reviewed-preference'}

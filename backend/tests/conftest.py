@@ -2,6 +2,7 @@ import asyncio
 import copy
 import importlib
 import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import time
@@ -51,7 +52,8 @@ from src.memory.snapshots import _reset_bounded_guardian_snapshot_cache
 from src.utils.background import drain_tracked_tasks, join_tracked_threads
 from tests.support.brokers import fresh_inference_broker  # noqa: F401 - fixture
 from tests.support.db import (arm_canonical_engine_sentinel, create_test_database, install_database,
-                              remove_test_database, take_canonical_engine_violations)
+                              note_test_finished, remove_test_database, take_canonical_engine_violations,
+                              take_late_canonical_engine_violations)
 
 # ── Settings isolation ──────────────────────────────────
 
@@ -81,11 +83,19 @@ def pytest_runtest_setup(item):
     # Taken before any fixture runs, so the restore below returns the shared
     # settings object to exactly its pre-test state.
     item.stash[_SETTINGS_SNAPSHOT_KEY] = snapshot_settings()
-    take_canonical_engine_violations()
+    # A connection made between tests came from work the previous test left
+    # running; report it instead of clearing it (#1241).
+    late = take_late_canonical_engine_violations()
     try:
         return (yield)
     finally:
-        _fail_on_canonical_engine_violations("setup")
+        try:
+            _fail_on_canonical_engine_violations("setup")
+        finally:
+            # Reported even when setup itself failed: the late connection
+            # belongs to the previous test and must not be lost.
+            if late:
+                pytest.fail(late, pytrace=False)
 
 
 @pytest.hookimpl(wrapper=True)
@@ -103,7 +113,24 @@ def pytest_runtest_teardown(item, nextitem):
             # Items live for the whole session; do not keep every test's copy.
             del item.stash[_SETTINGS_SNAPSHOT_KEY]
             restore_settings(snapshot)
-        _fail_on_canonical_engine_violations("teardown")
+        try:
+            _fail_on_canonical_engine_violations("teardown")
+        finally:
+            note_test_finished(item.nodeid)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # A connection made after the last test's teardown has no next test to
+    # fail; fail the run instead (#1241).
+    late = take_late_canonical_engine_violations()
+    if late:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(late, red=True)
+        else:
+            sys.stderr.write(late + "\n")
+        if session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 # ── Database seam (#1222) ───────────────────────────────

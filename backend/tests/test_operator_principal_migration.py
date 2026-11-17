@@ -1,6 +1,5 @@
 """Forward-only file SQLite migration, rollback and older issuer denial."""
 import ast
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import subprocess
 from pathlib import Path
@@ -8,9 +7,10 @@ import uuid
 import pytest
 from sqlalchemy import Column, String, DateTime, Boolean, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import declarative_base, sessionmaker
-from src.db.engine import _ensure_operator_session_columns, _ensure_operator_principals
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.orm import declarative_base
+from src.db.engine import _ensure_operator_session_columns, _ensure_operator_principals, create_database_engine, get_session
+from tests.support.db import install_database
 from src.db.models import OperatorSession
 from src.auth import service
 
@@ -32,18 +32,10 @@ async def test_existing_principals_migration_reopen_and_actual_older_auth_fail_c
         await _ensure_operator_principals(db)
         await _ensure_operator_principals(db)
     await engine.dispose()
-    engine = create_async_engine('sqlite+aiosqlite:///'+str(path))
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-    monkeypatch.setattr(service, 'get_session', sessions)
+    # Reopen the migrated file as the default database (#1241).
+    engine = create_database_engine('sqlite+aiosqlite:///'+str(path))
+    install_database(monkeypatch, engine)
+    sessions = get_session
     monkeypatch.setattr(service.settings, 'operator_auth_secret', 'migration-test')
     Base = declarative_base()
     class LegacySession(Base):

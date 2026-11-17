@@ -36,8 +36,8 @@ def owner():
 def evidence_storage(async_db, monkeypatch, tmp_path, client):
     client.headers["origin"] = "http://localhost:3001"
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
-    with patch("src.api.task_evidence.get_session", async_db), patch("src.api.mail.get_session", async_db):
-        yield tmp_path
+    # ``async_db`` is the default database: get_session reaches it unpatched.
+    yield tmp_path
 
 
 async def seed(async_db, owner, root):

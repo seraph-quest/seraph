@@ -51,7 +51,6 @@ async def test_original_sealed_handoff_mutation_denies_before_contact(task_runti
             db.add(producer)
     else:
         from src.vault import repository, crypto
-        monkeypatch.setattr(repository, "get_session", sessions)
         monkeypatch.setattr(crypto, "_fernet", None)
         await repository.VaultRepository().store("new-selected-vault-row", "new-private-test-value",
             owner_principal_id=owner.principal_id)

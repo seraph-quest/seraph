@@ -11,11 +11,6 @@ from types import SimpleNamespace
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel
 from sqlmodel import select
 
 from config.settings import settings
@@ -77,7 +72,6 @@ async def _seed_packet(
     owner_session_id: str = SESSION,
     malicious: bool = False,
     valid_readbacks: bool = True,
-    db_session=None,
 ) -> tuple[Goal, GuardianSourceWatch, GuardianDecisionPacket]:
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
     material = ["source-a"] if material is None and status == "succeeded" else (material or [])
@@ -192,7 +186,7 @@ async def _seed_packet(
         plan_revision=1,
         effect_receipts_json=json.dumps(effects),
     )
-    session_provider = db_session or async_db
+    session_provider = async_db
     async with session_provider() as db:
         db.add(goal)
         db.add(watch)
@@ -597,91 +591,45 @@ async def test_inbox_acceptance_crash_reconciles_one_triage_task(async_db, tmp_p
 
 @pytest.mark.asyncio
 async def test_concurrent_different_keys_have_one_cas_winner(async_db, tmp_path, monkeypatch):
-    database_path = tmp_path / "guardian-inbox-cas.db"
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{database_path}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
+    # The test's own production-configured file database (``async_db``): each
+    # concurrent action gets its own pooled connection and SQLite writer lock.
+    file_session = async_db
+    _, _, packet = await _seed_packet(
+        async_db,
+        tmp_path,
+        monkeypatch,
+        packet_id="packet-concurrent",
     )
+    row = await ensure_inbox_disposition(packet_id=packet.id)
+    assert row is not None
 
-    @event.listens_for(engine.sync_engine, "connect")
-    def _configure_sqlite(connection, _record):
-        cursor = connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=5000")
-        cursor.close()
+    async def accept(key: str):
+        try:
+            return await apply_action(
+                owner_principal_id=OWNER,
+                owner_session_id=SESSION,
+                item_id=row.id,
+                action="accept_followup",
+                expected_revision=1,
+                idempotency_key=key,
+            )
+        except Exception as exc:  # the loser is checked below as a typed CAS failure
+            return exc
 
-    tables = [
-        Session.__table__,
-        Goal.__table__,
-        GuardianSourceWatch.__table__,
-        GuardianDecisionPacket.__table__,
-        WorkflowRunState.__table__,
-        GuardianInboxDisposition.__table__,
-        GuardianInboxAction.__table__,
-        WorkBoardTask.__table__,
-        # WorkBoardRepository emits the task-created event in the same
-        # transaction, so the event table is part of the isolated proof.
-        WorkBoardEvent.__table__,
-    ]
-    async with engine.begin() as connection:
-        await connection.run_sync(lambda sync: SQLModel.metadata.create_all(sync, tables=tables))
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    from contextlib import asynccontextmanager
-
-    @asynccontextmanager
-    async def file_session():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-
-    # Restore before async_db tears down its overlapping session patch.
-    with monkeypatch.context() as scoped:
-        scoped.setattr(source_watch_module.db_engine, "get_session", file_session)
-        _, _, packet = await _seed_packet(
-            async_db,
-            tmp_path,
-            scoped,
-            packet_id="packet-concurrent",
-            db_session=file_session,
-        )
-        row = await ensure_inbox_disposition(packet_id=packet.id)
-        assert row is not None
-
-        async def accept(key: str):
-            try:
-                return await apply_action(
-                    owner_principal_id=OWNER,
-                    owner_session_id=SESSION,
-                    item_id=row.id,
-                    action="accept_followup",
-                    expected_revision=1,
-                    idempotency_key=key,
-                )
-            except Exception as exc:  # the loser is checked below as a typed CAS failure
-                return exc
-
-        results = await asyncio.gather(accept("concurrent-a"), accept("concurrent-b"))
-        successes = [result for result in results if isinstance(result, dict)]
-        failures = [result for result in results if isinstance(result, Exception)]
-        assert len(successes) == 1
-        assert len(failures) == 1
-        assert isinstance(failures[0], InboxError)
-        assert failures[0].code in {"stale_revision", "inbox_item_unavailable", "readback_blocked"}
-        async with file_session() as db:
-            tasks = list((await db.execute(select(WorkBoardTask))).scalars())
-            actions = list((await db.execute(select(GuardianInboxAction))).scalars())
-            disposition = await db.get(GuardianInboxDisposition, row.id)
-        assert len(tasks) == 1
-        assert len(actions) == 1
-        assert disposition is not None and disposition.state == "accepted"
-    await engine.dispose()
+    results = await asyncio.gather(accept("concurrent-a"), accept("concurrent-b"))
+    successes = [result for result in results if isinstance(result, dict)]
+    failures = [result for result in results if isinstance(result, Exception)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], InboxError)
+    assert failures[0].code in {"stale_revision", "inbox_item_unavailable", "readback_blocked"}
+    async with file_session() as db:
+        tasks = list((await db.execute(select(WorkBoardTask))).scalars())
+        actions = list((await db.execute(select(GuardianInboxAction))).scalars())
+        disposition = await db.get(GuardianInboxDisposition, row.id)
+    assert len(tasks) == 1
+    assert len(actions) == 1
+    assert disposition is not None and disposition.state == "accepted"
 
 
 @pytest.mark.asyncio

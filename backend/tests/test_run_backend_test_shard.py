@@ -15,6 +15,7 @@ from scripts.run_backend_test_shard import (
     main,
     pytest_invocations_for_target,
     run_shard_files,
+    stale_duration_warnings,
     timeout_for_file,
 )
 
@@ -1038,3 +1039,29 @@ def test_quarantine_only_lane_treats_an_invocation_without_quarantined_tests_as_
                return_value=CompletedProcess(args=["pytest"], returncode=5)):
         assert run_shard_files(tmp_path, ["tests/test_alpha.py"], keep_going=True, no_tests_ok=True) == 0
         assert run_shard_files(tmp_path, ["tests/test_alpha.py"], keep_going=True) == 5
+
+
+def test_stale_duration_warning_names_files_far_slower_than_recorded():
+    # #1274: test_work_board_memory was recorded at 34 s and ran ~500 s.
+    measured = {"tests/test_slow.py": 34.2, "tests/test_noisy.py": 30.0, "tests/test_fast.py": 1.0}
+    observed = {"tests/test_slow.py": 505.8, "tests/test_noisy.py": 95.0, "tests/test_fast.py": 100.0,
+                "tests/test_unmeasured.py": 900.0}
+    [warning] = stale_duration_warnings(observed, measured)
+    assert warning.startswith("::warning title=Stale backend test duration::tests/test_slow.py ran 506s")
+    assert "recorded 34s" in warning and "--update-durations-from" in warning
+
+
+def test_shard_run_warns_on_stale_duration_but_not_for_a_red_file(tmp_path, capsys):
+    clock = iter([0.0, 600.0, 600.0, 1200.0])
+    with patch("scripts.run_backend_test_shard.subprocess.run") as run, patch(
+        "scripts.run_backend_test_shard.time.perf_counter", side_effect=lambda: next(clock)
+    ), patch(
+        "scripts.run_backend_test_shard.load_measured_durations",
+        return_value={"tests/test_green.py": 30.0, "tests/test_red.py": 30.0},
+    ):
+        run.side_effect = [CompletedProcess(args=["pytest"], returncode=0),
+                           CompletedProcess(args=["pytest"], returncode=1)]
+        assert run_shard_files(tmp_path, ["tests/test_green.py", "tests/test_red.py"], keep_going=True) == 1
+    output = capsys.readouterr().out
+    assert "::warning title=Stale backend test duration::tests/test_green.py ran 600s" in output
+    assert "Stale backend test duration::tests/test_red.py" not in output

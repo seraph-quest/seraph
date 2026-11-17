@@ -270,6 +270,8 @@ This is a first presence path, not a full desktop shell:
 - an expired lease or daemon failure becomes `unknown` and requires explicit operator reconciliation before retry
 - broader channel controls and richer desktop presence are still future work
 
+**Receipt authentication ([#1258](https://github.com/seraph-quest/seraph/issues/1258)):** the display-attempted, ack and fail receipts are mutations sent without an `Origin`, so the backend accepts them only with the paired-edge credential, exactly like the context post. When this Mac is paired, the daemon adds the same paired-edge headers to each receipt (alongside `X-Seraph-Daemon-Id`) and sends them only to the validated loopback backend. Unpaired, the receipts are refused, so the daemon will not display a notification it cannot fence.
+
 ## How It Works
 
 1. Every `--interval` seconds, checks if the user is idle (no input for `--idle-timeout` seconds)

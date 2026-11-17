@@ -342,6 +342,243 @@ async def test_paired_daemon_context_post_is_accepted_in_local_mode(local_mode, 
     assert manager.get_context().active_window == "Code"
 
 
+# ── Daemon notification receipts (#1258) ──────────────────────────────
+
+_EDGE_ADAPTER = {"extension_id": "seraph.openclaw-device-bridge", "reference": "connectors/nodes/device.yaml"}
+_RECEIPT_WORKER = "daemon-local-1"
+
+
+@asynccontextmanager
+async def _paired_daemon(app, monkeypatch, tmp_path):
+    """Local mode with a paired daemon; yields the client and its headers."""
+    from tests.test_observer_local_capture_upload import _write_edge_extension
+
+    workspace = tmp_path / "workspace"
+    _write_edge_extension(workspace)
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    async with _client(app) as client:
+        pair = await client.post(
+            "/api/nodes/pairings/pair",
+            headers={"origin": ORIGIN},
+            json={**_EDGE_ADAPTER, "device_id": "mac-local-1", "pairing_id": "pair-local-1", "label": "Local daemon"},
+        )
+        assert pair.status_code == 200, pair.text
+        yield client, {
+            "authorization": f"Bearer {pair.json()['credential']}",
+            "x-seraph-node-device": "mac-local-1",
+            "x-seraph-node-pairing": "pair-local-1",
+            "x-seraph-daemon-id": _RECEIPT_WORKER,
+        }
+
+
+async def _claim(client, body: str) -> tuple[str, int]:
+    from src.observer.native_notification_queue import native_notification_queue
+
+    notification = await native_notification_queue.enqueue(
+        intervention_id=None, title="Seraph", body=body, intervention_type="advisory", urgency=3,
+    )
+    poll = await client.get(
+        "/api/observer/notifications/next",
+        params={"worker_id": _RECEIPT_WORKER},
+        headers={"x-seraph-daemon-id": _RECEIPT_WORKER},
+    )
+    assert poll.status_code == 200, poll.text
+    claimed = poll.json()["notification"]
+    assert claimed["id"] == notification.id
+    return notification.id, claimed["fencing_token"]
+
+
+def _receipt(fence: int, **extra) -> dict[str, object]:
+    return {"worker_id": _RECEIPT_WORKER, "fencing_token": fence, **extra}
+
+
+@pytest.mark.asyncio
+async def test_paired_daemon_notification_receipts_succeed_without_origin(local_mode, app, async_db, monkeypatch, tmp_path):
+    """#1258: the daemon's no-Origin ack, fail and display-attempted posts are
+    accepted on the paired credential instead of ``mutation_origin_required``."""
+    from src.observer.native_notification_queue import native_notification_queue
+
+    async with _paired_daemon(app, monkeypatch, tmp_path) as (client, daemon_headers):
+        shown_id, shown_fence = await _claim(client, "shown")
+        attempted = await client.post(
+            f"/api/observer/notifications/{shown_id}/display-attempted",
+            json=_receipt(shown_fence), headers=daemon_headers,
+        )
+        acked = await client.post(
+            f"/api/observer/notifications/{shown_id}/ack", json=_receipt(shown_fence), headers=daemon_headers,
+        )
+        failed_id, failed_fence = await _claim(client, "failed")
+        failed_attempt = await client.post(
+            f"/api/observer/notifications/{failed_id}/display-attempted",
+            json=_receipt(failed_fence), headers=daemon_headers,
+        )
+        failed = await client.post(
+            f"/api/observer/notifications/{failed_id}/fail",
+            json=_receipt(failed_fence, reason="display_failed"), headers=daemon_headers,
+        )
+    assert attempted.status_code == 200, attempted.text
+    assert attempted.json() == {"display_attempted": True}
+    assert acked.status_code == 200, acked.text
+    assert acked.json() == {"acked": True}
+    assert failed_attempt.json() == {"display_attempted": True}, failed_attempt.text
+    assert failed.status_code == 200, failed.text
+    assert failed.json() == {"failed": True}
+    assert (await native_notification_queue.get(shown_id)).delivery_status == "delivered"
+    assert (await native_notification_queue.get(failed_id)).delivery_status == "unknown"
+    assert await native_notification_queue.count() == 0
+
+
+@pytest.mark.asyncio
+async def test_daemon_notification_receipts_refuse_missing_or_wrong_credential(local_mode, app, async_db, monkeypatch, tmp_path):
+    from src.observer.native_notification_queue import native_notification_queue
+
+    async with _paired_daemon(app, monkeypatch, tmp_path) as (client, daemon_headers):
+        notification_id, fence = await _claim(client, "guarded")
+        no_credential = {"x-seraph-daemon-id": _RECEIPT_WORKER}
+        identity_only = {k: v for k, v in daemon_headers.items() if k != "authorization"}
+        wrong = {**daemon_headers, "authorization": "Bearer not-the-credential"}
+        wrong_device = {**daemon_headers, "x-seraph-node-device": "other-device"}
+        wrong_worker = {**daemon_headers, "x-seraph-daemon-id": "other-daemon"}
+        refused = {}
+        for action in ("display-attempted", "ack", "fail"):
+            url = f"/api/observer/notifications/{notification_id}/{action}"
+            refused[action] = [
+                await client.post(url, json=_receipt(fence), headers=headers)
+                for headers in (no_credential, identity_only, wrong, wrong_device, wrong_worker)
+            ]
+        # Authentication precedes the body: an unauthenticated malformed body
+        # is refused as unauthenticated; once authenticated it is a 422.
+        url = f"/api/observer/notifications/{notification_id}/ack"
+        malformed_unauthenticated = await client.post(url, content=b"{not json", headers=no_credential)
+        malformed = await client.post(url, content=b"{not json", headers=daemon_headers)
+        oversized = await client.post(
+            url, json=_receipt(fence, padding="x" * 5000), headers=daemon_headers,
+        )
+        revoke = await client.post(
+            "/api/nodes/pairings/revoke", headers={"origin": ORIGIN}, json={**_EDGE_ADAPTER, "reason": "lost"}
+        )
+        revoked = await client.post(url, json=_receipt(fence), headers=daemon_headers)
+    for action, responses in refused.items():
+        missing, identity, bad, bad_device, bad_worker = responses
+        for response in (missing, identity):
+            assert response.status_code == 401, (action, response.text)
+            assert response.json()["detail"]["code"] == "authentication_required"
+        assert bad.status_code == 401, (action, bad.text)
+        assert bad_device.status_code == 403, (action, bad_device.text)
+        assert bad_device.json()["detail"]["code"] == "pairing_identity_mismatch"
+        assert bad_worker.status_code == 401, (action, bad_worker.text)
+    assert malformed_unauthenticated.status_code == 401
+    assert malformed.status_code == 422
+    assert malformed.json()["detail"]["code"] == "invalid_notification_receipt"
+    assert oversized.status_code == 413
+    assert oversized.json()["detail"]["code"] == "notification_receipt_too_large"
+    assert revoke.status_code == 200, revoke.text
+    assert revoked.status_code in {401, 403}, revoked.text
+    # No refused receipt moved the claim.
+    assert (await native_notification_queue.get(notification_id)).delivery_status == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_daemon_notification_receipt_needs_pairing_owned_by_local_operator(local_mode, app, async_db, monkeypatch, tmp_path):
+    from src.api import observer
+
+    async with _paired_daemon(app, monkeypatch, tmp_path) as (client, daemon_headers):
+        notification_id, fence = await _claim(client, "owned")
+        authenticate = observer._authenticate_paired_daemon
+
+        async def foreign_owner(request):
+            uploader, policy = await authenticate(request)
+            return {**uploader, "owner_principal_id": "operator:someone-else"}, policy
+
+        monkeypatch.setattr(observer, "_authenticate_paired_daemon", foreign_owner)
+        response = await client.post(
+            f"/api/observer/notifications/{notification_id}/display-attempted",
+            json=_receipt(fence), headers=daemon_headers,
+        )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "pairing_owner_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_other_notification_routes_keep_browser_origin_rule(local_mode, app, async_db, monkeypatch, tmp_path):
+    """The receipt exemption is an exact template: no other notification
+    route, method or near-miss path gets a no-Origin pass, even with the
+    paired credential; a cookie or foreign Origin keeps the browser rule."""
+    async with _paired_daemon(app, monkeypatch, tmp_path) as (client, daemon_headers):
+        notification_id, fence = await _claim(client, "fenced")
+        body = _receipt(fence)
+        base = f"/api/observer/notifications/{notification_id}"
+        no_origin = {
+            path: await client.post(path, json=json_body, headers=daemon_headers)
+            for path, json_body in (
+                (f"{base}/dismiss", {}),
+                ("/api/observer/notifications/dismiss-all", {}),
+                ("/api/observer/notifications/test", {}),
+                (f"{base}/reconcile", {"action": "retry"}),
+                (f"{base}/ack/", body),
+                (f"{base}/x/ack", body),
+                (f"{base}/acknowledge", body),
+                (f"/api/observer/notifications/{notification_id}%2Fx/ack", body),
+                (f"/api/observer/notifications/{'a' * 129}/ack", body),
+                ("/api/observer/notifications/ack", body),
+            )
+        }
+        put = await client.put(f"{base}/ack", json=body, headers=daemon_headers)
+        with_cookie = await client.post(
+            f"{base}/ack", json=body, headers={**daemon_headers, "cookie": "seraph_session=x"},
+        )
+        foreign = await client.post(f"{base}/ack", json=body, headers={**daemon_headers, "origin": "https://evil.example"})
+        bad_host = await client.post(f"{base}/ack", json=body, headers={**daemon_headers, "host": "evil.example"})
+        # The browser path (allowed Origin, local operator) is unchanged and
+        # needs no paired credential.
+        browser = await client.post(
+            f"{base}/display-attempted", json=body, headers={"origin": ORIGIN, "x-seraph-daemon-id": _RECEIPT_WORKER},
+        )
+    async with _client(app, peer="192.168.1.30") as lan_client:
+        lan = await lan_client.post(f"{base}/ack", json=body, headers=daemon_headers)
+    for path, response in no_origin.items():
+        assert response.status_code == 403, (path, response.text)
+        assert response.json()["detail"]["code"] == "mutation_origin_required", path
+    for response in (put, with_cookie):
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "mutation_origin_required"
+    for response in (foreign, bad_host):
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "origin_forbidden"
+    assert lan.status_code == 403
+    assert lan.json()["detail"]["code"] == "local_peer_forbidden"
+    assert browser.status_code == 200, browser.text
+    assert browser.json() == {"display_attempted": True}
+
+
+@pytest.mark.parametrize(
+    ("path", "matches"),
+    [
+        ("/api/observer/notifications/0f1e2d3c4b5a/ack", True),
+        ("/api/observer/notifications/0f1e2d3c4b5a/fail", True),
+        ("/api/observer/notifications/0f1e2d3c4b5a/display-attempted", True),
+        ("/api/observer/notifications/0f1e2d3c4b5a/dismiss", False),
+        ("/api/observer/notifications/0f1e2d3c4b5a/reconcile", False),
+        ("/api/observer/notifications/dismiss-all", False),
+        ("/api/observer/notifications/test", False),
+        ("/api/observer/notifications/recovery", False),
+        ("/api/observer/notifications/ack", False),
+        ("/api/observer/notifications//ack", False),
+        ("/api/observer/notifications/a/b/ack", False),
+        ("/api/observer/notifications/0f1e/ack/", False),
+        ("/api/observer/notifications/0f1e/ack\n", False),
+        ("/api/observer/notifications/0f.1e/ack", False),
+        ("/api/observer/notifications/0f1e/acknowledge", False),
+        ("/x/api/observer/notifications/0f1e/ack", False),
+        ("/api/observer/notifications/0f1e/display-attempted-x", False),
+    ],
+)
+def test_native_notification_receipt_path_is_an_exact_template(path, matches):
+    from src.auth.middleware import _is_native_notification_receipt_path
+
+    assert _is_native_notification_receipt_path(path) is matches
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "headers",

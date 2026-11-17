@@ -539,3 +539,70 @@ async def test_refused_context_post_does_not_record_last_context_post_at(tmp_pat
     status = json.loads(status_file.read_text(encoding="utf-8"))
     assert status["active_window"] == "Code — main.py"
     assert "last_context_post_at" not in status
+
+
+# ── Notification receipt authentication (#1258) ───────────────────────
+
+
+class _NotifyingBackend(_GuardedBackend):
+    """Serves one claim, then records the daemon's receipts for it."""
+
+    def __init__(self):
+        super().__init__()
+        self._claims = [{"id": "notif-1", "title": "Seraph", "body": "Hi", "fencing_token": 3}]
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/observer/notifications/next":
+            if request.url.host not in _LOOPBACK:
+                raise _CloudCallAttempted(f"daemon attempted a non-local call: {request.url}")
+            self.requests.append(request)
+            return httpx.Response(200, json={"notification": self._claims.pop(0) if self._claims else None})
+        if path.startswith("/api/observer/notifications/notif-1/"):
+            if request.url.host not in _LOOPBACK:
+                raise _CloudCallAttempted(f"daemon attempted a non-local call: {request.url}")
+            self.requests.append(request)
+            if path.endswith("/display-attempted"):
+                return httpx.Response(200, json={"display_attempted": True})
+            return httpx.Response(200, json={"acked": True})
+        return super().handler(request)
+
+    def receipts(self) -> list[httpx.Request]:
+        return [r for r in self.requests if r.url.path.startswith("/api/observer/notifications/notif-1/")]
+
+
+async def _run_notifying_poll_loop(backend: _NotifyingBackend, runtime) -> None:
+    with patch("seraph_daemon.show_notification", return_value=True):
+        await _run_poll_loop(backend, runtime)
+
+
+@pytest.mark.asyncio
+async def test_paired_notification_receipts_send_edge_credential_without_origin_or_cookie(tmp_path):
+    backend = _NotifyingBackend()
+    await _run_notifying_poll_loop(backend, _runtime(tmp_path, _uploader()))
+
+    receipts = backend.receipts()
+    assert [r.url.path.rsplit("/", 1)[-1] for r in receipts] == ["display-attempted", "ack"]
+    [upload] = backend.uploads()
+    for receipt in receipts:
+        assert receipt.url.host == "localhost" and receipt.url.port == 8004
+        assert receipt.headers["x-seraph-daemon-id"] == "test-worker"
+        assert "origin" not in receipt.headers
+        assert "cookie" not in receipt.headers
+        # The same scoped credential headers as the capture upload.
+        for name in _EDGE_HEADERS:
+            assert receipt.headers[name] == upload.headers[name]
+        assert json.loads(receipt.content) == {"worker_id": "test-worker", "fencing_token": 3}
+
+
+@pytest.mark.asyncio
+async def test_unpaired_notification_receipts_carry_no_credential(tmp_path):
+    backend = _NotifyingBackend()
+    await _run_notifying_poll_loop(backend, _runtime(tmp_path, None))
+
+    receipts = backend.receipts()
+    assert [r.url.path.rsplit("/", 1)[-1] for r in receipts] == ["display-attempted", "ack"]
+    for receipt in receipts:
+        assert receipt.headers["x-seraph-daemon-id"] == "test-worker"
+        for name in (*_EDGE_HEADERS, "origin", "cookie"):
+            assert name not in receipt.headers

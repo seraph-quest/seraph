@@ -9,6 +9,7 @@ handle goes through ``src.utils.background.track_task`` instead.
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib
 import textwrap
 from pathlib import Path
@@ -85,6 +86,7 @@ def test_scan_classifies_module_state(tmp_path):
         _by_key = defaultdict(list)
         IMPORTED_AND_MUTATED = []
         ALIAS_MUTATED = {}
+        HANDED_TO_AN_INSTANCE = {}
         _flag = False
         _LOCK = threading.Lock()
         _ALOCK = asyncio.Lock()
@@ -93,6 +95,7 @@ def test_scan_classifies_module_state(tmp_path):
             pass
 
         service = Service()
+        service.tasks = HANDED_TO_AN_INSTANCE
         __all__ = ["Service"]
 
         @lru_cache(maxsize=1)
@@ -112,6 +115,7 @@ def test_scan_classifies_module_state(tmp_path):
         "_by_key": "container",
         "IMPORTED_AND_MUTATED": "container",
         "ALIAS_MUTATED": "container",
+        "HANDED_TO_AN_INSTANCE": "container",
         "_flag": "rebound",
         "_LOCK": "primitive",
         "_ALOCK": "primitive",
@@ -138,6 +142,34 @@ def test_snapshot_restores_in_place_so_other_holders_see_it(monkeypatch):
     assert snapshot.restore() == []
     assert held_elsewhere == {"seed": 1} and module.TABLE is held_elsewhere
     assert module.ITEMS == [1]
+
+
+async def test_a_leftover_dispatcher_worker_entry_is_caught_and_restored():
+    """#1259: a worker entry a test leaves in ``_ACTIVE_WORKER_TASKS`` is
+    reported (its still-running task fails the task leak check) and removed
+    in place before the next test, which therefore sees no stale worker."""
+    from src.work_board import dispatcher
+    from tests.support import leaks
+
+    key = "src.work_board.dispatcher:_ACTIVE_WORKER_TASKS"
+    assert PROCESS_STATE[key] == PROCESS_STATE["src.work_board.channel_capture:_LIVE_SOURCE_FRAMES"]
+    registry = dispatcher._ACTIVE_WORKER_TASKS
+    assert dispatcher._dispatcher._active_worker_tasks is registry
+
+    snapshot = ProcessStateSnapshot.take({key: PROCESS_STATE[key]})
+    worker = asyncio.create_task(asyncio.Event().wait(), name="leftover-worker")
+    registry[("leftover-task", "leftover-attempt")] = worker
+    try:
+        leaked = leaks.pending_tasks(asyncio.get_running_loop())
+        assert worker in leaked
+        assert "leftover-worker" in leaks.describe_task(worker)
+        assert snapshot.restore() == []
+        # Restored in place: the dispatcher's own reference sees the cleanup too.
+        assert dispatcher._ACTIVE_WORKER_TASKS is registry
+        assert registry == {} and dispatcher._dispatcher._active_worker_tasks == {}
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 
 # ── Background spawns ───────────────────────────────────

@@ -214,6 +214,155 @@ async def test_session_scope_publishes_work_board_events_only_after_commit(db, m
     assert published == [["after-commit"]]
 
 
+def _rollback_recording_factory(db, rollbacks, *, fail_rollback=False):
+    def factory():
+        session = db.factory()
+        real_rollback = session.rollback
+
+        async def recording_rollback():
+            rollbacks.append(session)
+            if fail_rollback:
+                await real_rollback()
+                raise RuntimeError("injected rollback failure")
+            await real_rollback()
+
+        session.rollback = recording_rollback
+        return session
+    return factory
+
+
+async def _cancel_after_a_write(event_type):
+    """Run a write inside ``get_session``, cancel it mid-unit, return the task."""
+    written = asyncio.Event()
+    never = asyncio.Event()
+
+    async def unit_of_work():
+        async with db_engine.get_session() as session:
+            session.add(AuditEvent(event_type=event_type, summary="cancelled"))
+            await session.flush()
+            session.info["work_board_events_after_commit"] = ["cancelled-event"]
+            written.set()
+            await never.wait()
+
+    task = asyncio.create_task(unit_of_work())
+    await written.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return task
+
+
+@pytest.mark.parametrize("fail_rollback", [False, True], ids=["rollback", "rollback_fails"])
+async def test_session_scope_rolls_back_explicitly_on_cancellation(db, monkeypatch, fail_rollback):
+    import src.work_board.events as events
+
+    published: list[list[str]] = []
+
+    async def record(pending):
+        published.append(list(pending))
+    monkeypatch.setattr(events, "publish_work_board_events", record)
+    rollbacks: list = []
+    install_session_factory(
+        monkeypatch, _rollback_recording_factory(db, rollbacks, fail_rollback=fail_rollback))
+
+    task = await _cancel_after_a_write("cancelled_write")
+
+    # CancelledError reached the caller unchanged, even when rollback failed.
+    assert task.cancelled()
+    assert len(rollbacks) == 1
+    assert "work_board_events_after_commit" not in rollbacks[0].info
+    assert published == []
+    async with db() as session:
+        rows = (await session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == "cancelled_write"))).scalars().all()
+    assert rows == []
+
+
+async def _rollback_reached(rollback_entered, task):
+    """Wait until the rollback stub is entered, or fail at once if the task ends first."""
+    waiter = asyncio.create_task(rollback_entered.wait())
+    await asyncio.wait({waiter, task}, return_when=asyncio.FIRST_COMPLETED)
+    if not waiter.done():
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+    assert rollback_entered.is_set(), "the unit of work ended without rolling back"
+
+
+async def test_a_second_cancel_during_the_cancellation_rollback_keeps_the_cancellation(db, monkeypatch):
+    rollback_entered = asyncio.Event()
+    never = asyncio.Event()
+    rollbacks: list = []
+
+    def parking_factory():
+        session = db.factory()
+        real_rollback = session.rollback
+
+        async def parking_rollback():
+            rollbacks.append(session)
+            rollback_entered.set()
+            await never.wait()  # interrupted by the second cancel
+            await real_rollback()
+
+        session.rollback = parking_rollback
+        return session
+
+    install_session_factory(monkeypatch, parking_factory)
+    written = asyncio.Event()
+
+    async def unit_of_work():
+        async with db_engine.get_session() as session:
+            session.add(AuditEvent(event_type="cancelled_twice", summary="cancelled"))
+            await session.flush()
+            written.set()
+            await never.wait()
+
+    task = asyncio.create_task(unit_of_work())
+    await written.wait()
+    task.cancel()
+    await _rollback_reached(rollback_entered, task)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled() and len(rollbacks) == 1
+    # The session close still discarded the transaction.
+    async with db() as session:
+        rows = (await session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == "cancelled_twice"))).scalars().all()
+    assert rows == []
+
+
+async def test_a_cancel_during_a_non_cancellation_rollback_propagates(db, monkeypatch):
+    """Only a cancellation absorbs a second cancel; for KeyboardInterrupt it is new."""
+    rollback_entered = asyncio.Event()
+    never = asyncio.Event()
+
+    def parking_factory():
+        session = db.factory()
+
+        async def parking_rollback():
+            rollback_entered.set()
+            await never.wait()
+
+        session.rollback = parking_rollback
+        return session
+
+    install_session_factory(monkeypatch, parking_factory)
+
+    async def unit_of_work():
+        try:
+            async with db_engine.get_session():
+                raise KeyboardInterrupt
+        except KeyboardInterrupt:
+            return "interrupt was swallowed"
+        except asyncio.CancelledError:
+            return "cancel propagated"
+
+    task = asyncio.create_task(unit_of_work())
+    await _rollback_reached(rollback_entered, task)
+    task.cancel()
+    assert await task == "cancel propagated"
+
+
 async def test_each_test_database_starts_with_an_open_state_gate_and_restores_it(db, tmp_path):
     assert db_engine.state_gate() == (None, None)
     # Install a second database by hand, leave its gate closed, and undo it

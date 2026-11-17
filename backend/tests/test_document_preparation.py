@@ -32,7 +32,6 @@ async def test_actual_document_preparation_task_private_readback(accounting_db, 
     sessions = factory.accounting_sessions
     monkeypatch.setattr(crypto, "_fernet", None)
     monkeypatch.setattr(settings, "vault_encryption_key", "")
-    monkeypatch.setattr(documents, "get_session", sessions)
     goal = _goal("prepare-" + fmt, "Local cited preparation")
     goal.owner_principal_id, goal.owner_session_id = owner.principal_id, owner.session_id
     async with sessions() as db:

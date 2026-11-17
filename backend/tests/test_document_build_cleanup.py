@@ -38,7 +38,6 @@ async def test_actual_authenticated_cleanup_after_cutoff_and_goal_drift(accounti
             await db.delete(current_goal)
         else:
             current_goal.revision += 1
-    monkeypatch.setattr(documents, "get_session", sessions)
     app = FastAPI()
     @app.middleware("http")
     async def authenticate(request, call_next):
@@ -106,7 +105,6 @@ async def test_actual_fully_cancelled_zero_launch_retirement_after_cutoff(accoun
     service = GeneralTaskService(registry); service.start()
     dispatcher = WorkBoardDispatcher(jobs=jobs, session_provider=sessions, general_tasks=service)
     binding, identifier = await admitted_build(accounting_db, service, dispatcher, operator, owner, goal, "never-launch-retire")
-    monkeypatch.setattr(documents, "get_session", sessions)
     monkeypatch.setattr(work_board, "dispatcher", dispatcher)
     monkeypatch.setattr(settings, "operator_auth_allowed_hosts", "test,localhost,127.0.0.1")
     monkeypatch.setattr(settings, "operator_auth_allowed_origins", "http://localhost:3001")

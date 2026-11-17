@@ -3,7 +3,6 @@
 Run exactly one test per epoch. Root pins the whole selected source snapshot and
 supplies a private locator path; this packet supplies no witness or authority.
 """
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -21,6 +20,7 @@ from src.workflows import repo_repair_source as source
 from src.workflows.job_runtime import DurableJobRepository
 from tests.test_general_task_planner import accounting_db, forbid_external_inference
 from tests.repository_admission_lifecycle import repository_admission_signer
+from tests.support.db import install_database
 
 
 # Each case runs only inside the external two-epoch harness, which checks out a
@@ -222,21 +222,10 @@ async def test_current_startup_classifies_genuine_historical_epoch(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///" + str(database), connect_args={"timeout": 5})
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    @asynccontextmanager
-    async def sessions():
-        async with factory() as db:
-            try:
-                yield db
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
-
     try:
-        # Bind original current repository/accounting owners to the SAME database.
-        for target in ("src.workflows.job_runtime.get_session", "src.workflows.durable_state.get_session",
-                       "src.db.engine.get_session"):
-            monkeypatch.setattr(target, sessions)
+        # Bind original current repository/accounting owners to the SAME
+        # database: it is the default for every get_session caller (#1241).
+        install_database(monkeypatch, engine)
         jobs = DurableJobRepository()
         async with factory() as db:
             root = (await db.execute(select(WorkflowRunState).where(

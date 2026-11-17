@@ -161,7 +161,6 @@ async def test_work_board_card_proposal_blocks_with_retired_reason(accounting_db
 
     _root, _engine, factory = accounting_db
     sessions = factory.accounting_sessions
-    monkeypatch.setattr("src.work_board.triage.get_session", sessions)
     if world == "retained_openrouter":
         with historical_openrouter():
             _jobs, owner = await prepare(accounting_db, monkeypatch)
@@ -466,7 +465,6 @@ async def test_guardian_opportunity_assessment_held_queued_with_route_reason(iso
     if world == "retained_openrouter":
         with historical_openrouter():
             setup_configuration(ceiling=25_000, bound=1000)
-    monkeypatch.setattr("src.model_fabric.repository.get_session", sessions)
     near = await write_world_async(world, monkeypatch)
     _assert_world(world)
     assert row.status == "queued" and row.job_id is None
@@ -658,7 +656,6 @@ async def test_specialist_delegation_planning_blocks_with_retired_reason(task_ru
     from src.workflows.specialist_delegation import execute_specialist
     from tests.test_general_task_specialist_planning import specialist_fixture
 
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", task_runtime[0])
     with historical_openrouter():
         (sessions, dispatcher, planner, transport, owner, _group, accounting, _inputs, _descriptors,
             _provenance) = await specialist_fixture(task_runtime, monkeypatch)

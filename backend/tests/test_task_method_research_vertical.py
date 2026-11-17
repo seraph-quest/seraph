@@ -44,8 +44,6 @@ async def test_genuine_research_producer_signed_adoption_discovery_and_pinned_ro
     root, _engine, factory = accounting_db
     root.chmod(0o700)
     sessions = factory.accounting_sessions
-    monkeypatch.setattr("src.memory.m5.get_session", sessions)
-    monkeypatch.setattr("src.memory.repository.get_session", sessions)
     monkeypatch.setattr(settings, "browser_site_allowlist", "example.com")
     monkeypatch.setattr(settings, "browser_site_blocklist", "")
     source_path = root / "owned-public-source.txt"

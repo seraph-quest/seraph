@@ -89,7 +89,6 @@ async def test_operator_api_safe_pause_and_resume_use_same_original_attempt(task
     sessions, dispatcher, service, envelope, current = await running_task(task_runtime,
         creation_request=creation, registry_override=registry)
     monkeypatch.setattr(api, "dispatcher", dispatcher)
-    monkeypatch.setattr(api, "get_session", sessions)
     parent_id = current["job"]["job_id"]
     owner, fence = current["job"]["lease"]["owner"], current["job"]["lease"]["fencing_token"]
     root = current["manifest"]["original_root_id"]

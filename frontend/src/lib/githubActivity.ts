@@ -42,6 +42,8 @@ export interface GitHubActivityStatus {
   endpoints: string[];
   message: string;
   last_run: GitHubActivityRun | null;
+  // The source belongs to the operator identity; an unenrolled login has none.
+  ownership_required: boolean;
 }
 
 export interface GhLoginCheck {
@@ -105,6 +107,7 @@ export function githubActivityStatus(value: unknown): GitHubActivityStatus {
     endpoints: strings(row.endpoints).filter(item => item.startsWith("GET /")),
     message: text(row.message) ?? "",
     last_run: run(row.last_run),
+    ownership_required: row.ownership_required === true,
   };
 }
 

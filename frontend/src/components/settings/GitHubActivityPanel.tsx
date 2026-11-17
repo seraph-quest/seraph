@@ -125,7 +125,7 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
   const login = check?.identity_login ?? source?.identity_login ?? null;
   const scopeValid = [...parseRepositoryList(repositories), ...parseRepositoryList(excluded)].every(validRepository)
     && parseRepositoryList(owners).every(validOwner);
-  const canEnable = !pending && !!status && !!check && acknowledged && !!ownerSessionId && scopeValid
+  const canEnable = !pending && !!status && !status.ownership_required && !!check && acknowledged && !!ownerSessionId && scopeValid
     && (discover || parseRepositoryList(repositories).length > 0);
   // The full-scope sentence stays visible whenever a source exists or a login was checked.
   const showSentence = !!check || (!!source && source.state !== "not_connected");
@@ -137,6 +137,8 @@ export function GitHubActivityPanel({ ownerPrincipalId, ownerSessionId }: {
       ? `On · @${source?.identity_login ?? "unknown"} · uses your local gh login`
       : status.message || source?.state.replace(/_/g, " ")}</p>
     {showSentence && <p>{GITHUB_ACTIVITY_GRANT_SENTENCE}</p>}
+    <p>The source belongs to your ownership identity: any of your logins can see and switch it off, and a new login or an expired one does not stop it.</p>
+    {status?.ownership_required && <p role="note">Enroll ownership for this login (Settings → Account) before enabling it.</p>}
     {status && !status.gh.available && <p>No usable gh command was found ({(status.gh.reason_code ?? "unavailable").replace(/_/g, " ")}). The local gh login only works when Seraph's backend runs directly on your computer.</p>}
     {status?.last_run && <p>Last collection ({status.last_run.report_date}): {status.last_run.message}</p>}
 

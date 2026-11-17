@@ -152,3 +152,17 @@ describe("GitHub activity panel scope", () => {
     expect(put.allow_model_context).toBe(true);
   });
 });
+
+
+describe("GitHub activity ownership", () => {
+  it("keeps Enable off for a login without an ownership identity", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: unknown) => response(String(url).endsWith("/gh/check") ? checked
+      : { ...off, ownership_required: true, message: "Enroll ownership for this login before enabling the GitHub activity source." })));
+    render(<GitHubActivityPanel ownerPrincipalId="owner-a" ownerSessionId="root-a" />);
+    await screen.findByText(/Enroll ownership for this login \(Settings/);
+    fireEvent.click(screen.getByText("Check gh login"));
+    await screen.findByText(/logged in as @octo/);
+    fireEvent.click(screen.getByLabelText(/Use my local gh login/));
+    expect(screen.getByText("Enable").hasAttribute("disabled")).toBe(true);
+  });
+});

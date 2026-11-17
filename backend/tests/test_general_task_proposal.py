@@ -182,11 +182,14 @@ async def test_charged_native_child_publication_uses_bounded_reads_and_preserves
                     await validate_handoff_publication(db, owner, changed)
                 assert rejected.value.code == "specialist_handoff_denied"
             import json
+            # A savepoint rollback expires loaded rows; an async session cannot
+            # lazy-load them, so keep the original callback identity by value.
+            callback_identity = context.callback.run_identity
             for mutation in ("missing", "foreign_root", "foreign_owner", "duplicate", "unknown"):
                 with pytest.raises(RollbackFixture):
                     async with db.begin_nested():
                         callback = await db.scalar(select(WorkflowRunState).where(
-                            WorkflowRunState.run_identity == context.callback.run_identity))
+                            WorkflowRunState.run_identity == callback_identity))
                         if mutation == "missing":
                             callback.run_identity = "missing-original-callback"
                         elif mutation == "foreign_root":

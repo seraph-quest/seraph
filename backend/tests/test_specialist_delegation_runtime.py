@@ -34,7 +34,6 @@ async def test_native_delegation_declared_execution_grant_is_required(task_runti
 
 @pytest.mark.asyncio
 async def test_actual_specialist_board_child_output_is_read_back(task_runtime, monkeypatch, native_admission_lifecycle):
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", task_runtime[0])
     sessions, dispatcher, planner, transport, owner, group, accounting, inputs, descriptors, provenance = await specialist_fixture(task_runtime, monkeypatch)
     service = dispatcher.general_tasks
     service.planner = planner
@@ -87,7 +86,6 @@ async def test_actual_parent_adopts_two_original_specialist_children(task_runtim
     from tests.test_general_task_native_guard import running_task
     from tests.general_task_test_transport import prepare_literal_planner
     from src.auth.service import authenticate_session
-    monkeypatch.setattr("src.workflows.job_runtime.get_session", task_runtime[0])
     monkeypatch.setattr(settings, "use_delegation", True)
     registry = ToolRegistry()
     registry.start()

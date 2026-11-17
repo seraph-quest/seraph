@@ -71,7 +71,6 @@ async def test_authenticated_partial_overlay_preserves_stop_and_replays_after_re
         monkeypatch.setattr(job_runtime,'_utc_now',lambda:manifest.original_deadline_at+timedelta(seconds=1))
         from src.api import work_board as board_api
         monkeypatch.setattr(board_api,'dispatcher',dispatcher)
-        monkeypatch.setattr(board_api,'get_session',sessions)
         app=FastAPI();app.include_router(router)
         @app.middleware('http')
         async def current_auth(request,call_next):

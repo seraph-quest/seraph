@@ -1,6 +1,5 @@
 """Closed population/signature/archive mechanics, not usefulness/native success proof."""
 from copy import deepcopy
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -15,6 +14,7 @@ from src.guardian import opportunity_preferences as pref
 from src.memory import repository as repo
 from src.db.models import MemoryProposal, MemoryProposalStatus, MemoryProposalDecisionEffect, Memory, MemoryTombstone, MemoryKind, GuardianIntervention
 from tests.test_memory_local_recovery import local_memory_db, _runtime_operator
+from tests.support.db import install_fake_session
 from src.auth.service import test_bypass_operator as make_test_bypass_operator
 
 
@@ -257,9 +257,6 @@ async def test_stale_adopted_projection_only_keeps_authenticated_removal(monkeyp
     row.status = MemoryProposalStatus.accepted
     row.accepted_memory_id = "canonical-memory"
     operator = SimpleNamespace()
-    @asynccontextmanager
-    async def session():
-        yield None
     async def owned(*args):
         return row
     async def historical(*args):
@@ -267,7 +264,8 @@ async def test_stale_adopted_projection_only_keeps_authenticated_removal(monkeyp
             raise pref.BoardError("accepted_memory_binding_mismatch", "Invalid signature")
     async def stale(*args, **kwargs):
         raise pref.BoardError("learning_population_incomplete", "The original population changed")
-    monkeypatch.setattr(pref.db_engine, "get_session", session)
+    # A data-free session: every read below is replaced by a projection stub.
+    install_fake_session(monkeypatch, SimpleNamespace)
     monkeypatch.setattr(pref, "_owned_proposal", owned)
     monkeypatch.setattr(pref, "_verify_historical_adoption", historical)
     monkeypatch.setattr(pref, "stage_finalization", stale)

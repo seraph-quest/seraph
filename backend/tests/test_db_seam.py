@@ -214,6 +214,70 @@ async def test_session_scope_publishes_work_board_events_only_after_commit(db, m
     assert published == [["after-commit"]]
 
 
+def _rollback_recording_factory(db, rollbacks, *, fail_rollback=False):
+    def factory():
+        session = db.factory()
+        real_rollback = session.rollback
+
+        async def recording_rollback():
+            rollbacks.append(session)
+            if fail_rollback:
+                await real_rollback()
+                raise RuntimeError("injected rollback failure")
+            await real_rollback()
+
+        session.rollback = recording_rollback
+        return session
+    return factory
+
+
+async def _cancel_after_a_write(event_type):
+    """Run a write inside ``get_session``, cancel it mid-unit, return the task."""
+    written = asyncio.Event()
+    never = asyncio.Event()
+
+    async def unit_of_work():
+        async with db_engine.get_session() as session:
+            session.add(AuditEvent(event_type=event_type, summary="cancelled"))
+            await session.flush()
+            session.info["work_board_events_after_commit"] = ["cancelled-event"]
+            written.set()
+            await never.wait()
+
+    task = asyncio.create_task(unit_of_work())
+    await written.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return task
+
+
+@pytest.mark.parametrize("fail_rollback", [False, True], ids=["rollback", "rollback_fails"])
+async def test_session_scope_rolls_back_explicitly_on_cancellation(db, monkeypatch, fail_rollback):
+    import src.work_board.events as events
+
+    published: list[list[str]] = []
+
+    async def record(pending):
+        published.append(list(pending))
+    monkeypatch.setattr(events, "publish_work_board_events", record)
+    rollbacks: list = []
+    install_session_factory(
+        monkeypatch, _rollback_recording_factory(db, rollbacks, fail_rollback=fail_rollback))
+
+    task = await _cancel_after_a_write("cancelled_write")
+
+    # CancelledError reached the caller unchanged, even when rollback failed.
+    assert task.cancelled()
+    assert len(rollbacks) == 1
+    assert "work_board_events_after_commit" not in rollbacks[0].info
+    assert published == []
+    async with db() as session:
+        rows = (await session.execute(
+            select(AuditEvent).where(AuditEvent.event_type == "cancelled_write"))).scalars().all()
+    assert rows == []
+
+
 async def test_each_test_database_starts_with_an_open_state_gate_and_restores_it(db, tmp_path):
     assert db_engine.state_gate() == (None, None)
     # Install a second database by hand, leave its gate closed, and undo it

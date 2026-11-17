@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -2258,6 +2259,25 @@ async def session_scope(
         except Exception:
             await session.rollback()
             session.info.pop("work_board_events_after_commit", None)
+            raise
+        except BaseException:
+            # Cancellation (and other BaseExceptions) must also discard the
+            # unit of work explicitly instead of relying on the session close
+            # (#1256). Drop the pending events first: that step cannot be
+            # interrupted, so nothing rolled back is ever published.
+            session.info.pop("work_board_events_after_commit", None)
+            try:
+                # Not shielded: a shielded rollback would keep running after a
+                # second cancel while the session closes underneath it. A
+                # second cancel interrupts the rollback instead, and the
+                # session close below still discards the transaction.
+                await session.rollback()
+            except (Exception, asyncio.CancelledError):
+                # The original exception (usually CancelledError) is what the
+                # caller must see; a failed rollback must not replace it.
+                logger.warning(
+                    "session rollback after cancellation failed", exc_info=True
+                )
             raise
 
 

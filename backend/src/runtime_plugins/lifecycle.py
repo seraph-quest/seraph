@@ -296,8 +296,14 @@ class RuntimeLifecycle:
             boot_nonce = host.boot_nonce
         return Activation(domain, row.owner_kind, row.epoch, row.composition_digest, boot_nonce, _now()), None
 
-    async def activate(self, domain: str) -> dict[str, Any]:
-        """Activate one domain's provider at its current ready epoch; a second call is a no-op."""
+    async def activate(self, domain: str, *, transition_reactivation: bool = False) -> dict[str, Any]:
+        """Activate one domain's provider at its current ready epoch; a second call is a no-op.
+
+        While a live transition holds the domain nothing activates it, except
+        the transition's own closing reactivation (``transition_reactivation``):
+        the domain stays claimed until that reactivation settles, so no reader
+        sees the transition finished while the domain is still blocked at E.
+        """
         if domain not in LIFECYCLE_DOMAINS:
             raise CompositionBindingError("composition_domain_unknown")
         if not self.managed or self.closing:
@@ -307,7 +313,8 @@ class RuntimeLifecycle:
             self._set_status(domain, "disabled", "scheduler_disabled")
             return self.status(domain)
         async with self._lock(domain):
-            if self.closing or domain in self._transitioning or self.current(domain) is not None:
+            if (self.closing or (domain in self._transitioning and not transition_reactivation)
+                    or self.current(domain) is not None):
                 return self.status(domain)
             self._last_attempt[domain] = get_clock().monotonic()
             held = [task for task in self._held.get(domain, ()) if not task.done()]
@@ -651,8 +658,6 @@ class RuntimeLifecycle:
             receipt = await transition_domain(domain, target, host=self.host or cordis_host, actor=actor,
                                               expected_epoch=expected_epoch, reason=reason)
         except BaseException as exc:
-            self._transitioning.pop(domain, None)
-            self._transition_tasks.pop(domain, None)
             failure = (exc.reason_code if isinstance(exc, (LifecycleBlocked, CompositionBindingError))
                        else "transition_cancelled" if isinstance(exc, asyncio.CancelledError)
                        else "transition_failed")
@@ -663,17 +668,31 @@ class RuntimeLifecycle:
             self._notified.pop(domain, None)
             # Whatever happened, the row decides: reactivate if it is still ready (never while closing).
             self._last_attempt.pop(domain, None)
-            if not self.closing:
-                await self.activate(domain)
+            try:
+                if not self.closing:
+                    self._transitioning[domain] = "reactivating"
+                    await self.activate(domain, transition_reactivation=True)
+            finally:
+                self._release_transition(domain, task)
             raise
-        self._transitioning.pop(domain, None)
-        self._transition_tasks.pop(domain, None)
         self._last_attempt.pop(domain, None)
         self._last_transition[domain] = {"status": "succeeded", "target": target, "epoch": receipt.get("epoch"),
                                          "owner_kind": receipt.get("owner_kind"), "state": receipt.get("state"),
                                          "at": _now()}
-        await self.activate(domain)
+        # The transition ends only once the reactivation at E+1 settled: the
+        # domain stays claimed until then, so a reader that sees it released
+        # also sees the new activation (or the reason it is blocked).
+        self._transitioning[domain] = "reactivating"
+        try:
+            await self.activate(domain, transition_reactivation=True)
+        finally:
+            self._release_transition(domain, task)
         return receipt
+
+    def _release_transition(self, domain: str, task: asyncio.Task | None) -> None:
+        self._transitioning.pop(domain, None)
+        if self._transition_tasks.get(domain) is task:
+            self._transition_tasks.pop(domain, None)
 
 
 def _dispatch_drain_seconds() -> float:

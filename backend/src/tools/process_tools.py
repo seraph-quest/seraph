@@ -1888,15 +1888,11 @@ def _stop_after_capture_setup_failure(
 
     ``started_capture`` is the stdout capture when it was built before the
     stderr capture failed; its drain owns and closes stdout. Every other pipe
-    has no drain, so it is closed here. The child is stopped through the same
+    has no drain, so it is closed here, before the kill: nothing reads it, so
+    a write the child makes after the close only gets SIGPIPE, and a kill
+    that raises cannot leave it open. The child is stopped through the same
     bounded group kill and bounded reap as a timeout or cancel.
     """
-    descendant_identities = _snapshot_process_descendants(process, leader_identity)
-    termination = _kill_process_group(
-        process,
-        leader_identity=leader_identity,
-        descendant_identities=descendant_identities,
-    )
     for stream in (process.stdout, process.stderr):
         if stream is None:
             continue
@@ -1906,15 +1902,24 @@ def _stop_after_capture_setup_failure(
             stream.close()
         except (OSError, ValueError):
             pass
-    # A ``None`` stream capture is already done and starts no thread, so this
-    # only waits on the child and the drain that did start.
-    _bounded_reap_process(
-        process,
-        captures=(
-            started_capture if started_capture is not None else _BoundedPipeCapture(None),
-            _BoundedPipeCapture(None),
-        ),
-    )
+    try:
+        descendant_identities = _snapshot_process_descendants(process, leader_identity)
+        termination = _kill_process_group(
+            process,
+            leader_identity=leader_identity,
+            descendant_identities=descendant_identities,
+        )
+    finally:
+        # Even when the kill raised, bound the started drain: ``finish`` stops
+        # it if the pipe has not reached EOF, and the drain closes stdout. A
+        # ``None`` stream capture is already done and starts no thread.
+        _bounded_reap_process(
+            process,
+            captures=(
+                started_capture if started_capture is not None else _BoundedPipeCapture(None),
+                _BoundedPipeCapture(None),
+            ),
+        )
     return _termination_cleanup_status(termination)
 
 
@@ -2239,7 +2244,10 @@ class ProcessRuntimeManager:
                 captures = (stdout_capture, _BoundedPipeCapture(process.stderr))
             except BaseException:
                 # The child is running but not every pipe has a drain (#1255).
-                # Stop it on the timeout/cancel path, then re-raise.
+                # Stop it on the timeout/cancel path, then re-raise. The status
+                # starts as failed so an interrupted cleanup keeps the worker
+                # root; a completed cleanup overwrites it.
+                runtime_cleanup_status = "failed"
                 try:
                     runtime_cleanup_status, remaining_descendants = _stop_after_capture_setup_failure(
                         process,
@@ -2248,8 +2256,13 @@ class ProcessRuntimeManager:
                     )
                 except Exception:
                     # Keep the worker root and surface the setup failure.
-                    runtime_cleanup_status = "failed"
                     logger.warning("Failed to stop a command after pipe capture setup failed", exc_info=True)
+                if runtime_cleanup_status not in {"not_requested", "stopped"}:
+                    logger.warning(
+                        "Pipe capture setup failed; command cleanup is %s, retaining worker root %s",
+                        runtime_cleanup_status,
+                        worker_root,
+                    )
                 raise
             deadline = time.monotonic() + timeout
             while True:

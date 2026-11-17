@@ -6,10 +6,11 @@ import gc
 import json
 import os
 import resource
+import shutil
 import signal
 import stat
-import textwrap
 import sys
+import textwrap
 import threading
 import warnings
 from pathlib import Path
@@ -1864,9 +1865,18 @@ def test_bounded_pipe_capture_closes_its_pipe_after_draining_to_eof():
     assert capture.text() == "drained output"
 
 
-def _run_command_with_failing_capture(monkeypatch, tmp_path, *, fail_on_call: int):
+def _run_command_with_failing_capture(monkeypatch, tmp_path, *, fail_on_call: int, worker_roots: list | None = None):
     """Run a never-ending command whose ``fail_on_call``-th capture fails to build (#1255)."""
     monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    real_worker_root = process_tools_module._worker_runtime_root
+
+    def record_worker_root(worker_id):
+        root = real_worker_root(worker_id)
+        if worker_roots is not None:
+            worker_roots.append(root)
+        return root
+
+    monkeypatch.setattr(process_tools_module, "_worker_runtime_root", record_worker_root)
     # The child waits for a signal, so only the stop path can end it.
     (tmp_path / "wait-for-signal.py").write_text("import signal\nsignal.pause()\n", encoding="utf-8")
     launched: list = []
@@ -1918,9 +1928,31 @@ def _run_command_with_failing_capture(monkeypatch, tmp_path, *, fail_on_call: in
 
 
 def test_run_command_stops_and_reaps_child_when_second_capture_setup_fails(monkeypatch, tmp_path):
-    built = _run_command_with_failing_capture(monkeypatch, tmp_path, fail_on_call=2)
+    worker_roots: list = []
+    built = _run_command_with_failing_capture(monkeypatch, tmp_path, fail_on_call=2, worker_roots=worker_roots)
     # The stdout drain had started before the stderr capture failed.
     assert len(built) == 1
+    # A stopped child leaves nothing to inspect, so the worker root is removed.
+    (worker_root,) = worker_roots
+    assert not worker_root.exists()
+
+
+def test_run_command_keeps_worker_root_when_capture_setup_cleanup_raises(monkeypatch, tmp_path):
+    """A cleanup that raises keeps the worker root and still surfaces the setup failure (#1255)."""
+    real_kill = process_tools_module._kill_process_group
+
+    def kill_then_raise(process, **kwargs):
+        # The child is stopped and reaped, then the cleanup fails after it.
+        real_kill(process, **kwargs)
+        raise RuntimeError("injected cleanup failure")
+
+    monkeypatch.setattr(process_tools_module, "_kill_process_group", kill_then_raise)
+    worker_roots: list = []
+    built = _run_command_with_failing_capture(monkeypatch, tmp_path, fail_on_call=2, worker_roots=worker_roots)
+    assert len(built) == 1
+    (worker_root,) = worker_roots
+    assert worker_root.exists()
+    shutil.rmtree(worker_root)
 
 
 def test_run_command_stops_and_reaps_child_when_first_capture_setup_fails(monkeypatch, tmp_path):

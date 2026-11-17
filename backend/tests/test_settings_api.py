@@ -1071,6 +1071,38 @@ async def test_artifact_storage_defaults_to_seraph_owned_screenshot_folder(clien
 
 
 @pytest.mark.asyncio
+async def test_artifact_storage_reports_capture_store_usage_and_limits(client, tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shots = tmp_path / "shots"
+    store_day = shots / ".seraph-daemon-captures" / "2026-11-17"
+    store_day.mkdir(parents=True)
+    (store_day / "cap-a.png").write_bytes(b"a" * 300)
+    (store_day / "cap-b.jpg").write_bytes(b"b" * 200)
+    (shots / "Screenshot.png").write_bytes(b"c" * 5_000)  # operator image: not in the store
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setattr(settings, "screen_capture_archive_dir", str(tmp_path / "archive"))
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 10240)
+    monkeypatch.setattr(settings, "screen_observation_retention_days", 90)
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(shots))
+    (workspace / "screen-analysis-settings.json").write_text(
+        json.dumps({"archive_retention_days": 30}), encoding="utf-8"
+    )
+
+    resp = await client.get("/api/settings/artifact-storage")
+
+    assert resp.status_code == 200
+    assert resp.json()["screenshot_folder"]["capture_store"] == {
+        "bytes": 500,
+        "file_count": 2,
+        "max_mb": 10240,
+        "retention_days": 30,
+        "cap_scope": "per_store",
+        "enforced_by": "backend",
+    }
+
+
+@pytest.mark.asyncio
 async def test_screen_analysis_settings_persist_and_drive_artifact_storage(client, tmp_path):
     with patch.object(settings, "workspace_dir", str(tmp_path / "workspace")):
         archive = tmp_path / "captures"

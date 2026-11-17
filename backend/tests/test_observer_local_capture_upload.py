@@ -607,6 +607,168 @@ async def test_uploaded_local_analysis_feeds_digest_report_and_status(capture_en
     assert status["total_observation_count"] == 1
 
 
+# ── Capture store cap (#1263) ──────────────────────────────────────────
+
+
+def _noise_png(seed: int, *, side: int = 400) -> bytes:
+    """An incompressible PNG of about ``side * side * 3`` bytes; distinct seeds
+    are never visual duplicates of each other."""
+    import random
+
+    from PIL import Image
+
+    image = Image.frombytes("RGB", (side, side), random.Random(seed).randbytes(side * side * 3))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", compress_level=0)
+    return buffer.getvalue()
+
+
+def _stored_files(shots: Path) -> list[Path]:
+    return sorted((shots / LOCAL_CAPTURE_UPLOAD_DIRNAME).rglob("*.png"))
+
+
+def _age_stored_files(shots: Path, base: int) -> None:
+    # Fixed, increasing mtimes in upload order (capture ids sort that way).
+    for index, path in enumerate(sorted(_stored_files(shots), key=lambda item: item.name)):
+        os.utime(path, (base + index, base + index))
+
+
+@pytest.mark.asyncio
+async def test_upload_past_cap_prunes_oldest_and_keeps_records_readable(capture_env, monkeypatch):
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    client = capture_env["client"]
+    headers = _headers(capture_env["credential"])
+    images = [_noise_png(seed) for seed in (1, 2, 3)]
+    assert all(450_000 < len(image) < 524_288 for image in images)
+    ids = ["cap-cap-00001", "cap-cap-00002", "cap-cap-00003"]
+
+    responses = []
+    for index, (capture_id, image) in enumerate(zip(ids, images, strict=True)):
+        _age_stored_files(capture_env["shots"], 1_700_000_000 + index * 10)
+        response = await client.post("/api/observer/captures", headers=headers, json=_body(image, capture_id=capture_id))
+        assert response.status_code == 201, response.text
+        responses.append(response.json())
+
+    assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-cap-00002.png", "cap-cap-00003.png"]
+    assert sum(path.stat().st_size for path in _stored_files(capture_env["shots"])) <= 1024 * 1024
+    assert len(await _observations(capture_env["db"])) == 3
+
+    operator_client = capture_env["operator_client"]
+    listing = await operator_client.get("/api/observer/screen-artifacts")
+    assert listing.status_code == 200, listing.text
+    available = {item["observation_id"]: item["artifacts"]["image_available"] for item in listing.json()["items"]}
+    assert available == {
+        responses[0]["observation_id"]: False,
+        responses[1]["observation_id"]: True,
+        responses[2]["observation_id"]: True,
+    }
+
+    first_id = responses[0]["observation_id"]
+    image = await operator_client.get(f"/api/observer/screen-artifacts/{first_id}/image")
+    assert image.status_code == 404
+    assert image.json()["detail"] == "Screen artifact file not found"
+    analysis = await operator_client.get(f"/api/observer/screen-artifacts/{first_id}/analysis")
+    assert analysis.status_code == 200, analysis.text
+    payload = analysis.json()
+    assert payload["image_available"] is False
+    assert payload["analysis"]["image_available"] is False
+    assert payload["analysis"]["width"] == 400 and payload["analysis"]["height"] == 400
+    assert payload["analysis"]["image_bytes"] == len(images[0])
+    assert payload["analysis"]["file_format"] == "png"
+    present = await operator_client.get(f"/api/observer/screen-artifacts/{responses[2]['observation_id']}/analysis")
+    assert present.json()["image_available"] is True
+
+    # Re-uploading the pruned capture id is idempotent and recreates nothing.
+    again = await client.post("/api/observer/captures", headers=headers, json=_body(images[0], capture_id=ids[0]))
+    assert again.status_code == 200
+    assert again.json()["status"] == "duplicate"
+    assert [path.name for path in _stored_files(capture_env["shots"])] == ["cap-cap-00002.png", "cap-cap-00003.png"]
+
+
+@pytest.mark.asyncio
+async def test_uncapped_upload_never_walks_the_store(capture_env, monkeypatch):
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 0)
+
+    def must_not_prune(**_kwargs):
+        raise AssertionError("an uncapped store must not be pruned after a write")
+
+    monkeypatch.setattr(local_capture_upload, "prune_local_capture_uploads", must_not_prune)
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((60, 61, 62)))
+    )
+    assert response.status_code == 201, response.text
+    assert len(_stored_files(capture_env["shots"])) == 1
+
+
+@pytest.mark.asyncio
+async def test_prune_failure_never_fails_an_accepted_upload(capture_env, monkeypatch):
+    from src.audit.repository import audit_repository
+
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+
+    def broken_prune(**_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(local_capture_upload, "prune_local_capture_uploads", broken_prune)
+    response = await capture_env["client"].post(
+        "/api/observer/captures", headers=_headers(capture_env["credential"]), json=_body(_png((70, 71, 72)))
+    )
+    assert response.status_code == 201, response.text
+    [observation] = await _observations(capture_env["db"])
+    assert observation.id == response.json()["observation_id"]
+    events = await audit_repository.list_events(limit=20)
+    assert any(
+        (event.get("details") or {}).get("name") == "capture_store_prune"
+        and event["details"].get("reason") == "prune_failed"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_upload_image_keeps_digest_and_report_until_analysis_marks_it(capture_env, monkeypatch):
+    from zoneinfo import ZoneInfo
+
+    from src.scheduler.jobs import end_of_day_goal_report, screenshot_observation_digest as digest
+
+    captured_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    response = await capture_env["client"].post(
+        "/api/observer/captures",
+        headers=_headers(capture_env["credential"]),
+        json=_body(
+            _png((80, 81, 82)),
+            captured_at=captured_at,
+            local_analysis={"provider": "apple-vision", "activity": "coding", "project": "seraph",
+                            "summary": "Pruned capture still reported"},
+        ),
+    )
+    assert response.status_code == 201, response.text
+    [stored] = _stored_files(capture_env["shots"])
+    stored.unlink()
+
+    start = captured_at - timedelta(minutes=5)
+    end = captured_at + timedelta(minutes=5)
+    observations = await digest._screenshot_observations(start, end)
+    assert [obs.id for obs in observations] == [response.json()["observation_id"]]
+    summary = await end_of_day_goal_report._screen_summary_for_local_day(captured_at.date(), ZoneInfo("UTC"))
+    assert "Pruned capture still reported" in summary["samples"]
+
+    async def unexpected_analysis(_image_path, _artifacts):
+        raise AssertionError("a missing capture must not reach the provider")
+
+    monkeypatch.setattr(screenshot_folder_source, "analyze_screenshot_image", unexpected_analysis)
+    result = await screenshot_folder_source.analyze_pending_screenshot_folder_observations(limit=10)
+    assert result.failed == 1
+    [observation] = await _observations(capture_env["db"])
+    statuses = [
+        json.loads(item.removeprefix("screenshot_analysis_status:"))
+        for item in json.loads(observation.details_json or "[]")
+        if item.startswith("screenshot_analysis_status:")
+    ]
+    assert statuses[0]["status"] == "source_missing"
+    # Documented consequence: a capture pruned before its analysis ran leaves the digest.
+    assert await digest._screenshot_observations(start, end) == []
+
+
 # ── Native daemon context post (#1248) ─────────────────────────────────
 
 

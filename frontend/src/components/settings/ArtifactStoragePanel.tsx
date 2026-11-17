@@ -61,6 +61,15 @@ interface VlmProbeEndpoint {
   error: string;
 }
 
+interface CaptureStoreUsage {
+  bytes: number | null;
+  file_count: number | null;
+  max_mb: number;
+  retention_days: number;
+  cap_scope?: string;
+  enforced_by?: string;
+}
+
 interface ArtifactStorageSettings {
   inference?: {
     provider: string;
@@ -92,6 +101,7 @@ interface ArtifactStorageSettings {
     exists: boolean;
     readable: boolean;
     stored_artifacts: string[];
+    capture_store?: CaptureStoreUsage;
     analysis?: {
       provider: string;
       model: string;
@@ -511,6 +521,22 @@ function ArtifactRow({
       </div>
     </div>
   );
+}
+
+export function captureStoreLabel(store: CaptureStoreUsage): string {
+  const kept = `kept ${store.retention_days} days`;
+  if (store.bytes === null || store.bytes === undefined) {
+    return `usage unavailable · ${store.max_mb > 0 ? `${store.max_mb} MB cap` : "no size cap"} · ${kept}`;
+  }
+  const usedMb = Math.round(store.bytes / (1024 * 1024));
+  return store.max_mb > 0
+    ? `${usedMb} MB of ${store.max_mb} MB cap · ${kept}`
+    : `${usedMb} MB · no size cap · ${kept}`;
+}
+
+function captureStoreTone(store: CaptureStoreUsage): "normal" | "good" | "warn" {
+  if (store.bytes === null || store.bytes === undefined) return "warn";
+  return store.max_mb > 0 && store.bytes > store.max_mb * 1024 * 1024 ? "warn" : "normal";
 }
 
 function screenshotFolderDisplayPath(path: string | null): string {
@@ -1084,6 +1110,13 @@ export function ArtifactStoragePanel() {
                   tone={screenshotFolderSource.auto_ingest_enabled ? "good" : "normal"}
                 />
                 <ArtifactRow label="Reads" value="local image files only" tone="good" />
+                {screenshotFolderSource.capture_store && (
+                  <ArtifactRow
+                    label="Stored captures"
+                    value={captureStoreLabel(screenshotFolderSource.capture_store)}
+                    tone={captureStoreTone(screenshotFolderSource.capture_store)}
+                  />
+                )}
                 {screenshotFolderSource.analysis && (
                   <>
                     <ArtifactRow

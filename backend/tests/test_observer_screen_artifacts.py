@@ -1165,6 +1165,93 @@ async def test_screenshot_folder_scan_skips_duplicate_hash(async_db, client, tmp
     assert "latest_suppressed_path" not in visual_runs[0]
 
 
+@pytest.mark.asyncio
+async def test_screenshot_folder_image_removed_after_scan_is_unavailable_not_an_error(
+    async_db, client, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path / "archive"))
+    root = tmp_path / "screenshots"
+    image = _write_screenshot(root, name="capture-pruned.png", data=_sample_png())
+    monkeypatch.setattr(
+        "src.observer.screenshot_folder_source.screenshot_semantic_analysis_enabled",
+        lambda: False,
+    )
+    scan = await client.post("/api/observer/screenshot-folder/scan", json={"screenshot_folder": str(root), "limit": 10})
+    assert scan.status_code == 200
+    async with async_db() as db:
+        observation = (await db.execute(select(ScreenObservation))).scalar_one()
+    stored_details_json = observation.details_json
+    image.unlink()
+
+    listing = await client.get("/api/observer/screen-artifacts")
+    assert listing.status_code == 200
+    [item] = listing.json()["items"]
+    assert item["artifacts"]["image_available"] is False
+
+    image_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
+    assert image_resp.status_code == 404
+    assert image_resp.json()["detail"] == "Screen artifact file not found"
+
+    analysis_resp = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
+    assert analysis_resp.status_code == 200
+    analysis = analysis_resp.json()
+    assert analysis["image_available"] is False
+    assert analysis["analysis"]["image_available"] is False
+    assert analysis["analysis"]["width"] == 1 and analysis["analysis"]["height"] == 1
+    assert analysis["analysis"]["file_format"] == "png"
+    assert analysis["analysis"]["image_bytes"] == len(_sample_png())
+    assert analysis["analysis"]["image_path"] == str(image.resolve())
+    assert any("no longer available" in note for note in analysis["analysis"]["notes"])
+
+    reanalyze = await client.post(
+        f"/api/observer/screen-artifacts/{observation.id}/reanalyze",
+        json={"reanalysis_reason": "provider_failure_retry"},
+    )
+    assert reanalyze.status_code == 404
+    async with async_db() as db:
+        unchanged = (await db.execute(select(ScreenObservation))).scalar_one()
+    assert unchanged.details_json == stored_details_json
+
+
+@pytest.mark.asyncio
+async def test_legacy_artifact_with_removed_files_returns_degraded_analysis(async_db, client, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.api.observer.settings.screen_capture_archive_dir", str(tmp_path))
+    artifacts = {
+        "id": "legacy-pruned",
+        "image_path": str(tmp_path / "pruned.png"),
+        "provider_output_path": str(tmp_path / "pruned.provider.txt"),
+        "analysis_path": str(tmp_path / "pruned.analysis.json"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    async with async_db() as db:
+        observation = ScreenObservation(
+            app_name="Legacy capture",
+            activity_type="coding",
+            project="seraph",
+            summary="Legacy capture whose files retention removed",
+            details_json=json.dumps(["capture_artifacts:" + json.dumps(artifacts)]),
+        )
+        db.add(observation)
+
+    listing = await client.get("/api/observer/screen-artifacts")
+    assert [item["artifacts"]["image_available"] for item in listing.json()["items"]] == [False]
+
+    analysis = await client.get(f"/api/observer/screen-artifacts/{observation.id}/analysis")
+    assert analysis.status_code == 200
+    assert analysis.json() == {
+        "provider": None,
+        "summary": "Legacy capture whose files retention removed",
+        "activity": "coding",
+        "project": "seraph",
+        "analysis": None,
+        "analysis_available": False,
+    }
+    output = await client.get(f"/api/observer/screen-artifacts/{observation.id}/provider-output")
+    assert output.status_code == 404
+    image = await client.get(f"/api/observer/screen-artifacts/{observation.id}/image")
+    assert image.status_code == 404
+
+
 def _write_screenshot(root: Path, *, name: str, data: bytes = b"png bytes") -> Path:
     root.mkdir(parents=True, exist_ok=True)
     image = root / name

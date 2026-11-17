@@ -170,8 +170,26 @@ async def test_memory_consolidation_logs_failure_when_all_sessions_fail(async_db
     )
 
 
+def _isolated_screen_cleanup(tmp_path, monkeypatch):
+    """Point every store the cleanup job could touch at ``tmp_path``.
+
+    Never the operator's real screenshot folder or archive, whatever the
+    developer's shell exports.
+    """
+    from config.settings import settings
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shots = tmp_path / "shots"
+    monkeypatch.setattr(settings, "workspace_dir", str(workspace))
+    monkeypatch.setenv("SERAPH_SCREENSHOT_FOLDER", str(shots))
+    monkeypatch.setenv("SERAPH_SCREEN_CAPTURE_ARCHIVE_DIR", str(tmp_path / "archive"))
+    return workspace, shots
+
+
 @pytest.mark.asyncio
-async def test_screen_cleanup_logs_skip_when_nothing_deleted(async_db):
+async def test_screen_cleanup_logs_skip_when_nothing_deleted(async_db, tmp_path, monkeypatch):
+    _isolated_screen_cleanup(tmp_path, monkeypatch)
     mock_repo = MagicMock()
     mock_repo.cleanup_old = AsyncMock(return_value=0)
 
@@ -187,6 +205,88 @@ async def test_screen_cleanup_logs_skip_when_nothing_deleted(async_db):
         and event["details"]["reason"] == "no_expired_observations"
         for event in events
     )
+
+
+def _upload_store_file(shots, name: str, size: int, *, mtime: float):
+    import os
+
+    from src.observer.local_capture_upload import LOCAL_CAPTURE_UPLOAD_DIRNAME
+
+    path = shots / LOCAL_CAPTURE_UPLOAD_DIRNAME / name
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_bytes(b"x" * size)
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+@pytest.mark.asyncio
+async def test_screen_cleanup_enforces_capture_store_cap(async_db, tmp_path, monkeypatch):
+    from config.settings import settings
+
+    _workspace, shots = _isolated_screen_cleanup(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "screen_capture_archive_max_mb", 1)
+    recent = datetime.now().timestamp() - 3600
+    files = [
+        _upload_store_file(shots, f"2026-11-17/cap-{index}.png", 600 * 1024, mtime=recent + index)
+        for index in range(3)
+    ]
+    operator_image = shots / "Screenshot.png"
+    operator_image.write_bytes(b"y" * 2_000_000)
+    mock_repo = MagicMock()
+    mock_repo.cleanup_old = AsyncMock(return_value=0)
+
+    with patch("src.observer.screen_repository.screen_observation_repo", mock_repo):
+        from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
+
+        await run_screen_cleanup()
+
+    # 1800 KiB over a 1 MiB cap: the two oldest go, the newest stays.
+    assert [path.exists() for path in files] == [False, False, True]
+    assert operator_image.stat().st_size == 2_000_000
+    events = await audit_repository.list_events(limit=10)
+    [event] = [
+        event for event in events
+        if event["event_type"] == "scheduler_job_succeeded" and event["tool_name"] == "screen_cleanup"
+    ]
+    assert event["details"]["deleted_capture_files"] == 2
+    assert event["details"]["deleted_capture_files_for_size"] == 2
+    assert event["details"]["capture_store_bytes"] == 600 * 1024
+    assert event["details"]["capture_cap_mb"] == 1
+    assert event["details"]["capture_retention_days"] == settings.screen_observation_retention_days
+    assert event["details"]["capture_prune_over_cap"] is False
+    assert event["details"]["capture_prune_skipped_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_screen_cleanup_applies_archive_retention_days_to_capture_store(async_db, tmp_path, monkeypatch):
+    import json
+
+    workspace, shots = _isolated_screen_cleanup(tmp_path, monkeypatch)
+    (workspace / "screen-analysis-settings.json").write_text(
+        json.dumps({"archive_retention_days": 30}), encoding="utf-8"
+    )
+    day = 24 * 3600
+    now = datetime.now().timestamp()
+    expired = _upload_store_file(shots, "2026-10-01/cap-old.png", 100, mtime=now - 40 * day)
+    kept = _upload_store_file(shots, "2026-10-20/cap-new.png", 100, mtime=now - 20 * day)
+    mock_repo = MagicMock()
+    mock_repo.cleanup_old = AsyncMock(return_value=0)
+
+    with patch("src.observer.screen_repository.screen_observation_repo", mock_repo):
+        from src.scheduler.jobs.screen_cleanup import run_screen_cleanup
+
+        await run_screen_cleanup()
+
+    assert not expired.exists()
+    assert kept.exists()
+    events = await audit_repository.list_events(limit=10)
+    [event] = [
+        event for event in events
+        if event["event_type"] == "scheduler_job_succeeded" and event["tool_name"] == "screen_cleanup"
+    ]
+    assert event["details"]["capture_retention_days"] == 30
+    assert event["details"]["deleted_capture_files"] == 1
+    assert event["details"]["capture_cap_mb"] == 0
 
 
 @pytest.mark.asyncio

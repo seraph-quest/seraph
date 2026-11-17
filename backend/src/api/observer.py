@@ -788,17 +788,28 @@ async def upload_local_capture(request: Request):
             details={"reason": exc.code, "device_id": uploader["device_id"]},
         )
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code}) from exc
+    upload_details: dict[str, Any] = {
+        "reason": result.reason,
+        "capture_id": result.capture_id,
+        "observation_id": result.observation_id,
+        "device_id": uploader["device_id"],
+    }
+    if result.pruned_files:
+        upload_details["pruned_files"] = result.pruned_files
+        upload_details["pruned_bytes"] = result.pruned_bytes
     await log_integration_event(
         integration_type="observer_daemon",
         name="local_capture_upload",
         outcome=result.status,
-        details={
-            "reason": result.reason,
-            "capture_id": result.capture_id,
-            "observation_id": result.observation_id,
-            "device_id": uploader["device_id"],
-        },
+        details=upload_details,
     )
+    if result.prune_skipped_reason:
+        await log_integration_event(
+            integration_type="observer_daemon",
+            name="capture_store_prune",
+            outcome="failed",
+            details={"reason": result.prune_skipped_reason, "device_id": uploader["device_id"]},
+        )
     return JSONResponse(
         {
             "schema": "seraph.local_capture_upload.v1",
@@ -844,16 +855,47 @@ def _screen_artifact_path(raw_path: str | None) -> Path:
     return _artifact_path(raw_path, allowed_roots=[_screen_artifact_root()])
 
 
-def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
+def _resolve_artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
+    """Resolve a stored artifact path inside the allowed roots; no existence check."""
     if not raw_path:
         raise HTTPException(status_code=404, detail="Screen artifact is missing")
     path = Path(raw_path).expanduser().resolve()
     roots = [root.expanduser().resolve() for root in allowed_roots]
     if not any(path.is_relative_to(root) for root in roots):
         raise HTTPException(status_code=403, detail="Screen artifact is outside the configured archive")
+    return path
+
+
+def _artifact_path(raw_path: str | None, *, allowed_roots: list[Path]) -> Path:
+    path = _resolve_artifact_path(raw_path, allowed_roots=allowed_roots)
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Screen artifact file not found")
     return path
+
+
+def _artifact_path_if_present(raw_path: str | None, *, allowed_roots: list[Path]) -> Path | None:
+    """The resolved artifact file, or ``None`` when retention (or anything) removed it.
+
+    A path outside the allowed roots is still refused with 403 before any
+    existence check.
+    """
+    path = _resolve_artifact_path(raw_path, allowed_roots=allowed_roots)
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _screen_artifact_image_available(artifacts: dict[str, Any]) -> bool:
+    if artifacts.get("provider") == "paired_edge":
+        return True
+    raw_path = str(artifacts.get("image_path") or "")
+    if not raw_path:
+        return False
+    try:
+        return _artifact_path_if_present(raw_path, allowed_roots=_artifact_allowed_roots(artifacts)) is not None
+    except HTTPException:
+        return False
 
 
 def _artifact_allowed_roots(artifacts: dict[str, Any]) -> list[Path]:
@@ -909,6 +951,9 @@ def _screen_artifact_response(observation: ScreenObservation) -> dict[str, Any] 
         "provider": artifacts.get("provider"),
         "image_url": f"/api/observer/screen-artifacts/{observation.id}/image",
         "analysis_url": f"/api/observer/screen-artifacts/{observation.id}/analysis",
+        # False when retention or the size cap removed the stored image; the
+        # record itself stays readable.
+        "image_available": _screen_artifact_image_available(artifacts),
     }
     if artifacts.get("provider") != "screenshot_folder":
         artifact_links["provider_output_url"] = f"/api/observer/screen-artifacts/{observation.id}/provider-output"
@@ -1033,7 +1078,7 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
             "analysis": None,
         }
     if artifacts.get("provider") == "screenshot_folder" and not artifacts.get("analysis_path"):
-        image_path = _artifact_path(
+        image_path = _artifact_path_if_present(
             str(artifacts.get("image_path") or ""),
             allowed_roots=_artifact_allowed_roots(artifacts),
         )
@@ -1041,9 +1086,23 @@ async def get_screen_artifact_analysis(observation_id: str, request: Request) ->
             "provider": artifacts.get("provider") or "screenshot_folder",
             "summary": observation.summary,
             "image_sha256": artifacts.get("image_sha256"),
+            "image_available": image_path is not None,
             "analysis": _screenshot_folder_image_analysis(image_path, artifacts, observation),
         }
-    path = _artifact_path(str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts))
+    path = _artifact_path_if_present(
+        str(artifacts.get("analysis_path") or ""), allowed_roots=_artifact_allowed_roots(artifacts)
+    )
+    if path is None:
+        # The saved analysis sidecar was removed (retention, size cap or by
+        # hand): the observation row is still readable.
+        return {
+            "provider": artifacts.get("provider") or None,
+            "summary": observation.summary,
+            "activity": observation.activity_type,
+            "project": observation.project,
+            "analysis": None,
+            "analysis_available": False,
+        }
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -1141,7 +1200,7 @@ def _image_media_type(path: Path) -> str:
 
 
 def _screenshot_folder_image_analysis(
-    image_path: Path,
+    image_path: Path | None,
     artifacts: dict[str, Any],
     observation: ScreenObservation,
 ) -> dict[str, Any]:
@@ -1152,7 +1211,15 @@ def _screenshot_folder_image_analysis(
         semantic_analysis_status_from_details,
     )
 
-    metadata = local_image_metadata(image_path)
+    metadata: dict[str, Any] | None = None
+    if image_path is not None:
+        try:
+            metadata = local_image_metadata(image_path)
+        except OSError:
+            metadata = None  # removed between the check and the read
+    image_available = metadata is not None
+    if metadata is None:
+        metadata = {key: artifacts.get(key) for key in ("image_bytes", "file_format", "width", "height")}
     details = _screen_observation_details(observation)
     semantic_analysis = semantic_analysis_from_details(details)
     semantic_error = semantic_analysis_error_from_details(details)
@@ -1176,7 +1243,8 @@ def _screenshot_folder_image_analysis(
         "analysis_owner": "seraph",
         "semantic_status": semantic_status,
         "semantic_status_detail": persisted_status or None,
-        "image_path": str(image_path),
+        "image_path": str(image_path) if image_path is not None else str(artifacts.get("image_path") or ""),
+        "image_available": image_available,
         "image_sha256": artifacts.get("image_sha256"),
         "image_bytes": metadata.get("image_bytes"),
         "file_format": metadata.get("file_format"),
@@ -1190,7 +1258,15 @@ def _screenshot_folder_image_analysis(
         "notes": [
             "The screenshot folder source produced only the image file.",
             "Seraph computed this local image analysis from the configured screenshot directory.",
-        ],
+        ]
+        + (
+            []
+            if image_available
+            else [
+                "The stored image is no longer available: capture retention or the size cap removed it. "
+                "Metadata shown is what Seraph recorded when the capture was ingested."
+            ]
+        ),
     }
 
 

@@ -48,6 +48,8 @@ import src.work_board.dispatcher as dispatcher_module
 from src.work_board.repository import BoardMutation, BoardError, WorkBoardRepository
 from src.work_board import review as review_service
 from src.workflows.job_runtime import DurableJobError, DurableJobLeaseError, DurableJobRepository
+from tests.support.clock import fake_clock, timers_pending  # noqa: F401 - fixture
+from tests.support.sync import Gate, Signal, within
 
 # Every test here reaches the database (#1222).
 pytestmark = pytest.mark.usefixtures("db")
@@ -3222,3 +3224,90 @@ async def test_unknown_effect_never_auto_retries(async_db):
             await db.execute(select(WorkBoardTask).where(WorkBoardTask.task_id == task.task_id))
         ).scalar_one()
         assert refreshed.status is WorkBoardStatus.blocked
+
+
+async def _research_cancel_fixture(monkeypatch):
+    """A registered research worker and stub cancel reservations (#1227 item 3).
+
+    The worker parks until it is cancelled, then parks again in its own
+    post-cancel cleanup at ``quiescing``, as the real worker does while it
+    cancels its children and freezes the group. The reservation calls are
+    stubbed so only ``cancel_research``'s own wait is under test.
+    """
+    from src.work_board import research_control
+
+    calls: list[str] = []
+
+    async def request_cancel(jobs, owner, task_id, request):
+        calls.append("request_cancel")
+        return {"attempt_id": "research-attempt"}
+
+    async def finish_cancel(jobs, owner, task_id, request):
+        calls.append("finish_cancel")
+        return {"completed": True, "proof": "finished"}
+
+    monkeypatch.setattr(research_control, "request_cancel", request_cancel)
+    monkeypatch.setattr(research_control, "finish_cancel", finish_cancel)
+    running = Signal("research worker running")
+    quiescing = Gate("research worker post-cancel cleanup")
+
+    async def worker_body():
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await quiescing.arrive()
+            raise
+
+    worker = asyncio.create_task(worker_body(), name="research-worker")
+    await running.wait(task=worker)
+    dispatcher = WorkBoardDispatcher(jobs=object())
+    monkeypatch.setitem(dispatcher._active_worker_tasks, ("research-task", "research-attempt"), worker)
+    return dispatcher, worker, quiescing, calls
+
+
+async def test_research_cancel_answers_pending_when_worker_outlives_its_wait(monkeypatch, fake_clock):
+    """The ``cancellation_pending`` branch: the cancelled worker is still in its
+    cleanup when the endpoint's wait expires (#1227 item 3). The fake clock
+    moves only past the production bound, so nothing here races load."""
+    dispatcher, worker, quiescing, calls = await _research_cancel_fixture(monkeypatch)
+    async with quiescing:
+        cancel = asyncio.create_task(dispatcher.cancel_research(OWNER, "research-task", object()))
+        await quiescing.wait_reached(task=cancel)
+        # Exactly one timer, at the unchanged production bound.
+        assert await timers_pending(fake_clock, what="cancel_research waits on the worker") == [
+            dispatcher_module._RESEARCH_CANCEL_WORKER_WAIT_SECONDS
+        ] == [5]
+        assert not cancel.done()
+        fake_clock.advance(5)
+        result = await within(cancel, what="cancel_research answers after its bound")
+        assert result == {
+            "completed": False,
+            "cancellation_pending": True,
+            "reason": "actual_worker_completion_required",
+        }
+        # No completion is claimed: the finishing reservation never ran and
+        # the worker, still cleaning up, was not abandoned or cancelled again.
+        assert calls == ["request_cancel"]
+        assert not worker.done()
+        assert worker.cancelling() == 1
+    with pytest.raises(asyncio.CancelledError):
+        await within(worker, what="the released worker finishes its cleanup")
+    assert fake_clock.pending_deadlines() == []
+
+
+async def test_research_cancel_finishes_after_the_worker_completes_within_its_wait(monkeypatch, fake_clock):
+    """The completed branch at the same seam: once the cancelled worker has
+    actually returned, the endpoint finishes the cancel without time moving."""
+    dispatcher, worker, quiescing, calls = await _research_cancel_fixture(monkeypatch)
+    async with quiescing:
+        cancel = asyncio.create_task(dispatcher.cancel_research(OWNER, "research-task", object()))
+        await quiescing.wait_reached(task=cancel)
+        assert await timers_pending(fake_clock, what="cancel_research waits on the worker") == [5]
+        quiescing.release()
+        result = await within(cancel, what="cancel_research answers after the worker returns")
+    assert result == {"completed": True, "proof": "finished"}
+    assert calls == ["request_cancel", "finish_cancel"]
+    assert worker.done() and worker.cancelled()
+    assert fake_clock.elapsed == 0
+    assert fake_clock.pending_deadlines() == []

@@ -70,10 +70,6 @@ filterwarnings = [
     # Narrow, tracked exceptions. Later entries take precedence over the
     # errors above. Delete each one with the change that removes its cause.
     #
-    # #1235 (#1224 follow-up): the one file that still leaks an unreaped
-    # child and its pipes gets its exception as -W in
-    # scripts/run_backend_test_shard.py (TRACKED_LEAK_FILES), not here.
-    #
     # (#1223 removed the two ignores for the event loop pytest-asyncio's
     # runner made implicitly: tests/support/leaks.py marks the main thread's
     # loop as explicitly unset at configure time, so none is created.)

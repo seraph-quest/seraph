@@ -136,32 +136,6 @@ FULLY_RETIRED_EVAL_INVOCATIONS = {
 }
 
 
-# #1235 (#1224 follow-up), tracked exception to the warnings-as-errors policy
-# (#1218). After #1228, one file still leaves an unreaped child and its raw
-# pipes to pytest's session-end gc pass, where no test-level mark applies: CI
-# on develop 05cb3164 failed only here once the per-file exceptions were
-# removed. The filters are passed as -W to this file's invocations only, so
-# the same leak anywhere else still fails. Delete with #1235.
-# pytest treats a -W message as a literal prefix (re.escape), not a regex, so
-# "anonymous pipe" is spelled as one prefix per leading fd digit: a file opened
-# by path has a quoted name and never matches.
-TRACKED_LEAK_FILTERS: tuple[str, ...] = (
-    *(f"ignore:unclosed file <_io.{kind} name={digit}:ResourceWarning"
-      for kind in ("BufferedReader", "FileIO") for digit in "123456789"),
-    *(f"ignore:subprocess {digit}:ResourceWarning" for digit in "123456789"),
-)
-TRACKED_LEAK_FILES: frozenset[str] = frozenset({
-    "tests/test_repo_repair_executors.py",
-})
-
-
-def tracked_warning_args(paths: list[str] | tuple[str, ...]) -> list[str]:
-    """``-W`` filters for invocations that include a #1235-tracked file."""
-    if not TRACKED_LEAK_FILES.intersection(paths):
-        return []
-    return [f"-W{entry}" for entry in TRACKED_LEAK_FILTERS]
-
-
 RUNTIME_HEAVY_FILE_TIMEOUTS: dict[str, int] = {
     "tests/test_approvals_api.py": 1_200,
     "tests/test_context_window.py": 1_200,
@@ -705,7 +679,6 @@ def run_shard_files(
                       "all 10 selected source definitions are cancelled campaign consumers; not passed")
                 continue
             command = [sys.executable, "-m", "pytest", "-q", *invocation_args, *extra_args,
-                       *tracked_warning_args([path]),
                        *(f"--deselect={node}" for node in retired_nodes)]
             report_path = junit_report_path(junit_dir, label) if junit_dir is not None else None
             if report_path is not None:
@@ -806,10 +779,7 @@ def run_shard_single_process(
         extra_args.append("--no-cov")
     deselect = [f"--deselect={node}" for path in selected
                 for node in (CANCELLED_EVAL_CONSUMER_NODES.get(path, []) if exclude_cancelled_eval_harness else [])]
-    # One process: if the #1235-tracked file is in the shard, its leak filters
-    # apply to the whole run (scheduled lane only).
-    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect,
-               *tracked_warning_args(selected)]
+    command = [sys.executable, "-m", "pytest", "-q", *selected, *extra_args, *deselect]
     report = junit_dir / f"{label}.xml" if junit_dir is not None else None
     if report is not None:
         junit_dir.mkdir(parents=True, exist_ok=True)
@@ -839,7 +809,7 @@ def main() -> int:
     parser.add_argument(
         "--files", nargs="+", default=None,
         help="run these test files (relative to backend/) instead of a shard, with the same per-file "
-             "handling, e.g. the #1235 leak exception for TRACKED_LEAK_FILES",
+             "handling (-k splits and retired nodes)",
     )
     parser.add_argument("--file-timeout-seconds", type=int, default=None)
     parser.add_argument(

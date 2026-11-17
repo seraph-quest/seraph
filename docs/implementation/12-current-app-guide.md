@@ -4373,14 +4373,20 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   different account, the next run stops the source (`gh_login_changed`) and it
   stays off until you enable it again. Being logged out, `gh` missing or no
   network only fail that run; the source resumes when the same account is back.
-  The source is bound to the login that enabled it: a new Seraph login needs
-  enabling again. Nothing expires by time.
+  The source is bound to the Seraph login that enabled it: an explicit logout
+  or revocation of that login stops it (enable it again after logging in).
+  Nothing expires by time: the login's idle or absolute expiry does not stop
+  the source. Switching off cannot recall a request already in flight: one
+  read-only GET may still reach GitHub just after you switch off, and its
+  result is discarded.
 - **Where it works.** Only where the backend runs directly on your computer as
   you (`./manage.sh -e dev local ...`) with `gh` installed. `gh` is looked for
   only at `/opt/homebrew/bin/gh`, `/usr/local/bin/gh`, `/usr/bin/gh`,
   `/home/linuxbrew/.linuxbrew/bin/gh`, or one absolute path you type, never
-  through `PATH`. The file and its directory must be owned by you or root and
-  not group- or world-writable, and the resolved binary must stay under the
+  through `PATH`. The path must end in `gh` and must not be inside Seraph's
+  workspace or process runtime directory. The binary must be owned by you or
+  root and not group- or world-writable; its directory must be owned by you or
+  root and not world-writable. The resolved binary must stay under the
   install prefix it had when you enabled the source (so `brew upgrade gh`
   keeps working). Each run records the binary's path and SHA-256 and notes
   when it changed; a changed hash does not stop the source. The Docker and
@@ -4400,7 +4406,8 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
   Commits whose GitHub author or committer is that account (on the default
   branch, up to 3 branches you pushed that day, and your own pull requests
   updated that day); your own pull requests opened, merged or closed; your own
-  issues opened or closed. Reviews and comments are not collected yet. A commit
+  issues opened or closed. Branch names are percent-encoded; a branch name Git
+  would refuse is skipped and named in the run's limitations. Reviews and comments are not collected yet. A commit
   whose e-mail is not linked to the account cannot be attributed and is noted.
 - **Scope.** Default: repositories named by your own GitHub events that day.
   You can always read listed repositories, limit discovery to owners, and
@@ -4419,7 +4426,9 @@ starts `gh`) and `backend/src/integrations/github_activity.py`.
 - **Limits.** One `gh` process at a time, at most 120 per run and 10
   repositories, no retry and no sleep. A rate-limit answer, or a response with
   no remaining quota, ends the run and keeps what was read. The calls count
-  against your own `gh` rate limit.
+  against your own `gh` rate limit. A run that was blocked (switched off,
+  scope changed, login revoked) stores nothing; items are written only in the
+  same transaction that confirms the source is still on at the run's revision.
 - **States.** Every run ends `complete`, `partial`, `failed` or `blocked` with
   one fixed sentence, for example "GitHub source blocked: gh is not logged in
   to github.com for this user. Run gh auth login in your terminal." or

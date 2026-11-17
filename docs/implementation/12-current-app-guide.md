@@ -3546,7 +3546,9 @@ and this capability remains Partial within those explicit proof limits.
 ### Project issues and pull requests (C4.3 #1017) {#project-issues-and-pull-requests-1017}
 
 Project follow-through is **Partial**. It uses the existing GitHub connection and
-adds no new write authority. Routes live under
+adds no new write authority. The [GitHub activity source](#github-activity-evidence-1264) is separate:
+it is read-only and uses the operator's local `gh` login, not this connection's
+vault credential. Routes live under
 `/api/capabilities/github/project-source`:
 
 - `GET` returns the sync status and the connection's actual limitations: selected
@@ -4382,6 +4384,118 @@ macOS execution or native desktop capture; missing adapters block capture while
 the portable core remains usable. Pairing alone grants neither execution nor
 data egress, and protected-surface checks cannot identify every sensitive page.
 Availability follows the reviewed installed revision described above.
+
+### GitHub activity evidence for the end-of-day report (#1264) {#github-activity-evidence-1264}
+
+**Partial (slice 1 of [#1264](https://github.com/seraph-quest/seraph/issues/1264)).**
+Seraph can collect the operator's own GitHub activity for a day and store it
+as evidence. The end-of-day report does not read it yet; that is the next
+slice. Code: `backend/src/integrations/github_cli.py` (the only code that
+starts `gh`) and `backend/src/integrations/github_activity.py`.
+
+- **Credential.** It uses the operator's local `gh` login. `gh` holds the
+  account's full GitHub access and Seraph cannot narrow it. Seraph never reads
+  the token: it does not run `gh auth`, and it does not open `gh`'s config,
+  hosts file or keychain. It only sends the GET requests listed in the panel
+  (`/user`, `/users/{login}/events`, `/repos/{repo}`, `/repos/{repo}/issues`,
+  `/repos/{repo}/commits`, `/repos/{repo}/pulls/{n}/commits`). The cockpit and
+  the effective-grants rows always say: "Uses the operator's local gh login
+  (full gh scope; Seraph only issues read GETs)." See the
+  [ADR-011 addendum](./decisions/011-finite-github-connection-consent.md#addendum-local-gh-login-as-an-activity-read-source-1264).
+- **Turning it on.** Run `gh auth login` yourself, in your own terminal. Then
+  open Settings → GitHub → **GitHub activity for reports** and press **Check
+  gh login**. Seraph runs `gh --version` and `GET /user` and shows the version,
+  path and login; it stores nothing. Choose the repositories, tick the
+  acknowledgement (optionally the model-analysis box) and press **Enable**. The
+  server reads `/user` again and refuses (409) if the account differs from the
+  one shown. **Collect now** collects today (in `USER_TIMEZONE`) and lists the
+  stored items.
+- **Turning it off.** **Switch off** in the panel, or revoke the
+  `github_activity` row in effective grants. After that no code path starts
+  `gh`. Stored items stay for audit. If `gh` is later logged in as a
+  different account, the next run stops the source (`gh_login_changed`) and it
+  stays off until you enable it again. Being logged out, `gh` missing or no
+  network only fail that run; the source resumes when the same account is back.
+  The source belongs to your ownership identity, not to one login. Any live
+  login of that identity sees it, its items and its effective-grants row, and
+  can switch it off. A new login, a logout or a login's idle or absolute
+  expiry does not stop it and does not need re-enabling. It is stopped by
+  revoking the identity (**Revoke ownership**), by a workspace restore (state
+  `stopped`, reason `workspace_restored`), and, for a source enabled in local
+  no-login mode, by that root being reset or the mode switched off. A password
+  login needs enrolled ownership before it can enable the source. Nothing
+  expires by time. Switching off cannot recall a request already in flight: one
+  read-only GET may still reach GitHub just after you switch off, and its
+  result is discarded.
+- **Where it works.** Only where the backend runs directly on your computer as
+  you (`./manage.sh -e dev local ...`) with `gh` installed. `gh` is looked for
+  only at `/opt/homebrew/bin/gh`, `/usr/local/bin/gh`, `/usr/bin/gh`,
+  `/home/linuxbrew/.linuxbrew/bin/gh`, or one absolute path you type, never
+  through `PATH`. The path must end in `gh` and must not be inside Seraph's
+  workspace or process runtime directory. The binary must be owned by you or
+  root and not group- or world-writable; its directory must be owned by you or
+  root and not world-writable. The resolved binary must stay under the
+  install prefix it had when you enabled the source (so `brew upgrade gh`
+  keeps working). Each run records the binary's path and SHA-256 and notes
+  when it changed; a changed hash does not stop the source. The Docker and
+  production compose images have no `gh`, so the panel reports it unavailable;
+  mounting host `gh` config into a container is not supported. On Linux a
+  keyring login needs `DBUS_SESSION_BUS_ADDRESS` in the backend's environment.
+- **The child process.** `gh api --method GET --hostname github.com -i` with a
+  fixed endpoint, no shell, `stdin` at `/dev/null`, a new empty private working
+  directory, a 30 s per-call liveness bound, 1 MiB stdout and 16 KiB stderr
+  (stderr is dropped). The environment is built from nothing: `HOME` from the
+  passwd database, `PATH=/usr/bin:/bin`, prompts and update checks off.
+  `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR`, `GH_DEBUG`, proxy, CA
+  and loader variables from Seraph's environment (including `.env.dev`) are
+  never passed. Proxy variables are deliberately not passed, so an operator
+  behind a mandatory proxy sees `gh_request_failed`.
+- **What counts.** The account `GET /user` returns, pinned by numeric id.
+  Commits whose GitHub author or committer is that account (on the default
+  branch, up to 3 branches you pushed that day, and your own pull requests
+  updated that day); your own pull requests opened, merged or closed; your own
+  issues opened or closed. Branch names are percent-encoded; a branch name Git
+  would refuse is skipped and named in the run's limitations. Reviews and comments are not collected yet. A commit
+  whose e-mail is not linked to the account cannot be attributed and is noted.
+- **Scope.** Default: repositories named by your own GitHub events that day.
+  You can always read listed repositories, limit discovery to owners, and
+  exclude repositories. GitHub's event feed can lag by minutes to hours and
+  covers only 30 days, so listing your main repository is recommended; a day
+  older than 30 days with no listed repository ends partial.
+- **The day.** `[local midnight, next local midnight)` in `USER_TIMEZONE`,
+  converted to UTC; DST days are 23 or 25 hours. Items store only the UTC
+  instant, and the day is derived when read. Collection for today stops at now.
+- **Storage.** `github_activity_sources` (the opt-in, keyed to the operator
+  identity; no token column),
+  `github_activity_runs` (one row per run with status, reason, limitations,
+  counts, call count and the binary) and `github_activity_items` (repository,
+  kind, number or sha, title, a URL Seraph builds itself, UTC time, and the
+  run that first and last saw it). Re-collecting a day updates rows in place.
+  Each run writes one audit event (`github_activity` / `gh_cli`).
+- **Limits.** One `gh` process at a time, at most 120 per run and 10
+  repositories, no retry and no sleep. A rate-limit answer, or a response with
+  no remaining quota, ends the run and keeps what was read. The calls count
+  against your own `gh` rate limit. A run that was blocked (switched off,
+  scope changed, login revoked) stores nothing; items are written only in the
+  same transaction that confirms the source is still on at the run's revision.
+- **States.** Every run ends `complete`, `partial`, `failed` or `blocked` with
+  one fixed sentence, for example "GitHub source blocked: gh is not logged in
+  to github.com for this user. Run gh auth login in your terminal." or
+  "GitHub source blocked: no gh command is available where Seraph's backend
+  runs." A run that started and never finished is reported as such; no state
+  deletes earlier items.
+- **Routes** (operator session required), under
+  `/api/capabilities/github/activity`: `GET` (status; starts nothing),
+  `POST /gh/check`, `PUT /source`, `POST /revoke`, `POST /collect`,
+  `GET /items?report_date=YYYY-MM-DD`.
+- **Residual risk.** Anything already running as you can replace `gh` or run
+  `gh auth token` itself; the binary checks do not defend against that. The
+  argv builder is the only limit on what is sent, so a change to
+  `github_cli.py` is a change to an authority boundary.
+- **Proof.** Fake `gh` runner and a fake `gh` executable in a temporary
+  directory; no test runs the real `gh` or reaches the network. Behaviour with
+  a real `gh` login is **external-unverified**: the first live call is the
+  operator's own **Check gh login**.
 
 ### Reading stored end-of-day reports
 

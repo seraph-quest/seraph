@@ -1923,6 +1923,175 @@ def _stop_after_capture_setup_failure(
     return _termination_cleanup_status(termination)
 
 
+@dataclass
+class OwnedRunCleanup:
+    """Cleanup outcome of one owned child, readable even when the run raised.
+
+    ``run_owned_argv`` updates it before returning or re-raising, so a caller
+    that owns per-run state (a worker root) can decide in its own ``finally``
+    whether that state is safe to delete.
+    """
+
+    status: str = "not_requested"
+    remaining_descendants: int | None = None
+
+
+@dataclass(frozen=True)
+class OwnedRunResult:
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    stdout_truncated: bool
+    stderr_truncated: bool
+    timed_out: bool
+    cancelled: bool
+    cleanup_status: str
+    remaining_descendants: int | None
+
+
+def run_owned_argv(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+    cancel_event: threading.Event | None = None,
+    stdout_limit: int = _PROCESS_OUTPUT_BYTES,
+    stderr_limit: int = _PROCESS_OUTPUT_BYTES,
+    stdin: int | None = None,
+    cleanup: OwnedRunCleanup | None = None,
+) -> OwnedRunResult:
+    """Run one argv as an owned child: bounded capture, group kill and reap.
+
+    This is the launch/wait/stop body of ``run_command`` (#1264 extracted it
+    unchanged so a backend owner can reuse it). The child starts with
+    ``shell=False`` in a new session; both pipes are drained with bounded
+    captures; a timeout or ``cancel_event`` stops the verified process group
+    and reaps it; a capture setup failure stops the child and re-raises
+    (#1255). ``cleanup`` receives the cleanup status on every path.
+    """
+    state = cleanup if cleanup is not None else OwnedRunCleanup()
+    process: subprocess.Popen[bytes] | None = None
+    leader_identity: _ProcessLeaderIdentity | None = None
+    captures: tuple[_BoundedPipeCapture, _BoundedPipeCapture] | None = None
+    popen_kwargs: dict[str, Any] = {}
+    if stdin is not None:
+        popen_kwargs["stdin"] = stdin
+    try:
+        process = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            shell=False,
+            env=env,
+            start_new_session=True,
+            **popen_kwargs,
+        )
+        # start_new_session makes the child PID the process-group leader.
+        # Retain its start time and PGID so a later timeout cannot signal a
+        # recycled PID's process group.
+        leader_identity = _capture_process_identity(process)
+        stdout_capture: _BoundedPipeCapture | None = None
+        try:
+            stdout_capture = _BoundedPipeCapture(process.stdout, limit=stdout_limit)
+            captures = (stdout_capture, _BoundedPipeCapture(process.stderr, limit=stderr_limit))
+        except BaseException:
+            # The child is running but not every pipe has a drain (#1255).
+            # Stop it on the timeout/cancel path, then re-raise. The status
+            # starts as failed so an interrupted cleanup keeps the caller's
+            # state; a completed cleanup overwrites it.
+            state.status = "failed"
+            try:
+                state.status, state.remaining_descendants = _stop_after_capture_setup_failure(
+                    process,
+                    leader_identity=leader_identity,
+                    started_capture=stdout_capture,
+                )
+            except Exception:
+                # Keep the caller's state and surface the setup failure.
+                logger.warning("Failed to stop a command after pipe capture setup failed", exc_info=True)
+            if state.status not in {"not_requested", "stopped"}:
+                logger.warning(
+                    "Pipe capture setup failed; command cleanup is %s, retaining caller state",
+                    state.status,
+                )
+            raise
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout_seconds)
+            if process.poll() is not None and captures[0].done and captures[1].done:
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                descendant_identities = _snapshot_process_descendants(
+                    process,
+                    leader_identity,
+                )
+                termination = _kill_process_group(
+                    process,
+                    leader_identity=leader_identity,
+                    descendant_identities=descendant_identities,
+                )
+                state.status, state.remaining_descendants = _termination_cleanup_status(termination)
+                stdout, stderr = _bounded_reap_process(process, captures=captures)
+                return OwnedRunResult(
+                    exit_code=process.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                    stdout_truncated=captures[0].truncated,
+                    stderr_truncated=captures[1].truncated,
+                    timed_out=False,
+                    cancelled=True,
+                    cleanup_status=state.status,
+                    remaining_descendants=state.remaining_descendants,
+                )
+            time.sleep(min(0.05, remaining))
+    except subprocess.TimeoutExpired as exc:
+        if process is not None:
+            descendant_identities = _snapshot_process_descendants(
+                process,
+                leader_identity,
+            )
+            termination = _kill_process_group(
+                process,
+                leader_identity=leader_identity,
+                descendant_identities=descendant_identities,
+            )
+            state.status, state.remaining_descendants = _termination_cleanup_status(termination)
+            if captures is not None:
+                stdout, stderr = _bounded_reap_process(process, captures=captures)
+            else:
+                stdout, stderr = _bounded_reap_process(process)
+        else:
+            stdout, stderr = exc.stdout or "", exc.stderr or ""
+        return OwnedRunResult(
+            exit_code=process.returncode if process is not None else None,
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=bool(captures is not None and captures[0].truncated),
+            stderr_truncated=bool(captures is not None and captures[1].truncated),
+            timed_out=True,
+            cancelled=False,
+            cleanup_status=state.status,
+            remaining_descendants=state.remaining_descendants,
+        )
+
+    return OwnedRunResult(
+        exit_code=process.returncode,
+        stdout=captures[0].text(),
+        stderr=captures[1].text(),
+        stdout_truncated=captures[0].truncated,
+        stderr_truncated=captures[1].truncated,
+        timed_out=False,
+        cancelled=False,
+        cleanup_status=state.status,
+        remaining_descendants=state.remaining_descendants,
+    )
+
+
 def _command_env(*, worker_root: Path | None = None) -> dict[str, str]:
     env = {
         key: value
@@ -2206,11 +2375,7 @@ class ProcessRuntimeManager:
         )
         timeout = _normalize_timeout_seconds(timeout_seconds)
         worker_root = _worker_runtime_root(uuid.uuid4().hex)
-        process: subprocess.Popen[bytes] | None = None
-        leader_identity: _ProcessLeaderIdentity | None = None
-        captures: tuple[_BoundedPipeCapture, _BoundedPipeCapture] | None = None
-        runtime_cleanup_status = "not_requested"
-        remaining_descendants: int | None = None
+        cleanup = OwnedRunCleanup()
         try:
             if cancel_event is not None and cancel_event.is_set():
                 return {
@@ -2224,145 +2389,60 @@ class ProcessRuntimeManager:
                     "cwd": str(resolved_cwd),
                     "timeout_seconds": timeout,
                 }
-            process = subprocess.Popen(
+            result = run_owned_argv(
                 _process_launch_argv(executable, args),
-                cwd=str(resolved_cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False,
-                shell=False,
+                cwd=resolved_cwd,
                 env=_command_env(worker_root=worker_root),
-                start_new_session=True,
+                timeout_seconds=timeout,
+                cancel_event=cancel_event,
+                cleanup=cleanup,
             )
-            # start_new_session makes the child PID the process-group leader.
-            # Retain its start time and PGID so a later timeout cannot signal a
-            # recycled PID's process group.
-            leader_identity = _capture_process_identity(process)
-            stdout_capture: _BoundedPipeCapture | None = None
-            try:
-                stdout_capture = _BoundedPipeCapture(process.stdout)
-                captures = (stdout_capture, _BoundedPipeCapture(process.stderr))
-            except BaseException:
-                # The child is running but not every pipe has a drain (#1255).
-                # Stop it on the timeout/cancel path, then re-raise. The status
-                # starts as failed so an interrupted cleanup keeps the worker
-                # root; a completed cleanup overwrites it.
-                runtime_cleanup_status = "failed"
-                try:
-                    runtime_cleanup_status, remaining_descendants = _stop_after_capture_setup_failure(
-                        process,
-                        leader_identity=leader_identity,
-                        started_capture=stdout_capture,
-                    )
-                except Exception:
-                    # Keep the worker root and surface the setup failure.
-                    logger.warning("Failed to stop a command after pipe capture setup failed", exc_info=True)
-                if runtime_cleanup_status not in {"not_requested", "stopped"}:
-                    logger.warning(
-                        "Pipe capture setup failed; command cleanup is %s, retaining worker root %s",
-                        runtime_cleanup_status,
-                        worker_root,
-                    )
-                raise
-            deadline = time.monotonic() + timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired([executable, *args], timeout)
-                if process.poll() is not None and captures[0].done and captures[1].done:
-                    break
-                if cancel_event is not None and cancel_event.is_set():
-                    descendant_identities = _snapshot_process_descendants(
-                        process,
-                        leader_identity,
-                    )
-                    termination = _kill_process_group(
-                        process,
-                        leader_identity=leader_identity,
-                        descendant_identities=descendant_identities,
-                    )
-                    runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
-                    stdout, stderr = _bounded_reap_process(process, captures=captures)
-                    return {
-                        "ok": False,
-                        "cancelled": True,
-                        "timed_out": False,
-                        "exit_code": process.returncode,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "display_command": _display_command([executable, *args]),
-                        "cwd": str(resolved_cwd),
-                        "timeout_seconds": timeout,
-                        "cleanup_status": runtime_cleanup_status,
-                        "remaining_descendants": remaining_descendants,
-                        "worker_root": (
-                            str(worker_root)
-                            if runtime_cleanup_status not in {"not_requested", "stopped"}
-                            else None
-                        ),
-                    }
-                time.sleep(min(0.05, remaining))
-        except subprocess.TimeoutExpired as exc:
-            if process is not None:
-                descendant_identities = _snapshot_process_descendants(
-                    process,
-                    leader_identity,
-                )
-                termination = _kill_process_group(
-                    process,
-                    leader_identity=leader_identity,
-                    descendant_identities=descendant_identities,
-                )
-                runtime_cleanup_status, remaining_descendants = _termination_cleanup_status(termination)
-                if captures is not None:
-                    stdout, stderr = _bounded_reap_process(process, captures=captures)
-                else:
-                    stdout, stderr = _bounded_reap_process(process)
-            else:
-                stdout, stderr = exc.stdout or "", exc.stderr or ""
-            return {
-                "ok": False,
-                "cancelled": False,
-                "timed_out": True,
-                "exit_code": process.returncode if process is not None else None,
-                "stdout": stdout,
-                "stderr": stderr,
-                "display_command": _display_command([executable, *args]),
-                "cwd": str(resolved_cwd),
-                "timeout_seconds": timeout,
-                "cleanup_status": runtime_cleanup_status,
-                "remaining_descendants": remaining_descendants,
-                "worker_root": (
-                    str(worker_root)
-                    if runtime_cleanup_status not in {"not_requested", "stopped"}
-                    else None
-                ),
-            }
-        except OSError:
+        except BaseException:
+            if cleanup.status not in {"not_requested", "stopped"}:
+                logger.warning("Command cleanup is %s, retaining worker root %s", cleanup.status, worker_root)
             raise
         finally:
             # Preserve the worker root when cleanup is unknown or failed so an
             # operator can inspect the retained state while the detached
             # descendant remains alive.  Successful bounded cleanup reclaims
             # the invocation-scoped root.
-            if runtime_cleanup_status in {"not_requested", "stopped"}:
+            if cleanup.status in {"not_requested", "stopped"}:
                 _delete_runtime_dir(worker_root)
 
+        if result.cancelled or result.timed_out:
+            return {
+                "ok": False,
+                "cancelled": result.cancelled,
+                "timed_out": result.timed_out,
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "display_command": _display_command([executable, *args]),
+                "cwd": str(resolved_cwd),
+                "timeout_seconds": timeout,
+                "cleanup_status": result.cleanup_status,
+                "remaining_descendants": result.remaining_descendants,
+                "worker_root": (
+                    str(worker_root)
+                    if result.cleanup_status not in {"not_requested", "stopped"}
+                    else None
+                ),
+            }
         return {
-            "ok": process.returncode == 0,
+            "ok": result.exit_code == 0,
             "cancelled": bool(cancel_event is not None and cancel_event.is_set()),
             "timed_out": False,
-            "exit_code": process.returncode,
-            "stdout": captures[0].text() if captures is not None else "",
-            "stderr": captures[1].text() if captures is not None else "",
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
             "display_command": _display_command([executable, *args]),
             "cwd": str(resolved_cwd),
             "timeout_seconds": timeout,
-            "cleanup_status": runtime_cleanup_status,
-            "remaining_descendants": remaining_descendants,
+            "cleanup_status": result.cleanup_status,
+            "remaining_descendants": result.remaining_descendants,
             "worker_root": (
                 str(worker_root)
-                if runtime_cleanup_status not in {"not_requested", "stopped"}
+                if result.cleanup_status not in {"not_requested", "stopped"}
                 else None
             ),
         }

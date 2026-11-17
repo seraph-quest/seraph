@@ -443,3 +443,25 @@ false closure or absence proof. Acceptance includes positive stopped-consent
 legacy reconciliation/finalization/release, stale-Goal exact legacy closure,
 all missing-ID/non-positive/too-large blockers, restart durable read-revision
 adoption, and zero POST/new-root adoption on every route.
+
+## Addendum: local gh login as an activity read source (#1264)
+
+**Status:** Accepted for #1264 slice 1.
+
+The operator's local `gh` login is Seraph's first ambient-credential source.
+It is ambient authority: `gh` normally holds full read and write access to
+the account and Seraph cannot narrow it. Under this ADR's rule that
+credentials identify an account but do not authorize Seraph, `gh` being
+logged in grants nothing. The read source is off until the operator checks
+the login, acknowledges the full `gh` scope, chooses the scope and enables it
+in Settings. It is visible as an effective-grants row and revocable there or
+in the panel; a different `gh` account stops it until enabled again.
+
+The boundary is Seraph's own argv, not GitHub: one fixed
+`gh api --method GET --hostname github.com` shape over a closed endpoint table
+with validated values, never `gh auth`, field flags, `--input`, `--paginate`,
+GraphQL or a full URL, with an environment built from nothing so no token,
+host or config override from Seraph's environment reaches `gh`. Seraph never
+reads the token. This read source grants no write authority and does not
+change the mutation consent above. Changes to `backend/src/integrations/github_cli.py`
+are reviewed as authority changes.

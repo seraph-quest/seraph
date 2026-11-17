@@ -105,6 +105,19 @@ limitations. Verified with offline local GitHub fixtures and zero
 inference/provider spend. Live GitHub usefulness remains
 **external-unverified**.
 
+**GitHub activity source for reports: Partial (#1264, slice 1).** Settings →
+GitHub → **GitHub activity for reports** lets the operator check their local
+`gh` login, acknowledge that it holds full GitHub access, choose repositories
+and enable a read-only source. **Collect now** stores the day's own commits,
+pull requests opened/merged/closed and issues opened/closed as provenance rows
+with Seraph-built URLs; effective grants show and revoke it. Only fixed GET
+requests are sent, through `gh api` with a scratch environment and a pinned,
+ownership-checked binary. Missing boundaries: the end-of-day report does not
+read the activity yet (slice 2), reviews and comments are not collected, and
+it works only where the backend runs directly on the operator's computer.
+Verified with a fake `gh` runner, a fake `gh` executable and offline route and
+component tests; behaviour with a real `gh` login is **external-unverified**.
+
 **Cockpit end-of-day report reader: Partial.** The cockpit **Reports**
 section and `GET /api/reports/end-of-day[/{episode_id}]` read stored
 end-of-day goal reports only; they cannot generate a report and make no model

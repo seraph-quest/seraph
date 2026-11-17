@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import gc
 import json
 import os
 import resource
 import signal
 import stat
 import textwrap
+import sys
 import threading
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1859,3 +1862,67 @@ def test_bounded_pipe_capture_closes_its_pipe_after_draining_to_eof():
     assert capture.done
     assert stream.closed
     assert capture.text() == "drained output"
+
+
+def _run_command_with_failing_capture(monkeypatch, tmp_path, *, fail_on_call: int):
+    """Run a never-ending command whose ``fail_on_call``-th capture fails to build (#1255)."""
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path))
+    # The child waits for a signal, so only the stop path can end it.
+    (tmp_path / "wait-for-signal.py").write_text("import signal\nsignal.pause()\n", encoding="utf-8")
+    launched: list = []
+    real_identity = process_tools_module._capture_process_identity
+
+    def record_process(process):
+        launched.append(process)
+        return real_identity(process)
+
+    built: list = []
+    real_capture = process_tools_module._BoundedPipeCapture
+
+    class FailingCapture(real_capture):
+        def __init__(self, stream, **kwargs):
+            if stream is not None:
+                if len(built) + 1 == fail_on_call:
+                    raise OSError(errno.EMFILE, "injected capture setup failure")
+                built.append(self)
+            super().__init__(stream, **kwargs)
+
+    monkeypatch.setattr(process_tools_module, "_capture_process_identity", record_process)
+    monkeypatch.setattr(process_tools_module, "_BoundedPipeCapture", FailingCapture)
+
+    unraisable: list = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(OSError, match="injected capture setup failure") as raised:
+            process_runtime_manager.run_command(
+                command="python3",
+                args_json=json.dumps(["wait-for-signal.py"]),
+                timeout_seconds=30,
+            )
+        assert raised.value.errno == errno.EMFILE
+        (process,) = launched
+        # The child was stopped and reaped, and no pipe outlives the call.
+        assert process.returncode is not None
+        assert process.stdout.closed
+        assert process.stderr.closed
+        assert all(capture.done for capture in built)
+        # Dropping the last references must not report an unclosed file or a
+        # still-running subprocess.
+        del process, raised
+        launched.clear()
+        gc.collect()
+    assert [warning for warning in caught if issubclass(warning.category, ResourceWarning)] == []
+    assert unraisable == []
+    return built
+
+
+def test_run_command_stops_and_reaps_child_when_second_capture_setup_fails(monkeypatch, tmp_path):
+    built = _run_command_with_failing_capture(monkeypatch, tmp_path, fail_on_call=2)
+    # The stdout drain had started before the stderr capture failed.
+    assert len(built) == 1
+
+
+def test_run_command_stops_and_reaps_child_when_first_capture_setup_fails(monkeypatch, tmp_path):
+    built = _run_command_with_failing_capture(monkeypatch, tmp_path, fail_on_call=1)
+    assert built == []

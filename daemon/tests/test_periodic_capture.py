@@ -31,6 +31,8 @@ from seraph_daemon import (
     fetch_capture_mode,
     periodic_capture_loop,
 )
+from capture_archive import ARCHIVE_FILE_RE
+from capture_upload import CaptureUploadResult
 from ocr.base import AnalysisResult
 
 
@@ -485,3 +487,214 @@ class TestPeriodicCaptureLoop:
                 pass
 
         assert len(posts) == 0
+
+
+# ── Capture archive limits (#1263) ─────────────────────────────────────
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+_NOW = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
+
+
+class _FailingSettingsClient:
+    async def get(self, _url):
+        return SimpleNamespace(status_code=503, json=lambda: {})
+
+
+def _old_group(root: Path, day: str, index: int, *, mtime: datetime, size: int = 300) -> list[Path]:
+    stem = f"0900{index:02d}-code-{index:016x}"
+    paths = [root / day / f"{stem}.png", root / day / f"{stem}.apple-vision.json", root / day / f"{stem}.analysis.json"]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * (size if path.suffix == ".png" else 50))
+        os.utime(path, (mtime.timestamp(), mtime.timestamp()))
+    return paths
+
+
+def test_archive_writer_names_match_the_pruner_pattern(tmp_path):
+    artifacts = _archive_provider_capture(
+        archive_dir=str(tmp_path),
+        png_bytes=b"png bytes",
+        app_name="Visual Studio Code — main.py",
+        provider_name="apple-vision",
+        analysis={"summary": "Editing"},
+    )
+    written = sorted(path for path in tmp_path.rglob("*") if path.is_file())
+    assert len(written) == 3
+    stems = set()
+    for path in written:
+        match = ARCHIVE_FILE_RE.fullmatch(path.name)
+        assert match is not None, path.name
+        stems.add(match.group("stem"))
+    assert len(stems) == 1
+    assert Path(artifacts["image_path"]) in written
+
+
+def _uploading_runtime(tmp_path, upload_result, *, archive_max_mb=0):
+    provider = SimpleNamespace(
+        name="apple-vision",
+        analyze_screen=AsyncMock(
+            return_value=AnalysisResult(success=True, data={"summary": "Editing.", "activity": "coding"}, duration_ms=5)
+        ),
+    )
+    async def post_context(client, payload):
+        return await client.post("http://localhost:8004/api/observer/context", json=payload)
+
+    uploader = SimpleNamespace(
+        upload=AsyncMock(return_value=upload_result),
+        status=MagicMock(return_value={}),
+        origin="http://localhost:8004",
+        post_context=post_context,
+    )
+    runtime = ScreenAnalysisRuntime(
+        enabled=True,
+        provider="apple-vision",
+        model=None,
+        preserve_captures=True,
+        archive_dir=str(tmp_path / "archive"),
+        blocklist_file=None,
+        uploader=uploader,
+        now=lambda: _NOW,
+    )
+    runtime.provider = provider
+    runtime.enabled = True
+    runtime.preserve_captures = True
+    runtime.blocklist = set()
+    runtime.refresh = AsyncMock()
+    runtime._archive_limits_known = True
+    runtime.archive_max_mb = archive_max_mb
+    return runtime
+
+
+async def _run_periodic_once(runtime) -> list[dict]:
+    posts: list[dict] = []
+
+    async def mock_get(url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"mode": "detailed"}
+        return resp
+
+    async def mock_post(url, **kwargs):
+        posts.append(kwargs.get("json", {}))
+        raise asyncio.CancelledError()
+
+    mock_client = AsyncMock()
+    mock_client.get = mock_get
+    mock_client.post = mock_post
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with patch("seraph_daemon.get_frontmost_app_name", return_value="VS Code"), \
+         patch("seraph_daemon.get_window_title", return_value="main.py"), \
+         patch("seraph_daemon.get_idle_seconds", return_value=0.0), \
+         patch("ocr.screenshot.capture_screen_png", return_value=b"png bytes"), \
+         patch("httpx.AsyncClient", return_value=mock_client):
+        with pytest.raises(asyncio.CancelledError):
+            await periodic_capture_loop("http://localhost:8004", idle_timeout=300, verbose=False, screen_runtime=runtime)
+    return posts
+
+
+@pytest.mark.asyncio
+async def test_capture_stored_by_backend_is_not_archived_again(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
+    runtime = _uploading_runtime(tmp_path, CaptureUploadResult(status="accepted", reason="capture_accepted"))
+
+    posts = await _run_periodic_once(runtime)
+
+    assert len(posts) == 1
+    assert "observation" not in posts[0]
+    archive = tmp_path / "archive"
+    assert not archive.exists() or not any(path.is_file() for path in archive.rglob("*"))
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_is_archived_and_older_capture_pruned_under_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
+    archive = tmp_path / "archive"
+    old = _old_group(archive, "2026-11-16", 1, mtime=_NOW - timedelta(days=1), size=1024 * 1024)
+    runtime = _uploading_runtime(
+        tmp_path, CaptureUploadResult(status="failed", reason="backend_unreachable"), archive_max_mb=1
+    )
+
+    posts = await _run_periodic_once(runtime)
+
+    artifacts = posts[0]["observation"]["capture_artifacts"]
+    assert Path(artifacts["image_path"]).read_bytes() == b"png bytes"
+    assert not any(path.exists() for path in old)
+    assert runtime.budget_status()["archive_prune"]["trigger"] == "write"
+    assert runtime.budget_status()["archive_prune"]["deleted_captures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_limits_come_only_from_backend_and_survive_an_outage(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
+    archive = tmp_path / "archive"
+    ancient = _old_group(archive, "2024-11-01", 1, mtime=_NOW - timedelta(days=2 * 365))
+    runtime = ScreenAnalysisRuntime(
+        enabled=True,
+        provider="apple-vision",
+        model=None,
+        preserve_captures=True,
+        archive_dir=str(archive),
+        blocklist_file=None,
+        now=lambda: _NOW,
+    )
+
+    with patch("ocr.create_provider", side_effect=lambda **_kwargs: _FakeProvider()), patch(
+        "blocklist.load_blocklist", return_value=set()
+    ):
+        await runtime.refresh(_FailingSettingsClient(), "http://localhost:8004", force=True)
+        # Limits unknown: even two-year-old files survive.
+        assert all(path.exists() for path in ancient)
+        assert runtime.budget_status()["archive_prune"] is None
+
+        await runtime.refresh(
+            _RuntimeSettingsClient(
+                {
+                    "enabled": True,
+                    "provider": "apple-vision",
+                    "preserve_captures": True,
+                    "archive_dir": str(archive),
+                    "archive_retention_days": 180,
+                    "archive_max_mb": 64,
+                }
+            ),
+            "http://localhost:8004",
+            force=True,
+        )
+        assert not any(path.exists() for path in ancient)
+        assert runtime.budget_status()["archive_prune"]["trigger"] == "settings"
+
+        await runtime.refresh(_FailingSettingsClient(), "http://localhost:8004", force=True)
+
+    assert runtime.archive_retention_days == 180
+    assert runtime.archive_max_mb == 64
+
+
+def test_day_rollover_prunes_groups_that_crossed_retention(tmp_path, monkeypatch):
+    monkeypatch.setenv("SERAPH_DAEMON_STATUS_FILE", str(tmp_path / "daemon-status.json"))
+    archive = tmp_path / "archive"
+    clock = {"now": _NOW}
+    group = _old_group(archive, "2026-10-18", 1, mtime=_NOW - timedelta(days=30, hours=-6))
+    runtime = ScreenAnalysisRuntime(
+        enabled=True,
+        provider="apple-vision",
+        model=None,
+        preserve_captures=True,
+        archive_dir=str(archive),
+        blocklist_file=None,
+        now=lambda: clock["now"],
+    )
+    runtime._archive_limits_known = True
+    runtime._update_budget_settings(0, 0, 30, 0)
+
+    runtime.budget_status()
+    assert all(path.exists() for path in group)
+
+    clock["now"] = _NOW + timedelta(days=1)
+    status = runtime.budget_status()
+
+    assert not any(path.exists() for path in group)
+    assert status["archive_prune"]["trigger"] == "day_rollover"
+    assert status["daily_capture_date"] == "2026-11-18"

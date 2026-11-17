@@ -209,14 +209,46 @@ def test_dynamic_import_with_a_non_literal_name_is_unresolvable(tmp_path: Path) 
             module = importlib.import_module(name)
             module = other
             module.sleep(1)
+
+        def helper(name, module=None):
+            if module is None:
+                module = importlib.import_module(name)
+            module.run()
+
+        def test_d(name):
+            loaded = importlib.import_module(name)
+            loaded.FLAG = True
+            try:
+                pass
+            except ValueError as caught:
+                caught = importlib.import_module(name)
+                caught.sleep(1)
+
+        def test_e(name, value):
+            matched = importlib.import_module(name)
+            match value:
+                case matched:
+                    pass
+            matched.sleep(1)
+
+        def with_default(clock=importlib.import_module(NAME).monotonic):
+            pass
+
+        class Subject(importlib.import_module(NAME).Base):
+            pass
     """})
     result = checker.scan(tests, tmp_path)
     # Attribute reads, directly or through a name bound only to the import in
     # that scope, are reported; a bare or passed-on import is not, nor a name
     # with another binding in its scope.
-    assert [error.split(":")[1] for error in result.errors] == ["7", "8", "9", "11", "12"]
-    assert all("relative/unresolvable" in error for error in result.errors)
-    assert ["non-literal" in error for error in result.errors] == [True, True, True, False, True]
+    # A default argument and a class base are evaluated in the enclosing scope
+    # and still reported. Parameters, ``except ... as`` names and ``match``
+    # captures are other bindings, and an attribute store is not a read.
+    assert [error.split(":")[1] for error in result.errors] == ["7", "8", "9", "11", "12", "44", "47"]
+    assert [error.split(" is ")[1].split(" ")[0] for error in result.errors] == [
+        "non-literal/unresolvable", "non-literal/unresolvable", "non-literal/unresolvable",
+        "relative/unresolvable", "non-literal/unresolvable", "non-literal/unresolvable",
+        "non-literal/unresolvable"]
     assert "relative module name" in result.errors[3]
 
     module = tmp_path / "src/adopted.py"

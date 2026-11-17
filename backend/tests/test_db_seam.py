@@ -278,6 +278,16 @@ async def test_session_scope_rolls_back_explicitly_on_cancellation(db, monkeypat
     assert rows == []
 
 
+async def _rollback_reached(rollback_entered, task):
+    """Wait until the rollback stub is entered, or fail at once if the task ends first."""
+    waiter = asyncio.create_task(rollback_entered.wait())
+    await asyncio.wait({waiter, task}, return_when=asyncio.FIRST_COMPLETED)
+    if not waiter.done():
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+    assert rollback_entered.is_set(), "the unit of work ended without rolling back"
+
+
 async def test_a_second_cancel_during_the_cancellation_rollback_keeps_the_cancellation(db, monkeypatch):
     rollback_entered = asyncio.Event()
     never = asyncio.Event()
@@ -309,7 +319,7 @@ async def test_a_second_cancel_during_the_cancellation_rollback_keeps_the_cancel
     task = asyncio.create_task(unit_of_work())
     await written.wait()
     task.cancel()
-    await rollback_entered.wait()
+    await _rollback_reached(rollback_entered, task)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -348,7 +358,7 @@ async def test_a_cancel_during_a_non_cancellation_rollback_propagates(db, monkey
             return "cancel propagated"
 
     task = asyncio.create_task(unit_of_work())
-    await rollback_entered.wait()
+    await _rollback_reached(rollback_entered, task)
     task.cancel()
     assert await task == "cancel propagated"
 

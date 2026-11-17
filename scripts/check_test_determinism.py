@@ -247,7 +247,7 @@ def scan_clock_seam(src_dir: Path, root: Path, modules=CLOCK_SEAM_MODULES) -> li
                 elif name in CLOCK_SEAM_TIMER_VALUES:
                     report(node, "timer " + name + " used as a value")
         for node, unresolvable in unresolvable_dynamic_imports(tree):
-            report(node, f"dynamic import with {unresolvable.why} (relative/unresolvable)")
+            report(node, f"dynamic import with {unresolvable.why} ({unresolvable.label})")
         errors.extend(message for _, message in sorted(found))
     return errors
 
@@ -263,12 +263,13 @@ class Finding:
 class _Unresolvable:
     """A dynamic import whose module the checker cannot name."""
 
-    def __init__(self, why: str) -> None:
+    def __init__(self, why: str, label: str) -> None:
         self.why = why
+        self.label = label
 
 
-_NON_LITERAL = _Unresolvable("a non-literal module name")
-_RELATIVE = _Unresolvable("a relative module name")
+_NON_LITERAL = _Unresolvable("a non-literal module name", "non-literal/unresolvable")
+_RELATIVE = _Unresolvable("a relative module name", "relative/unresolvable")
 
 
 def dynamic_import(node: ast.AST) -> str | _Unresolvable | None:
@@ -340,9 +341,15 @@ def _scope_nodes(body: list[ast.stmt]):
         current = stack.pop()
         yield current
         if isinstance(current, scopes):
-            # The definition binds its name here; its body is its own scope.
-            # Decorators and defaults are evaluated here, though.
-            stack.extend(getattr(current, "decorator_list", []))
+            # The definition binds its name here and its body is its own
+            # scope; everything else (decorators, defaults, annotations, class
+            # bases and keywords) is evaluated here.
+            for name, value in ast.iter_fields(current):
+                if name == "body":
+                    continue
+                for child in value if isinstance(value, list) else [value]:
+                    if isinstance(child, ast.AST):
+                        stack.append(child)
             continue
         stack.extend(ast.iter_child_nodes(current))
 
@@ -357,17 +364,23 @@ def unresolvable_dynamic_imports(tree: ast.Module) -> list[tuple[ast.Attribute, 
     name counts only in a scope where every binding of it is such an import.
     """
     found: list[tuple[ast.Attribute, _Unresolvable]] = []
-    scopes: list[list[ast.stmt]] = [tree.body]
+    scopes: list[tuple[ast.AST | None, list[ast.stmt]]] = [(None, tree.body)]
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            scopes.append(node.body)
+            scopes.append((node, node.body))
         elif isinstance(node, ast.Lambda):
-            scopes.append([ast.Expr(value=node.body)])
-    for body in scopes:
+            scopes.append((node, [ast.Expr(value=node.body)]))
+    for owner, body in scopes:
         nodes = list(_scope_nodes(body))
         dynamic: dict[str, _Unresolvable] = {}
         dynamic_targets: set[int] = set()
         other: set[str] = set()
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # The scope's own parameters bind their names too.
+            arguments = owner.args
+            parameters = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                          arguments.vararg, arguments.kwarg]
+            other.update(parameter.arg for parameter in parameters if parameter is not None)
         for node in nodes:
             if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
                 result = dynamic_import(node.value)
@@ -386,9 +399,16 @@ def unresolvable_dynamic_imports(tree: ast.Module) -> list[tuple[ast.Attribute, 
                 other.update((alias.asname or alias.name).partition(".")[0] for alias in node.names)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 other.add(node.name)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                other.add(node.name)
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                other.add(node.name)
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                other.add(node.rest)
         unresolved_names = {name: why for name, why in dynamic.items() if name not in other}
         for node in nodes:
-            if not isinstance(node, ast.Attribute):
+            if not isinstance(node, ast.Attribute) or not isinstance(node.ctx, ast.Load):
+                # ``module.FLAG = True`` stores; it does not read a hazard.
                 continue
             result = dynamic_import(node.value)
             if result is None and isinstance(node.value, ast.Name):
@@ -800,7 +820,7 @@ def scan(tests_dir: Path, root: Path) -> ScanResult:
         for node, unresolvable in unresolvable_dynamic_imports(tree):
             errors.append(
                 f"{display_path}:{node.lineno}: dynamic import with {unresolvable.why} is "
-                "relative/unresolvable and cannot be checked for determinism hazards; import the module by name"
+                f"{unresolvable.label} and cannot be checked for determinism hazards; import the module by name"
             )
         findings.extend(scanner.findings)
         exempt.extend(scanner.exempt)

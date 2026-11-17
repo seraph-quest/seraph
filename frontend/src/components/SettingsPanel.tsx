@@ -17,6 +17,7 @@ import { CalendarConnectionPanel } from "./settings/CalendarConnectionPanel";
 import { CalendarRescheduleProfiles } from "./settings/CalendarRescheduleProfiles";
 import { SelectedContextPairing } from "./settings/SelectedContextPairing";
 import { GitHubConnectionPanel } from "./settings/GitHubConnectionPanel";
+import { GitHubActivityPanel } from "./settings/GitHubActivityPanel";
 import { MoltbookConnectionPanel } from "./settings/MoltbookConnectionPanel";
 import { ForgejoTitlePanel } from "./settings/ForgejoTitlePanel";
 import { RepoSandboxPanel } from "./settings/RepoSandboxPanel";
@@ -799,6 +800,10 @@ export function SettingsPanel() {
           />}
 
           {activeSection === "github" && <GitHubConnectionPanel
+            ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
+            ownerSessionId={operatorAuth?.session.session_id ?? null}
+          />}
+          {activeSection === "github" && <GitHubActivityPanel
             ownerPrincipalId={operatorAuth?.session.principal_id ?? null}
             ownerSessionId={operatorAuth?.session.session_id ?? null}
           />}

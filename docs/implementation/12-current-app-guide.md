@@ -1395,7 +1395,9 @@ Live operator transitions of these two domains through
 one background step: drain at E while the row is still `ready`, then the
 fenced `transition_domain` writer (`ready → draining → blocked@E+1 → ready` in
 one transaction), then reactivation at E+1. Only one transition per domain runs
-at a time. A failure leaves the domain visibly blocked with its fix, or, when
+at a time, and the domain stays claimed (status `transition: reactivating`)
+until that reactivation settles, so a released domain already shows its new
+activation or its block reason. A failure leaves the domain visibly blocked with its fix, or, when
 the row never moved, reactivates it at E without a "recovered" entry; the
 status shows `last_transition` (`succeeded` or `failed` with its reason).
 

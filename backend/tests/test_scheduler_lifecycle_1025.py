@@ -661,6 +661,42 @@ async def test_operator_api_moves_a_lifecycle_domain_as_one_background_drain_ste
         assert (status["state"], status["epoch"], status["last_transition"]["epoch"]) == ("active", 2, 2)
 
 
+@needs_cordis
+async def test_a_transition_keeps_its_claim_until_the_reactivation_at_e_plus_1_settles(accounting_db):  # noqa: F811
+    # The claim used to be released before the reactivation at E+1 ran, so a
+    # reader that saw the transition finished could still see the domain
+    # blocked at E (the flaky background-drain API test above).
+    from src.workflows.job_runtime import DurableJobRepository
+    async with research_host(DurableJobRepository()) as host:
+        lifecycle = _lifecycle(host=host)
+        await lifecycle.activate(SCHEDULER_DOMAIN)
+        gate = Gate("reactivation at E+1")
+        evaluate = lifecycle._evaluate
+
+        async def held_evaluate(domain):
+            await gate.arrive()
+            return await evaluate(domain)
+
+        lifecycle._evaluate = held_evaluate
+        moving = asyncio.create_task(lifecycle.transition(SCHEDULER_DOMAIN, "cordis", actor="operator:test",
+                                                          expected_epoch=1, reason="test"))
+        try:
+            await gate.wait_reached(task=moving)
+            # The row already moved to E+1; the reactivation has not settled, so the domain stays claimed.
+            status = lifecycle.status(SCHEDULER_DOMAIN)
+            assert (status["transition"], status["last_transition"]["epoch"]) == ("reactivating", 2)
+            with pytest.raises(CompositionBindingError) as busy:
+                lifecycle.claim_transition(SCHEDULER_DOMAIN)
+            assert busy.value.reason_code == "composition_transition_in_progress"
+            assert not moving.done()
+        finally:
+            gate.release()
+        receipt = await moving
+        assert SCHEDULER_DOMAIN not in lifecycle._transitioning
+        status = lifecycle.status(SCHEDULER_DOMAIN)
+        assert (receipt["epoch"], status["state"], status["epoch"]) == (2, "active", 2)
+
+
 # ------------------------------------------------------------------ shutdown (critic SHOULD 1 and 2)
 
 async def test_shutdown_closes_admission_first_so_no_tick_reactivates_after_the_drain(service_db):  # noqa: F811
